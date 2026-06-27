@@ -40,8 +40,12 @@ function saveFavorites(favorites) {
 
 
 const IMAGE_EXTENSIONS = ['.jpg', '.jpeg', '.png', '.webp', '.gif', '.svg'];
+const configuredScanDepth = Number.parseInt(process.env.COMIC_SCAN_MAX_DEPTH || '', 10);
 function isImage(n) { return IMAGE_EXTENSIONS.includes(path.extname(n).toLowerCase()); }
 function isSystemFile(n) { return path.basename(n).startsWith('.') || n.includes('__MACOSX'); }
+function hasReachedScanDepth(depth) {
+  return Number.isFinite(configuredScanDepth) && configuredScanDepth >= 0 && depth > configuredScanDepth;
+}
 
 // ======================================================
 // 設定 & 進度
@@ -300,6 +304,16 @@ function findCoverCache(id) {
   } catch(e) { return null; }
 }
 
+function clearCoverCacheDirectory() {
+  try {
+    for (const entry of fs.readdirSync(COVER_CACHE_DIR)) {
+      fs.rmSync(path.join(COVER_CACHE_DIR, entry), { recursive: true, force: true });
+    }
+  } catch (e) {
+    console.error('clearCoverCacheDirectory error:', e);
+  }
+}
+
 // ======================================================
 // 書架掃描
 // ======================================================
@@ -322,7 +336,7 @@ function emitScanProgress(force = false) {
 }
 
 async function scanDirectory(dir, rootDir, scannedIds, progressData, depth = 0) {
-  if (depth > 3) return;
+  if (hasReachedScanDepth(depth)) return;
   scanProgress.currentPath = dir;
   emitScanProgress();
   let files;
@@ -480,6 +494,29 @@ function getCachedFolderImages(folderPath) {
 
 function getFolderImages(folderPath) {
   return getCachedFolderImages(folderPath);
+}
+
+function clearZipHandleCache() {
+  for (const handle of zipHandleCache.values()) {
+    try {
+      handle.zipfile.close();
+    } catch (e) {}
+  }
+  zipHandleCache.clear();
+}
+
+function clearReaderCaches() {
+  clearZipHandleCache();
+  folderImageListCache.clear();
+  coverMemCache.clear();
+  ramCachePool.clear();
+  preloadFailuresPool.clear();
+  cachedComics = [];
+  activeReadingComicId = null;
+  preloaderState.queue = [];
+  preloaderState.isPreloading = false;
+  scanProgress = { isScanning: false, found: 0, currentPath: currentScanDir, startedAt: null, completedAt: null };
+  clearCoverCacheDirectory();
 }
 
 // ======================================================
@@ -817,8 +854,7 @@ function setupIPC() {
       throw new Error(`路徑不存在或無法存取：${scanDir}`);
     }
     saveConfig(resolved);
-    cachedComics = [];
-    folderImageListCache.clear();
+    clearReaderCaches();
     doBackgroundScan();
     watchScanDir(); // 重新監聽新目錄
     return { success: true, scanDir: resolved };

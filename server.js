@@ -68,6 +68,7 @@ app.use(express.static(path.join(__dirname, 'public')));
 
 // 支援的圖片副檔名
 const IMAGE_EXTENSIONS = ['.jpg', '.jpeg', '.png', '.webp', '.gif', '.svg'];
+const configuredScanDepth = Number.parseInt(process.env.COMIC_SCAN_MAX_DEPTH || '', 10);
 
 function isImage(filename) {
   const ext = path.extname(filename).toLowerCase();
@@ -78,6 +79,20 @@ function isImage(filename) {
 function isSystemFile(filepath) {
   const base = path.basename(filepath);
   return base.startsWith('.') || filepath.includes('__MACOSX');
+}
+
+function hasReachedScanDepth(depth) {
+  return Number.isFinite(configuredScanDepth) && configuredScanDepth >= 0 && depth > configuredScanDepth;
+}
+
+function clearCoverCacheDirectory() {
+  try {
+    for (const entry of fs.readdirSync(COVER_CACHE_DIR)) {
+      fs.rmSync(path.join(COVER_CACHE_DIR, entry), { recursive: true, force: true });
+    }
+  } catch (e) {
+    console.error('清理封面快取失敗：', e);
+  }
 }
 
 // 取得讀取進度
@@ -319,8 +334,7 @@ async function addComicToCache(relativePath, type, file, dirStat, scannedIds, pr
 
 // 遞迴順序掃描資料夾 (避免 Promise.all 同時掃描幾千個資料夾造成 V8 記憶體溢出 OOM！)
 async function scanDirectory(dir, rootDir, scannedIds, progressData, depth = 0) {
-  // 限制深度最多 3 層，防止在 NAS 上遞迴過深造成懸掛
-  if (depth > 3) return;
+  if (hasReachedScanDepth(depth)) return;
   scanProgress.currentPath = dir;
 
   let files;
@@ -457,6 +471,26 @@ function getFolderImageFiles(folderPath) {
   return getCachedFolderImageFiles(folderPath);
 }
 
+function clearZipHandleCache() {
+  for (const handle of zipHandleCache.values()) {
+    try {
+      handle.zipfile.close();
+    } catch (e) {}
+  }
+  zipHandleCache.clear();
+}
+
+function clearLibraryCaches() {
+  pageCountCache.clear();
+  archiveEntriesCache.clear();
+  coverBufferCache.clear();
+  clearZipHandleCache();
+  folderImageListCache.clear();
+  cachedComics = [];
+  scanProgress = { isScanning: false, found: 0, currentPath: currentComicDir, startedAt: null, completedAt: null };
+  clearCoverCacheDirectory();
+}
+
 // 背景掃描任務
 async function doBackgroundScan() {
   if (isScanning) return;
@@ -565,16 +599,20 @@ app.get('/api/comic/:id', async (req, res) => {
 
 // API: 串流載入特定分頁圖片
 // 架構：優先走 YauzlHandle 常駐快取（翻頁超快！），封面二級快取加速回傳
-app.get('/api/page', async (req, res) => {
+async function serveComicPage(req, res, forcedPage = null) {
   try {
     const { id, page } = req.query;
-    if (!id || page === undefined) {
+    if (!id || (forcedPage === null && page === undefined)) {
       return res.status(400).json({ error: '缺少 id 或 page 參數！' });
     }
 
     const relativePath = Buffer.from(id, 'base64url').toString('utf-8');
     const fullPath = path.resolve(currentComicDir, relativePath);
-    const pageIndex = parseInt(page, 10);
+    const pageIndex = forcedPage ?? Number.parseInt(page, 10);
+
+    if (!Number.isInteger(pageIndex) || pageIndex < 0) {
+      return res.status(400).json({ error: '頁碼格式不正確！' });
+    }
 
     const rel = path.relative(currentComicDir, fullPath);
     if (rel.startsWith('..') || path.isAbsolute(rel)) {
@@ -588,9 +626,8 @@ app.get('/api/page', async (req, res) => {
     const isDir = fs.statSync(fullPath).isDirectory();
 
     if (isDir) {
-      // 資料夾模式：直接 sendFile，超級快！
       const images = getFolderImageFiles(fullPath);
-      if (pageIndex < 0 || pageIndex >= images.length) {
+      if (pageIndex >= images.length) {
         return res.status(404).json({ error: '頁碼超出範圍！' });
       }
       const imagePath = path.join(fullPath, images[pageIndex]);
@@ -598,11 +635,6 @@ app.get('/api/page', async (req, res) => {
       return res.sendFile(imagePath);
     }
 
-    // ====================================================
-    // 壓縮檔模式：YauzlHandle 常駐快取（核心！）
-    // ====================================================
-
-    // 封面（page 0）優先查磁碟/記憶體快取，避免重複解壓
     if (pageIndex === 0) {
       const coverKey = `${id}:0`;
       if (coverBufferCache.has(coverKey)) {
@@ -611,7 +643,7 @@ app.get('/api/page', async (req, res) => {
         res.setHeader('Cache-Control', 'public, max-age=86400');
         return res.end(cached.buf);
       }
-      // 查磁碟快取目錄中是否有此封面（不限副檔名）
+
       const coverDir = fs.readdirSync(COVER_CACHE_DIR).filter(f => f.startsWith(`${id}_p0`));
       if (coverDir.length > 0) {
         const cached = path.join(COVER_CACHE_DIR, coverDir[0]);
@@ -623,14 +655,12 @@ app.get('/api/page', async (req, res) => {
       }
     }
 
-    // 取得/建立 YauzlHandle（第一次打開 ~30ms，後續命中快取 <1ms）
     const handle = await getZipHandle(id, fullPath);
 
-    if (pageIndex < 0 || pageIndex >= handle.entryNames.length) {
+    if (pageIndex >= handle.entryNames.length) {
       return res.status(404).json({ error: '頁碼超出範圍！' });
     }
 
-    // 讀取頁面 Buffer（yauzl streaming，無需信號量）
     const buffer = await readPageFromHandle(handle, pageIndex);
     const entryExt = path.extname(handle.entryNames[pageIndex]).toLowerCase();
     let mimeType = 'image/jpeg';
@@ -638,7 +668,6 @@ app.get('/api/page', async (req, res) => {
     else if (entryExt === '.webp') mimeType = 'image/webp';
     else if (entryExt === '.gif') mimeType = 'image/gif';
 
-    // 封面寫入磁碟快取 + 記憶體快取（非同步，不阻塞）
     if (pageIndex === 0) {
       const cacheFilePath = path.join(COVER_CACHE_DIR, `${id}_p0${entryExt}`);
       if (coverBufferCache.size < 200) coverBufferCache.set(`${id}:0`, { buf: buffer, mime: mimeType });
@@ -648,17 +677,19 @@ app.get('/api/page', async (req, res) => {
     res.setHeader('Content-Type', mimeType);
     res.setHeader('Cache-Control', 'public, max-age=86400');
     res.end(buffer);
-
   } catch (e) {
     console.error('載入圖片分頁錯誤：', e);
     res.status(500).json({ error: '載入圖片分頁錯誤：' + e.message });
   }
+}
+
+app.get('/api/page', async (req, res) => {
+  await serveComicPage(req, res);
 });
 
 // API: 獲取或讀取封面 (通常為 page 0)
-app.get('/api/cover', (req, res) => {
-  req.query.page = '0';
-  return app._router.handle(req, res); // 重新導向至 page 0 API
+app.get('/api/cover', async (req, res) => {
+  await serveComicPage(req, res, 0);
 });
 
 // API: 儲存閱讀進度
@@ -710,9 +741,7 @@ app.post('/api/config', (req, res) => {
     }
 
     currentComicDir = resolved;
-    pageCountCache.clear(); // 清空舊路徑的頁數快取
-    folderImageListCache.clear();
-    cachedComics = []; // 清空舊書架快取
+    clearLibraryCaches();
     doBackgroundScan(); // 異步觸發新路徑的背景掃描
     
     fs.writeFileSync(CONFIG_FILE, JSON.stringify({ scanDir: currentComicDir }, null, 2), 'utf-8');

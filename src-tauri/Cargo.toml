@@ -1,0 +1,38 @@
+[package]
+name = "app"
+version = "0.1.0"
+description = "A Tauri App"
+authors = ["you"]
+license = ""
+repository = ""
+edition = "2021"
+rust-version = "1.85.0"
+
+# See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
+
+[lib]
+name = "app_lib"
+crate-type = ["staticlib", "cdylib", "rlib"]
+
+[build-dependencies]
+tauri-build = { version = "2.0.0", features = [] }
+
+[dependencies]
+serde_json = "1.0"
+serde = { version = "1.0", features = ["derive"] }
+log = "0.4"
+tauri = { version = "2.0.0", features = [] }
+tauri-plugin-log = "2.0.0"
+walkdir = "2.5.0"
+tokio = { version = "1.52.3", features = ["full"] }
+zip = "0.6.3"
+mime_guess = "2.0.5"
+base64 = "0.22.1"
+chrono = "0.4.45"
+natord = "1.0.9"
+tauri-plugin-dialog = "2.0.0"
+smb2 = "0.11.3"
+tauri-plugin-ios-folder = { path = "./tauri-plugin-ios-folder" }
+
+[target.'cfg(not(target_os = "ios"))'.dependencies]
+trash = "5.2.3"

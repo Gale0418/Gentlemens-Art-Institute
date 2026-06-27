@@ -1,0 +1,387 @@
+<!DOCTYPE html>
+<html lang="zh-TW">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>天才少女的超感官漫畫閱覽器 🎀</title>
+  <!-- 載入 Google Fonts -->
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700&family=Outfit:wght@400;600;700;800&display=swap" rel="stylesheet">
+  <!-- 載入 FontAwesome 圖標 -->
+  <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.4.0/css/all.min.css" integrity="sha512-iecdLmaskl7CVkqkXNQ/ZH/XLlvWZOJyj7Yy7tcenmpD1ypASozpmT/E0iPtmFIB46ZmdtAc9eNBvH0H/ZpiBw==" crossorigin="anonymous">
+  <link rel="stylesheet" href="style.css">
+</head>
+<body>
+
+  <!-- 隱藏式 SVG 銀利化濃鎮定義 -->
+  <svg xmlns="http://www.w3.org/2000/svg" style="position:absolute;width:0;height:0;overflow:hidden;">
+    <defs>
+      <!-- 輕度銀利化 (Subtle Sharpen) -->
+      <filter id="sharpen-subtle" x="0%" y="0%" width="100%" height="100%" color-interpolation-filters="linearRGB">
+        <feConvolveMatrix order="3" kernelMatrix="0 -0.5 0  -0.5 3 -0.5  0 -0.5 0" divisor="1" bias="0" preserveAlpha="true"/>
+      </filter>
+      <!-- 中度銀利化 (Standard Sharpen) -->
+      <filter id="sharpen-standard" x="0%" y="0%" width="100%" height="100%" color-interpolation-filters="linearRGB">
+        <feConvolveMatrix order="3" kernelMatrix="0 -1 0  -1 5 -1  0 -1 0" divisor="1" bias="0" preserveAlpha="true"/>
+      </filter>
+      <!-- 強度銀利化 (Strong Sharpen) -->
+      <filter id="sharpen-strong" x="0%" y="0%" width="100%" height="100%" color-interpolation-filters="linearRGB">
+        <feConvolveMatrix order="3" kernelMatrix="-1 -1 -1  -1 9 -1  -1 -1 -1" divisor="1" bias="0" preserveAlpha="true"/>
+      </filter>
+    </defs>
+  </svg>
+
+  <!-- 背景流光特效 -->
+  <div class="aurora-bg">
+    <div class="aurora-blob blob-1"></div>
+    <div class="aurora-blob blob-2"></div>
+    <div class="aurora-blob blob-3"></div>
+  </div>
+
+  <!-- 整個 App 容器 -->
+  <div class="app-container" id="app-root">
+    
+    <!-- 頂部導覽列 -->
+    <header class="app-header">
+      <div class="logo">
+        <span class="logo-emoji">✦</span>
+        <div class="logo-text">
+          <h1>少女漫畫閣</h1>
+          <p>Antigravity Comic Station</p>
+        </div>
+      </div>
+      <div class="header-actions">
+        <div class="library-path-pill" title="本機漫畫庫">
+          <i class="fa-solid fa-hard-drive"></i>
+          <span id="library-path-label">本機書庫</span>
+        </div>
+        <div class="search-box">
+          <i class="fa-solid fa-magnifying-glass search-icon"></i>
+          <label for="search-input" class="visually-hidden">搜尋漫畫、作者、標籤</label>
+          <input type="text" id="search-input" placeholder="搜尋漫畫、作者、標籤">
+          <button id="clear-search-btn" class="clear-btn" style="display: none;"><i class="fa-solid fa-xmark"></i></button>
+        </div>
+        <button id="refresh-btn" class="action-btn" title="重新整理書架">
+          <i class="fa-solid fa-rotate-right"></i> 重新整理
+        </button>
+        <button id="import-photo-btn" class="action-btn" title="從相簿匯入圖片" style="display: none; background: rgba(255, 255, 255, 0.05); border-color: var(--card-border); color: var(--text-muted);">
+          <i class="fa-regular fa-images"></i> 匯入圖片
+        </button>
+        <button id="smb-setup-btn-header" class="action-btn" title="設定 NAS (SMB)" style="background: rgba(255, 255, 255, 0.05); border-color: var(--card-border); color: var(--accent);">
+          <i class="fa-solid fa-globe"></i> SMB 設定
+        </button>
+        <button id="settings-btn" class="action-btn" title="設定" style="background: rgba(255, 255, 255, 0.05); border-color: var(--card-border); color: var(--text-muted);">
+          <i class="fa-solid fa-gear"></i> 設定
+        </button>
+      </div>
+    </header>
+
+    <!-- 主要內容區 -->
+    <div class="main-layout">
+      <!-- 側邊欄 -->
+      <aside class="sidebar">
+        <div class="sidebar-section smart-collections">
+          <h3><i class="fa-solid fa-wand-magic-sparkles"></i> 智慧收藏</h3>
+          <button class="smart-item active" data-filter-shortcut="all">
+            <span><i class="fa-solid fa-layer-group"></i> 全部漫畫</span>
+            <i class="fa-solid fa-chevron-right"></i>
+          </button>
+          <button class="smart-item" data-filter-shortcut="reading">
+            <span><i class="fa-solid fa-book-open-reader"></i> 閱讀中</span>
+            <i class="fa-solid fa-chevron-right"></i>
+          </button>
+          <button class="smart-item" data-filter-shortcut="favorite">
+            <span><i class="fa-solid fa-heart"></i> 已收藏</span>
+            <i class="fa-solid fa-chevron-right"></i>
+          </button>
+          <button class="smart-item" data-filter-shortcut="finished">
+            <span><i class="fa-solid fa-circle-check"></i> 已看完</span>
+            <i class="fa-solid fa-chevron-right"></i>
+          </button>
+        </div>
+
+        <div class="sidebar-section">
+          <h3><i class="fa-solid fa-folder-tree"></i> 漫畫系列</h3>
+          <ul class="series-list" id="series-filter-list">
+            <li class="active" data-series="all">
+              <span class="series-name">全部漫畫</span>
+              <span class="badge" id="total-count-badge">0</span>
+            </li>
+            <!-- 動態插入系列清單 -->
+          </ul>
+        </div>
+
+        <div class="sidebar-section progress-summary-box">
+          <h3><i class="fa-solid fa-chart-pie"></i> 閱讀統計</h3>
+          <div class="stats-grid">
+            <div class="stat-card">
+              <span class="stat-value" id="stats-total">0</span>
+              <span class="stat-label">總藏書</span>
+            </div>
+            <div class="stat-card">
+              <span class="stat-value" id="stats-reading">0</span>
+              <span class="stat-label">閱讀中</span>
+            </div>
+            <div class="stat-card">
+              <span class="stat-value" id="stats-completed">0</span>
+              <span class="stat-label">已讀完</span>
+            </div>
+          </div>
+        </div>
+
+        <div class="sidebar-footer">
+          <p>小提示：點選漫畫即可開始閱讀。支援 `.cbz` 與圖片資料夾喔！✨</p>
+        </div>
+      </aside>
+
+      <section class="library-workspace">
+        <!-- 漫畫書架網格 -->
+        <main class="content-area">
+          <section class="continue-panel">
+            <div class="section-title-row">
+              <div>
+                <span class="section-kicker">Resume</span>
+                <h2>繼續閱讀</h2>
+              </div>
+              <span class="section-hint">最近進度與收藏會優先出現在這裡</span>
+            </div>
+            <div class="continue-strip" id="continue-strip">
+              <!-- 動態插入繼續閱讀卡片 -->
+            </div>
+          </section>
+
+          <div class="library-header">
+            <div>
+              <span class="section-kicker">Library</span>
+              <h2 id="library-title">全部漫畫</h2>
+            </div>
+            <div class="filter-options">
+              <button class="filter-btn active" data-filter="all">全部</button>
+              <button class="filter-btn" data-filter="reading">閱讀中</button>
+              <button class="filter-btn" data-filter="unread">未讀取</button>
+              <button class="filter-btn" data-filter="finished">已看完</button>
+              <button class="filter-btn" data-filter="favorite"><i class="fa-solid fa-heart" style="color: #ff6b8b; margin-right: 4px;"></i> 已收藏</button>
+            </div>
+          </div>
+
+          <!-- 資料夾層級導航列 (姬米妮貼心打造 ✨) -->
+          <div class="folder-breadcrumbs" id="folder-breadcrumbs" style="display: none; align-items: center; gap: 8px; margin: -10px 0 20px 0; padding: 10px 16px; background: var(--bg-hover); border: 1px solid var(--border); border-radius: 10px; font-size: 13.5px; color: var(--text-light); overflow-x: auto; white-space: nowrap; scrollbar-width: none;">
+            <!-- 動態麵包屑 -->
+          </div>
+
+          <div class="comic-grid" id="comic-grid">
+            <!-- 漫畫卡片動態載入 -->
+          </div>
+
+          <!-- 漫畫庫為空時的顯示狀態 -->
+          <div class="empty-state" id="empty-state" style="display: none;">
+            <div class="empty-icon">📂</div>
+            <h3>書架空空如也呢，主人...</h3>
+            <p>請把漫畫圖片資料夾或 <code>.cbz</code>/<code>.zip</code> 壓縮檔放入掃描目錄，然後點擊右上角的「重新整理」按鈕吧！<br><small>您可在設定中查看或變更掃描路徑。</small></p>
+          </div>
+        </main>
+
+        <aside class="comic-inspector" id="comic-inspector">
+          <div class="inspector-empty">
+            <span class="inspector-mark"><i class="fa-solid fa-book-open"></i></span>
+            <h3>選一本漫畫</h3>
+            <p>封面、進度、標籤與快捷操作會顯示在這裡。</p>
+          </div>
+        </aside>
+      </section>
+    </div>
+  </div>
+
+  <!-- 全螢幕漫畫閱讀器層 -->
+  <div class="reader-overlay" id="reader-overlay" style="display: none;">
+    <!-- 頂部浮動標題列 (滑鼠靠近時顯示) -->
+    <div class="reader-top-bar" id="reader-top-bar">
+      <button class="back-btn" id="reader-back-btn">
+        <i class="fa-solid fa-arrow-left"></i> 返回書架
+      </button>
+      <div class="reader-title" id="reader-comic-title">漫畫標題名稱</div>
+      <div class="reader-mode-indicator" id="reader-mode-indicator">單頁模式</div>
+    </div>
+
+    <!-- 左右翻頁熱區 (懸停時會有微弱導引箭頭) -->
+    <div class="nav-zone prev-zone" id="prev-zone" title="上一頁 (左方向鍵)">
+      <div class="nav-arrow"><i class="fa-solid fa-chevron-left"></i></div>
+    </div>
+    <div class="nav-zone next-zone" id="next-zone" title="下一頁 (右方向鍵)">
+      <div class="nav-arrow"><i class="fa-solid fa-chevron-right"></i></div>
+    </div>
+
+    <!-- 圖片核心容器 -->
+    <div class="reader-viewport" id="reader-viewport">
+      <div class="pages-container" id="pages-container">
+        <!-- 漫畫圖片動態插入 -->
+      </div>
+    </div>
+
+    <!-- 姬米妮貼心快取與載入狀態浮動面板 (Floating Status Panel) -->
+    <div class="reader-status-panel" id="reader-status-panel">
+      <span class="status-ram" id="status-ram"><i class="fa-solid fa-memory"></i> RAM 快取準備中...</span>
+      <span class="status-loading" id="status-loading" style="display: none;"><i class="fa-solid fa-circle-notch fa-spin"></i> 正在解碼...</span>
+    </div>
+
+    <!-- 底部懸浮控制面版 -->
+    <div class="reader-bottom-bar" id="reader-bottom-bar">
+      <div class="bottom-bar-left">
+        <span class="page-counter" id="page-counter">第 0 / 0 頁</span>
+      </div>
+
+      <!-- 進度拉條 -->
+      <div class="bottom-bar-center">
+        <input type="range" class="progress-slider" id="progress-slider" min="1" max="100" value="1">
+      </div>
+
+      <div class="bottom-bar-right">
+        <!-- 閱讀模式切換 -->
+        <div class="btn-group">
+          <button class="mode-btn active" id="btn-mode-single" title="單頁模式 (寬高自適應)"><i class="fa-solid fa-file"></i> 單頁</button>
+          <button class="mode-btn" id="btn-mode-double" title="雙頁模式 (第一頁封面單顯示)"><i class="fa-solid fa-book-open"></i> 雙頁</button>
+          <button class="mode-btn" id="btn-mode-double-rtl" title="雙頁日式 (右至左)"><i class="fa-solid fa-book-open"></i> 雙頁 (日)</button>
+          <button class="mode-btn" id="btn-mode-webtoon" title="直捲條漫模式"><i class="fa-solid fa-arrows-up-down"></i> 條漫</button>
+          <button class="mode-btn" id="btn-mode-catalog" title="目錄縮圖模式"><i class="fa-solid fa-grip"></i> 目錄</button>
+        </div>
+
+        <!-- 縮放工具 -->
+        <div class="zoom-controls" id="zoom-controls-container">
+          <button class="zoom-btn" id="btn-zoom-out" title="縮小"><i class="fa-solid fa-magnifying-glass-minus"></i></button>
+          <span class="zoom-value" id="zoom-value">100%</span>
+          <button class="zoom-btn" id="btn-zoom-in" title="放大"><i class="fa-solid fa-magnifying-glass-plus"></i></button>
+        </div>
+
+        <button class="control-action-btn" id="btn-fit-mode" title="螢幕適應模式 (M 鍵)">
+          <i class="fa-solid fa-compress"></i>
+        </button>
+
+        <button class="control-action-btn" id="btn-rotate-left" title="向左旋轉 90° (L 鍵)">
+          <i class="fa-solid fa-rotate-left"></i>
+        </button>
+
+        <button class="control-action-btn" id="btn-rotate-right" title="向右旋轉 90° (R 鍵)">
+          <i class="fa-solid fa-rotate-right"></i>
+        </button>
+
+        <button class="control-action-btn" id="btn-sharpen" title="銀利化模式 (S 鍵) - 進階清晰">
+          <i class="fa-solid fa-wand-magic-sparkles"></i>
+        </button>
+
+        <button class="control-action-btn" id="btn-fullscreen" title="切換全螢幕 (F 鍵)">
+          <i class="fa-solid fa-expand"></i>
+        </button>
+      </div>
+    </div>
+
+    <div class="reader-context-menu" id="reader-context-menu" style="display: none;">
+      <button data-reader-action="single"><i class="fa-solid fa-file"></i> 單頁</button>
+      <button data-reader-action="double"><i class="fa-solid fa-book-open"></i> 雙頁</button>
+      <button data-reader-action="double-rtl"><i class="fa-solid fa-book-open-reader"></i> 日式雙頁</button>
+      <button data-reader-action="webtoon"><i class="fa-solid fa-arrows-up-down"></i> 條漫</button>
+      <span class="context-separator"></span>
+      <button data-reader-action="first"><i class="fa-solid fa-backward-step"></i> 跳到首頁</button>
+      <button data-reader-action="last"><i class="fa-solid fa-forward-step"></i> 跳到尾頁</button>
+      <button data-reader-action="fit"><i class="fa-solid fa-compress"></i> 螢幕適應</button>
+      <button data-reader-action="crop"><i class="fa-solid fa-crop-simple"></i> 裁切白邊</button>
+      <button data-reader-action="brightness"><i class="fa-solid fa-sun"></i> 亮度</button>
+      <span class="context-separator"></span>
+      <button data-reader-action="fullscreen"><i class="fa-solid fa-expand"></i> 全螢幕</button>
+      <button data-reader-action="close"><i class="fa-solid fa-arrow-left"></i> 返回書架</button>
+    </div>
+  </div>
+
+  <!-- 設定彈出視窗 -->
+  <div class="modal-overlay" id="settings-modal" style="display: none;">
+    <div class="modal-content">
+      <div class="modal-header">
+        <h2><i class="fa-solid fa-gear"></i> 漫畫庫路徑設定</h2>
+        <button class="close-modal-btn" id="close-settings-btn"><i class="fa-solid fa-xmark"></i></button>
+      </div>
+      <div class="modal-body">
+        <div class="input-group">
+          <label for="scan-dir-input">當前掃描漫畫目錄：</label>
+          <div class="path-input-row">
+            <input type="text" id="scan-dir-input" placeholder="請輸入絕對路徑">
+            <button id="native-browse-btn" class="modal-action-btn" style="display: none; background: var(--bg-hover); color: var(--text-light); border: 1px solid var(--border); padding: 0 15px; border-radius: 8px; font-weight: 500; cursor: pointer; transition: all 0.2s;"><i class="fa-solid fa-folder-open"></i> 選擇...</button>
+            <button id="save-path-btn" class="modal-action-btn primary">儲存套用</button>
+          </div>
+          <p class="input-tip">小提示：您可使用「選擇...」按鈕選擇資料夾，或直接貼上絕對路徑。✨</p>
+        </div>
+        
+        <div class="advanced-settings-group" style="margin-top: 15px; display: flex; gap: 10px; flex-wrap: wrap;">
+          <button id="smb-setup-btn" class="modal-action-btn" style="background: var(--bg-hover); color: var(--text-light); border: 1px solid var(--border); padding: 8px 15px; border-radius: 8px; cursor: pointer;"><i class="fa-solid fa-globe"></i> 🌐 設定 NAS (SMB)</button>
+          <button id="native-external-btn" class="modal-action-btn" style="background: var(--bg-hover); color: var(--text-light); border: 1px solid var(--border); padding: 8px 15px; border-radius: 8px; cursor: pointer;"><i class="fa-solid fa-folder-open"></i> 📂 直接讀取外部資料夾 (iOS)</button>
+        </div>
+        
+        <div id="external-bookmarks-list" style="margin-top: 10px; display: flex; flex-direction: column; gap: 8px;">
+          <!-- 動態載入外部書籤 -->
+        </div>
+
+        <div class="folder-browser-section">
+          <h3><i class="fa-solid fa-folder-open"></i> 後端路徑瀏覽器</h3>
+          <div class="browser-path-display">
+            <span id="browser-current-path">/</span>
+            <button id="browser-up-btn" class="browser-btn" title="回上一層"><i class="fa-solid fa-arrow-up"></i> 回上一層</button>
+          </div>
+          <div class="folders-list-container" id="browser-folders-list">
+            <!-- 動態資料夾清單 -->
+          </div>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <!-- NAS (SMB) 設定彈出視窗 -->
+  <div class="modal-overlay" id="smb-modal" style="display: none;">
+    <div class="modal-content" style="max-width: 400px;">
+      <div class="modal-header">
+        <h2><i class="fa-solid fa-globe"></i> 網路硬碟 (NAS) 設定</h2>
+        <button class="close-modal-btn" id="close-smb-btn"><i class="fa-solid fa-xmark"></i></button>
+      </div>
+      <div class="modal-body">
+        <div class="input-group">
+          <label for="smb-host">NAS 伺服器 IP 或主機名稱：</label>
+          <input type="text" id="smb-host" placeholder="例如：192.168.1.100 或 MyNAS.local">
+        </div>
+        <div class="input-group">
+          <label for="smb-share">共用資料夾名稱 (Share)：</label>
+          <input type="text" id="smb-share" placeholder="例如：comic">
+        </div>
+        <div class="input-group">
+          <label for="smb-user">使用者帳號：</label>
+          <input type="text" id="smb-user" placeholder="留白表示訪客 (Guest) 登入">
+        </div>
+        <div class="input-group">
+          <label for="smb-pass">密碼：</label>
+          <input type="password" id="smb-pass" placeholder="留白表示無密碼">
+        </div>
+        <div class="advanced-settings-group" style="margin-top: 20px; display: flex; justify-content: flex-end; gap: 10px;">
+          <button id="smb-clear-btn" class="modal-action-btn" style="background: rgba(255,107,139,0.1); color: var(--accent);">清除連線</button>
+          <button id="smb-connect-btn" class="modal-action-btn primary"><i class="fa-solid fa-plug"></i> 測試並儲存</button>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <!-- 全局載入遮罩 -->
+  <div class="loader-mask" id="loader-mask" style="display: none;">
+    <div class="loader-content">
+      <div class="spinner"></div>
+      <p id="loader-text">天才少女正在為主人召喚漫畫中...</p>
+      <div class="loader-progress" id="loader-progress" style="display: none;">
+        <span id="loader-progress-bar"></span>
+      </div>
+      <small id="loader-progress-label"></small>
+    </div>
+  </div>
+
+  <!-- 隱藏的檔案選擇器，用於從相簿匯入圖片 -->
+  <input type="file" id="photo-import-input" multiple accept="image/*" style="display: none;" />
+
+  <!-- Preload API -->
+  <script src="tauri-api.js"></script>
+  <script src="app.js"></script>
+</body>
+</html>

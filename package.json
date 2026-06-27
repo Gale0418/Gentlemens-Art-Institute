@@ -1,0 +1,54 @@
+{
+  "name": "comic-reader",
+  "version": "1.0.0",
+  "description": "A beautiful local comic reader — 少女漫畫閣",
+  "main": "main.js",
+  "type": "module",
+  "scripts": {
+    "start": "node server.js",
+    "electron": "electron .",
+    "test": "node tests/ui-smoke.mjs",
+    "build": "electron-builder --mac --dir",
+    "tauri": "tauri"
+  },
+  "dependencies": {
+    "adm-zip": "^0.5.12",
+    "cors": "^2.8.5",
+    "express": "^4.19.2",
+    "open": "11.0.0",
+    "yauzl": "^3.3.1"
+  },
+  "devDependencies": {
+    "@tauri-apps/cli": "^2.11.3",
+    "electron": "^42.2.0",
+    "electron-builder": "^26.8.1"
+  },
+  "build": {
+    "appId": "com.jiminie.comic-reader",
+    "productName": "少女漫畫閣",
+    "asar": true,
+    "mac": {
+      "category": "public.app-category.entertainment",
+      "icon": "assets/icon.png",
+      "target": [
+        {
+          "target": "dir",
+          "arch": [
+            "arm64"
+          ]
+        }
+      ]
+    },
+    "files": [
+      "**/*",
+      "!src-tauri/**/*",
+      "!*.md",
+      "!.git",
+      "!.gitignore",
+      "!progress.json",
+      "!metadata.json",
+      "!config.json"
+    ],
+    "extraResources": []
+  }
+}

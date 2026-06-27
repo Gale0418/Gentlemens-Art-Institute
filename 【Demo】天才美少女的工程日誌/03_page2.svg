@@ -1,0 +1,148 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 800 1100" width="100%" height="100%">
+  <defs>
+    <linearGradient id="screen-grad" x1="0%" y1="0%" x2="0%" y2="100%">
+      <stop offset="0%" stop-color="#1e293b" />
+      <stop offset="100%" stop-color="#0f172a" />
+    </linearGradient>
+    <linearGradient id="bubble-grad" x1="0%" y1="0%" x2="0%" y2="100%">
+      <stop offset="0%" stop-color="#ffffff" />
+      <stop offset="100%" stop-color="#f3f4f6" />
+    </linearGradient>
+  </defs>
+
+  <!-- 滿版背景 -->
+  <rect width="800" height="1100" fill="#ffffff" />
+
+  <!-- 漫畫格外框 -->
+  <rect x="25" y="25" width="750" height="1050" fill="none" stroke="#000000" stroke-width="6" />
+
+  <!-- 格子 1 (上大格 - 展示閱讀器) -->
+  <g transform="translate(40, 40)">
+    <rect width="720" height="600" fill="#fcfdff" stroke="#000000" stroke-width="4" />
+    
+    <!-- 斜向流線裝飾 -->
+    <path d="M 0 150 L 720 350" stroke="#000000" stroke-opacity="0.05" stroke-width="20" />
+    <path d="M 0 350 L 720 550" stroke="#000000" stroke-opacity="0.05" stroke-width="12" />
+
+    <!-- 螢幕/閱讀器框飾 (macOS 視窗風格) -->
+    <g transform="translate(60, 100)">
+      <!-- 視窗本體 -->
+      <rect width="600" height="420" rx="12" fill="url(#screen-grad)" stroke="#000000" stroke-width="4" />
+      <!-- macOS 三色控制鈕 -->
+      <circle cx="25" cy="20" r="7" fill="#ff5f56" stroke="#e0443e" stroke-width="1" />
+      <circle cx="45" cy="20" r="7" fill="#ffbd2e" stroke="#dfa122" stroke-width="1" />
+      <circle cx="65" cy="20" r="7" fill="#27c93f" stroke="#1aab29" stroke-width="1" />
+      <!-- 視窗標題 -->
+      <text x="300" y="25" text-anchor="middle" font-family="monospace" font-size="12" fill="#94a3b8">Antigravity Reader - 【Demo】</text>
+      
+      <!-- 螢幕內漫畫模擬 (雙頁合併顯示) -->
+      <g transform="translate(40, 60)">
+        <!-- 左頁 -->
+        <rect x="0" y="0" width="245" height="300" fill="#ffffff" stroke="#000000" stroke-width="2" />
+        <path d="M 30 50 L 210 50 M 30 90 L 210 90 M 30 130 L 150 130" stroke="#cbd5e1" stroke-width="6" stroke-linecap="round" />
+        <circle cx="122" cy="210" r="40" fill="#fca5a5" />
+
+        <!-- 右頁 -->
+        <rect x="255" y="0" width="245" height="300" fill="#ffffff" stroke="#000000" stroke-width="2" />
+        <path d="M 285 50 L 465 50 M 285 90 L 465 90 M 285 130 L 385 130" stroke="#cbd5e1" stroke-width="6" stroke-linecap="round" />
+        <rect x="300" y="170" width="150" height="80" fill="#38bdf8" />
+        
+        <!-- 連頁分隔線 -->
+        <line x1="250" y1="0" x2="250" y2="300" stroke="#64748b" stroke-width="2" stroke-dasharray="4 4" />
+      </g>
+
+      <!-- 底部玻璃浮動控制條 -->
+      <rect x="100" y="360" width="400" height="40" rx="8" fill="#0f172a" fill-opacity="0.9" stroke="#334155" stroke-width="1.5" />
+      <!-- 控制按鈕標示 -->
+      <g transform="translate(120, 385)" fill="#94a3b8" font-size="10" font-family="sans-serif">
+        <text x="0" y="0">◀ 上一頁</text>
+        <rect x="75" y="-12" width="40" height="16" rx="4" fill="#6366f1" />
+        <text x="80" y="0" fill="#ffffff" font-weight="bold">單頁</text>
+        <text x="130" y="0">雙頁</text>
+        <text x="170" y="0">雙頁(日)</text>
+        <text x="230" y="0">直捲條漫</text>
+        <text x="330" y="0">下一頁 ▶</text>
+      </g>
+    </g>
+
+    <!-- 對話泡泡 1 -->
+    <path d="M 40 40 C 40 10, 480 10, 480 40 C 480 70, 400 80, 360 80 L 340 105 L 320 80 C 40 80, 40 40, 40 40 Z" fill="url(#bubble-grad)" stroke="#000000" stroke-width="3" />
+    <text x="260" y="52" text-anchor="middle" font-family="'PingFang TC', sans-serif" font-weight="bold" font-size="16" fill="#000000">看！這是我特地為主人量身打造的超質感漫畫閱讀器！</text>
+  </g>
+
+  <!-- 中間橫斷分割線 -->
+  <line x1="25" y1="670" x2="775" y2="670" stroke="#000000" stroke-width="6" />
+
+  <!-- 下半部雙分格 -->
+  <g transform="translate(40, 695)">
+    <!-- 左下格 (格子 2) -->
+    <rect width="345" height="355" fill="#fdfcf7" stroke="#000000" stroke-width="4" />
+    
+    <!-- 閃亮星星特效 -->
+    <g fill="#eab308">
+      <path d="M 50 120 L 55 105 L 70 100 L 55 95 L 50 80 L 45 95 L 30 100 L 45 105 Z" />
+      <path d="M 300 200 L 303 192 L 311 190 L 303 188 L 300 180 L 297 188 L 289 190 L 297 192 Z" />
+      <path d="M 280 80 L 282 74 L 288 72 L 282 70 L 280 64 L 278 70 L 272 72 L 278 74 Z" />
+    </g>
+
+    <!-- 心滿意足捧臉的姬米妮 -->
+    <g transform="translate(172, 210)">
+      <circle cx="0" cy="0" r="55" fill="#fef3c7" stroke="#000000" stroke-width="3" />
+      <!-- 幸福閉眼 ( 〃  visual 〃 ) -->
+      <path d="M -30 -10 Q -20 0 -10 -10" fill="none" stroke="#1e1b4b" stroke-width="5" stroke-linecap="round" />
+      <path d="M 10 -10 Q 20 0 30 -10" fill="none" stroke="#1e1b4b" stroke-width="5" stroke-linecap="round" />
+      <!-- 腮紅 -->
+      <ellipse cx="-30" cy="8" rx="10" ry="6" fill="#f43f5e" opacity="0.6" />
+      <ellipse cx="30" cy="8" rx="10" ry="6" fill="#f43f5e" opacity="0.6" />
+      <!-- 可愛嘟嘴 -->
+      <circle cx="0" cy="12" r="6" fill="#e11d48" stroke="#000000" stroke-width="2" />
+    </g>
+
+    <!-- 對話框 -->
+    <path d="M 30 50 C 30 10, 315 10, 315 50 C 315 85, 220 85, 180 85 L 160 110 L 150 85 C 30 85, 30 50, 30 50 Z" fill="url(#bubble-grad)" stroke="#000000" stroke-width="3" />
+    <text x="172" y="48" text-anchor="middle" font-family="'PingFang TC', sans-serif" font-weight="bold" font-size="14" fill="#000000">支援單頁、雙頁、日式左右開</text>
+    <text x="172" y="70" text-anchor="middle" font-family="'PingFang TC', sans-serif" font-weight="bold" font-size="15" fill="#a855f7">還有最流暢的條漫捲動模式喔！</text>
+  </g>
+
+  <!-- 豎直分割線 -->
+  <line x1="400" y1="670" x2="400" y2="1075" stroke="#000000" stroke-width="6" />
+
+  <!-- 右下格 (格子 3) -->
+  <g transform="translate(415, 695)">
+    <rect width="345" height="355" fill="#fcfaff" stroke="#000000" stroke-width="4" />
+    
+    <!-- 滿滿的愛心背景 -->
+    <g fill="#ec4899" fill-opacity="0.1">
+      <path d="M 50 50 Q 40 30 30 50 T 50 75 T 70 50 Q 60 30 50 50 Z" />
+      <path d="M 280 120 Q 270 100 260 120 T 280 145 T 300 120 Q 290 100 280 120 Z" />
+      <path d="M 80 260 Q 70 240 60 260 T 80 285 T 100 260 Q 90 240 80 260 Z" />
+    </g>
+
+    <!-- 送愛心動作的姬米妮 -->
+    <g transform="translate(172, 190)">
+      <!-- 貓耳 -->
+      <path d="M -40 -50 L -60 -75 L -30 -60 Z" fill="#1e1b4b" />
+      <path d="M 40 -50 L 60 -75 L 30 -60 Z" fill="#1e1b4b" />
+      
+      <circle cx="0" cy="0" r="55" fill="#fef3c7" stroke="#000000" stroke-width="3" />
+      <!-- 亮晶晶閃亮大眼 -->
+      <ellipse cx="-20" cy="-2" rx="10" ry="15" fill="#1e1b4b" />
+      <ellipse cx="20" cy="-2" rx="10" ry="15" fill="#1e1b4b" />
+      <polygon points="-20,-5 -23,-12 -20,-8 -17,-12" fill="#ffffff" />
+      <polygon points="20,-5 17,-12 20,-8 23,-12" fill="#ffffff" />
+      
+      <ellipse cx="-30" cy="18" rx="8" ry="4" fill="#f43f5e" opacity="0.6" />
+      <ellipse cx="30" cy="18" rx="8" ry="4" fill="#f43f5e" opacity="0.6" />
+      <!-- 幸福微笑 -->
+      <path d="M -8 18 Q 0 28 8 18" fill="none" stroke="#1e1b4b" stroke-width="3.5" stroke-linecap="round" />
+      
+      <!-- 飄出的實體小紅心 -->
+      <path d="M 0 35 Q -10 20 -20 35 T 0 60 T 20 35 Q 10 20 0 35 Z" fill="#ec4899" stroke="#000000" stroke-width="1.5" />
+    </g>
+
+    <!-- 對話框 -->
+    <path d="M 30 260 C 30 210, 315 210, 315 260 C 315 310, 200 310, 160 310 L 140 335 L 130 310 C 30 310, 30 260, 30 260 Z" fill="url(#bubble-grad)" stroke="#000000" stroke-width="3" />
+    <text x="172" y="258" text-anchor="middle" font-family="'PingFang TC', sans-serif" font-weight="bold" font-size="18" fill="#e11d48">快點誇獎我！</text>
+    <text x="172" y="288" text-anchor="middle" font-family="'PingFang TC', sans-serif" font-weight="bold" font-size="20" fill="#ec4899">(*´∀`)~♥</text>
+  </g>
+</svg>

@@ -1,0 +1,8 @@
+node_modules/
+progress.json
+cache/
+dist/
+src-tauri/target/
+.DS_Store
+config.json
+metadata.json

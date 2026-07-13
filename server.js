@@ -110,11 +110,7 @@ function getProgressData() {
 
 // 儲存讀取進度
 function saveProgressData(data) {
-  try {
-    fs.writeFileSync(PROGRESS_FILE, JSON.stringify(data, null, 2), 'utf-8');
-  } catch (e) {
-    console.error('儲存進度檔案失敗：', e);
-  }
+  fs.writeFileSync(PROGRESS_FILE, JSON.stringify(data, null, 2), 'utf-8');
 }
 
 // 快取記憶體：儲存漫畫 ID -> 總頁數
@@ -226,6 +222,8 @@ function releaseZipSlot() {
 // 全局緩存漫畫清單，實現 0 毫秒 Instant Load
 let cachedComics = [];
 let isScanning = false;
+let pendingScan = false;
+let scanHadError = false;
 let scanProgress = { isScanning: false, found: 0, currentPath: '', startedAt: null, completedAt: null };
 
 function getScanProgress() {
@@ -342,6 +340,7 @@ async function scanDirectory(dir, rootDir, scannedIds, progressData, depth = 0) 
     files = await fs.promises.readdir(dir);
   } catch (e) {
     console.error(`無法讀取目錄: ${dir}`, e);
+    scanHadError = true;
     return;
   }
 
@@ -493,8 +492,13 @@ function clearLibraryCaches() {
 
 // 背景掃描任務
 async function doBackgroundScan() {
-  if (isScanning) return;
+  if (isScanning) {
+    pendingScan = true;
+    return;
+  }
   isScanning = true;
+  pendingScan = false;
+  scanHadError = false;
   scanProgress = { isScanning: true, found: 0, currentPath: currentComicDir, startedAt: new Date().toISOString(), completedAt: null };
   console.log(`⏳ 開始背景靜默掃描漫畫庫... 當前目錄: ${currentComicDir}`);
   const scannedIds = new Set();
@@ -504,7 +508,9 @@ async function doBackgroundScan() {
     await scanDirectory(currentComicDir, currentComicDir, scannedIds, progressData);
 
     // 掃描結束後，把在磁碟中已被刪除的漫畫從快取中清除，保持完美同步！
-    cachedComics = cachedComics.filter(comic => scannedIds.has(comic.id));
+    if (!scanHadError) {
+      cachedComics = cachedComics.filter(comic => scannedIds.has(comic.id));
+    }
 
     console.log(`✅ 背景靜默掃描完成！共發現 ${cachedComics.length} 本漫畫。`);
   } catch (e) {
@@ -512,6 +518,7 @@ async function doBackgroundScan() {
   } finally {
     isScanning = false;
     scanProgress = { ...scanProgress, isScanning: false, found: cachedComics.length, currentPath: currentComicDir, completedAt: new Date().toISOString() };
+    if (pendingScan) setTimeout(doBackgroundScan, 100);
   }
 }
 

@@ -5,4 +5,5 @@ dist/
 src-tauri/target/
 .DS_Store
 config.json
+coderabbit_review*.json
 metadata.json

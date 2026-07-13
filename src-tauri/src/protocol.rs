@@ -1,11 +1,22 @@
 use crate::state::AppState;
 use base64::{engine::general_purpose, Engine as _};
 use std::fs::File;
-use std::io::Read;
-use std::path::Path;
+use std::io::{self, Read};
+use std::path::{Component, Path};
 use std::sync::Arc;
 use tauri::http::{Request, Response, StatusCode};
 use tauri::Manager;
+
+const MAX_IMAGE_BYTES: u64 = 64 * 1024 * 1024;
+
+fn read_image_limited<R: Read>(reader: R) -> io::Result<Vec<u8>> {
+    let mut buf = Vec::new();
+    reader.take(MAX_IMAGE_BYTES + 1).read_to_end(&mut buf)?;
+    if buf.len() as u64 > MAX_IMAGE_BYTES {
+        return Err(io::Error::new(io::ErrorKind::InvalidData, "image exceeds size limit"));
+    }
+    Ok(buf)
+}
 
 fn get_mime(ext: &str) -> &'static str {
     match ext.to_lowercase().as_str() {
@@ -76,8 +87,10 @@ pub fn handle_comic_request(
             if let Some(img_path_str) = cached_path {
                 let img_path = Path::new(&img_path_str);
                 if let Ok(mut f) = File::open(img_path) {
-                    let mut buf = Vec::new();
-                    let _ = f.read_to_end(&mut buf);
+                    let buf = match read_image_limited(&mut f) {
+                        Ok(buf) => buf,
+                        Err(_) => return Response::builder().status(StatusCode::PAYLOAD_TOO_LARGE).body(b"image too large".to_vec()).map_err(Into::into),
+                    };
                     let ext = img_path.extension().and_then(|s| s.to_str()).unwrap_or("");
                     let mime = get_mime(&format!(".{}", ext));
                     
@@ -93,8 +106,10 @@ pub fn handle_comic_request(
                 if index < images.len() {
                     let img_path = &images[index];
                     if let Ok(mut f) = File::open(img_path) {
-                        let mut buf = Vec::new();
-                        let _ = f.read_to_end(&mut buf);
+                        let buf = match read_image_limited(&mut f) {
+                            Ok(buf) => buf,
+                            Err(_) => return Response::builder().status(StatusCode::PAYLOAD_TOO_LARGE).body(b"image too large".to_vec()).map_err(Into::into),
+                        };
                         let ext = img_path.extension().and_then(|s| s.to_str()).unwrap_or("");
                         let mime = get_mime(&format!(".{}", ext));
                         
@@ -110,7 +125,31 @@ pub fn handle_comic_request(
 
     } else if (host == "page" || host == "cover") && parts.len() >= 2 {
         let id = parts[1];
-        let page_index: usize = if host == "cover" { 0 } else { parts.get(2).and_then(|s| s.parse().ok()).unwrap_or(0) };
+        let page_index: usize = if host == "cover" {
+            0
+        } else {
+            match parts.get(2).and_then(|s| s.parse().ok()) {
+                Some(index) => index,
+                None => return Response::builder().status(StatusCode::BAD_REQUEST).body(b"invalid page index".to_vec()).map_err(Into::into),
+            }
+        };
+
+        // IDs are capabilities: reject unknown IDs before touching any cache or path.
+        let comic_info = {
+            let comics = state.comics.blocking_lock();
+            comics.iter().find(|c| c.id == id).cloned()
+        };
+        let comic_info = match comic_info {
+            Some(info) => info,
+            None => return Response::builder().status(StatusCode::NOT_FOUND).body(b"unknown comic".to_vec()).map_err(Into::into),
+        };
+        let page_count = {
+            let opened = state.opened_comic_files.read().unwrap();
+            opened.get(id).map(|pages| pages.len()).unwrap_or(comic_info.page_count)
+        };
+        if page_index >= page_count {
+            return Response::builder().status(StatusCode::RANGE_NOT_SATISFIABLE).body(b"page out of range".to_vec()).map_err(Into::into);
+        }
         
         // 🚀 檢查極致 RAM 快取池
         let cached_buf = {
@@ -146,13 +185,12 @@ pub fn handle_comic_request(
 
         let relative_path_bytes = general_purpose::URL_SAFE_NO_PAD.decode(id).unwrap_or_default();
         let relative_path_str = String::from_utf8(relative_path_bytes).unwrap_or_default();
+        if Path::new(&relative_path_str).components().any(|component| matches!(component, Component::ParentDir)) {
+            return Response::builder().status(StatusCode::FORBIDDEN).body(b"forbidden".to_vec()).map_err(Into::into);
+        }
         
-        let comic_info = {
-            let comics = state.comics.blocking_lock();
-            comics.iter().find(|c| c.id == id).cloned()
-        };
-        let is_smb = comic_info.as_ref().map(|c| c.r#type == "smb-archive").unwrap_or(false);
-        let is_external = comic_info.as_ref().map(|c| c.r#type.starts_with("external-")).unwrap_or(false);
+        let is_smb = comic_info.r#type == "smb-archive";
+        let is_external = comic_info.r#type.starts_with("external-");
         
         let full_path;
         if is_smb {
@@ -162,6 +200,9 @@ pub fn handle_comic_request(
             full_path = Path::new(&relative_path_str).to_path_buf();
         } else {
             let scan_dir = { state.scan_dir.read().unwrap().clone() };
+            if scan_dir.is_empty() {
+                return Response::builder().status(StatusCode::FORBIDDEN).body(b"scan directory is not configured".to_vec()).map_err(Into::into);
+            }
             full_path = Path::new(&scan_dir).join(&relative_path_str);
             // BUG-04 修正：用 canonicalize 取代 starts_with 字串比對
             if !scan_dir.is_empty() {
@@ -177,6 +218,19 @@ pub fn handle_comic_request(
             }
         }
 
+        if is_smb {
+            let temp_root = app.path().app_local_data_dir().unwrap_or_else(|_| std::env::temp_dir()).join("ComicTemp");
+            match (full_path.canonicalize(), temp_root.canonicalize()) {
+                (Ok(canon_full), Ok(canon_root)) if !canon_full.starts_with(&canon_root) => {
+                    return Response::builder().status(StatusCode::FORBIDDEN).body(b"forbidden".to_vec()).map_err(Into::into);
+                }
+                (Err(_), _) | (_, Err(_)) => {
+                    return Response::builder().status(StatusCode::FORBIDDEN).body(b"forbidden".to_vec()).map_err(Into::into);
+                }
+                _ => {}
+            }
+        }
+
         if full_path.is_file() {
             if let Ok(file) = File::open(&full_path) {
                 if let Ok(mut archive) = zip::ZipArchive::new(file) {
@@ -188,8 +242,10 @@ pub fn handle_comic_request(
                     
                     if let Some(target_name) = cached_name {
                         if let Ok(mut file) = archive.by_name(&target_name) {
-                            let mut buf = Vec::new();
-                            let _ = file.read_to_end(&mut buf);
+                            let buf = match read_image_limited(&mut file) {
+                                Ok(buf) => buf,
+                                Err(_) => return Response::builder().status(StatusCode::PAYLOAD_TOO_LARGE).body(b"image too large".to_vec()).map_err(Into::into),
+                            };
                             let ext = Path::new(&target_name).extension().and_then(|s| s.to_str()).unwrap_or("");
                             let mime = get_mime(&format!(".{}", ext));
                             
@@ -205,8 +261,10 @@ pub fn handle_comic_request(
                         if page_index < entry_names.len() {
                             let target_name = &entry_names[page_index];
                             if let Ok(mut file) = archive.by_name(target_name) {
-                                let mut buf = Vec::new();
-                                let _ = file.read_to_end(&mut buf);
+                                let buf = match read_image_limited(&mut file) {
+                                    Ok(buf) => buf,
+                                    Err(_) => return Response::builder().status(StatusCode::PAYLOAD_TOO_LARGE).body(b"image too large".to_vec()).map_err(Into::into),
+                                };
                                 let ext = Path::new(target_name).extension().and_then(|s| s.to_str()).unwrap_or("");
                                 let mime = get_mime(&format!(".{}", ext));
                                 

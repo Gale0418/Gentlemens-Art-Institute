@@ -18,7 +18,7 @@
       }
     ],
     "security": {
-      "csp": "default-src 'self'; script-src 'self' https://cdnjs.cloudflare.com 'unsafe-inline' 'unsafe-eval'; style-src 'self' https://cdnjs.cloudflare.com https://fonts.googleapis.com 'unsafe-inline'; font-src 'self' https://cdnjs.cloudflare.com https://fonts.gstatic.com; connect-src 'self' comic: http://localhost:4000; img-src 'self' comic: http://localhost:4000 data: blob:;"
+      "csp": "default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; font-src 'self'; connect-src 'self' comic: http://localhost:4000; img-src 'self' comic: http://localhost:4000 data: blob:; object-src 'none'; base-uri 'self';"
     }
   },
   "bundle": {

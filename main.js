@@ -40,9 +40,15 @@ function saveFavorites(favorites) {
 
 
 const IMAGE_EXTENSIONS = ['.jpg', '.jpeg', '.png', '.webp', '.gif', '.svg'];
+const MAX_IMAGE_BYTES = 64 * 1024 * 1024;
 const configuredScanDepth = Number.parseInt(process.env.COMIC_SCAN_MAX_DEPTH || '', 10);
 function isImage(n) { return IMAGE_EXTENSIONS.includes(path.extname(n).toLowerCase()); }
 function isSystemFile(n) { return path.basename(n).startsWith('.') || n.includes('__MACOSX'); }
+async function readImageFile(filePath) {
+  const stat = await fs.promises.stat(filePath);
+  if (stat.size > MAX_IMAGE_BYTES) throw new Error('image exceeds size limit');
+  return fs.promises.readFile(filePath);
+}
 function hasReachedScanDepth(depth) {
   return Number.isFinite(configuredScanDepth) && configuredScanDepth >= 0 && depth > configuredScanDepth;
 }
@@ -123,7 +129,7 @@ function getProgress() {
   } catch(e) { return {}; }
 }
 function saveProgress(data) {
-  try { fs.writeFileSync(PROGRESS_FILE, JSON.stringify(data, null, 2), 'utf-8'); } catch(e) {}
+  fs.writeFileSync(PROGRESS_FILE, JSON.stringify(data, null, 2), 'utf-8');
 }
 
 // ======================================================
@@ -133,10 +139,16 @@ const ZIP_HANDLE_MAX = 5;
 const zipHandleCache = new Map(); // id -> { zipfile, entryNames, entriesByName, lastAccess }
 
 function getZipHandle(id, fullPath) {
+  const stat = fs.statSync(fullPath);
   if (zipHandleCache.has(id)) {
     const h = zipHandleCache.get(id);
-    h.lastAccess = Date.now();
-    return Promise.resolve(h);
+    if (h.mtimeMs === stat.mtimeMs && h.size === stat.size) {
+      h.lastAccess = Date.now();
+      return Promise.resolve(h);
+    } else {
+      try { h.zipfile.close(); } catch(e) {}
+      zipHandleCache.delete(id);
+    }
   }
   return new Promise((resolve, reject) => {
     // 淘汰最舊的
@@ -161,7 +173,7 @@ function getZipHandle(id, fullPath) {
       zipfile.on('end', () => {
         const entryNames = Array.from(entriesByName.keys())
           .sort((a, b) => a.localeCompare(b, undefined, { numeric: true, sensitivity: 'base' }));
-        const handle = { zipfile, entriesByName, entryNames, lastAccess: Date.now() };
+        const handle = { zipfile, entriesByName, entryNames, lastAccess: Date.now(), mtimeMs: stat.mtimeMs, size: stat.size };
         zipHandleCache.set(id, handle);
         resolve(handle);
       });
@@ -178,7 +190,15 @@ function readPageBuffer(handle, pageIndex) {
     handle.zipfile.openReadStream(entry, (err, stream) => {
       if (err) return reject(err);
       const chunks = [];
-      stream.on('data', c => chunks.push(c));
+      let totalBytes = 0;
+      stream.on('data', c => {
+        totalBytes += c.length;
+        if (totalBytes > MAX_IMAGE_BYTES) {
+          stream.destroy(new Error('image exceeds size limit'));
+          return;
+        }
+        chunks.push(c);
+      });
       stream.on('end', () => resolve(Buffer.concat(chunks)));
       stream.on('error', reject);
     });
@@ -201,6 +221,26 @@ let preloaderState = {
   queue: [], // list of { id, fullPath, isDir, totalPages }
   isPreloading: false,
 };
+
+let totalRamCacheBytes = 0;
+const MAX_RAM_CACHE_BYTES = 500 * 1024 * 1024; // 500 MB
+function evictRamCache(neededBytes) {
+  if (totalRamCacheBytes + neededBytes <= MAX_RAM_CACHE_BYTES) return;
+  for (const [cid, cache] of ramCachePool) {
+    if (cid !== activeReadingComicId) {
+      for (const [page, data] of cache) {
+        totalRamCacheBytes -= data.buf.length;
+        cache.delete(page);
+      }
+      ramCachePool.delete(cid);
+    }
+    if (totalRamCacheBytes + neededBytes <= MAX_RAM_CACHE_BYTES) return;
+  }
+  if (totalRamCacheBytes + neededBytes > MAX_RAM_CACHE_BYTES) {
+    totalRamCacheBytes = 0;
+    ramCachePool.clear();
+  }
+}
 
 async function startSmartPreloader() {
   if (preloaderState.isPreloading) return;
@@ -256,7 +296,7 @@ async function startSmartPreloader() {
         if (nextPageIndex < images.length) {
           const imgPath = path.join(item.fullPath, images[nextPageIndex]);
           ext = path.extname(images[nextPageIndex]).toLowerCase();
-          buf = await fs.promises.readFile(imgPath);
+          buf = await readImageFile(imgPath);
         }
       } else {
         const handle = await getZipHandle(item.id, item.fullPath);
@@ -265,7 +305,9 @@ async function startSmartPreloader() {
       }
 
       // 再次確認狀態無虞後存入快取
-      if (activeReadingComicId !== null && preloaderState.queue[0]?.id === item.id && buf) {
+      if (activeReadingComicId !== null && preloaderState.queue[0]?.id === item.id && buf && buf.length <= 50 * 1024 * 1024) {
+        evictRamCache(buf.length);
+        totalRamCacheBytes += buf.length;
         bookCache.set(nextPageIndex, { buf, ext });
         
         // 如果是當前正在閱讀的書，向前端報告進度！
@@ -319,6 +361,8 @@ function clearCoverCacheDirectory() {
 // ======================================================
 let cachedComics = [];
 let isScanning = false;
+let pendingScan = false;
+let scanHadError = false;
 let scanProgress = { isScanning: false, found: 0, currentPath: '', startedAt: null, completedAt: null };
 let lastScanProgressEmit = 0;
 
@@ -340,7 +384,7 @@ async function scanDirectory(dir, rootDir, scannedIds, progressData, depth = 0) 
   scanProgress.currentPath = dir;
   emitScanProgress();
   let files;
-  try { files = await fs.promises.readdir(dir); } catch(e) { return; }
+  try { files = await fs.promises.readdir(dir); } catch(e) { scanHadError = true; return; }
 
   let hasImages = false;
   const subdirs = [], archives = [];
@@ -417,8 +461,13 @@ function addComicToCache(relativePath, type, filePath, stat, scannedIds, progres
 }
 
 async function doBackgroundScan() {
-  if (isScanning) return;
+  if (isScanning) {
+    pendingScan = true;
+    return;
+  }
   isScanning = true;
+  pendingScan = false;
+  scanHadError = false;
   scanProgress = { isScanning: true, found: 0, currentPath: currentScanDir, startedAt: new Date().toISOString(), completedAt: null };
   emitScanProgress(true);
   console.log('⏳ 掃描漫畫庫:', currentScanDir);
@@ -434,7 +483,9 @@ async function doBackgroundScan() {
   const progressData = getProgress();
   try {
     await scanDirectory(currentScanDir, currentScanDir, scannedIds, progressData);
-    cachedComics = cachedComics.filter(c => scannedIds.has(c.id));
+    if (!scanHadError) {
+      cachedComics = cachedComics.filter(c => scannedIds.has(c.id));
+    }
     console.log(`✅ 掃描完成，共 ${cachedComics.length} 本漫畫`);
   } catch(e) {
     console.error('掃描失敗:', e);
@@ -442,6 +493,8 @@ async function doBackgroundScan() {
     isScanning = false;
     scanProgress = { ...scanProgress, isScanning: false, found: cachedComics.length, currentPath: currentScanDir, completedAt: new Date().toISOString() };
     emitScanProgress(true);
+    
+    if (pendingScan) setTimeout(doBackgroundScan, 100);
 
     // 比對掃描後的狀態快照
     const afterSnapshot = getSnapshotStr();
@@ -559,7 +612,7 @@ function registerComicProtocol() {
         if (index < 0 || index >= images.length) return new Response('not found', { status: 404 });
         const imgPath = path.join(folderPath, images[index]);
         const ext = path.extname(images[index]).toLowerCase();
-        const data = await fs.promises.readFile(imgPath);
+        const data = await readImageFile(imgPath);
 
         // 寫入極致 RAM 快取
         if (activeReadingComicId === folderId) {
@@ -586,17 +639,29 @@ function registerComicProtocol() {
         const relativePath = Buffer.from(id, 'base64url').toString('utf-8');
         const fullPath = path.join(currentScanDir, relativePath);
 
+        // 檢查路徑安全
+        let resolvedPath, resolvedScanDir;
+        try {
+          resolvedPath = fs.realpathSync(fullPath);
+          resolvedScanDir = fs.realpathSync(currentScanDir);
+        } catch(e) { return new Response('invalid path', { status: 403 }); }
+        if (!resolvedPath.startsWith(resolvedScanDir + path.sep) && resolvedPath !== resolvedScanDir) {
+          return new Response('forbidden', { status: 403 });
+        }
+
         // 檢查是否為資料夾漫畫
         if (fs.existsSync(fullPath) && fs.statSync(fullPath).isDirectory()) {
           const images = getFolderImages(fullPath);
           if (pageIndex >= images.length) return new Response('not found', { status: 404 });
           const imgPath = path.join(fullPath, images[pageIndex]);
           const ext = path.extname(images[pageIndex]).toLowerCase();
-          const data = await fs.promises.readFile(imgPath);
+          const data = await readImageFile(imgPath);
 
           // 寫入極致 RAM 快取
-          if (activeReadingComicId === id) {
+          if (activeReadingComicId === id && data.length <= 50 * 1024 * 1024) {
             if (!ramCachePool.has(id)) ramCachePool.set(id, new Map());
+            evictRamCache(data.length);
+            totalRamCacheBytes += data.length;
             ramCachePool.get(id).set(pageIndex, { buf: data, ext });
           }
 
@@ -613,7 +678,7 @@ function registerComicProtocol() {
           const diskPath = findCoverCache(id);
           if (diskPath) {
             const ext = path.extname(diskPath).toLowerCase();
-            const data = await fs.promises.readFile(diskPath);
+            const data = await readImageFile(diskPath);
             return new Response(data, { headers: { 'Content-Type': getMime(ext), 'Cache-Control': 'public, max-age=86400' } });
           }
         }
@@ -625,8 +690,10 @@ function registerComicProtocol() {
         const mime = getMime(ext);
 
         // 寫入極致 RAM 快取
-        if (activeReadingComicId === id) {
+        if (activeReadingComicId === id && buf.length <= 50 * 1024 * 1024) {
           if (!ramCachePool.has(id)) ramCachePool.set(id, new Map());
+          evictRamCache(buf.length);
+          totalRamCacheBytes += buf.length;
           ramCachePool.get(id).set(pageIndex, { buf, ext });
         }
 
@@ -806,6 +873,7 @@ function setupIPC() {
     activeReadingComicId = null;
     preloaderState.queue = [];
     ramCachePool.clear(); // 徹底釋放 RAM 快取，不看書就不佔用記憶體！
+    totalRamCacheBytes = 0;
     preloadFailuresPool.clear();
     return { success: true };
   });

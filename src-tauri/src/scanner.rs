@@ -179,12 +179,11 @@ pub async fn start_background_scan(state: Arc<AppState>, app_handle: tauri::AppH
         for bookmark_entry in external_bookmarks {
             #[cfg(target_os = "ios")]
             {
-                use tauri_plugin_ios_folder::{StartAccessingRequest, StopAccessingRequest};
+                use tauri_plugin_ios_folder::StartAccessingRequest;
                 use tauri_plugin_ios_folder::TauriPluginIosFolderExt;
                 if let Ok(res) = app_handle_clone.tauri_plugin_ios_folder().start_accessing(StartAccessingRequest { bookmark: bookmark_entry.bookmark.clone() }) {
                     let resolved_path = Path::new(&res.path);
                     scan_recursive(resolved_path, resolved_path, 0, &mut results, &app_handle_clone, &state_clone2, my_gen, &all_progress, Some(&bookmark_entry.name));
-                    let _ = app_handle_clone.tauri_plugin_ios_folder().stop_accessing(StopAccessingRequest { bookmark: bookmark_entry.bookmark.clone() });
                 }
             }
         }

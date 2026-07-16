@@ -2258,3 +2258,5 @@ body {
   border-left: 3px solid #00f0ff; /* Cyan accent for decoding spinner */
   color: #00f0ff;
 }
+
+.filter-group select { cursor: pointer; }

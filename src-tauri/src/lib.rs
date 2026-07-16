@@ -50,6 +50,12 @@ async fn open_comic(id: String, state: State<'_, Arc<AppState>>, app_handle: tau
             let temp_dir = app_handle.path().app_local_data_dir().unwrap_or_else(|_| std::env::temp_dir()).join("ComicTemp");
             std::fs::create_dir_all(&temp_dir).unwrap_or_default();
             full_path = temp_dir.join(&relative_path_str);
+            if let Some(parent) = full_path.parent() {
+                if let Err(error) = std::fs::create_dir_all(parent) {
+                    let _ = app_handle.emit("smb-download-end", serde_json::json!({"id": id}));
+                    return Err(format!("無法建立 SMB 暫存目錄: {error}"));
+                }
+            }
             
             let addr = format!("{}:445", cfg.host);
             let username = cfg.username.unwrap_or_else(|| "guest".to_string());
@@ -69,7 +75,7 @@ async fn open_comic(id: String, state: State<'_, Arc<AppState>>, app_handle: tau
             }
             let mut tree = tree_result.unwrap();
             
-            let smb_path = relative_path_str.clone();
+            let smb_path = relative_path_str.replace("/", "\\");
             let data_result = client.read_file(&mut tree, &smb_path).await;
             if data_result.is_err() {
                 let _ = app_handle.emit("smb-download-end", serde_json::json!({"id": id}));
@@ -128,7 +134,7 @@ async fn open_comic(id: String, state: State<'_, Arc<AppState>>, app_handle: tau
         opened.insert(id.clone(), cached_files);
     } else {
         // Zip file
-        let entry_names = crate::utils::get_archive_images(&full_path);
+        let entry_names = crate::utils::get_archive_images(&full_path).map_err(|error| error.to_string())?;
         for i in 0..entry_names.len() {
             pages.push(format!("comic://page/{}/{}", id, i));
         }
@@ -149,11 +155,13 @@ async fn open_comic(id: String, state: State<'_, Arc<AppState>>, app_handle: tau
     };
 
     // 觸發背景預載任務
+    let preload_generation = state.preload_generation.fetch_add(1, std::sync::atomic::Ordering::SeqCst) + 1;
+    state.ram_cache_pool.lock().unwrap().clear();
     let state_clone = state.inner().clone();
     let id_clone = id.clone();
     let handle_clone = app_handle.clone();
     tauri::async_runtime::spawn(async move {
-        crate::cache::preload_comic(state_clone, handle_clone, id_clone).await;
+        crate::cache::preload_comic(state_clone, handle_clone, id_clone, preload_generation).await;
     });
 
     Ok(serde_json::json!({ 
@@ -174,6 +182,8 @@ async fn open_folder_dialog(_app: tauri::AppHandle) -> Result<String, String> {
 
 #[tauri::command]
 async fn close_comic(state: State<'_, Arc<AppState>>, app_handle: tauri::AppHandle) -> Result<(), String> {
+    state.preload_generation.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+
     // 釋放記憶體快取
     let mut pool = state.ram_cache_pool.lock().unwrap();
     pool.clear();
@@ -247,7 +257,7 @@ async fn set_smb_config(app_handle: tauri::AppHandle, state: State<'_, Arc<AppSt
 
 #[tauri::command]
 async fn set_bookmarks(data: Vec<crate::state::ExternalBookmark>, state: State<'_, Arc<AppState>>) -> Result<(), String> {
-    *state.external_bookmarks.write().unwrap() = data.clone();
+    *state.external_bookmarks.write().unwrap() = data;
     Ok(())
 }
 

@@ -7,3 +7,10 @@ src-tauri/target/
 config.json
 coderabbit_review*.json
 metadata.json
+
+# Local packaging artifacts and workspace-only review material.
+*.dmg
+MissionCenter/
+scratch/
+*_tmp_*
+*.patch

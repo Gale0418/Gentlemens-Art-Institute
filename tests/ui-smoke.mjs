@@ -13,6 +13,7 @@ const app = readRequiredFile('public/app.js', 'frontend app');
 const html = readRequiredFile('public/index.html', 'HTML');
 const css = readRequiredFile('public/style.css', 'CSS');
 const server = readRequiredFile('server.js', 'server');
+const tauri = readRequiredFile('src-tauri/src/lib.rs', 'Tauri commands');
 
 const mustContain = (source, needle, label) => {
   assert.ok(source.includes(needle), `${label}: missing ${needle}`);
@@ -44,6 +45,8 @@ mustContain(app, 'function showLoaderProgress', 'loader progress UI');
 mustContain(app, 'function setLoaderProgress', 'loader progress UI');
 mustContain(app, '!img.getAttribute(\'src\')', 'webtoon lazy image detection');
 mustContain(app, 'img.removeAttribute(\'src\')', 'reader preload cleanup');
+mustContain(app, 'renderGeneration', 'reader render invalidation');
+mustContain(app, 'async function clearSmbConfig()', 'SMB cleanup');
 mustContain(html, 'id="loader-progress"', 'loader progress UI');
 mustContain(css, '.loader-progress', 'loader progress styling');
 mustContain(server, 'folderImageListCache', 'folder image list cache');
@@ -52,6 +55,21 @@ mustContain(server, 'process.env.COMIC_BASE_DIR', 'server base dir');
 const main = readRequiredFile('main.js', 'main script');
 mustContain(main, 'folderImageListCache', 'electron folder image list cache');
 mustContain(main, 'function getCachedFolderImages', 'electron folder image list cache');
+assert.match(
+  app,
+  /const renderGeneration = \+\+state\.renderGeneration[\s\S]*state\.renderGeneration !== renderGeneration/,
+  'stale reader decode callbacks should be invalidated'
+);
+assert.match(
+  app,
+  /async function clearSmbConfig\(\) \{[\s\S]*await eAPI\.setSmbConfig\(null\)[\s\S]*localStorage\.removeItem/,
+  'SMB local state should clear only after backend success'
+);
+assert.match(
+  tauri,
+  /if let Err\(error\) = std::fs::create_dir_all\(parent\)[\s\S]*smb-download-end[\s\S]*return Err/,
+  'SMB temp directory failures should end progress and return an error'
+);
 assert.doesNotMatch(
   server,
   /const BASE_DIR = '\/Volumes\/MyGame\/comic'/,

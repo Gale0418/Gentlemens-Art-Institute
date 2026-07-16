@@ -257,7 +257,7 @@ pub fn handle_comic_request(
                         }
                     } else {
                         // Fallback
-                        let entry_names = crate::utils::get_archive_images(&full_path);
+                        let entry_names = crate::utils::get_archive_images(&full_path).unwrap_or_default();
                         if page_index < entry_names.len() {
                             let target_name = &entry_names[page_index];
                             if let Ok(mut file) = archive.by_name(target_name) {

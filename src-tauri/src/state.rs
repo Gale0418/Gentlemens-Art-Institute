@@ -66,6 +66,7 @@ pub struct AppState {
     // BUG-13 修正：移除從未使用的 progress_data 欄位，避免混淆維護者
     pub scan_progress: Mutex<ScanProgress>,
     pub scan_generation: std::sync::atomic::AtomicU64,
+    pub preload_generation: std::sync::atomic::AtomicU64,
     // (comic_id, page_index) -> byte array
     pub ram_cache_pool: std::sync::Mutex<HashMap<String, HashMap<usize, Vec<u8>>>>,
     // (comic_id) -> list of entry paths (for folder) or names (for archive)
@@ -87,6 +88,7 @@ impl AppState {
                 completed_at: None,
             }),
             scan_generation: std::sync::atomic::AtomicU64::new(0),
+            preload_generation: std::sync::atomic::AtomicU64::new(0),
             ram_cache_pool: std::sync::Mutex::new(HashMap::new()),
             opened_comic_files: std::sync::RwLock::new(HashMap::new()),
             smb_config: std::sync::RwLock::new(None),

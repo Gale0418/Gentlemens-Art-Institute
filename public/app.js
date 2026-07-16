@@ -92,6 +92,7 @@ let state = {
   readerContextMenuOpen: false,
   webtoonScrollFrame: null,
   scanStatusPollTimer: null,
+  renderGeneration: 0,
   sharpenLevel: 0, // 0=關閉, 1=輕度, 2=中度, 3=強度
 };
 
@@ -309,11 +310,11 @@ function bindEvents() {
   // 閱讀器翻頁按鈕
   elements.prevZone.addEventListener('click', (e) => {
     e.stopPropagation();
-    prevPage();
+    goPreviousByReadingDirection();
   });
   elements.nextZone.addEventListener('click', (e) => {
     e.stopPropagation();
-    nextPage();
+    goNextByReadingDirection();
   });
 
   // 閱讀模式切換
@@ -1160,6 +1161,10 @@ async function openReader(comicId) {
   try {
     const data = await eAPI.openComic(comicId);
 
+    if (!data.pages || data.pages.length === 0) {
+      throw new Error('這本漫畫沒有可讀取的圖片頁面');
+    }
+
     state.currentComic = data;
     state.selectedComicId = comicId;
     state.currentComicPages = data.pages;
@@ -1177,7 +1182,7 @@ async function openReader(comicId) {
     
     if (state.zoomPercentage === undefined) state.zoomPercentage = 100;
     if (state.rotationAngle === undefined) state.rotationAngle = 0;
-    state.preloadedImages.clear();
+    releasePreloadedImages();
 
     if (elements.statusRam) {
       elements.statusRam.style.display = window.electronAPI && window.electronAPI.isElectron ? 'inline-flex' : 'none';
@@ -1201,7 +1206,8 @@ async function openReader(comicId) {
     // BUG-09 修正：失敗時清除 currentComic 避免殘留舊狀態
     state.currentComic = null;
     state.currentComicPages = [];
-    alert('讀取漫畫資料失敗！這本漫畫資料夾裡面可能沒有圖檔喔？');
+    const message = typeof e === 'string' ? e : (e && e.message) || String(e);
+    alert('讀取漫畫資料失敗：' + message);
   } finally {
     hideLoader();
   }
@@ -1209,12 +1215,15 @@ async function openReader(comicId) {
 
 // 關閉閱讀器
 function closeReader() {
+  state.renderGeneration += 1;
   if (window.electronAPI && window.electronAPI.closeComic) {
     window.electronAPI.closeComic().catch(err => console.error('關閉漫畫清理失敗:', err));
   }
 
   if (elements.statusRam) elements.statusRam.style.display = 'none';
   if (elements.statusLoading) elements.statusLoading.style.display = 'none';
+  releasePreloadedImages();
+  elements.pagesContainer.replaceChildren();
 
   hideReaderContextMenu();
   if (document.fullscreenElement) {
@@ -1225,7 +1234,6 @@ function closeReader() {
   document.body.style.overflow = 'auto';
   state.currentComic = null;
   state.currentComicPages = [];
-  state.preloadedImages.clear();
   if (state.webtoonScrollFrame) {
     cancelAnimationFrame(state.webtoonScrollFrame);
     state.webtoonScrollFrame = null;
@@ -1235,9 +1243,18 @@ function closeReader() {
   fetchLibrary();
 }
 
+function releasePreloadedImages() {
+  for (const img of state.preloadedImages.values()) {
+    img.removeAttribute('src');
+  }
+  state.preloadedImages.clear();
+}
+
 // 根據模式繪製圖片（極致雙緩衝與背景解碼，徹底根除 Chromium 的點位更換閃爍）
 function renderPages() {
   if (!state.currentComic) return;
+
+  const renderGeneration = ++state.renderGeneration;
 
   const totalPages = state.currentComicPages.length;
   
@@ -1265,6 +1282,7 @@ function renderPages() {
     // 🚀 極致雙緩衝：在背景將圖片完整載入並由 GPU 完成解碼，這段期間舊圖片原封不動留在畫面上！
     tempImg.decode().then(() => {
       // 確保在非同步解碼期間，使用者沒有突然切換模式或快速翻到別的頁面
+      if (state.renderGeneration !== renderGeneration) return;
       if (state.readingMode !== 'single') return;
       if (state.currentComicPages[state.currentPageIndex] !== targetSrc) return;
 
@@ -1276,6 +1294,7 @@ function renderPages() {
       showPageLoadingSpinner(false);
     }).catch(() => {
       // 降級處理（例如圖片損壞等特殊情況）
+      if (state.renderGeneration !== renderGeneration) return;
       if (state.readingMode !== 'single') return;
       if (state.currentComicPages[state.currentPageIndex] !== targetSrc) return;
       elements.pagesContainer.innerHTML = '';
@@ -1308,6 +1327,7 @@ function renderPages() {
       showPageLoadingSpinner(true);
 
       tempImg.decode().then(() => {
+        if (state.renderGeneration !== renderGeneration) return;
         if (state.readingMode !== 'double' && state.readingMode !== 'double-rtl') return;
         if (state.currentPageIndex !== 0) return;
 
@@ -1315,6 +1335,7 @@ function renderPages() {
         elements.pagesContainer.appendChild(tempImg);
         showPageLoadingSpinner(false);
       }).catch(() => {
+        if (state.renderGeneration !== renderGeneration) return;
         if (state.readingMode !== 'double' && state.readingMode !== 'double-rtl') return;
         if (state.currentPageIndex !== 0) return;
         elements.pagesContainer.innerHTML = '';
@@ -1344,6 +1365,7 @@ function renderPages() {
       if (img2) decodePromises.push(img2.decode());
 
       Promise.all(decodePromises).then(() => {
+        if (state.renderGeneration !== renderGeneration) return;
         if (state.readingMode !== 'double' && state.readingMode !== 'double-rtl') return;
         if (state.currentPageIndex !== page1Index) return;
 
@@ -1357,6 +1379,7 @@ function renderPages() {
         }
         showPageLoadingSpinner(false);
       }).catch(() => {
+        if (state.renderGeneration !== renderGeneration) return;
         if (state.readingMode !== 'double' && state.readingMode !== 'double-rtl') return;
         if (state.currentPageIndex !== page1Index) return;
 
@@ -1410,6 +1433,7 @@ function renderPages() {
     // 如果進度不是 0，則捲動到該頁面位置
     if (state.currentPageIndex > 0) {
       setTimeout(() => {
+        if (state.renderGeneration !== renderGeneration) return;
         const targetImg = elements.pagesContainer.querySelector(`img[data-index="${state.currentPageIndex}"]`);
         if (targetImg) {
           targetImg.scrollIntoView({ behavior: 'auto' });
@@ -1453,16 +1477,15 @@ function nextPage() {
     }
   } else if (state.readingMode === 'double' || state.readingMode === 'double-rtl') {
     if (state.currentPageIndex === 0) {
-      // 封面跳下一頁變成 1
-      state.currentPageIndex = 1;
-      renderPages();
+      if (totalPages > 1) {
+        state.currentPageIndex = 1;
+        renderPages();
+      } else {
+        endReached = true;
+      }
     } else if (state.currentPageIndex + 2 < totalPages) {
       // 後續每次跳 2 頁
       state.currentPageIndex += 2;
-      renderPages();
-    } else if (state.currentPageIndex + 1 < totalPages) {
-      // 剩下最後一頁
-      state.currentPageIndex += 1;
       renderPages();
     } else {
       endReached = true;
@@ -2502,9 +2525,10 @@ async function saveSmbConfig() {
   const safeConfig = { host, share, username };
   // 呼叫後端套用設定
   try {
-    if (window.electronAPI && window.electronAPI.setSmbConfig) {
-      await window.electronAPI.setSmbConfig(config);
+    if (!eAPI?.setSmbConfig) {
+      throw new Error('此環境不支援 SMB 設定');
     }
+    await eAPI.setSmbConfig(config);
     localStorage.setItem('comic-reader:smb', JSON.stringify(safeConfig));
     showReaderToast('✅ SMB 設定已儲存！請重新整理書架。');
     closeSmbModal();
@@ -2517,17 +2541,21 @@ async function saveSmbConfig() {
 }
 
 async function clearSmbConfig() {
-  localStorage.removeItem('comic-reader:smb');
-  elements.smbHost.value = '';
-  elements.smbShare.value = '';
-  elements.smbUser.value = '';
-  elements.smbPass.value = '';
-  
-  if (window.electronAPI && window.electronAPI.setSmbConfig) {
-    await window.electronAPI.setSmbConfig(null);
+  try {
+    if (eAPI?.setSmbConfig) {
+      await eAPI.setSmbConfig(null);
+    }
+    localStorage.removeItem('comic-reader:smb');
+    elements.smbHost.value = '';
+    elements.smbShare.value = '';
+    elements.smbUser.value = '';
+    elements.smbPass.value = '';
+    showReaderToast('✅ 已清除 SMB 連線');
+    closeSmbModal();
+  } catch (err) {
+    console.error('清除 SMB 設定失敗：', err);
+    showReaderToast('❌ SMB 清除失敗：' + (err?.message || err));
   }
-  showReaderToast('✅ 已清除 SMB 連線');
-  closeSmbModal();
 }
 
 // 瀏覽路徑按鈕點擊事件獲取並渲染資料夾清單
@@ -2590,7 +2618,10 @@ async function saveSettingsPath(pathStr) {
     // 馬上清空目前的書架，避免使用者看到舊的漫畫
     state.comics = [];
     state.activeSeries = 'all';
-    renderLibrary();
+    filterAndRenderGrid();
+    renderSidebar();
+    renderContinueStrip();
+    updateStats();
     
     // 背景執行，不阻擋 UI
     eAPI.setConfig({ scanDir: pathStr }).catch(e => {

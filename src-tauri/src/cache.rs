@@ -56,7 +56,7 @@ pub async fn preload_comic(state: Arc<AppState>, app_handle: tauri::AppHandle, i
     if !full_path.exists() || full_path.is_dir() {
         // 資料夾模式速度極快，不太需要預載到記憶體
         let _ = app_handle.emit("ram-cache-progress", serde_json::json!({
-            "id": id, "loaded": 0, "total": 0, "finished": true
+            "id": id, "generation": generation, "loaded": 0, "total": 0, "finished": true
         }));
         return;
     }
@@ -75,11 +75,10 @@ pub async fn preload_comic(state: Arc<AppState>, app_handle: tauri::AppHandle, i
                 let preload_count = entry_names.len().min(MAX_PRELOAD_PAGES);
                 let mut cached_bytes = 0;
                 let mut loaded_count = 0;
-                for i in 0..preload_count {
+                for (i, target_name) in entry_names.iter().take(preload_count).enumerate() {
                     if state.preload_generation.load(std::sync::atomic::Ordering::Acquire) != generation {
                         return;
                     }
-                    let target_name = &entry_names[i];
                     if let Ok(mut file) = archive.by_name(target_name) {
                         let expected_size = file.size() as usize;
                         if expected_size > MAX_PRELOAD_BYTES.saturating_sub(cached_bytes) {
@@ -95,17 +94,23 @@ pub async fn preload_comic(state: Arc<AppState>, app_handle: tauri::AppHandle, i
                                 return;
                             }
                             cached_bytes += buf.len();
-                            // 寫入快取
-                            let state_clone = state.clone();
+                            // generation check 與寫入必須在同一個 lifecycle 區段內。
                             let id_clone = id.clone();
-                            let mut pool = state_clone.ram_cache_pool.lock().unwrap();
-                            let book_cache = pool.entry(id_clone.clone()).or_insert_with(std::collections::HashMap::new);
-                            book_cache.insert(i, buf);
+                            {
+                                let _lifecycle = state.comic_lifecycle.lock().unwrap();
+                                if state.preload_generation.load(std::sync::atomic::Ordering::Acquire) != generation {
+                                    return;
+                                }
+                                let mut pool = state.ram_cache_pool.lock().unwrap();
+                                let book_cache = pool.entry(id_clone.clone()).or_default();
+                                book_cache.insert(i, buf);
+                            }
                             loaded_count = i + 1;
                             
                             // 發送進度到前端
                             let _ = app_handle.emit("ram-cache-progress", serde_json::json!({
                                 "id": id_clone,
+                                "generation": generation,
                                 "loaded": i + 1,
                                 "total": preload_count,
                                 "finished": false
@@ -114,12 +119,15 @@ pub async fn preload_comic(state: Arc<AppState>, app_handle: tauri::AppHandle, i
                     }
                 }
 
-                let _ = app_handle.emit("ram-cache-progress", serde_json::json!({
-                    "id": id,
-                    "loaded": loaded_count,
-                    "total": preload_count,
-                    "finished": true
-                }));
+                if state.preload_generation.load(std::sync::atomic::Ordering::Acquire) == generation {
+                    let _ = app_handle.emit("ram-cache-progress", serde_json::json!({
+                        "id": id,
+                        "generation": generation,
+                        "loaded": loaded_count,
+                        "total": preload_count,
+                        "finished": true
+                    }));
+                }
             }
         }
     }).await;

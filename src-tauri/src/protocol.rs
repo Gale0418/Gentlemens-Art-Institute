@@ -25,7 +25,29 @@ fn get_mime(ext: &str) -> &'static str {
         ".gif" => "image/gif",
         ".svg" => "image/svg+xml",
         ".jpg" | ".jpeg" => "image/jpeg",
+        ".avif" => "image/avif",
         _ => "application/octet-stream",
+    }
+}
+
+pub fn detect_mime(buf: &[u8], ext_fallback: &str) -> &'static str {
+    if buf.len() >= 8 && &buf[0..8] == b"\x89PNG\r\n\x1a\n" {
+        "image/png"
+    } else if buf.len() >= 12 && &buf[0..4] == b"RIFF" && &buf[8..12] == b"WEBP" {
+        "image/webp"
+    } else if buf.len() >= 6 && (&buf[0..6] == b"GIF87a" || &buf[0..6] == b"GIF89a") {
+        "image/gif"
+    } else if buf.len() >= 3 && &buf[0..3] == b"\xFF\xD8\xFF" {
+        "image/jpeg"
+    } else if buf.len() >= 12
+        && &buf[4..8] == b"ftyp"
+        && buf[8..buf.len().min(32)]
+            .chunks_exact(4)
+            .any(|brand| brand == b"avif" || brand == b"avis")
+    {
+            "image/avif"
+    } else {
+        get_mime(ext_fallback)
     }
 }
 
@@ -36,33 +58,62 @@ pub fn handle_comic_request(
     let uri = request.uri().to_string();
     let path_str = uri.strip_prefix("comic://").unwrap_or(&uri);
     let path_str = path_str.strip_prefix("localhost/").unwrap_or(path_str);
-    
+
     let parts: Vec<&str> = path_str.split('/').filter(|s| !s.is_empty()).collect();
     if parts.is_empty() {
         return Response::builder().status(StatusCode::BAD_REQUEST).body(b"bad request".to_vec()).map_err(Into::into);
     }
 
-    let host = parts[0]; 
+    let host = parts[0];
     let state = app.state::<Arc<AppState>>();
 
     if host == "folder" && parts.len() >= 3 {
         let folder_id = parts[1];
         let index: usize = parts[2].parse().unwrap_or(0);
-        let folder_path_bytes = general_purpose::URL_SAFE_NO_PAD.decode(folder_id).unwrap_or_default();
-        let folder_path_str = String::from_utf8(folder_path_bytes).unwrap_or_default();
-        
+
+        // IDs are capabilities: reject unknown IDs before touching any cache or path.
         let comic_info = {
             let comics = state.comics.blocking_lock();
             comics.iter().find(|c| c.id == folder_id).cloned()
         };
-        let is_external = comic_info.as_ref().map(|c| c.r#type.starts_with("external-")).unwrap_or(false);
-        
+        let comic_info = match comic_info {
+            Some(info) => info,
+            None => return Response::builder().status(StatusCode::NOT_FOUND).body(b"unknown folder comic".to_vec()).map_err(Into::into),
+        };
+
+        let relative_path_bytes = general_purpose::URL_SAFE_NO_PAD.decode(folder_id).unwrap_or_default();
+        let relative_path_str = String::from_utf8(relative_path_bytes).unwrap_or_default();
+        if Path::new(&relative_path_str).components().any(|component| matches!(component, Component::ParentDir)) {
+            return Response::builder().status(StatusCode::FORBIDDEN).body(b"forbidden".to_vec()).map_err(Into::into);
+        }
+
+        let is_external = comic_info.r#type.starts_with("external-");
+
         let folder_path = if is_external {
-            Path::new(&folder_path_str).to_path_buf()
+            let path = Path::new(&relative_path_str).to_path_buf();
+            #[cfg(target_os = "ios")]
+            {
+                let allowed = match path.canonicalize() {
+                    Ok(canonical) => state
+                        .active_bookmarks
+                        .lock()
+                        .unwrap()
+                        .values()
+                        .filter_map(|root| Path::new(root).canonicalize().ok())
+                        .any(|root| canonical.starts_with(root)),
+                    Err(_) => false,
+                };
+                if !allowed {
+                    return Response::builder().status(StatusCode::FORBIDDEN).body(b"external bookmark is not active".to_vec()).map_err(Into::into);
+                }
+            }
+            path
         } else {
             let scan_dir = { state.scan_dir.read().unwrap().clone() };
-            let p = Path::new(&scan_dir).join(&folder_path_str);
-            // BUG-04 修正：用 canonicalize 取代 starts_with 字串比對，防止 symlink 越權
+            if scan_dir.is_empty() {
+                return Response::builder().status(StatusCode::FORBIDDEN).body(b"scan directory is not configured".to_vec()).map_err(Into::into);
+            }
+            let p = Path::new(&scan_dir).join(&relative_path_str);
             if !scan_dir.is_empty() {
                 match (p.canonicalize(), Path::new(&scan_dir).canonicalize()) {
                     (Ok(canon_p), Ok(canon_scan)) if !canon_p.starts_with(&canon_scan) => {
@@ -78,12 +129,12 @@ pub fn handle_comic_request(
         };
 
         if folder_path.is_dir() {
-            // 從快取讀取檔案路徑
+            // 從快取讀取檔案路徑（以 capability folder_id 作 key）
             let cached_path = {
                 let opened = state.opened_comic_files.read().unwrap();
                 opened.get(folder_id).and_then(|files| files.get(index).cloned())
             };
-            
+
             if let Some(img_path_str) = cached_path {
                 let img_path = Path::new(&img_path_str);
                 if let Ok(mut f) = File::open(img_path) {
@@ -92,8 +143,8 @@ pub fn handle_comic_request(
                         Err(_) => return Response::builder().status(StatusCode::PAYLOAD_TOO_LARGE).body(b"image too large".to_vec()).map_err(Into::into),
                     };
                     let ext = img_path.extension().and_then(|s| s.to_str()).unwrap_or("");
-                    let mime = get_mime(&format!(".{}", ext));
-                    
+                    let mime = detect_mime(&buf, &format!(".{}", ext));
+
                     return Response::builder()
                         .header("Content-Type", mime)
                         .header("Cache-Control", "public, max-age=86400")
@@ -111,8 +162,8 @@ pub fn handle_comic_request(
                             Err(_) => return Response::builder().status(StatusCode::PAYLOAD_TOO_LARGE).body(b"image too large".to_vec()).map_err(Into::into),
                         };
                         let ext = img_path.extension().and_then(|s| s.to_str()).unwrap_or("");
-                        let mime = get_mime(&format!(".{}", ext));
-                        
+                        let mime = detect_mime(&buf, &format!(".{}", ext));
+
                         return Response::builder()
                             .header("Content-Type", mime)
                             .header("Cache-Control", "public, max-age=86400")
@@ -150,32 +201,19 @@ pub fn handle_comic_request(
         if page_index >= page_count {
             return Response::builder().status(StatusCode::RANGE_NOT_SATISFIABLE).body(b"page out of range".to_vec()).map_err(Into::into);
         }
-        
+
         // 🚀 檢查極致 RAM 快取池
         let cached_buf = {
             let pool = state.ram_cache_pool.lock().unwrap();
             if let Some(book) = pool.get(id) {
-                if let Some(buf) = book.get(&page_index) {
-                    Some(buf.clone())
-                } else {
-                    None
-                }
+                book.get(&page_index).cloned()
             } else {
                 None
             }
         };
 
         if let Some(buf) = cached_buf {
-            // 目前快取沒存附檔名，根據魔術數字推測
-            let mime = if buf.len() > 8 && &buf[0..8] == b"\x89PNG\r\n\x1a\n" {
-                "image/png"
-            } else if buf.len() > 4 && &buf[0..4] == b"RIFF" {
-                "image/webp"
-            } else if buf.len() > 3 && &buf[0..3] == b"GIF" {
-                "image/gif"
-            } else {
-                "image/jpeg"
-            };
+            let mime = detect_mime(&buf, &comic_info.ext);
             return Response::builder()
                 .header("Content-Type", mime)
                 .header("Cache-Control", "public, max-age=86400")
@@ -188,10 +226,10 @@ pub fn handle_comic_request(
         if Path::new(&relative_path_str).components().any(|component| matches!(component, Component::ParentDir)) {
             return Response::builder().status(StatusCode::FORBIDDEN).body(b"forbidden".to_vec()).map_err(Into::into);
         }
-        
+
         let is_smb = comic_info.r#type == "smb-archive";
         let is_external = comic_info.r#type.starts_with("external-");
-        
+
         let full_path;
         if is_smb {
             let temp_dir = app.path().app_local_data_dir().unwrap_or_else(|_| std::env::temp_dir()).join("ComicTemp");
@@ -204,7 +242,6 @@ pub fn handle_comic_request(
                 return Response::builder().status(StatusCode::FORBIDDEN).body(b"scan directory is not configured".to_vec()).map_err(Into::into);
             }
             full_path = Path::new(&scan_dir).join(&relative_path_str);
-            // BUG-04 修正：用 canonicalize 取代 starts_with 字串比對
             if !scan_dir.is_empty() {
                 match (full_path.canonicalize(), Path::new(&scan_dir).canonicalize()) {
                     (Ok(canon_full), Ok(canon_scan)) if !canon_full.starts_with(&canon_scan) => {
@@ -239,7 +276,7 @@ pub fn handle_comic_request(
                         let opened = state.opened_comic_files.read().unwrap();
                         opened.get(id).and_then(|names| names.get(page_index).cloned())
                     };
-                    
+
                     if let Some(target_name) = cached_name {
                         if let Ok(mut file) = archive.by_name(&target_name) {
                             let buf = match read_image_limited(&mut file) {
@@ -247,8 +284,8 @@ pub fn handle_comic_request(
                                 Err(_) => return Response::builder().status(StatusCode::PAYLOAD_TOO_LARGE).body(b"image too large".to_vec()).map_err(Into::into),
                             };
                             let ext = Path::new(&target_name).extension().and_then(|s| s.to_str()).unwrap_or("");
-                            let mime = get_mime(&format!(".{}", ext));
-                            
+                            let mime = detect_mime(&buf, &format!(".{}", ext));
+
                             return Response::builder()
                                 .header("Content-Type", mime)
                                 .header("Cache-Control", "public, max-age=86400")
@@ -266,8 +303,8 @@ pub fn handle_comic_request(
                                     Err(_) => return Response::builder().status(StatusCode::PAYLOAD_TOO_LARGE).body(b"image too large".to_vec()).map_err(Into::into),
                                 };
                                 let ext = Path::new(target_name).extension().and_then(|s| s.to_str()).unwrap_or("");
-                                let mime = get_mime(&format!(".{}", ext));
-                                
+                                let mime = detect_mime(&buf, &format!(".{}", ext));
+
                                 return Response::builder()
                                     .header("Content-Type", mime)
                                     .header("Cache-Control", "public, max-age=86400")
@@ -286,4 +323,45 @@ pub fn handle_comic_request(
         .header("Access-Control-Allow-Origin", "*")
         .body(b"not found".to_vec())
         .map_err(Into::into)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_detect_mime_avif() {
+        let mut header = vec![0u8; 16];
+        header[4..8].copy_from_slice(b"ftyp");
+        header[8..12].copy_from_slice(b"avif");
+        assert_eq!(detect_mime(&header, ".avif"), "image/avif");
+    }
+
+    #[test]
+    fn test_detect_mime_png() {
+        let header = b"\x89PNG\r\n\x1a\n\x00\x00";
+        assert_eq!(detect_mime(header, ".png"), "image/png");
+    }
+
+    #[test]
+    fn test_detect_mime_webp() {
+        let mut header = vec![0u8; 16];
+        header[0..4].copy_from_slice(b"RIFF");
+        header[8..12].copy_from_slice(b"WEBP");
+        assert_eq!(detect_mime(&header, ".webp"), "image/webp");
+    }
+
+    #[test]
+    fn test_detect_mime_avif_compatible_brand() {
+        let mut header = vec![0u8; 24];
+        header[4..8].copy_from_slice(b"ftyp");
+        header[8..12].copy_from_slice(b"mif1");
+        header[16..20].copy_from_slice(b"avif");
+        assert_eq!(detect_mime(&header, ""), "image/avif");
+    }
+
+    #[test]
+    fn test_detect_mime_unknown_is_not_jpeg() {
+        assert_eq!(detect_mime(b"not an image", ""), "application/octet-stream");
+    }
 }

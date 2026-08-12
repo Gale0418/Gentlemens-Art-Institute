@@ -16,7 +16,7 @@ if (window.__TAURI__) {
     getLibrary: () => invoke('get_library'),
     getScanStatus: () => invoke('get_scan_status'),
     openComic: (id) => invoke('open_comic', { id }),
-    closeComic: () => invoke('close_comic'),
+    closeComic: (comicId) => invoke('close_comic', { comicId }),
     saveProgress: (data) => invoke('save_progress', { data }),
     getConfig: () => invoke('get_config'),
     setConfig: (data) => invoke('set_config', { data }),

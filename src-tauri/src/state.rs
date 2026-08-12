@@ -73,6 +73,11 @@ pub struct AppState {
     pub opened_comic_files: std::sync::RwLock<HashMap<String, Vec<String>>>,
     pub smb_config: std::sync::RwLock<Option<SmbConfig>>,
     pub external_bookmarks: std::sync::RwLock<Vec<ExternalBookmark>>,
+    pub progress_file_lock: tokio::sync::Mutex<()>,
+    pub active_bookmarks: std::sync::Mutex<HashMap<String, String>>,
+    pub active_comic_id: std::sync::Mutex<Option<String>>,
+    pub comic_lifecycle: std::sync::Mutex<()>,
+    pub reader_generation: std::sync::atomic::AtomicU64,
 }
 
 impl AppState {
@@ -93,6 +98,17 @@ impl AppState {
             opened_comic_files: std::sync::RwLock::new(HashMap::new()),
             smb_config: std::sync::RwLock::new(None),
             external_bookmarks: std::sync::RwLock::new(Vec::new()),
+            progress_file_lock: tokio::sync::Mutex::new(()),
+            active_bookmarks: std::sync::Mutex::new(HashMap::new()),
+            active_comic_id: std::sync::Mutex::new(None),
+            comic_lifecycle: std::sync::Mutex::new(()),
+            reader_generation: std::sync::atomic::AtomicU64::new(0),
         }
+    }
+}
+
+impl Default for AppState {
+    fn default() -> Self {
+        Self::new()
     }
 }

@@ -95,6 +95,9 @@ let state = {
   renderGeneration: 0,
   sharpenLevel: 0, // 0=關閉, 1=輕度, 2=中度, 3=強度
   loaderRefCount: 0, // 🔧 BUG-FIX：引用計數，防止多個 showLoader 互相覆蓋導致無法 hideLoader
+  readerClosePromise: Promise.resolve(),
+  readerOperation: 0,
+  pendingComicId: null,
 };
 
 // 元素選取器
@@ -499,7 +502,7 @@ function bindEvents() {
 
     if (window.electronAPI.onRamCacheProgress) {
       window.electronAPI.onRamCacheProgress((data) => {
-        if (state.currentComic && data.id === state.currentComic.id) {
+        if (state.currentComic && data.id === state.currentComic.id && data.generation === state.currentComic.preloadGeneration) {
           updateRamCacheProgress(data.loaded, data.total, data.finished);
         }
       });
@@ -1165,15 +1168,23 @@ function renderGrid() {
 
 // 開啟閱讀器
 async function openReader(comicId) {
+  await state.readerClosePromise;
+  if (state.currentComic) {
+    await closeReader();
+  }
+  const operation = ++state.readerOperation;
+  state.pendingComicId = comicId;
   showLoader('主人請稍候，天才少女正在載入漫畫分頁...', { progress: null, detail: '正在準備頁面清單...' });
   try {
     const data = await eAPI.openComic(comicId);
+    if (operation !== state.readerOperation) return;
 
     if (!data.pages || data.pages.length === 0) {
       throw new Error('這本漫畫沒有可讀取的圖片頁面');
     }
 
     state.currentComic = data;
+    state.pendingComicId = null;
     state.selectedComicId = comicId;
     state.currentComicPages = data.pages;
     state.currentComicIsDir = data.isDir || false;
@@ -1210,23 +1221,27 @@ async function openReader(comicId) {
     renderPages();
     triggerControlsActive();
   } catch (e) {
+    if (operation !== state.readerOperation) return;
     console.error('開啟閱讀器出錯：', e);
     // BUG-09 修正：失敗時清除 currentComic 避免殘留舊狀態
     state.currentComic = null;
     state.currentComicPages = [];
+    state.pendingComicId = null;
     const message = typeof e === 'string' ? e : (e && e.message) || String(e);
     alert('讀取漫畫資料失敗：' + message);
   } finally {
-    hideLoader();
+    if (operation === state.readerOperation) hideLoader();
   }
 }
 
 // 關閉閱讀器
-function closeReader() {
+async function closeReader() {
+  ++state.readerOperation;
   state.renderGeneration += 1;
-  if (window.electronAPI && window.electronAPI.closeComic) {
-    window.electronAPI.closeComic().catch(err => console.error('關閉漫畫清理失敗:', err));
-  }
+  const closingId = state.currentComic ? state.currentComic.id : state.pendingComicId;
+  state.currentComic = null;
+  state.currentComicPages = [];
+  state.pendingComicId = null;
 
   if (elements.statusRam) elements.statusRam.style.display = 'none';
   if (elements.statusLoading) elements.statusLoading.style.display = 'none';
@@ -1240,13 +1255,22 @@ function closeReader() {
   elements.readerOverlay.style.display = 'none';
   elements.readerOverlay.classList.remove('reader-idle');
   document.body.style.overflow = 'auto';
-  state.currentComic = null;
-  state.currentComicPages = [];
   if (state.webtoonScrollFrame) {
     cancelAnimationFrame(state.webtoonScrollFrame);
     state.webtoonScrollFrame = null;
   }
   
+  if (closingId && window.electronAPI && window.electronAPI.closeComic) {
+    state.readerClosePromise = state.readerClosePromise
+      .catch(() => {})
+      .then(() => window.electronAPI.closeComic(closingId));
+    try {
+      await state.readerClosePromise;
+    } catch (err) {
+      console.error('關閉漫畫清理失敗:', err);
+    }
+  }
+
   // 重新整理書架（更新最近閱讀與進度條）
   fetchLibrary();
 }

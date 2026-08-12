@@ -48,6 +48,7 @@ pub async fn start_background_scan(state: Arc<AppState>, app_handle: tauri::AppH
     let scanned_comics_task = tokio::task::spawn_blocking(move || {
         let mut results = Vec::new();
         
+        #[allow(clippy::too_many_arguments, clippy::manual_flatten)]
         fn scan_recursive(dir: &Path, root_dir: &Path, depth: usize, results: &mut Vec<ComicItem>, app_handle: &tauri::AppHandle, state: &Arc<AppState>, my_gen: u64, all_progress: &std::collections::HashMap<String, Progress>, virtual_prefix: Option<&str>) {
             if depth > 100 { return; }
             if state.scan_generation.load(std::sync::atomic::Ordering::Relaxed) != my_gen { return; }
@@ -183,6 +184,10 @@ pub async fn start_background_scan(state: Arc<AppState>, app_handle: tauri::AppH
                 use tauri_plugin_ios_folder::TauriPluginIosFolderExt;
                 if let Ok(res) = app_handle_clone.tauri_plugin_ios_folder().start_accessing(StartAccessingRequest { bookmark: bookmark_entry.bookmark.clone() }) {
                     let resolved_path = Path::new(&res.path);
+                    {
+                        let mut active = state_clone2.active_bookmarks.lock().unwrap();
+                        active.insert(bookmark_entry.bookmark.clone(), res.path.clone());
+                    }
                     scan_recursive(resolved_path, resolved_path, 0, &mut results, &app_handle_clone, &state_clone2, my_gen, &all_progress, Some(&bookmark_entry.name));
                 }
             }

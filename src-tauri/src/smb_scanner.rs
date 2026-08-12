@@ -5,7 +5,7 @@ use base64::{engine::general_purpose, Engine as _};
 pub async fn scan_smb(config: SmbConfig, state: Arc<AppState>, scan_generation: u64) -> Result<(), String> {
     let addr = format!("{}:445", config.host);
     let username = config.username.unwrap_or_else(|| "guest".to_string());
-    let password = config.password.unwrap_or_else(|| "".to_string());
+    let password = config.password.unwrap_or_default();
     let share = config.share;
 
     // BUG-07 修正：從本地 .comic_progress.json 讀取進度
@@ -49,6 +49,7 @@ pub async fn scan_smb(config: SmbConfig, state: Arc<AppState>, scan_generation: 
 }
 
 // BUG-06 修正：遞迴掃描 SMB 子目錄（深度限制 5 層）
+#[allow(clippy::too_many_arguments)]
 async fn scan_smb_dir(
     client: &mut smb2::SmbClient,
     tree: &mut smb2::Tree,

@@ -112,4 +112,25 @@ assert.match(
   'loader progress should toggle the progress UI'
 );
 
+assert.match(
+  app,
+  /async function openReader\(comicId\) \{[\s\S]*await state\.readerClosePromise/,
+  'openReader should await any pending backend cleanup'
+);
+assert.match(
+  app,
+  /state\.currentComic = null;[\s\S]*state\.readerClosePromise = state\.readerClosePromise/,
+  'closeReader should clear UI state before serializing backend cleanup'
+);
+assert.match(
+  tauri,
+  /comic:\/\/folder\/\{\}\/\{\}", id, i/,
+  'folder pages should use comic id as capability token'
+);
+assert.match(
+  tauri,
+  /fn write_progress_file[\s\S]*\.comic_progress\.json\.tmp[\s\S]*progress_file_lock\.lock\(\)\.await/,
+  'save_progress should write to a temporary file before renaming atomically'
+);
+
 console.log('UI smoke checks passed.');

@@ -10,7 +10,7 @@ configs:
 settingGroups:
   app:
     base:
-      PRODUCT_NAME: comic-reader
+      PRODUCT_NAME: 少女漫畫閣
       PRODUCT_BUNDLE_IDENTIFIER: com.jiminie.comicreader
 targetTemplates:
   app:

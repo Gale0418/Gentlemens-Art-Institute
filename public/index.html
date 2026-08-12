@@ -6,6 +6,13 @@
   <meta name="description" content="少女漫畫閣，專為本機漫畫收藏打造的沉浸式閱讀器。">
   <meta name="theme-color" content="#11100f">
   <title>少女漫畫閣 | 本機漫畫閱讀器</title>
+  <script>
+    try {
+      document.documentElement.dataset.theme = localStorage.getItem('comic-reader:theme') || 'midnight';
+    } catch (_) {
+      document.documentElement.dataset.theme = 'midnight';
+    }
+  </script>
   <link rel="stylesheet" href="style.css">
 </head>
 <body>
@@ -294,10 +301,42 @@
   <div class="modal-overlay" id="settings-modal" style="display: none;">
     <div class="modal-content">
       <div class="modal-header">
-        <h2><i class="fa-solid fa-gear"></i> 漫畫庫路徑設定</h2>
+        <h2><i class="fa-solid fa-gear"></i> 外觀與漫畫庫設定</h2>
         <button class="close-modal-btn" id="close-settings-btn"><i class="fa-solid fa-xmark"></i></button>
       </div>
       <div class="modal-body">
+        <section class="theme-settings" aria-labelledby="theme-settings-title">
+          <div class="theme-settings-heading">
+            <div>
+              <span class="section-kicker">Appearance</span>
+              <h3 id="theme-settings-title">書庫畫風</h3>
+            </div>
+            <p>即時套用，重新開啟後仍會保留。</p>
+          </div>
+          <div class="theme-picker" id="theme-picker" role="radiogroup" aria-label="選擇書庫畫風">
+            <button class="theme-option" type="button" data-theme-option="midnight" role="radio" aria-checked="false">
+              <span class="theme-preview theme-preview-midnight" aria-hidden="true"><i></i><i></i><i></i></span>
+              <strong>午夜編輯室</strong>
+              <small>墨黑、暖紙白、朱紅</small>
+            </button>
+            <button class="theme-option" type="button" data-theme-option="sakura" role="radio" aria-checked="false">
+              <span class="theme-preview theme-preview-sakura" aria-hidden="true"><i></i><i></i><i></i></span>
+              <strong>櫻花文庫</strong>
+              <small>奶油紙張、柔粉書封</small>
+            </button>
+            <button class="theme-option" type="button" data-theme-option="ink" role="radio" aria-checked="false">
+              <span class="theme-preview theme-preview-ink" aria-hidden="true"><i></i><i></i><i></i></span>
+              <strong>黑白原稿</strong>
+              <small>高對比、網點、硬邊框</small>
+            </button>
+            <button class="theme-option" type="button" data-theme-option="aurora" role="radio" aria-checked="false">
+              <span class="theme-preview theme-preview-aurora" aria-hidden="true"><i></i><i></i><i></i></span>
+              <strong>極光夜航</strong>
+              <small>深藍玻璃、冷色光暈</small>
+            </button>
+          </div>
+        </section>
+
         <div class="input-group">
           <label for="scan-dir-input">當前掃描漫畫目錄：</label>
           <div class="path-input-row">

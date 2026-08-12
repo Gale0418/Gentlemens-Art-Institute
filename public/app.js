@@ -100,6 +100,15 @@ let state = {
   pendingComicId: null,
 };
 
+const THEME_STORAGE_KEY = 'comic-reader:theme';
+const THEMES = new Set(['midnight', 'sakura', 'ink', 'aurora']);
+const THEME_COLORS = {
+  midnight: '#11100f',
+  sakura: '#f5eee8',
+  ink: '#e8e4db',
+  aurora: '#080d18'
+};
+
 // 元素選取器
 const elements = {
   comicGrid: document.getElementById('comic-grid'),
@@ -170,6 +179,7 @@ const elements = {
   browserCurrentPath: document.getElementById('browser-current-path'),
   browserUpBtn: document.getElementById('browser-up-btn'),
   browserFoldersList: document.getElementById('browser-folders-list'),
+  themePicker: document.getElementById('theme-picker'),
   
   // SMB 設定元素
   smbSetupBtn: document.getElementById('smb-setup-btn'),
@@ -189,9 +199,24 @@ const elements = {
 // ==========================================================================
 
 document.addEventListener('DOMContentLoaded', () => {
+  applyTheme(localStorage.getItem(THEME_STORAGE_KEY) || 'midnight', { persist: false });
   initApp();
   bindEvents();
 });
+
+function applyTheme(theme, { persist = true } = {}) {
+  const nextTheme = THEMES.has(theme) ? theme : 'midnight';
+  document.documentElement.dataset.theme = nextTheme;
+  document.querySelector('meta[name="theme-color"]')?.setAttribute('content', THEME_COLORS[nextTheme]);
+
+  elements.themePicker?.querySelectorAll('[data-theme-option]').forEach(button => {
+    const selected = button.dataset.themeOption === nextTheme;
+    button.classList.toggle('active', selected);
+    button.setAttribute('aria-checked', String(selected));
+  });
+
+  if (persist) localStorage.setItem(THEME_STORAGE_KEY, nextTheme);
+}
 
 // 初始化載入
 async function initApp() {
@@ -411,6 +436,10 @@ function bindEvents() {
   // 設定按鈕與視窗事件
   elements.settingsBtn.addEventListener('click', openSettingsModal);
   elements.closeSettingsBtn.addEventListener('click', closeSettingsModal);
+  elements.themePicker?.addEventListener('click', event => {
+    const option = event.target.closest('[data-theme-option]');
+    if (option) applyTheme(option.dataset.themeOption);
+  });
   
   if (elements.smbSetupBtn) elements.smbSetupBtn.addEventListener('click', openSmbModal);
   const smbHeaderBtn = document.getElementById('smb-setup-btn-header');
@@ -2458,17 +2487,15 @@ function handleWheelScroll(e) {
 
 // 打開設定視窗
 async function openSettingsModal() {
-    showLoader('正在載入設定...', { progress: 35, detail: '正在讀取目錄設定...' });
+  elements.settingsModal.style.display = 'flex';
+  renderExternalBookmarks();
+
   try {
     const config = await eAPI.getConfig();
     elements.scanDirInput.value = config.scanDir;
     await fetchBrowserFolders(config.scanDir);
-    renderExternalBookmarks();
-    elements.settingsModal.style.display = 'flex';
   } catch (e) {
-    alert('載入設定出錯了呢，主人！');
-  } finally {
-    hideLoader();
+    console.error('載入漫畫庫設定失敗：', e);
   }
 }
 

@@ -22,6 +22,11 @@ const mustContain = (source, needle, label) => {
 mustContain(html, 'id="continue-strip"', 'library layout');
 mustContain(html, 'id="comic-inspector"', 'library layout');
 mustContain(html, 'id="reader-context-menu"', 'reader context menu');
+mustContain(html, 'id="theme-picker"', 'theme picker');
+for (const theme of ['midnight', 'sakura', 'ink', 'aurora']) {
+  mustContain(html, `data-theme-option="${theme}"`, `theme option ${theme}`);
+  mustContain(css, `html[data-theme="${theme}"]`, `theme styling ${theme}`);
+}
 
 mustContain(css, '.continue-strip', 'library styling');
 mustContain(css, '.comic-inspector', 'library styling');
@@ -43,6 +48,8 @@ mustContain(app, 'decoding = \'async\'', 'async image decoding');
 mustContain(app, 'fetchPriority = \'low\'', 'low-priority noncritical images');
 mustContain(app, 'function showLoaderProgress', 'loader progress UI');
 mustContain(app, 'function setLoaderProgress', 'loader progress UI');
+mustContain(app, 'function applyTheme', 'theme switching');
+mustContain(app, "const THEME_STORAGE_KEY = 'comic-reader:theme'", 'theme persistence');
 mustContain(app, '!img.getAttribute(\'src\')', 'webtoon lazy image detection');
 mustContain(app, 'img.removeAttribute(\'src\')', 'reader preload cleanup');
 mustContain(app, 'renderGeneration', 'reader render invalidation');

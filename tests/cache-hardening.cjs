@@ -2,7 +2,7 @@ const fs = require('fs');
 const path = require('path');
 const assert = require('assert');
 
-const root = 'D:/MyGame/comic';
+const root = path.resolve(__dirname, '..');
 const serverText = fs.readFileSync(path.join(root, 'server.js'), 'utf8');
 const mainText = fs.readFileSync(path.join(root, 'main.js'), 'utf8');
 

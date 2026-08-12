@@ -2,12 +2,25 @@ use crate::state::AppState;
 use base64::{engine::general_purpose, Engine as _};
 use std::fs::File;
 use std::io::Read;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
-use tauri::Emitter;
+use tauri::{Emitter, Manager};
 
 const MAX_PRELOAD_PAGES: usize = 5;
 const MAX_PRELOAD_BYTES: usize = 64 * 1024 * 1024;
+
+fn resolve_preload_path(
+    comic_type: Option<&str>,
+    scan_dir: &Path,
+    smb_temp_dir: &Path,
+    relative_path: &str,
+) -> PathBuf {
+    match comic_type {
+        Some("smb-archive") => smb_temp_dir.join(relative_path),
+        Some(kind) if kind.starts_with("external-") => PathBuf::from(relative_path),
+        _ => scan_dir.join(relative_path),
+    }
+}
 
 pub async fn preload_comic(state: Arc<AppState>, app_handle: tauri::AppHandle, id: String, generation: u64) {
     // 取得 relative_path
@@ -20,8 +33,25 @@ pub async fn preload_comic(state: Arc<AppState>, app_handle: tauri::AppHandle, i
         Err(_) => return,
     };
 
+    let comic_type = {
+        let comics = state.comics.lock().await;
+        comics
+            .iter()
+            .find(|comic| comic.id == id)
+            .map(|comic| comic.r#type.clone())
+    };
     let scan_dir = { state.scan_dir.read().unwrap().clone() };
-    let full_path = Path::new(&scan_dir).join(&relative_path_str);
+    let smb_temp_dir = app_handle
+        .path()
+        .app_local_data_dir()
+        .unwrap_or_else(|_| std::env::temp_dir())
+        .join("ComicTemp");
+    let full_path = resolve_preload_path(
+        comic_type.as_deref(),
+        Path::new(&scan_dir),
+        &smb_temp_dir,
+        &relative_path_str,
+    );
 
     if !full_path.exists() || full_path.is_dir() {
         // 資料夾模式速度極快，不太需要預載到記憶體
@@ -93,4 +123,34 @@ pub async fn preload_comic(state: Arc<AppState>, app_handle: tauri::AppHandle, i
             }
         }
     }).await;
+}
+
+#[cfg(test)]
+mod tests {
+    use super::resolve_preload_path;
+    use std::path::Path;
+
+    #[test]
+    fn preload_path_uses_smb_download_cache() {
+        let resolved = resolve_preload_path(
+            Some("smb-archive"),
+            Path::new("/library"),
+            Path::new("/app-data/ComicTemp"),
+            "series/book.zip",
+        );
+
+        assert_eq!(resolved, Path::new("/app-data/ComicTemp/series/book.zip"));
+    }
+
+    #[test]
+    fn preload_path_preserves_external_absolute_path() {
+        let resolved = resolve_preload_path(
+            Some("external-archive"),
+            Path::new("/library"),
+            Path::new("/app-data/ComicTemp"),
+            "/external/book.zip",
+        );
+
+        assert_eq!(resolved, Path::new("/external/book.zip"));
+    }
 }

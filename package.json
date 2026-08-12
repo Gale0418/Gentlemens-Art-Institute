@@ -8,7 +8,8 @@
     "start": "node server.js",
     "electron": "electron .",
     "test": "node tests/ui-smoke.mjs && node tests/cache-hardening.cjs && node tests/scan-depth-behavior.mjs",
-    "build": "electron-builder --mac --dir",
+    "build": "tauri build --bundles app,dmg",
+    "build:electron": "electron-builder --mac --dir",
     "tauri": "tauri"
   },
   "dependencies": {

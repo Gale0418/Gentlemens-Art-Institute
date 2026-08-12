@@ -94,6 +94,7 @@ let state = {
   scanStatusPollTimer: null,
   renderGeneration: 0,
   sharpenLevel: 0, // 0=關閉, 1=輕度, 2=中度, 3=強度
+  loaderRefCount: 0, // 🔧 BUG-FIX：引用計數，防止多個 showLoader 互相覆蓋導致無法 hideLoader
 };
 
 // 元素選取器
@@ -507,11 +508,17 @@ function bindEvents() {
     if (window.electronAPI.onSmbDownloadStart) {
       window.electronAPI.onSmbDownloadStart((data) => {
         showLoader('正在從 NAS 雲端下載漫畫...', { progress: null, detail: '網路傳輸中，請保持連線...' });
+        // 🔧 BUG-FIX：30 秒安全鈵，如果 SMB 事件沒有回來，強制解除 Loader
+        state._smbLoaderTimer = setTimeout(() => {
+          console.warn('[SMB] 等待逾時（30 秒），強制關閉 Loader');
+          forceHideLoader();
+        }, 30000);
       });
     }
 
     if (window.electronAPI.onSmbDownloadEnd) {
       window.electronAPI.onSmbDownloadEnd((data) => {
+        clearTimeout(state._smbLoaderTimer);
         hideLoader();
       });
     }
@@ -599,7 +606,8 @@ async function fetchLibrary() {
     setLoaderProgress(100, '書架整理完成');
   } catch (e) {
     console.error('無法獲取書架清單：', e);
-    alert('讀取漫畫庫失敗：' + e.message);
+    hideLoader(); // 🔧 BUG-FIX：fetchLibrary 失敗時也要確保 Loader 被隱藏
+    alert('讀取漫畫庫失敗：' + (e?.message || String(e)));
   } finally {
     stopScanStatusPolling();
   }
@@ -2293,6 +2301,7 @@ function triggerControlsActive() {
 // ==========================================================================
 
 function showLoader(text, options = {}) {
+  state.loaderRefCount++;
   elements.loaderText.textContent = text || '召喚中...';
   elements.loaderMask.style.display = 'flex';
   if (Object.prototype.hasOwnProperty.call(options, 'progress')) {
@@ -2303,6 +2312,16 @@ function showLoader(text, options = {}) {
 }
 
 function hideLoader() {
+  state.loaderRefCount = Math.max(0, state.loaderRefCount - 1);
+  if (state.loaderRefCount === 0) {
+    elements.loaderMask.style.display = 'none';
+    hideLoaderProgress();
+  }
+}
+
+// 🔧 BUG-FIX：緊急強制隱藏 Loader（不管 refCount 多少），供 timeout 等情境使用
+function forceHideLoader() {
+  state.loaderRefCount = 0;
   elements.loaderMask.style.display = 'none';
   hideLoaderProgress();
 }

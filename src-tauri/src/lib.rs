@@ -61,14 +61,28 @@ async fn open_comic(id: String, state: State<'_, Arc<AppState>>, app_handle: tau
             let username = cfg.username.unwrap_or_else(|| "guest".to_string());
             let password = cfg.password.unwrap_or_else(|| "".to_string());
             
-            let client_result = smb2::connect(&addr, &username, &password).await;
+            let client_result = tokio::time::timeout(
+                std::time::Duration::from_secs(10),
+                smb2::connect(&addr, &username, &password)
+            ).await
+                .map_err(|_| {
+                    let _ = app_handle.emit("smb-download-end", serde_json::json!({"id": id}));
+                    "SMB 連線逾時（10 秒），請檢查 NAS IP 或連線".to_string()
+                })?;
             if client_result.is_err() {
                 let _ = app_handle.emit("smb-download-end", serde_json::json!({"id": id}));
                 return Err(format!("SMB 連線錯誤: {:?}", client_result.err().unwrap()));
             }
             let mut client = client_result.unwrap();
             
-            let tree_result = client.connect_share(&cfg.share).await;
+            let tree_result = tokio::time::timeout(
+                std::time::Duration::from_secs(10),
+                client.connect_share(&cfg.share)
+            ).await
+                .map_err(|_| {
+                    let _ = app_handle.emit("smb-download-end", serde_json::json!({"id": id}));
+                    format!("SMB Share '{}' 連線逾時（10 秒）", cfg.share)
+                })?;
             if tree_result.is_err() {
                 let _ = app_handle.emit("smb-download-end", serde_json::json!({"id": id}));
                 return Err(format!("SMB Share 連線錯誤: {:?}", tree_result.err().unwrap()));

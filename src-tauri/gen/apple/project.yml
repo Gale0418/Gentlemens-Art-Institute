@@ -1,6 +1,6 @@
 name: app
 options:
-  bundleIdPrefix: com.tauri.dev
+  bundleIdPrefix: com.jiminie
   deploymentTarget:
     iOS: 14.0
 fileGroups: [../../src]
@@ -11,7 +11,7 @@ settingGroups:
   app:
     base:
       PRODUCT_NAME: comic-reader
-      PRODUCT_BUNDLE_IDENTIFIER: com.tauri.dev
+      PRODUCT_BUNDLE_IDENTIFIER: com.jiminie.comicreader
 targetTemplates:
   app:
     type: application
@@ -51,8 +51,8 @@ targets:
           - UIInterfaceOrientationPortraitUpsideDown
           - UIInterfaceOrientationLandscapeLeft
           - UIInterfaceOrientationLandscapeRight
-        CFBundleShortVersionString: 0.1.0
-        CFBundleVersion: "0.1.0"
+        CFBundleShortVersionString: 1.0.0
+        CFBundleVersion: "1.0.0"
     entitlements:
       path: app_iOS/app_iOS.entitlements
     scheme:

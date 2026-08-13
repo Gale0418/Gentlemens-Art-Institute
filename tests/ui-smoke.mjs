@@ -16,12 +16,16 @@ const server = readRequiredFile('server.js', 'server');
 const tauri = readRequiredFile('src-tauri/src/lib.rs', 'Tauri commands');
 const protocol = readRequiredFile('src-tauri/src/protocol.rs', 'Tauri protocol');
 const tauriProtocol = readRequiredFile('src-tauri/src/protocol.rs', 'Tauri comic protocol');
+const tauriConfig = readRequiredFile('src-tauri/tauri.conf.json', 'Tauri config');
+const appleProject = readRequiredFile('src-tauri/gen/apple/project.yml', 'Apple project config');
 
 const mustContain = (source, needle, label) => {
   assert.ok(source.includes(needle), `${label}: missing ${needle}`);
 };
 
 mustContain(html, 'id="continue-strip"', 'library layout');
+mustContain(tauriConfig, 'com.windsheep.comicreader', 'Tauri bundle identifier');
+mustContain(appleProject, 'com.windsheep.comicreader', 'Apple bundle identifier');
 mustContain(html, 'id="comic-inspector"', 'library layout');
 mustContain(html, 'id="reader-context-menu"', 'reader context menu');
 mustContain(html, 'id="theme-picker"', 'theme picker');

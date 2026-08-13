@@ -1,6 +1,6 @@
 name: app
 options:
-  bundleIdPrefix: com.jiminie
+  bundleIdPrefix: com.windsheep
   deploymentTarget:
     iOS: 14.0
 fileGroups: [../../src]
@@ -11,7 +11,7 @@ settingGroups:
   app:
     base:
       PRODUCT_NAME: 少女漫畫閣
-      PRODUCT_BUNDLE_IDENTIFIER: com.jiminie.comicreader
+      PRODUCT_BUNDLE_IDENTIFIER: com.windsheep.comicreader
 targetTemplates:
   app:
     type: application

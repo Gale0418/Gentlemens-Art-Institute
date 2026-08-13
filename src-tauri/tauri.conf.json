@@ -2,7 +2,7 @@
   "$schema": "../node_modules/@tauri-apps/cli/config.schema.json",
   "productName": "少女漫畫閣",
   "version": "1.0.0",
-  "identifier": "com.jiminie.comicreader",
+  "identifier": "com.windsheep.comicreader",
   "build": {
     "frontendDist": "../public"
   },

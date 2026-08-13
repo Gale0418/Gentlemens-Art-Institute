@@ -42,7 +42,7 @@
 | iPad UUID（xcrun） | `YOUR_DEVICE_UUID` |
 | iPad 裝置名稱 | Pe的 iPad (2) |
 | Apple 開發者帳號 | `wiuwwror@hotmail.com` |
-| Bundle ID | `com.jiminie.comicreader` |
+| Bundle ID | `com.windsheep.comicreader` |
 | 簽名 Identity | `B6A670B80A7585975850D5E3F0D3F31AA846CDB0` |
 
 ---
@@ -143,7 +143,7 @@ xcrun devicectl device install app \
 成功輸出範例：
 ```
 App installed:
-• bundleID: com.jiminie.comicreader
+• bundleID: com.windsheep.comicreader
 • installationURL: file:///private/var/containers/...
 ```
 

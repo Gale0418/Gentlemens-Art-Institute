@@ -19,6 +19,7 @@ const PROGRESS_FILE = path.join(BASE_DIR, 'progress.json');
 const CONFIG_FILE = path.join(BASE_DIR, 'config.json');
 const METADATA_FILE = path.join(BASE_DIR, 'metadata.json');
 const COVER_CACHE_DIR = path.join(BASE_DIR, 'cache', 'covers');
+const SERVER_CACHE_DIR = path.dirname(COVER_CACHE_DIR);
 if (!fs.existsSync(COVER_CACHE_DIR)) {
   fs.mkdirSync(COVER_CACHE_DIR, { recursive: true });
 }
@@ -68,11 +69,25 @@ app.use(express.static(path.join(__dirname, 'public')));
 
 // 支援的圖片副檔名
 const IMAGE_EXTENSIONS = ['.jpg', '.jpeg', '.png', '.webp', '.gif', '.svg'];
+const MAX_IMAGE_BYTES = 64 * 1024 * 1024;
 const configuredScanDepth = Number.parseInt(process.env.COMIC_SCAN_MAX_DEPTH || '', 10);
 
 function isImage(filename) {
   const ext = path.extname(filename).toLowerCase();
   return IMAGE_EXTENSIONS.includes(ext);
+}
+
+function getImageMime(ext) {
+  switch (String(ext || '').toLowerCase()) {
+    case '.png': return 'image/png';
+    case '.webp': return 'image/webp';
+    case '.gif': return 'image/gif';
+    case '.svg': return 'image/svg+xml';
+    case '.avif': return 'image/avif';
+    case '.jpg':
+    case '.jpeg': return 'image/jpeg';
+    default: return 'application/octet-stream';
+  }
 }
 
 // 避開系統隱藏檔案與 macOS 垃圾資料夾
@@ -182,11 +197,26 @@ function readPageFromHandle(handle, pageIndex) {
     const entryName = handle.entryNames[pageIndex];
     const entry = handle.entriesByName.get(entryName);
     if (!entry) return reject(new Error('找不到該頁'));
+    if (entry.uncompressedSize > MAX_IMAGE_BYTES) {
+      const error = new Error('image exceeds size limit');
+      error.code = 'IMAGE_TOO_LARGE';
+      return reject(error);
+    }
 
     handle.zipfile.openReadStream(entry, (err, stream) => {
       if (err) return reject(err);
       const chunks = [];
-      stream.on('data', c => chunks.push(c));
+      let totalBytes = 0;
+      stream.on('data', c => {
+        totalBytes += c.length;
+        if (totalBytes > MAX_IMAGE_BYTES) {
+          const error = new Error('image exceeds size limit');
+          error.code = 'IMAGE_TOO_LARGE';
+          stream.destroy(error);
+          return;
+        }
+        chunks.push(c);
+      });
       stream.on('end', () => resolve(Buffer.concat(chunks)));
       stream.on('error', reject);
     });
@@ -358,6 +388,7 @@ async function scanDirectory(dir, rootDir, scannedIds, progressData, depth = 0) 
       try {
         const stat = await fs.promises.stat(fullPath);
         if (stat.isDirectory()) {
+          if (path.resolve(fullPath) === path.resolve(SERVER_CACHE_DIR)) return;
           subdirs.push({ file, fullPath });
         } else {
           const ext = path.extname(file).toLowerCase();
@@ -630,6 +661,19 @@ async function serveComicPage(req, res, forcedPage = null) {
       return res.status(404).json({ error: '找不到指定的漫畫！' });
     }
 
+    let canonicalLibrary;
+    let canonicalComic;
+    try {
+      canonicalLibrary = fs.realpathSync(currentComicDir);
+      canonicalComic = fs.realpathSync(fullPath);
+    } catch (e) {
+      return res.status(403).json({ error: '漫畫路徑無法安全解析！' });
+    }
+    const canonicalRel = path.relative(canonicalLibrary, canonicalComic);
+    if (canonicalRel.startsWith('..') || path.isAbsolute(canonicalRel)) {
+      return res.status(403).json({ error: '漫畫路徑超出書庫範圍！' });
+    }
+
     const isDir = fs.statSync(fullPath).isDirectory();
 
     if (isDir) {
@@ -638,8 +682,23 @@ async function serveComicPage(req, res, forcedPage = null) {
         return res.status(404).json({ error: '頁碼超出範圍！' });
       }
       const imagePath = path.join(fullPath, images[pageIndex]);
+      let canonicalImage;
+      try {
+        canonicalImage = fs.realpathSync(imagePath);
+      } catch (e) {
+        return res.status(404).json({ error: '找不到指定圖片！' });
+      }
+      const imageRel = path.relative(canonicalComic, canonicalImage);
+      if (imageRel.startsWith('..') || path.isAbsolute(imageRel)) {
+        return res.status(403).json({ error: '圖片路徑超出漫畫資料夾範圍！' });
+      }
+      const imageStat = fs.statSync(canonicalImage);
+      if (imageStat.size > MAX_IMAGE_BYTES) {
+        return res.status(413).json({ error: '圖片超過 64 MiB 上限！' });
+      }
+      res.setHeader('Content-Type', getImageMime(path.extname(canonicalImage)));
       res.setHeader('Cache-Control', 'public, max-age=86400');
-      return res.sendFile(imagePath);
+      return res.sendFile(canonicalImage);
     }
 
     if (pageIndex === 0) {
@@ -655,7 +714,7 @@ async function serveComicPage(req, res, forcedPage = null) {
       if (coverDir.length > 0) {
         const cached = path.join(COVER_CACHE_DIR, coverDir[0]);
         const ext = path.extname(coverDir[0]).toLowerCase();
-        const mime = ext === '.png' ? 'image/png' : ext === '.webp' ? 'image/webp' : 'image/jpeg';
+        const mime = getImageMime(ext);
         res.setHeader('Content-Type', mime);
         res.setHeader('Cache-Control', 'public, max-age=86400');
         return res.sendFile(cached);
@@ -670,10 +729,7 @@ async function serveComicPage(req, res, forcedPage = null) {
 
     const buffer = await readPageFromHandle(handle, pageIndex);
     const entryExt = path.extname(handle.entryNames[pageIndex]).toLowerCase();
-    let mimeType = 'image/jpeg';
-    if (entryExt === '.png') mimeType = 'image/png';
-    else if (entryExt === '.webp') mimeType = 'image/webp';
-    else if (entryExt === '.gif') mimeType = 'image/gif';
+    const mimeType = getImageMime(entryExt);
 
     if (pageIndex === 0) {
       const cacheFilePath = path.join(COVER_CACHE_DIR, `${id}_p0${entryExt}`);
@@ -686,6 +742,9 @@ async function serveComicPage(req, res, forcedPage = null) {
     res.end(buffer);
   } catch (e) {
     console.error('載入圖片分頁錯誤：', e);
+    if (e && e.code === 'IMAGE_TOO_LARGE') {
+      return res.status(413).json({ error: '圖片超過 64 MiB 上限！' });
+    }
     res.status(500).json({ error: '載入圖片分頁錯誤：' + e.message });
   }
 }

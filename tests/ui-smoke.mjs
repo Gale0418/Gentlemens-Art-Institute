@@ -14,6 +14,8 @@ const html = readRequiredFile('public/index.html', 'HTML');
 const css = readRequiredFile('public/style.css', 'CSS');
 const server = readRequiredFile('server.js', 'server');
 const tauri = readRequiredFile('src-tauri/src/lib.rs', 'Tauri commands');
+const protocol = readRequiredFile('src-tauri/src/protocol.rs', 'Tauri protocol');
+const tauriProtocol = readRequiredFile('src-tauri/src/protocol.rs', 'Tauri comic protocol');
 
 const mustContain = (source, needle, label) => {
   assert.ok(source.includes(needle), `${label}: missing ${needle}`);
@@ -50,6 +52,9 @@ mustContain(app, 'function showLoaderProgress', 'loader progress UI');
 mustContain(app, 'function setLoaderProgress', 'loader progress UI');
 mustContain(app, 'function applyTheme', 'theme switching');
 mustContain(app, "const THEME_STORAGE_KEY = 'comic-reader:theme'", 'theme persistence');
+mustContain(app, 'function getCoverUrl(comicId)', 'cross-runtime cover routing');
+mustContain(app, "`/api/cover?id=${encodedId}`", 'browser cover routing');
+mustContain(app, '`comic://cover/${encodedId}`', 'desktop cover routing');
 mustContain(app, '!img.getAttribute(\'src\')', 'webtoon lazy image detection');
 mustContain(app, 'img.removeAttribute(\'src\')', 'reader preload cleanup');
 mustContain(app, 'renderGeneration', 'reader render invalidation');
@@ -118,6 +123,25 @@ assert.match(
   /showLoaderProgress\([\s\S]{0,320}loaderProgress\.style\.display = 'block'/,
   'loader progress should toggle the progress UI'
 );
+
+assert.equal(
+  (app.match(/comic:\/\/cover\//g) || []).length,
+  1,
+  'all cover consumers should route through getCoverUrl'
+);
+
+assert.match(
+  tauriProtocol,
+  /page_count > 0 && page_index >= page_count/,
+  'unknown Tauri page counts should not reject cover page zero'
+);
+
+assert.match(
+  tauriProtocol,
+  /if full_path\.is_dir\(\)[\s\S]{0,900}get_folder_images/,
+  'Tauri cover routing should read the first image from folder comics'
+);
+mustContain(tauriProtocol, 'canonical_image_within(img_path, &full_path)', 'Tauri folder cover boundary');
 
 assert.match(
   app,

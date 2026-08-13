@@ -68,6 +68,16 @@ const httpAPI = {
 };
 
 const eAPI = window.electronAPI || httpAPI;
+
+function getCoverUrl(comicId) {
+  if (!comicId) return '';
+  const encodedId = encodeURIComponent(String(comicId));
+  if (eAPI && eAPI.isElectron) {
+    return `comic://cover/${encodedId}`;
+  }
+  return `/api/cover?id=${encodedId}`;
+}
+
 const MAX_PRELOADED_IMAGES = 10;
 const WEBTOON_EAGER_IMAGES = 3;
 
@@ -765,7 +775,7 @@ function renderContinueStrip() {
     const favorite = state.favorites.includes(comic.id);
     return `
       <button class="continue-card" data-comic-id="${comic.id}">
-        <img src="comic://cover/${comic.id}" loading="lazy" decoding="async" fetchpriority="low" alt="${escapeHtml(comic.title)}" onerror="this.style.display='none';">
+        <img src="${escapeHtml(getCoverUrl(comic.id))}" loading="lazy" decoding="async" fetchpriority="low" alt="${escapeHtml(comic.title)}" onerror="this.style.display='none';">
         <span class="continue-body">
           <strong>${escapeHtml(comic.title)}</strong>
           <small>${progress.hasProgress ? `${progress.percent}% · 第 ${progress.currentPage + 1} 頁` : '已收藏'}</small>
@@ -810,7 +820,7 @@ function renderComicInspector(comic, options = {}) {
 
   elements.comicInspector.innerHTML = `
     <div class="inspector-cover">
-      <img src="comic://cover/${coverId}" loading="lazy" decoding="async" fetchpriority="low" alt="${escapeHtml(comic.title)}" onerror="this.style.display='none';">
+      <img src="${escapeHtml(getCoverUrl(coverId))}" loading="lazy" decoding="async" fetchpriority="low" alt="${escapeHtml(comic.title)}" onerror="this.style.display='none';">
       <div class="inspector-shine"></div>
     </div>
     <div class="inspector-body">
@@ -1051,7 +1061,7 @@ function renderGrid() {
       card.innerHTML = `
         <div class="comic-cover-wrapper">
           <img class="comic-cover lazy-cover"
-               data-src="comic://cover/${comic.coverComicId}"
+               data-src="${escapeHtml(getCoverUrl(comic.coverComicId))}"
                loading="lazy"
                decoding="async"
                fetchpriority="low"
@@ -1101,7 +1111,7 @@ function renderGrid() {
       card.innerHTML = `
         <div class="comic-cover-wrapper">
           <img class="comic-cover lazy-cover"
-               data-src="comic://cover/${comic.id}"
+               data-src="${escapeHtml(getCoverUrl(comic.id))}"
                loading="lazy"
                decoding="async"
                fetchpriority="low"

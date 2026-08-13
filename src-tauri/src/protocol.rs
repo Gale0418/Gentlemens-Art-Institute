@@ -30,6 +30,16 @@ fn get_mime(ext: &str) -> &'static str {
     }
 }
 
+fn is_page_out_of_range(page_count: usize, page_index: usize) -> bool {
+    page_count > 0 && page_index >= page_count
+}
+
+fn canonical_image_within(image_path: &Path, folder_path: &Path) -> Option<std::path::PathBuf> {
+    let canonical_image = image_path.canonicalize().ok()?;
+    let canonical_folder = folder_path.canonicalize().ok()?;
+    canonical_image.starts_with(&canonical_folder).then_some(canonical_image)
+}
+
 pub fn detect_mime(buf: &[u8], ext_fallback: &str) -> &'static str {
     if buf.len() >= 8 && &buf[0..8] == b"\x89PNG\r\n\x1a\n" {
         "image/png"
@@ -137,12 +147,16 @@ pub fn handle_comic_request(
 
             if let Some(img_path_str) = cached_path {
                 let img_path = Path::new(&img_path_str);
-                if let Ok(mut f) = File::open(img_path) {
+                if let Some(canonical_image) = canonical_image_within(img_path, &folder_path) {
+                    let mut f = match File::open(&canonical_image) {
+                        Ok(file) => file,
+                        Err(_) => return Response::builder().status(StatusCode::NOT_FOUND).body(b"not found".to_vec()).map_err(Into::into),
+                    };
                     let buf = match read_image_limited(&mut f) {
                         Ok(buf) => buf,
                         Err(_) => return Response::builder().status(StatusCode::PAYLOAD_TOO_LARGE).body(b"image too large".to_vec()).map_err(Into::into),
                     };
-                    let ext = img_path.extension().and_then(|s| s.to_str()).unwrap_or("");
+                    let ext = canonical_image.extension().and_then(|s| s.to_str()).unwrap_or("");
                     let mime = detect_mime(&buf, &format!(".{}", ext));
 
                     return Response::builder()
@@ -156,12 +170,16 @@ pub fn handle_comic_request(
                 let images = crate::utils::get_folder_images(&folder_path);
                 if index < images.len() {
                     let img_path = &images[index];
-                    if let Ok(mut f) = File::open(img_path) {
+                    if let Some(canonical_image) = canonical_image_within(img_path, &folder_path) {
+                        let mut f = match File::open(&canonical_image) {
+                            Ok(file) => file,
+                            Err(_) => return Response::builder().status(StatusCode::NOT_FOUND).body(b"not found".to_vec()).map_err(Into::into),
+                        };
                         let buf = match read_image_limited(&mut f) {
                             Ok(buf) => buf,
                             Err(_) => return Response::builder().status(StatusCode::PAYLOAD_TOO_LARGE).body(b"image too large".to_vec()).map_err(Into::into),
                         };
-                        let ext = img_path.extension().and_then(|s| s.to_str()).unwrap_or("");
+                        let ext = canonical_image.extension().and_then(|s| s.to_str()).unwrap_or("");
                         let mime = detect_mime(&buf, &format!(".{}", ext));
 
                         return Response::builder()
@@ -198,7 +216,9 @@ pub fn handle_comic_request(
             let opened = state.opened_comic_files.read().unwrap();
             opened.get(id).map(|pages| pages.len()).unwrap_or(comic_info.page_count)
         };
-        if page_index >= page_count {
+        // 掃描階段的 0 代表「尚未計算」，不是一本零頁漫畫。
+        // 封面與尚未開啟的頁面請求應繼續交由實體檔案內容判斷。
+        if is_page_out_of_range(page_count, page_index) {
             return Response::builder().status(StatusCode::RANGE_NOT_SATISFIABLE).body(b"page out of range".to_vec()).map_err(Into::into);
         }
 
@@ -268,7 +288,29 @@ pub fn handle_comic_request(
             }
         }
 
-        if full_path.is_file() {
+        if full_path.is_dir() {
+            let images = crate::utils::get_folder_images(&full_path);
+            if let Some(img_path) = images.get(page_index) {
+                if let Some(canonical_image) = canonical_image_within(img_path, &full_path) {
+                    let mut file = match File::open(&canonical_image) {
+                        Ok(file) => file,
+                        Err(_) => return Response::builder().status(StatusCode::NOT_FOUND).body(b"not found".to_vec()).map_err(Into::into),
+                    };
+                    let buf = match read_image_limited(&mut file) {
+                        Ok(buf) => buf,
+                        Err(_) => return Response::builder().status(StatusCode::PAYLOAD_TOO_LARGE).body(b"image too large".to_vec()).map_err(Into::into),
+                    };
+                    let ext = canonical_image.extension().and_then(|value| value.to_str()).unwrap_or("");
+                    let mime = detect_mime(&buf, &format!(".{}", ext));
+
+                    return Response::builder()
+                        .header("Content-Type", mime)
+                        .header("Cache-Control", "public, max-age=86400")
+                        .header("Access-Control-Allow-Origin", "*")
+                        .body(buf).map_err(Into::into);
+                }
+            }
+        } else if full_path.is_file() {
             if let Ok(file) = File::open(&full_path) {
                 if let Ok(mut archive) = zip::ZipArchive::new(file) {
                     // 從快取讀取進入點名稱
@@ -363,5 +405,59 @@ mod tests {
     #[test]
     fn test_detect_mime_unknown_is_not_jpeg() {
         assert_eq!(detect_mime(b"not an image", ""), "application/octet-stream");
+    }
+
+    #[test]
+    fn unknown_page_count_does_not_reject_cover_page() {
+        assert!(!is_page_out_of_range(0, 0));
+    }
+
+    #[test]
+    fn known_page_count_still_rejects_out_of_range_page() {
+        assert!(is_page_out_of_range(3, 3));
+        assert!(!is_page_out_of_range(3, 2));
+    }
+
+    #[test]
+    fn unopened_comic_page_count_zero_allows_cover_request() {
+        // When comic has not been opened yet, page_count is 0 (unknown).
+        // Cover request (page_index = 0) must not be rejected with 416.
+        assert!(!is_page_out_of_range(0, 0));
+    }
+
+    #[test]
+    fn folder_comic_cover_reads_first_naturally_sorted_image() {
+        let temp_dir = std::env::temp_dir().join(format!("comic_test_folder_cover_{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&temp_dir);
+        std::fs::create_dir_all(&temp_dir).unwrap();
+
+        let img2 = temp_dir.join("002.jpg");
+        let img1 = temp_dir.join("001.jpg");
+        std::fs::write(&img2, b"fake img2").unwrap();
+        std::fs::write(&img1, b"fake img1").unwrap();
+
+        let images = crate::utils::get_folder_images(&temp_dir);
+        assert_eq!(images.len(), 2);
+        assert_eq!(images[0], img1);
+
+        let _ = std::fs::remove_dir_all(&temp_dir);
+    }
+
+    #[test]
+    fn folder_images_cannot_escape_through_symlinks() {
+        let root = std::env::temp_dir().join(format!("comic_protocol_boundary_{}", std::process::id()));
+        let folder = root.join("comic");
+        let outside = root.join("outside.png");
+        std::fs::create_dir_all(&folder).unwrap();
+        std::fs::write(&outside, b"outside").unwrap();
+
+        #[cfg(unix)]
+        {
+            let link = folder.join("cover.png");
+            std::os::unix::fs::symlink(&outside, &link).unwrap();
+            assert!(canonical_image_within(&link, &folder).is_none());
+        }
+
+        std::fs::remove_dir_all(root).unwrap();
     }
 }

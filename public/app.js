@@ -108,6 +108,7 @@ let state = {
   readerClosePromise: Promise.resolve(),
   readerOperation: 0,
   pendingComicId: null,
+  dialogReturnFocus: null,
 };
 
 const THEME_STORAGE_KEY = 'comic-reader:theme';
@@ -355,6 +356,8 @@ function bindEvents() {
     e.stopPropagation();
     goNextByReadingDirection();
   });
+  bindKeyboardActivation(elements.prevZone, goPreviousByReadingDirection);
+  bindKeyboardActivation(elements.nextZone, goNextByReadingDirection);
 
   // 閱讀模式切換
   elements.btnModeSingle.addEventListener('click', () => setReadingMode('single'));
@@ -610,10 +613,14 @@ function applyLibraryFilter(filter) {
   state.currentPath = ""; // 切換狀態過濾時回到根目錄
 
   document.querySelectorAll('.filter-btn').forEach(btn => {
-    btn.classList.toggle('active', btn.dataset.filter === state.activeFilter);
+    const selected = btn.dataset.filter === state.activeFilter;
+    btn.classList.toggle('active', selected);
+    btn.setAttribute('aria-pressed', String(selected));
   });
   document.querySelectorAll('.smart-item').forEach(btn => {
-    btn.classList.toggle('active', btn.dataset.filterShortcut === state.activeFilter);
+    const selected = btn.dataset.filterShortcut === state.activeFilter;
+    btn.classList.toggle('active', selected);
+    btn.setAttribute('aria-pressed', String(selected));
   });
 
   filterAndRenderGrid();
@@ -674,6 +681,7 @@ function renderSidebar() {
   allLi.onclick = () => {
     selectSeries('all', allLi);
   };
+  configureInteractiveItem(allLi, '顯示全部漫畫系列', () => selectSeries('all', allLi));
 
   // 排序並渲染其他系列
   Array.from(seriesMap.keys()).sort().forEach(seriesName => {
@@ -684,6 +692,7 @@ function renderSidebar() {
       <span class="badge">${seriesMap.get(seriesName)}</span>
     `;
     li.onclick = () => selectSeries(seriesName, li);
+    configureInteractiveItem(li, `顯示系列：${seriesName}`, () => selectSeries(seriesName, li));
     if (state.activeSeries === seriesName) li.classList.add('active');
     elements.seriesFilterList.appendChild(li);
   });
@@ -696,6 +705,7 @@ function renderSidebar() {
       <span class="badge">${seriesMap.get('未分類')}</span>
     `;
     li.onclick = () => selectSeries('未分類', li);
+    configureInteractiveItem(li, '顯示未分類漫畫', () => selectSeries('未分類', li));
     if (state.activeSeries === '未分類') li.classList.add('active');
     elements.seriesFilterList.appendChild(li);
   }
@@ -703,8 +713,12 @@ function renderSidebar() {
 
 // 切換側邊欄系列
 function selectSeries(seriesName, element) {
-  document.querySelectorAll('#series-filter-list li').forEach(li => li.classList.remove('active'));
+  document.querySelectorAll('#series-filter-list li').forEach(li => {
+    li.classList.remove('active');
+    li.setAttribute('aria-pressed', 'false');
+  });
   element.classList.add('active');
+  element.setAttribute('aria-pressed', 'true');
   state.activeSeries = seriesName;
   // 直接進入該資料夾內，免去主人的二次點擊 (姬米妮貼心優化 ✨)
   state.currentPath = (seriesName === 'all' || seriesName === '未分類') ? "" : seriesName;
@@ -994,7 +1008,9 @@ function filterAndRenderGrid() {
     elements.folderBreadcrumbs.innerHTML = '';
 
     // 「首頁」麵包屑
-    const homeBtn = document.createElement('span');
+    const homeBtn = document.createElement('button');
+    homeBtn.type = 'button';
+    homeBtn.className = 'breadcrumb-button';
     homeBtn.innerHTML = `<i class="fa-solid fa-house" style="font-size: 12px; color: var(--accent);"></i> 首頁`;
     homeBtn.style.cursor = 'pointer';
     homeBtn.style.fontWeight = '600';
@@ -1016,14 +1032,15 @@ function filterAndRenderGrid() {
       separator.style.margin = '0 4px';
       elements.folderBreadcrumbs.appendChild(separator);
 
-      const pathBtn = document.createElement('span');
+      const pathBtn = document.createElement(index === parts.length - 1 ? 'span' : 'button');
       pathBtn.textContent = part;
-      pathBtn.style.cursor = 'pointer';
       
       if (index === parts.length - 1) {
         pathBtn.style.fontWeight = '600';
         pathBtn.style.color = 'var(--accent)';
       } else {
+        pathBtn.type = 'button';
+        pathBtn.className = 'breadcrumb-button';
         pathBtn.style.color = 'var(--text-light)';
         const targetPath = accumPath; // 閉包保留
         pathBtn.onclick = () => {
@@ -1086,6 +1103,7 @@ function renderGrid() {
         state.currentPath = comic.relativePath;
         filterAndRenderGrid();
       };
+      configureInteractiveItem(card, `開啟資料夾：${comic.title}`, card.onclick);
       card.onmouseenter = () => renderComicInspector(comic);
       card.oncontextmenu = (e) => showGridContextMenu(e, comic);
     } else {
@@ -1145,12 +1163,15 @@ function renderGrid() {
       `;
 
       card.onclick = () => openReader(comic.id);
+      configureInteractiveItem(card, `閱讀漫畫：${comic.title}`, card.onclick);
       card.onmouseenter = () => renderComicInspector(comic);
       card.oncontextmenu = (e) => showGridContextMenu(e, comic);
 
       // 綁定收藏點擊事件
       const favBtn = card.querySelector('.favorite-toggle-btn');
       if (favBtn) {
+        favBtn.setAttribute('aria-label', isFavorite ? '取消收藏' : '加入收藏');
+        favBtn.setAttribute('aria-pressed', String(isFavorite));
         favBtn.onclick = async (e) => {
           e.stopPropagation(); // 阻止開啟閱讀器
           if (eAPI && eAPI.toggleFavorite) {
@@ -1161,6 +1182,8 @@ function renderGrid() {
               // 姬米妮的流暢 UI 動態過渡 ✨
               favBtn.classList.toggle('active', isFav);
               favBtn.title = isFav ? '取消收藏' : '加入收藏';
+              favBtn.setAttribute('aria-label', isFav ? '取消收藏' : '加入收藏');
+              favBtn.setAttribute('aria-pressed', String(isFav));
               favBtn.querySelector('i').className = isFav ? 'fa-solid fa-heart' : 'fa-regular fa-heart';
               
               // 如果當前在「已收藏」篩選器下，點擊取消收藏應將卡片在書架上剔除
@@ -1584,6 +1607,11 @@ function renderCatalogGrid() {
     thumb.className = 'catalog-thumb';
     if (idx === state.currentPageIndex) thumb.classList.add('current');
     thumb.dataset.index = idx;
+    configureInteractiveItem(thumb, `跳到第 ${idx + 1} 頁`, () => {
+      state.currentPageIndex = idx;
+      const backMode = state.prevReadingMode || 'single';
+      setReadingMode(backMode);
+    });
 
     const img = document.createElement('img');
     img.loading = 'lazy';
@@ -1601,6 +1629,7 @@ function renderCatalogGrid() {
       deleteBtn = document.createElement('button');
       deleteBtn.className = 'catalog-delete-btn';
       deleteBtn.title = '移到垃圾桶';
+      deleteBtn.setAttribute('aria-label', `將第 ${idx + 1} 頁移到垃圾桶`);
       deleteBtn.innerHTML = '<i class="fa-solid fa-trash-can"></i>';
       deleteBtn.onclick = async (e) => {
         e.stopPropagation();
@@ -1828,6 +1857,7 @@ function handleReaderPointerClick(e) {
 
 function handleReaderAuxClick(e) {
   if (elements.readerOverlay.style.display === 'none') return;
+  if (e.target.closest?.('button, input, select, textarea') && e.key !== 'Escape') return;
   if (e.button !== 3 && e.button !== 4) return;
   e.preventDefault();
 
@@ -2041,6 +2071,13 @@ function setReadingMode(mode) {
   elements.btnModeDoubleRtl.classList.toggle('active', mode === 'double-rtl');
   elements.btnModeWebtoon.classList.toggle('active', mode === 'webtoon');
   elements.btnModeCatalog.classList.toggle('active', mode === 'catalog');
+  [
+    [elements.btnModeSingle, 'single'],
+    [elements.btnModeDouble, 'double'],
+    [elements.btnModeDoubleRtl, 'double-rtl'],
+    [elements.btnModeWebtoon, 'webtoon'],
+    [elements.btnModeCatalog, 'catalog']
+  ].forEach(([button, value]) => button.setAttribute('aria-pressed', String(mode === value)));
 
   // 控制 Zoom 面板的隱藏與顯示
   const disableZoom = mode === 'webtoon' || mode === 'catalog';
@@ -2149,6 +2186,14 @@ function updateReaderUiControls() {
   elements.btnModeDouble.classList.toggle('active', mode === 'double');
   elements.btnModeDoubleRtl.classList.toggle('active', mode === 'double-rtl');
   elements.btnModeWebtoon.classList.toggle('active', mode === 'webtoon');
+  elements.btnModeCatalog.classList.toggle('active', mode === 'catalog');
+  [
+    [elements.btnModeSingle, 'single'],
+    [elements.btnModeDouble, 'double'],
+    [elements.btnModeDoubleRtl, 'double-rtl'],
+    [elements.btnModeWebtoon, 'webtoon'],
+    [elements.btnModeCatalog, 'catalog']
+  ].forEach(([button, value]) => button.setAttribute('aria-pressed', String(mode === value)));
   elements.zoomValue.textContent = `${state.zoomPercentage}%`;
 
   // 條漫模式下不支援螢幕適應與旋轉
@@ -2497,7 +2542,9 @@ function handleWheelScroll(e) {
 
 // 打開設定視窗
 async function openSettingsModal() {
+  state.dialogReturnFocus = document.activeElement;
   elements.settingsModal.style.display = 'flex';
+  elements.closeSettingsBtn.focus();
   renderExternalBookmarks();
 
   try {
@@ -2507,6 +2554,28 @@ async function openSettingsModal() {
   } catch (e) {
     console.error('載入漫畫庫設定失敗：', e);
   }
+}
+
+function bindKeyboardActivation(element, action) {
+  if (!element) return;
+  element.addEventListener('keydown', event => {
+    if (event.target !== element || (event.key !== 'Enter' && event.key !== ' ')) return;
+    event.preventDefault();
+    event.stopPropagation();
+    action();
+  });
+}
+
+function configureInteractiveItem(element, label, action) {
+  element.tabIndex = 0;
+  element.setAttribute('role', 'button');
+  element.setAttribute('aria-label', label);
+  element.onkeydown = event => {
+    if (event.target !== element || (event.key !== 'Enter' && event.key !== ' ')) return;
+    event.preventDefault();
+    event.stopPropagation();
+    action();
+  };
 }
 
 function renderExternalBookmarks() {
@@ -2567,6 +2636,7 @@ function renderExternalBookmarks() {
 // 關閉設定視窗
 function closeSettingsModal() {
   elements.settingsModal.style.display = 'none';
+  state.dialogReturnFocus?.focus?.();
 }
 
 function openSmbModal() {
@@ -2581,10 +2651,13 @@ function openSmbModal() {
   elements.smbUser.value = smbConfig.username || '';
   elements.smbPass.value = smbConfig.password || '';
   elements.smbModal.style.display = 'flex';
+  state.dialogReturnFocus = document.activeElement;
+  elements.closeSmbBtn.focus();
 }
 
 function closeSmbModal() {
   elements.smbModal.style.display = 'none';
+  state.dialogReturnFocus?.focus?.();
 }
 
 async function saveSmbConfig() {

@@ -2,7 +2,7 @@
 <html lang="zh-TW">
 <head>
   <meta charset="UTF-8">
-  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover">
   <meta name="description" content="少女漫畫閣，專為本機漫畫收藏打造的沉浸式閱讀器。">
   <meta name="theme-color" content="#11100f">
   <title>少女漫畫閣 | 本機漫畫閱讀器</title>
@@ -143,11 +143,17 @@
       <section class="library-workspace">
         <!-- 漫畫書架網格 -->
         <main class="content-area">
-          <section class="continue-panel">
+          <nav class="tablet-collections" aria-label="智慧收藏快捷篩選">
+            <button class="smart-item active" data-filter-shortcut="all" aria-pressed="true"><i class="fa-solid fa-layer-group"></i> 全部漫畫</button>
+            <button class="smart-item" data-filter-shortcut="reading" aria-pressed="false"><i class="fa-solid fa-book-open-reader"></i> 閱讀中</button>
+            <button class="smart-item" data-filter-shortcut="favorite" aria-pressed="false"><i class="fa-solid fa-heart"></i> 已收藏</button>
+            <button class="smart-item" data-filter-shortcut="finished" aria-pressed="false"><i class="fa-solid fa-circle-check"></i> 已看完</button>
+          </nav>
+
+          <section class="continue-panel" aria-labelledby="continue-title">
             <div class="section-title-row">
               <div>
-                <span class="section-kicker">Resume</span>
-                <h2>繼續閱讀</h2>
+                <h2 id="continue-title">繼續閱讀</h2>
               </div>
               <span class="section-hint">最近進度與收藏會優先出現在這裡</span>
             </div>
@@ -158,15 +164,14 @@
 
           <div class="library-header">
             <div>
-              <span class="section-kicker">Library</span>
-              <h2 id="library-title">全部漫畫</h2>
+              <h2 id="library-title" aria-live="polite">全部漫畫</h2>
             </div>
             <div class="filter-options">
-              <button class="filter-btn active" data-filter="all">全部</button>
-              <button class="filter-btn" data-filter="reading">閱讀中</button>
-              <button class="filter-btn" data-filter="unread">未讀取</button>
-              <button class="filter-btn" data-filter="finished">已看完</button>
-              <button class="filter-btn" data-filter="favorite"><i class="fa-solid fa-heart" style="color: #ff6b8b; margin-right: 4px;"></i> 已收藏</button>
+              <button class="filter-btn active" data-filter="all" aria-pressed="true">全部</button>
+              <button class="filter-btn" data-filter="reading" aria-pressed="false">閱讀中</button>
+              <button class="filter-btn" data-filter="unread" aria-pressed="false">未讀取</button>
+              <button class="filter-btn" data-filter="finished" aria-pressed="false">已看完</button>
+              <button class="filter-btn" data-filter="favorite" aria-pressed="false"><i class="fa-solid fa-heart" style="color: #ff6b8b; margin-right: 4px;"></i> 已收藏</button>
             </div>
           </div>
 
@@ -199,10 +204,10 @@
   </div>
 
   <!-- 全螢幕漫畫閱讀器層 -->
-  <div class="reader-overlay" id="reader-overlay" style="display: none;">
+  <div class="reader-overlay" id="reader-overlay" role="dialog" aria-modal="true" aria-labelledby="reader-comic-title" style="display: none;">
     <!-- 頂部浮動標題列 (滑鼠靠近時顯示) -->
     <div class="reader-top-bar" id="reader-top-bar">
-      <button class="back-btn" id="reader-back-btn">
+      <button class="back-btn" id="reader-back-btn" aria-label="返回漫畫書架">
         <i class="fa-solid fa-arrow-left"></i> 返回書架
       </button>
       <div class="reader-title" id="reader-comic-title">漫畫標題名稱</div>
@@ -210,10 +215,10 @@
     </div>
 
     <!-- 左右翻頁熱區 (懸停時會有微弱導引箭頭) -->
-    <div class="nav-zone prev-zone" id="prev-zone" title="上一頁 (左方向鍵)">
+    <div class="nav-zone prev-zone" id="prev-zone" role="button" tabindex="0" aria-label="上一頁" title="上一頁 (左方向鍵)">
       <div class="nav-arrow"><i class="fa-solid fa-chevron-left"></i></div>
     </div>
-    <div class="nav-zone next-zone" id="next-zone" title="下一頁 (右方向鍵)">
+    <div class="nav-zone next-zone" id="next-zone" role="button" tabindex="0" aria-label="下一頁" title="下一頁 (右方向鍵)">
       <div class="nav-arrow"><i class="fa-solid fa-chevron-right"></i></div>
     </div>
 
@@ -244,11 +249,11 @@
       <div class="bottom-bar-right">
         <!-- 閱讀模式切換 -->
         <div class="btn-group">
-          <button class="mode-btn active" id="btn-mode-single" title="單頁模式 (寬高自適應)"><i class="fa-solid fa-file"></i> 單頁</button>
-          <button class="mode-btn" id="btn-mode-double" title="雙頁模式 (第一頁封面單顯示)"><i class="fa-solid fa-book-open"></i> 雙頁</button>
-          <button class="mode-btn" id="btn-mode-double-rtl" title="雙頁日式 (右至左)"><i class="fa-solid fa-book-open"></i> 雙頁 (日)</button>
-          <button class="mode-btn" id="btn-mode-webtoon" title="直捲條漫模式"><i class="fa-solid fa-arrows-up-down"></i> 條漫</button>
-          <button class="mode-btn" id="btn-mode-catalog" title="目錄縮圖模式"><i class="fa-solid fa-grip"></i> 目錄</button>
+          <button class="mode-btn active" id="btn-mode-single" aria-pressed="true" title="單頁模式 (寬高自適應)"><i class="fa-solid fa-file"></i> 單頁</button>
+          <button class="mode-btn" id="btn-mode-double" aria-pressed="false" title="雙頁模式 (第一頁封面單顯示)"><i class="fa-solid fa-book-open"></i> 雙頁</button>
+          <button class="mode-btn" id="btn-mode-double-rtl" aria-pressed="false" title="雙頁日式 (右至左)"><i class="fa-solid fa-book-open"></i> 雙頁 (日)</button>
+          <button class="mode-btn" id="btn-mode-webtoon" aria-pressed="false" title="直捲條漫模式"><i class="fa-solid fa-arrows-up-down"></i> 條漫</button>
+          <button class="mode-btn" id="btn-mode-catalog" aria-pressed="false" title="目錄縮圖模式"><i class="fa-solid fa-grip"></i> 目錄</button>
         </div>
 
         <!-- 縮放工具 -->
@@ -298,17 +303,16 @@
   </div>
 
   <!-- 設定彈出視窗 -->
-  <div class="modal-overlay" id="settings-modal" style="display: none;">
+  <div class="modal-overlay" id="settings-modal" role="dialog" aria-modal="true" aria-labelledby="settings-title" style="display: none;">
     <div class="modal-content">
       <div class="modal-header">
-        <h2><i class="fa-solid fa-gear"></i> 外觀與漫畫庫設定</h2>
-        <button class="close-modal-btn" id="close-settings-btn"><i class="fa-solid fa-xmark"></i></button>
+        <h2 id="settings-title"><i class="fa-solid fa-gear"></i> 外觀與漫畫庫設定</h2>
+        <button class="close-modal-btn" id="close-settings-btn" aria-label="關閉設定"><i class="fa-solid fa-xmark"></i></button>
       </div>
       <div class="modal-body">
         <section class="theme-settings" aria-labelledby="theme-settings-title">
           <div class="theme-settings-heading">
             <div>
-              <span class="section-kicker">Appearance</span>
               <h3 id="theme-settings-title">書庫畫風</h3>
             </div>
             <p>即時套用，重新開啟後仍會保留。</p>
@@ -348,8 +352,8 @@
         </div>
         
         <div class="advanced-settings-group" style="margin-top: 15px; display: flex; gap: 10px; flex-wrap: wrap;">
-          <button id="smb-setup-btn" class="modal-action-btn" style="background: var(--bg-hover); color: var(--text-light); border: 1px solid var(--border); padding: 8px 15px; border-radius: 8px; cursor: pointer;"><i class="fa-solid fa-globe"></i> 🌐 設定 NAS (SMB)</button>
-          <button id="native-external-btn" class="modal-action-btn" style="background: var(--bg-hover); color: var(--text-light); border: 1px solid var(--border); padding: 8px 15px; border-radius: 8px; cursor: pointer;"><i class="fa-solid fa-folder-open"></i> 📂 直接讀取外部資料夾 (iOS)</button>
+          <button id="smb-setup-btn" class="modal-action-btn" style="background: var(--bg-hover); color: var(--text-light); border: 1px solid var(--border); padding: 8px 15px; border-radius: 8px; cursor: pointer;"><i class="fa-solid fa-globe"></i> 設定 NAS (SMB)</button>
+          <button id="native-external-btn" class="modal-action-btn" style="background: var(--bg-hover); color: var(--text-light); border: 1px solid var(--border); padding: 8px 15px; border-radius: 8px; cursor: pointer;"><i class="fa-solid fa-folder-open"></i> 直接讀取外部資料夾 (iOS)</button>
         </div>
         
         <div id="external-bookmarks-list" style="margin-top: 10px; display: flex; flex-direction: column; gap: 8px;">
@@ -371,11 +375,11 @@
   </div>
 
   <!-- NAS (SMB) 設定彈出視窗 -->
-  <div class="modal-overlay" id="smb-modal" style="display: none;">
+  <div class="modal-overlay" id="smb-modal" role="dialog" aria-modal="true" aria-labelledby="smb-title" style="display: none;">
     <div class="modal-content" style="max-width: 400px;">
       <div class="modal-header">
-        <h2><i class="fa-solid fa-globe"></i> 網路硬碟 (NAS) 設定</h2>
-        <button class="close-modal-btn" id="close-smb-btn"><i class="fa-solid fa-xmark"></i></button>
+        <h2 id="smb-title"><i class="fa-solid fa-globe"></i> 網路硬碟 (NAS) 設定</h2>
+        <button class="close-modal-btn" id="close-smb-btn" aria-label="關閉 NAS 設定"><i class="fa-solid fa-xmark"></i></button>
       </div>
       <div class="modal-body">
         <div class="input-group">
@@ -403,7 +407,7 @@
   </div>
 
   <!-- 全局載入遮罩 -->
-  <div class="loader-mask" id="loader-mask" style="display: none;">
+  <div class="loader-mask" id="loader-mask" role="status" aria-live="polite" style="display: none;">
     <div class="loader-content">
       <div class="spinner"></div>
       <p id="loader-text">天才少女正在為主人召喚漫畫中...</p>

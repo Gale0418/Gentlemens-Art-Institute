@@ -25,6 +25,15 @@ mustContain(html, 'id="continue-strip"', 'library layout');
 mustContain(html, 'id="comic-inspector"', 'library layout');
 mustContain(html, 'id="reader-context-menu"', 'reader context menu');
 mustContain(html, 'id="theme-picker"', 'theme picker');
+mustContain(html, 'viewport-fit=cover', 'iPad safe-area viewport');
+mustContain(html, 'class="tablet-collections"', 'tablet collection shortcuts');
+mustContain(html, 'role="dialog" aria-modal="true" aria-labelledby="reader-comic-title"', 'reader dialog semantics');
+mustContain(html, 'role="dialog" aria-modal="true" aria-labelledby="settings-title"', 'settings dialog semantics');
+assert.equal(
+  (html.match(/id="progress-slider"/g) || []).length,
+  1,
+  'reader progress slider id should be unique'
+);
 for (const theme of ['midnight', 'sakura', 'ink', 'aurora']) {
   mustContain(html, `data-theme-option="${theme}"`, `theme option ${theme}`);
   mustContain(css, `html[data-theme="${theme}"]`, `theme styling ${theme}`);
@@ -34,6 +43,9 @@ mustContain(css, '.continue-strip', 'library styling');
 mustContain(css, '.comic-inspector', 'library styling');
 mustContain(css, '.reader-context-menu', 'reader styling');
 mustContain(css, '.reader-overlay.reader-idle', 'reader idle styling');
+mustContain(css, 'Impeccable polish', 'bounded visual polish layer');
+mustContain(css, '@media (hover: none), (pointer: coarse)', 'coarse pointer controls');
+mustContain(css, 'env(safe-area-inset-bottom)', 'safe-area adaptation');
 
 mustContain(app, 'function jumpToFirstPage()', 'keyboard navigation');
 mustContain(app, 'function jumpToLastPage()', 'keyboard navigation');
@@ -51,6 +63,9 @@ mustContain(app, 'fetchPriority = \'low\'', 'low-priority noncritical images');
 mustContain(app, 'function showLoaderProgress', 'loader progress UI');
 mustContain(app, 'function setLoaderProgress', 'loader progress UI');
 mustContain(app, 'function applyTheme', 'theme switching');
+mustContain(app, 'function bindKeyboardActivation', 'keyboard activation helper');
+mustContain(app, 'function configureInteractiveItem', 'dynamic interactive semantics');
+mustContain(app, "setAttribute('aria-pressed'", 'pressed state semantics');
 mustContain(app, "const THEME_STORAGE_KEY = 'comic-reader:theme'", 'theme persistence');
 mustContain(app, 'function getCoverUrl(comicId)', 'cross-runtime cover routing');
 mustContain(app, "`/api/cover?id=${encodedId}`", 'browser cover routing');

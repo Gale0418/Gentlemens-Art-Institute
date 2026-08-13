@@ -23,6 +23,11 @@ const patchedWry = readRequiredFile(
   'src-tauri/vendor/wry/src/wkwebview/mod.rs',
   'patched Wry WKWebView runtime'
 );
+const iosFolderPlugin = readRequiredFile(
+  'src-tauri/tauri-plugin-ios-folder/ios/Sources/ExamplePlugin.swift',
+  'iOS folder plugin'
+);
+const scanner = readRequiredFile('src-tauri/src/scanner.rs', 'Tauri scanner');
 
 const mustContain = (source, needle, label) => {
   assert.ok(source.includes(needle), `${label}: missing ${needle}`);
@@ -94,6 +99,10 @@ mustContain(app, '!img.getAttribute(\'src\')', 'webtoon lazy image detection');
 mustContain(app, 'img.removeAttribute(\'src\')', 'reader preload cleanup');
 mustContain(app, 'renderGeneration', 'reader render invalidation');
 mustContain(app, 'async function clearSmbConfig()', 'SMB cleanup');
+mustContain(app, 'RAM 預載略過，將改為逐頁讀取', 'preload error fallback');
+mustContain(scanner, 'external_bookmark: external_bookmark.map(str::to_owned)', 'bookmark ownership');
+mustContain(iosFolderPlugin, 'startDownloadingUbiquitousItem', 'iCloud materialization');
+mustContain(iosFolderPlugin, 'NSFileCoordinator()', 'file provider coordination');
 mustContain(html, 'id="loader-progress"', 'loader progress UI');
 mustContain(css, '.loader-progress', 'loader progress styling');
 mustContain(server, 'folderImageListCache', 'folder image list cache');
@@ -111,6 +120,11 @@ assert.match(
   app,
   /async function clearSmbConfig\(\) \{[\s\S]*await eAPI\.setSmbConfig\(null\)[\s\S]*localStorage\.removeItem/,
   'SMB local state should clear only after backend success'
+);
+assert.match(
+  app,
+  /await window\.electronAPI\.setBookmarks\(bookmarks\);[\s\S]{0,180}localStorage\.setItem\('comic-reader:externalBookmarks'/,
+  'external bookmarks should persist only after backend activation succeeds'
 );
 assert.match(
   tauri,

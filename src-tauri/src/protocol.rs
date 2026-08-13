@@ -9,6 +9,40 @@ use tauri::Manager;
 
 const MAX_IMAGE_BYTES: u64 = 64 * 1024 * 1024;
 
+#[derive(Debug)]
+enum ArchivePageError {
+    FileAccess(io::Error),
+    InvalidZip(String),
+    MissingEntry(String),
+    ImageTooLarge,
+    ReadFailed(String),
+}
+
+impl ArchivePageError {
+    fn status(&self) -> StatusCode {
+        match self {
+            Self::FileAccess(error) if error.kind() == io::ErrorKind::NotFound => StatusCode::NOT_FOUND,
+            Self::FileAccess(error) if error.kind() == io::ErrorKind::PermissionDenied => StatusCode::FORBIDDEN,
+            Self::FileAccess(_) => StatusCode::SERVICE_UNAVAILABLE,
+            Self::MissingEntry(_) => StatusCode::NOT_FOUND,
+            Self::InvalidZip(_) | Self::ReadFailed(_) => StatusCode::UNPROCESSABLE_ENTITY,
+            Self::ImageTooLarge => StatusCode::PAYLOAD_TOO_LARGE,
+        }
+    }
+}
+
+impl std::fmt::Display for ArchivePageError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::FileAccess(error) => write!(f, "無法讀取 ZIP 檔案：{error}"),
+            Self::InvalidZip(error) => write!(f, "ZIP 格式無效或不受支援：{error}"),
+            Self::MissingEntry(name) => write!(f, "ZIP 找不到頁面：{name}"),
+            Self::ImageTooLarge => write!(f, "圖片超過 64 MiB 安全上限"),
+            Self::ReadFailed(error) => write!(f, "ZIP 頁面解壓失敗：{error}"),
+        }
+    }
+}
+
 fn read_image_limited<R: Read>(reader: R) -> io::Result<Vec<u8>> {
     let mut buf = Vec::new();
     reader.take(MAX_IMAGE_BYTES + 1).read_to_end(&mut buf)?;
@@ -38,6 +72,38 @@ fn canonical_image_within(image_path: &Path, folder_path: &Path) -> Option<std::
     let canonical_image = image_path.canonicalize().ok()?;
     let canonical_folder = folder_path.canonicalize().ok()?;
     canonical_image.starts_with(&canonical_folder).then_some(canonical_image)
+}
+
+#[cfg(any(target_os = "ios", test))]
+fn external_path_is_authorized(comic: &crate::state::ComicItem, path: &Path, state: &AppState) -> bool {
+    let Some(bookmark) = comic.external_bookmark.as_ref() else {
+        return false;
+    };
+    let active = state.active_bookmarks.lock().unwrap();
+    let Some(root) = active.get(bookmark) else {
+        return false;
+    };
+    match (path.canonicalize(), Path::new(root).canonicalize()) {
+        (Ok(canonical_path), Ok(canonical_root)) => canonical_path.starts_with(canonical_root),
+        _ => false,
+    }
+}
+
+fn read_archive_page(zip_path: &Path, target_name: &str) -> Result<(Vec<u8>, String), ArchivePageError> {
+    let file = File::open(zip_path).map_err(ArchivePageError::FileAccess)?;
+    let mut archive = zip::ZipArchive::new(file)
+        .map_err(|error| ArchivePageError::InvalidZip(error.to_string()))?;
+    let mut entry = archive.by_name(target_name)
+        .map_err(|_| ArchivePageError::MissingEntry(target_name.to_string()))?;
+    let buf = read_image_limited(&mut entry).map_err(|error| {
+        if error.kind() == io::ErrorKind::InvalidData && error.to_string() == "image exceeds size limit" {
+            ArchivePageError::ImageTooLarge
+        } else {
+            ArchivePageError::ReadFailed(error.to_string())
+        }
+    })?;
+    let extension = Path::new(target_name).extension().and_then(|value| value.to_str()).unwrap_or("");
+    Ok((buf, format!(".{extension}")))
 }
 
 pub fn detect_mime(buf: &[u8], ext_fallback: &str) -> &'static str {
@@ -103,17 +169,7 @@ pub fn handle_comic_request(
             let path = Path::new(&relative_path_str).to_path_buf();
             #[cfg(target_os = "ios")]
             {
-                let allowed = match path.canonicalize() {
-                    Ok(canonical) => state
-                        .active_bookmarks
-                        .lock()
-                        .unwrap()
-                        .values()
-                        .filter_map(|root| Path::new(root).canonicalize().ok())
-                        .any(|root| canonical.starts_with(root)),
-                    Err(_) => false,
-                };
-                if !allowed {
+                if !external_path_is_authorized(&comic_info, &path, &state) {
                     return Response::builder().status(StatusCode::FORBIDDEN).body(b"external bookmark is not active".to_vec()).map_err(Into::into);
                 }
             }
@@ -256,6 +312,10 @@ pub fn handle_comic_request(
             full_path = temp_dir.join(&relative_path_str);
         } else if is_external {
             full_path = Path::new(&relative_path_str).to_path_buf();
+            #[cfg(target_os = "ios")]
+            if !external_path_is_authorized(&comic_info, &full_path, &state) {
+                return Response::builder().status(StatusCode::FORBIDDEN).body(b"external bookmark is not active".to_vec()).map_err(Into::into);
+            }
         } else {
             let scan_dir = { state.scan_dir.read().unwrap().clone() };
             if scan_dir.is_empty() {
@@ -310,51 +370,43 @@ pub fn handle_comic_request(
                         .body(buf).map_err(Into::into);
                 }
             }
-        } else if full_path.is_file() {
-            if let Ok(file) = File::open(&full_path) {
-                if let Ok(mut archive) = zip::ZipArchive::new(file) {
-                    // 從快取讀取進入點名稱
-                    let cached_name = {
-                        let opened = state.opened_comic_files.read().unwrap();
-                        opened.get(id).and_then(|names| names.get(page_index).cloned())
-                    };
-
-                    if let Some(target_name) = cached_name {
-                        if let Ok(mut file) = archive.by_name(&target_name) {
-                            let buf = match read_image_limited(&mut file) {
-                                Ok(buf) => buf,
-                                Err(_) => return Response::builder().status(StatusCode::PAYLOAD_TOO_LARGE).body(b"image too large".to_vec()).map_err(Into::into),
-                            };
-                            let ext = Path::new(&target_name).extension().and_then(|s| s.to_str()).unwrap_or("");
-                            let mime = detect_mime(&buf, &format!(".{}", ext));
-
-                            return Response::builder()
-                                .header("Content-Type", mime)
-                                .header("Cache-Control", "public, max-age=86400")
-                                .header("Access-Control-Allow-Origin", "*")
-                                .body(buf).map_err(Into::into);
-                        }
-                    } else {
-                        // Fallback
-                        let entry_names = crate::utils::get_archive_images(&full_path).unwrap_or_default();
-                        if page_index < entry_names.len() {
-                            let target_name = &entry_names[page_index];
-                            if let Ok(mut file) = archive.by_name(target_name) {
-                                let buf = match read_image_limited(&mut file) {
-                                    Ok(buf) => buf,
-                                    Err(_) => return Response::builder().status(StatusCode::PAYLOAD_TOO_LARGE).body(b"image too large".to_vec()).map_err(Into::into),
-                                };
-                                let ext = Path::new(target_name).extension().and_then(|s| s.to_str()).unwrap_or("");
-                                let mime = detect_mime(&buf, &format!(".{}", ext));
-
-                                return Response::builder()
-                                    .header("Content-Type", mime)
-                                    .header("Cache-Control", "public, max-age=86400")
-                                    .header("Access-Control-Allow-Origin", "*")
-                                    .body(buf).map_err(Into::into);
-                            }
-                        }
+        } else {
+            let target_name = {
+                let opened = state.opened_comic_files.read().unwrap();
+                opened.get(id).and_then(|names| names.get(page_index).cloned())
+            };
+            let target_name = match target_name {
+                Some(name) => name,
+                None => match crate::utils::get_archive_images(&full_path) {
+                    Ok(names) => match names.get(page_index) {
+                        Some(name) => name.clone(),
+                        None => return Response::builder().status(StatusCode::NOT_FOUND).body(b"archive page not found".to_vec()).map_err(Into::into),
+                    },
+                    Err(error) => {
+                        return Response::builder()
+                            .status(StatusCode::UNPROCESSABLE_ENTITY)
+                            .header("Access-Control-Allow-Origin", "*")
+                            .body(error.to_string().into_bytes())
+                            .map_err(Into::into);
                     }
+                },
+            };
+
+            match read_archive_page(&full_path, &target_name) {
+                Ok((buf, extension)) => {
+                    let mime = detect_mime(&buf, &extension);
+                    return Response::builder()
+                        .header("Content-Type", mime)
+                        .header("Cache-Control", "public, max-age=86400")
+                        .header("Access-Control-Allow-Origin", "*")
+                        .body(buf).map_err(Into::into);
+                }
+                Err(error) => {
+                    return Response::builder()
+                        .status(error.status())
+                        .header("Access-Control-Allow-Origin", "*")
+                        .body(error.to_string().into_bytes())
+                        .map_err(Into::into);
                 }
             }
         }
@@ -370,6 +422,8 @@ pub fn handle_comic_request(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::state::{ComicItem, Progress};
+    use std::io::Write;
 
     #[test]
     fn test_detect_mime_avif() {
@@ -423,6 +477,60 @@ mod tests {
         // When comic has not been opened yet, page_count is 0 (unknown).
         // Cover request (page_index = 0) must not be rejected with 416.
         assert!(!is_page_out_of_range(0, 0));
+    }
+
+    #[test]
+    fn corrupt_archive_page_reports_unprocessable_entity() {
+        let path = std::env::temp_dir().join(format!("comic-corrupt-{}.zip", std::process::id()));
+        std::fs::write(&path, b"not a zip").unwrap();
+        let error = read_archive_page(&path, "page.jpg").unwrap_err();
+        assert_eq!(error.status(), StatusCode::UNPROCESSABLE_ENTITY);
+        std::fs::remove_file(path).unwrap();
+    }
+
+    #[test]
+    fn missing_archive_entry_reports_not_found() {
+        let path = std::env::temp_dir().join(format!("comic-missing-page-{}.zip", std::process::id()));
+        let file = File::create(&path).unwrap();
+        let mut writer = zip::ZipWriter::new(file);
+        writer.start_file("page1.jpg", zip::write::FileOptions::default()).unwrap();
+        writer.write_all(b"image").unwrap();
+        writer.finish().unwrap();
+
+        let error = read_archive_page(&path, "page2.jpg").unwrap_err();
+        assert_eq!(error.status(), StatusCode::NOT_FOUND);
+        std::fs::remove_file(path).unwrap();
+    }
+
+    #[test]
+    fn external_path_requires_its_own_bookmark() {
+        let root = std::env::temp_dir().join(format!("comic-bookmark-{}", std::process::id()));
+        let other_root = std::env::temp_dir().join(format!("comic-other-bookmark-{}", std::process::id()));
+        std::fs::create_dir_all(&root).unwrap();
+        std::fs::create_dir_all(&other_root).unwrap();
+        let archive = root.join("book.zip");
+        std::fs::write(&archive, b"zip").unwrap();
+        let state = AppState::new();
+        state.active_bookmarks.lock().unwrap().insert("other".into(), root.to_string_lossy().into_owned());
+        state.active_bookmarks.lock().unwrap().insert("owner".into(), other_root.to_string_lossy().into_owned());
+        let comic = ComicItem {
+            id: "id".into(),
+            r#type: "external-archive".into(),
+            relative_path: archive.to_string_lossy().into_owned(),
+            ext: ".zip".into(),
+            title: "book".into(),
+            series: "test".into(),
+            updated_at: String::new(),
+            page_count: 0,
+            progress: Progress { current_page: 0, total_pages: 0, percent: 0.0, updated_at: None },
+            external_bookmark: Some("owner".into()),
+        };
+
+        assert!(!external_path_is_authorized(&comic, &archive, &state));
+        state.active_bookmarks.lock().unwrap().insert("owner".into(), root.to_string_lossy().into_owned());
+        assert!(external_path_is_authorized(&comic, &archive, &state));
+        std::fs::remove_dir_all(root).unwrap();
+        std::fs::remove_dir_all(other_root).unwrap();
     }
 
     #[test]

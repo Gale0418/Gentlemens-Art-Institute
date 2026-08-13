@@ -116,6 +116,7 @@ async fn scan_smb_dir(
                     updated_at: chrono::Utc::now().to_rfc3339(),
                     page_count: 0,
                     progress,
+                    external_bookmark: None,
                 });
             }
         }

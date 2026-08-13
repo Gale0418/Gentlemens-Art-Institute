@@ -45,4 +45,11 @@ impl<R: Runtime> TauriPluginIosFolder<R> {
       .run_mobile_plugin("stopAccessing", payload)
       .map_err(Into::into)
   }
+
+  pub fn ensure_available(&self, payload: EnsureAvailableRequest) -> crate::Result<EnsureAvailableResponse> {
+    self
+      .0
+      .run_mobile_plugin("ensureAvailable", payload)
+      .map_err(Into::into)
+  }
 }

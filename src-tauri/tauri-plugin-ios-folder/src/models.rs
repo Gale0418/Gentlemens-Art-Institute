@@ -24,3 +24,16 @@ pub struct StartAccessingResponse {
 pub struct StopAccessingRequest {
   pub bookmark: String,
 }
+
+#[derive(Debug, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct EnsureAvailableRequest {
+  pub bookmark: String,
+  pub path: String,
+}
+
+#[derive(Debug, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct EnsureAvailableResponse {
+  pub path: String,
+}

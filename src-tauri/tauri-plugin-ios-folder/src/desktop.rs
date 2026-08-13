@@ -25,4 +25,8 @@ impl<R: Runtime> TauriPluginIosFolder<R> {
   pub fn stop_accessing(&self, _payload: StopAccessingRequest) -> crate::Result<()> {
     Err(crate::Error::Io(std::io::Error::new(std::io::ErrorKind::Unsupported, "Not supported on desktop")))
   }
+
+  pub fn ensure_available(&self, _payload: EnsureAvailableRequest) -> crate::Result<EnsureAvailableResponse> {
+    Err(crate::Error::Io(std::io::Error::new(std::io::ErrorKind::Unsupported, "Not supported on desktop")))
+  }
 }

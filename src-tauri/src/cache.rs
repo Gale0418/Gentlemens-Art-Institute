@@ -63,74 +63,84 @@ pub async fn preload_comic(state: Arc<AppState>, app_handle: tauri::AppHandle, i
 
     // 只預載 Zip
     // BUG-03 修正：對 spawn_blocking 加上 .await 確保任務確實執行完畢
-    let _ = tokio::task::spawn_blocking(move || {
-        if let Ok(file) = File::open(&full_path) {
-            if let Ok(mut archive) = zip::ZipArchive::new(file) {
-                // 從 opened_comic_files 快取讀取，省去重新掃描跟排序的時間
-                let entry_names = {
-                    let opened = state.opened_comic_files.read().unwrap();
-                    opened.get(&id).cloned().unwrap_or_else(Vec::new)
-                };
+    let completion_handle = app_handle.clone();
+    let completion_state = state.clone();
+    let completion_id = id.clone();
+    let task = tokio::task::spawn_blocking(move || -> Result<Option<(usize, usize)>, String> {
+        let file = File::open(&full_path).map_err(|error| format!("無法讀取預載 ZIP：{error}"))?;
+        let mut archive = zip::ZipArchive::new(file).map_err(|error| format!("預載 ZIP 格式無效：{error}"))?;
+        let entry_names = {
+            let opened = state.opened_comic_files.read().unwrap();
+            opened.get(&id).cloned().unwrap_or_default()
+        };
 
-                let preload_count = entry_names.len().min(MAX_PRELOAD_PAGES);
-                let mut cached_bytes = 0;
-                let mut loaded_count = 0;
-                for (i, target_name) in entry_names.iter().take(preload_count).enumerate() {
-                    if state.preload_generation.load(std::sync::atomic::Ordering::Acquire) != generation {
-                        return;
-                    }
-                    if let Ok(mut file) = archive.by_name(target_name) {
-                        let expected_size = file.size() as usize;
-                        if expected_size > MAX_PRELOAD_BYTES.saturating_sub(cached_bytes) {
-                            break;
-                        }
-                        let mut buf = Vec::new();
-                        let remaining = MAX_PRELOAD_BYTES.saturating_sub(cached_bytes);
-                        if file.by_ref().take((remaining + 1) as u64).read_to_end(&mut buf).is_ok() {
-                            if buf.len() > remaining {
-                                break;
-                            }
-                            if state.preload_generation.load(std::sync::atomic::Ordering::Acquire) != generation {
-                                return;
-                            }
-                            cached_bytes += buf.len();
-                            // generation check 與寫入必須在同一個 lifecycle 區段內。
-                            let id_clone = id.clone();
-                            {
-                                let _lifecycle = state.comic_lifecycle.lock().unwrap();
-                                if state.preload_generation.load(std::sync::atomic::Ordering::Acquire) != generation {
-                                    return;
-                                }
-                                let mut pool = state.ram_cache_pool.lock().unwrap();
-                                let book_cache = pool.entry(id_clone.clone()).or_default();
-                                book_cache.insert(i, buf);
-                            }
-                            loaded_count = i + 1;
-                            
-                            // 發送進度到前端
-                            let _ = app_handle.emit("ram-cache-progress", serde_json::json!({
-                                "id": id_clone,
-                                "generation": generation,
-                                "loaded": i + 1,
-                                "total": preload_count,
-                                "finished": false
-                            }));
-                        }
-                    }
-                }
-
-                if state.preload_generation.load(std::sync::atomic::Ordering::Acquire) == generation {
-                    let _ = app_handle.emit("ram-cache-progress", serde_json::json!({
-                        "id": id,
-                        "generation": generation,
-                        "loaded": loaded_count,
-                        "total": preload_count,
-                        "finished": true
-                    }));
-                }
+        let preload_count = entry_names.len().min(MAX_PRELOAD_PAGES);
+        let mut cached_bytes = 0;
+        let mut loaded_count = 0;
+        for (i, target_name) in entry_names.iter().take(preload_count).enumerate() {
+            if state.preload_generation.load(std::sync::atomic::Ordering::Acquire) != generation {
+                return Ok(None);
             }
+            let mut file = archive.by_name(target_name)
+                .map_err(|error| format!("預載找不到 ZIP 頁面 {target_name}：{error}"))?;
+            let expected_size = file.size() as usize;
+            if expected_size > MAX_PRELOAD_BYTES.saturating_sub(cached_bytes) {
+                break;
+            }
+            let mut buf = Vec::new();
+            let remaining = MAX_PRELOAD_BYTES.saturating_sub(cached_bytes);
+            file.by_ref().take((remaining + 1) as u64).read_to_end(&mut buf)
+                .map_err(|error| format!("預載解壓 ZIP 頁面失敗：{error}"))?;
+            if buf.len() > remaining {
+                break;
+            }
+            if state.preload_generation.load(std::sync::atomic::Ordering::Acquire) != generation {
+                return Ok(None);
+            }
+            cached_bytes += buf.len();
+            let id_clone = id.clone();
+            {
+                let _lifecycle = state.comic_lifecycle.lock().unwrap();
+                if state.preload_generation.load(std::sync::atomic::Ordering::Acquire) != generation {
+                    return Ok(None);
+                }
+                let mut pool = state.ram_cache_pool.lock().unwrap();
+                pool.entry(id_clone.clone()).or_default().insert(i, buf);
+            }
+            loaded_count = i + 1;
+            let _ = app_handle.emit("ram-cache-progress", serde_json::json!({
+                "id": id_clone,
+                "generation": generation,
+                "loaded": loaded_count,
+                "total": preload_count,
+                "finished": false
+            }));
         }
+        Ok(Some((loaded_count, preload_count)))
     }).await;
+
+    if completion_state.preload_generation.load(std::sync::atomic::Ordering::Acquire) != generation {
+        return;
+    }
+    match task {
+        Ok(Ok(Some((loaded, total)))) => {
+            let _ = completion_handle.emit("ram-cache-progress", serde_json::json!({
+                "id": completion_id, "generation": generation, "loaded": loaded, "total": total, "finished": true
+            }));
+        }
+        Ok(Ok(None)) => {}
+        Ok(Err(error)) => {
+            let _ = completion_handle.emit("ram-cache-progress", serde_json::json!({
+                "id": completion_id, "generation": generation, "loaded": 0, "total": 0, "finished": true, "error": error
+            }));
+        }
+        Err(error) => {
+            let _ = completion_handle.emit("ram-cache-progress", serde_json::json!({
+                "id": completion_id, "generation": generation, "loaded": 0, "total": 0, "finished": true,
+                "error": format!("預載背景工作失敗：{error}")
+            }));
+        }
+    }
 }
 
 #[cfg(test)]

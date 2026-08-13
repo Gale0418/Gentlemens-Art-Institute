@@ -49,7 +49,7 @@ pub async fn start_background_scan(state: Arc<AppState>, app_handle: tauri::AppH
         let mut results = Vec::new();
         
         #[allow(clippy::too_many_arguments, clippy::manual_flatten)]
-        fn scan_recursive(dir: &Path, root_dir: &Path, depth: usize, results: &mut Vec<ComicItem>, app_handle: &tauri::AppHandle, state: &Arc<AppState>, my_gen: u64, all_progress: &std::collections::HashMap<String, Progress>, virtual_prefix: Option<&str>) {
+        fn scan_recursive(dir: &Path, root_dir: &Path, depth: usize, results: &mut Vec<ComicItem>, app_handle: &tauri::AppHandle, state: &Arc<AppState>, my_gen: u64, all_progress: &std::collections::HashMap<String, Progress>, virtual_prefix: Option<&str>, external_bookmark: Option<&str>) {
             if depth > 100 { return; }
             if state.scan_generation.load(std::sync::atomic::Ordering::Relaxed) != my_gen { return; }
             
@@ -117,6 +117,7 @@ pub async fn start_background_scan(state: Arc<AppState>, app_handle: tauri::AppH
                                         id, r#type: c_type, relative_path: virtual_path,
                                         ext: ext_lower, title, series, updated_at, page_count: 0,
                                         progress: saved_progress,
+                                        external_bookmark: external_bookmark.map(str::to_owned),
                                     });
                                 }
                             }
@@ -160,19 +161,20 @@ pub async fn start_background_scan(state: Arc<AppState>, app_handle: tauri::AppH
                             id, r#type: c_type, relative_path: virtual_path,
                             ext: "".to_string(), title, series, updated_at, page_count: 0,
                             progress: saved_progress,
+                            external_bookmark: external_bookmark.map(str::to_owned),
                         });
                     }
                 }
             }
             
             for subdir in subdirs {
-                scan_recursive(&subdir, root_dir, depth + 1, results, app_handle, state, my_gen, all_progress, virtual_prefix);
+                scan_recursive(&subdir, root_dir, depth + 1, results, app_handle, state, my_gen, all_progress, virtual_prefix, external_bookmark);
             }
         }
         
         let root_path = Path::new(&scan_dir_clone);
         let state_clone2 = state_clone_for_spawn.clone();
-        scan_recursive(root_path, root_path, 0, &mut results, &app_handle_clone, &state_clone2, my_gen, &all_progress, None);
+        scan_recursive(root_path, root_path, 0, &mut results, &app_handle_clone, &state_clone2, my_gen, &all_progress, None, None);
         
         // Scan external bookmarks
         let external_bookmarks = { state_clone2.external_bookmarks.read().unwrap().clone() };
@@ -181,14 +183,29 @@ pub async fn start_background_scan(state: Arc<AppState>, app_handle: tauri::AppH
             #[cfg(target_os = "ios")]
             {
                 use tauri_plugin_ios_folder::StartAccessingRequest;
+                use tauri_plugin_ios_folder::StopAccessingRequest;
                 use tauri_plugin_ios_folder::TauriPluginIosFolderExt;
+                if state_clone2.scan_generation.load(std::sync::atomic::Ordering::Acquire) != my_gen {
+                    break;
+                }
                 if let Ok(res) = app_handle_clone.tauri_plugin_ios_folder().start_accessing(StartAccessingRequest { bookmark: bookmark_entry.bookmark.clone() }) {
+                    if state_clone2.scan_generation.load(std::sync::atomic::Ordering::Acquire) != my_gen {
+                        let still_configured = state_clone2.external_bookmarks.read().unwrap()
+                            .iter()
+                            .any(|entry| entry.bookmark == bookmark_entry.bookmark);
+                        if !still_configured {
+                            let _ = app_handle_clone.tauri_plugin_ios_folder().stop_accessing(StopAccessingRequest {
+                                bookmark: bookmark_entry.bookmark.clone(),
+                            });
+                        }
+                        continue;
+                    }
                     let resolved_path = Path::new(&res.path);
                     {
                         let mut active = state_clone2.active_bookmarks.lock().unwrap();
                         active.insert(bookmark_entry.bookmark.clone(), res.path.clone());
                     }
-                    scan_recursive(resolved_path, resolved_path, 0, &mut results, &app_handle_clone, &state_clone2, my_gen, &all_progress, Some(&bookmark_entry.name));
+                    scan_recursive(resolved_path, resolved_path, 0, &mut results, &app_handle_clone, &state_clone2, my_gen, &all_progress, Some(&bookmark_entry.name), Some(&bookmark_entry.bookmark));
                 }
             }
         }

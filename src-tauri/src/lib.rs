@@ -149,18 +149,30 @@ async fn open_comic(id: String, state: State<'_, Arc<AppState>>, app_handle: tau
         }
     } else if is_external {
         full_path = Path::new(&relative_path_str).to_path_buf();
-        if !full_path.exists() {
-            return Err("找不到外部漫畫！".into());
-        }
         #[cfg(target_os = "ios")]
         {
-            let canonical = full_path.canonicalize().map_err(|error| format!("外部漫畫路徑無效: {error}"))?;
-            let allowed = state.active_bookmarks.lock().unwrap().values()
-                .filter_map(|root| Path::new(root).canonicalize().ok())
-                .any(|root| canonical.starts_with(root));
-            if !allowed {
-                return Err("外部資料夾權限尚未啟用，請重新加入資料夾".into());
+            use tauri_plugin_ios_folder::{EnsureAvailableRequest, TauriPluginIosFolderExt};
+
+            let bookmark = comic_info.external_bookmark.as_ref()
+                .ok_or_else(|| "外部漫畫缺少資料夾權限關聯，請重新掃描書庫".to_string())?;
+            let active_root = state.active_bookmarks.lock().unwrap().get(bookmark).cloned()
+                .ok_or_else(|| "外部資料夾權限尚未啟用，請重新加入資料夾".to_string())?;
+            let root_path = Path::new(&active_root);
+            if !full_path.starts_with(root_path) {
+                return Err("外部漫畫不屬於原先授權的資料夾".into());
             }
+            app_handle.tauri_plugin_ios_folder().ensure_available(EnsureAvailableRequest {
+                bookmark: bookmark.clone(),
+                path: full_path.to_string_lossy().into_owned(),
+            }).map_err(|error| format!("外部漫畫尚未下載完成或無法讀取：{error}"))?;
+            let canonical = full_path.canonicalize().map_err(|error| format!("外部漫畫路徑無效: {error}"))?;
+            let canonical_root = root_path.canonicalize().map_err(|error| format!("外部資料夾路徑無效: {error}"))?;
+            if !canonical.starts_with(canonical_root) {
+                return Err("外部漫畫路徑超出授權範圍".into());
+            }
+        }
+        if !full_path.exists() {
+            return Err("找不到外部漫畫！".into());
         }
         is_dir = full_path.is_dir();
     } else {
@@ -365,6 +377,7 @@ async fn set_smb_config(app_handle: tauri::AppHandle, state: State<'_, Arc<AppSt
 #[tauri::command]
 async fn set_bookmarks(data: Vec<crate::state::ExternalBookmark>, state: State<'_, Arc<AppState>>, app_handle: tauri::AppHandle) -> Result<(), String> {
     let old_bookmarks = { state.external_bookmarks.read().unwrap().clone() };
+    state.scan_generation.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
 
     let removed_bookmarks: Vec<_> = old_bookmarks.into_iter()
         .filter(|old| !data.iter().any(|new_b| new_b.bookmark == old.bookmark))
@@ -384,7 +397,6 @@ async fn set_bookmarks(data: Vec<crate::state::ExternalBookmark>, state: State<'
     }
 
     *state.external_bookmarks.write().unwrap() = data;
-    state.scan_generation.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
     let state_clone = state.inner().clone();
     tauri::async_runtime::spawn(async move {
         crate::scanner::start_background_scan(state_clone, app_handle).await;

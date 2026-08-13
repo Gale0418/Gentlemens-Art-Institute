@@ -23,6 +23,8 @@ pub struct ComicItem {
     pub updated_at: String, // ISO8601 String
     pub page_count: usize,
     pub progress: Progress,
+    #[serde(skip)]
+    pub external_bookmark: Option<String>,
 }
 
 #[derive(Debug, Serialize, Deserialize, Clone)]

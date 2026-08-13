@@ -263,7 +263,12 @@ async function initApp() {
       savedBookmarks = JSON.parse(localStorage.getItem('comic-reader:externalBookmarks') || '[]');
     } catch (e) {}
     if (savedBookmarks.length > 0) {
-      try { await eAPI.setBookmarks(savedBookmarks); } catch(e) {}
+      try {
+        await eAPI.setBookmarks(savedBookmarks);
+      } catch (error) {
+        console.error('恢復外部資料夾失敗：', error);
+        alert('部分外部資料夾權限無法恢復，請在設定中重新加入：\n' + error);
+      }
     }
   }
   await fetchLibrary();
@@ -508,8 +513,8 @@ function bindEvents() {
             // 如果已經有同一個資料夾就不重複加
             if (!bookmarks.some(b => b.name === result.name && b.bookmark === result.bookmark)) {
               bookmarks.push({ bookmark: result.bookmark, name: result.name });
-              localStorage.setItem('comic-reader:externalBookmarks', JSON.stringify(bookmarks));
               await window.electronAPI.setBookmarks(bookmarks);
+              localStorage.setItem('comic-reader:externalBookmarks', JSON.stringify(bookmarks));
               renderExternalBookmarks();
               alert('成功加入外部資料夾：' + result.name + '\n即將為您重新掃描...');
               elements.refreshBtn.click();
@@ -545,7 +550,7 @@ function bindEvents() {
     if (window.electronAPI.onRamCacheProgress) {
       window.electronAPI.onRamCacheProgress((data) => {
         if (state.currentComic && data.id === state.currentComic.id && data.generation === state.currentComic.preloadGeneration) {
-          updateRamCacheProgress(data.loaded, data.total, data.finished);
+          updateRamCacheProgress(data.loaded, data.total, data.finished, data.error);
         }
       });
     }
@@ -2435,8 +2440,15 @@ function forceHideLoader() {
 }
 
 // 🚀 姬米妮貼心設計：更新記憶體快取進度條，載入完成後自動隱藏保持介面清爽！
-function updateRamCacheProgress(loaded, total, finished = false) {
+function updateRamCacheProgress(loaded, total, finished = false, error = null) {
   if (!elements.statusRam) return;
+
+  if (error) {
+    console.error('[RAM preload]', error);
+    elements.statusRam.innerHTML = '<i class="fa-solid fa-triangle-exclamation"></i> RAM 預載略過，將改為逐頁讀取';
+    elements.statusRam.style.color = 'var(--accent-red)';
+    return;
+  }
   
   if (finished || loaded >= total) {
     elements.statusRam.innerHTML = '<i class="fa-solid fa-memory" style="color: var(--accent);"></i> ⚡ RAM 已全載入';
@@ -2616,10 +2628,16 @@ function renderExternalBookmarks() {
     delBtn.style.cursor = 'pointer';
     delBtn.onclick = async () => {
       if (confirm(`確定要移除外部資料夾 [${b.name}] 嗎？`)) {
-        bookmarks.splice(idx, 1);
-        localStorage.setItem('comic-reader:externalBookmarks', JSON.stringify(bookmarks));
-        if (window.electronAPI && window.electronAPI.setBookmarks) {
-          try { await window.electronAPI.setBookmarks(bookmarks); } catch(e){}
+        const nextBookmarks = bookmarks.filter((_, bookmarkIndex) => bookmarkIndex !== idx);
+        try {
+          if (window.electronAPI && window.electronAPI.setBookmarks) {
+            await window.electronAPI.setBookmarks(nextBookmarks);
+          }
+          localStorage.setItem('comic-reader:externalBookmarks', JSON.stringify(nextBookmarks));
+        } catch (error) {
+          console.error('移除外部資料夾失敗：', error);
+          alert('移除失敗，原本的資料夾權限已保留：\n' + error);
+          return;
         }
         renderExternalBookmarks();
         alert('移除成功，將為您重新掃描...');

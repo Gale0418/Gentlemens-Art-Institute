@@ -18,6 +18,11 @@ const protocol = readRequiredFile('src-tauri/src/protocol.rs', 'Tauri protocol')
 const tauriProtocol = readRequiredFile('src-tauri/src/protocol.rs', 'Tauri comic protocol');
 const tauriConfig = readRequiredFile('src-tauri/tauri.conf.json', 'Tauri config');
 const appleProject = readRequiredFile('src-tauri/gen/apple/project.yml', 'Apple project config');
+const cargoManifest = readRequiredFile('src-tauri/Cargo.toml', 'Cargo manifest');
+const patchedWry = readRequiredFile(
+  'src-tauri/vendor/wry/src/wkwebview/mod.rs',
+  'patched Wry WKWebView runtime'
+);
 
 const mustContain = (source, needle, label) => {
   assert.ok(source.includes(needle), `${label}: missing ${needle}`);
@@ -26,6 +31,17 @@ const mustContain = (source, needle, label) => {
 mustContain(html, 'id="continue-strip"', 'library layout');
 mustContain(tauriConfig, 'com.windsheep.comicreader', 'Tauri bundle identifier');
 mustContain(appleProject, 'com.windsheep.comicreader', 'Apple bundle identifier');
+mustContain(cargoManifest, 'wry = { path = "vendor/wry" }', 'local Wry patch');
+assert.match(
+  patchedWry,
+  /#\[cfg\(target_os = "ios"\)\]\s*return Ok\("WKWebView \(iOS system framework\)"\.into\(\)\);/,
+  'iOS startup must not query the unavailable com.apple.WebKit bundle'
+);
+assert.match(
+  patchedWry,
+  /#\[cfg\(not\(target_os = "ios"\)\)\]\s*unsafe \{\s*let Some\(bundle\) = NSBundle::bundleWithIdentifier/,
+  'non-iOS WebKit version detection should retain the upstream behavior'
+);
 mustContain(html, 'id="comic-inspector"', 'library layout');
 mustContain(html, 'id="reader-context-menu"', 'reader context menu');
 mustContain(html, 'id="theme-picker"', 'theme picker');

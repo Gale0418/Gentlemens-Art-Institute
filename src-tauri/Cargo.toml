@@ -36,3 +36,6 @@ tauri-plugin-ios-folder = { path = "./tauri-plugin-ios-folder" }
 
 [target.'cfg(not(target_os = "ios"))'.dependencies]
 trash = "5.2.3"
+
+[patch.crates-io]
+wry = { path = "vendor/wry" }

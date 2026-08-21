@@ -114,10 +114,10 @@ let state = {
 const THEME_STORAGE_KEY = 'comic-reader:theme';
 const THEMES = new Set(['midnight', 'sakura', 'ink', 'aurora']);
 const THEME_COLORS = {
-  midnight: '#11100f',
-  sakura: '#f5eee8',
-  ink: '#e8e4db',
-  aurora: '#080d18'
+  midnight: '#140508',
+  sakura: '#050506',
+  ink: '#03140d',
+  aurora: '#161004'
 };
 
 // 元素選取器

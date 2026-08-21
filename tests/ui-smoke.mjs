@@ -63,6 +63,11 @@ for (const theme of ['midnight', 'sakura', 'ink', 'aurora']) {
   mustContain(html, `data-theme-option="${theme}"`, `theme option ${theme}`);
   mustContain(css, `html[data-theme="${theme}"]`, `theme styling ${theme}`);
 }
+for (const themeName of ['赤晶戰殿', '黑鉻指揮艙', '翡翠反應爐', '鎏金王座']) {
+  mustContain(html, themeName, `premium chromatic theme ${themeName}`);
+}
+mustContain(css, '--on-accent:', 'accessible accent foreground tokens');
+mustContain(css, '@keyframes showroom-sweep', 'mirror-plated showroom sweep');
 
 mustContain(css, '.continue-strip', 'library styling');
 mustContain(css, '.comic-inspector', 'library styling');

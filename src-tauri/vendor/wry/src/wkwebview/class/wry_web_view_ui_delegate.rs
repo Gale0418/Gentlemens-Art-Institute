@@ -133,7 +133,10 @@ define_class!(
       decision_handler: &Block<dyn Fn(WKPermissionDecision)>,
     ) {
       //https://developer.apple.com/documentation/webkit/wkpermissiondecision?language=objc
-      (*decision_handler).call((WKPermissionDecision::Grant,));
+      // Wry does not expose an application-level media permission policy, so
+      // deny capture by default instead of granting camera/microphone access
+      // to every origin loaded in the webview.
+      (*decision_handler).call((WKPermissionDecision::Deny,));
     }
 
     #[cfg(target_os = "macos")]

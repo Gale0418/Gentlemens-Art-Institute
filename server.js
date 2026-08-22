@@ -68,7 +68,7 @@ app.use(express.json());
 app.use(express.static(path.join(__dirname, 'public')));
 
 // 支援的圖片副檔名
-const IMAGE_EXTENSIONS = ['.jpg', '.jpeg', '.png', '.webp', '.gif', '.svg'];
+const IMAGE_EXTENSIONS = ['.jpg', '.jpeg', '.png', '.webp', '.gif'];
 const MAX_IMAGE_BYTES = 64 * 1024 * 1024;
 const configuredScanDepth = Number.parseInt(process.env.COMIC_SCAN_MAX_DEPTH || '', 10);
 
@@ -82,12 +82,29 @@ function getImageMime(ext) {
     case '.png': return 'image/png';
     case '.webp': return 'image/webp';
     case '.gif': return 'image/gif';
-    case '.svg': return 'image/svg+xml';
+    // SVG is served as inert data so uploaded markup cannot execute as active content.
+    case '.svg': return 'application/octet-stream';
     case '.avif': return 'image/avif';
     case '.jpg':
     case '.jpeg': return 'image/jpeg';
     default: return 'application/octet-stream';
   }
+}
+
+function isStrictBase64Url(value) {
+  if (typeof value !== 'string' || value.length === 0 || !/^[A-Za-z0-9_-]+$/.test(value)) return false;
+  try {
+    return Buffer.from(value, 'base64url').toString('base64url') === value;
+  } catch (e) {
+    return false;
+  }
+}
+
+function isStrictPageIndex(value) {
+  if (typeof value === 'number') return Number.isSafeInteger(value) && value >= 0;
+  return typeof value === 'string'
+    && /^(0|[1-9]\d*)$/.test(value)
+    && Number.isSafeInteger(Number(value));
 }
 
 // 避開系統隱藏檔案與 macOS 垃圾資料夾
@@ -644,11 +661,18 @@ async function serveComicPage(req, res, forcedPage = null) {
       return res.status(400).json({ error: '缺少 id 或 page 參數！' });
     }
 
+    // Validate the raw capability token before using it for caches or filesystem paths.
+    if (!isStrictBase64Url(id)) {
+      return res.status(400).json({ error: '漫畫識別碼格式不正確！' });
+    }
+    res.setHeader('X-Content-Type-Options', 'nosniff');
+
     const relativePath = Buffer.from(id, 'base64url').toString('utf-8');
     const fullPath = path.resolve(currentComicDir, relativePath);
-    const pageIndex = forcedPage ?? Number.parseInt(page, 10);
+    const rawPage = forcedPage === null ? page : forcedPage;
+    const pageIndex = Number(rawPage);
 
-    if (!Number.isInteger(pageIndex) || pageIndex < 0) {
+    if (!isStrictPageIndex(rawPage)) {
       return res.status(400).json({ error: '頁碼格式不正確！' });
     }
 

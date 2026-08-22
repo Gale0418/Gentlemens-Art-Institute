@@ -14,7 +14,6 @@ const html = readRequiredFile('public/index.html', 'HTML');
 const css = readRequiredFile('public/style.css', 'CSS');
 const server = readRequiredFile('server.js', 'server');
 const tauri = readRequiredFile('src-tauri/src/lib.rs', 'Tauri commands');
-const protocol = readRequiredFile('src-tauri/src/protocol.rs', 'Tauri protocol');
 const tauriProtocol = readRequiredFile('src-tauri/src/protocol.rs', 'Tauri comic protocol');
 const tauriConfig = readRequiredFile('src-tauri/tauri.conf.json', 'Tauri config');
 const appleProject = readRequiredFile('src-tauri/gen/apple/project.yml', 'Apple project config');
@@ -39,7 +38,7 @@ mustContain(appleProject, 'com.windsheep.comicreader', 'Apple bundle identifier'
 mustContain(cargoManifest, 'wry = { path = "vendor/wry" }', 'local Wry patch');
 assert.match(
   patchedWry,
-  /#\[cfg\(target_os = "ios"\)\]\s*return Ok\("WKWebView \(iOS system framework\)"\.into\(\)\);/,
+  /#\[cfg\(target_os = "ios"\)\]\s*(?:return Ok\("WKWebView \(iOS system framework\)"\.into\(\);|\{\s*let \(major, minor, patch\) = operating_system_version\(\);\s*return Ok\(format!\("\{major\}\.\{minor\}\.\{patch\}"\)\);\s*\})/,
   'iOS startup must not query the unavailable com.apple.WebKit bundle'
 );
 assert.match(
@@ -48,6 +47,7 @@ assert.match(
   'non-iOS WebKit version detection should retain the upstream behavior'
 );
 mustContain(html, 'id="comic-inspector"', 'library layout');
+mustContain(html, 'id="comic-grid" tabindex="-1"', 'library focus target');
 mustContain(html, 'id="reader-context-menu"', 'reader context menu');
 mustContain(html, 'id="theme-picker"', 'theme picker');
 mustContain(html, 'viewport-fit=cover', 'iPad safe-area viewport');
@@ -68,6 +68,9 @@ for (const themeName of ['赤晶戰殿', '黑鉻指揮艙', '翡翠反應爐', '
 }
 mustContain(css, '--on-accent:', 'accessible accent foreground tokens');
 mustContain(css, '@keyframes showroom-sweep', 'mirror-plated showroom sweep');
+assert.doesNotMatch(css, /animation:\s*showroom-sweep[^;]*infinite/);
+const actionButtonBlock = css.slice(css.indexOf('.modal-action-btn,'), css.indexOf('.theme-preview i'));
+assert.doesNotMatch(actionButtonBlock, /animation:\s*plated-flow/);
 
 mustContain(css, '.continue-strip', 'library styling');
 mustContain(css, '.comic-inspector', 'library styling');
@@ -82,6 +85,8 @@ mustContain(app, 'function jumpToLastPage()', 'keyboard navigation');
 mustContain(app, 'function handleReaderPointerClick', 'mouse navigation');
 mustContain(app, 'function handleReaderContextMenu', 'mouse context menu');
 mustContain(app, 'function handleReaderAuxClick', 'mouse side buttons');
+mustContain(app, 'state._smbLoaderTimer = null;', 'SMB loader timer cleanup');
+assert.doesNotMatch(app, /closest\?\.\('button, input, select, textarea'\) && e\.key/);
 mustContain(app, 'function hideReaderContextMenu', 'mouse context menu');
 mustContain(app, 'const httpAPI', 'browser fallback');
 mustContain(app, "window.electronAPI || httpAPI", 'browser fallback');

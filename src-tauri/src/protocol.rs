@@ -57,7 +57,7 @@ fn get_mime(ext: &str) -> &'static str {
         ".png" => "image/png",
         ".webp" => "image/webp",
         ".gif" => "image/gif",
-        ".svg" => "image/svg+xml",
+        ".svg" => "application/octet-stream",
         ".jpg" | ".jpeg" => "image/jpeg",
         ".avif" => "image/avif",
         _ => "application/octet-stream",
@@ -335,6 +335,10 @@ pub fn handle_comic_request(
             }
         }
 
+        if !full_path.exists() {
+            return Response::builder().status(StatusCode::NOT_FOUND).body(b"not found".to_vec()).map_err(Into::into);
+        }
+
         if is_smb {
             let temp_root = app.path().app_local_data_dir().unwrap_or_else(|_| std::env::temp_dir()).join("ComicTemp");
             match (full_path.canonicalize(), temp_root.canonicalize()) {
@@ -459,6 +463,11 @@ mod tests {
     #[test]
     fn test_detect_mime_unknown_is_not_jpeg() {
         assert_eq!(detect_mime(b"not an image", ""), "application/octet-stream");
+    }
+
+    #[test]
+    fn svg_is_served_as_inert_binary() {
+        assert_eq!(get_mime(".svg"), "application/octet-stream");
     }
 
     #[test]

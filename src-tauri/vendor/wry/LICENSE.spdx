@@ -1,20 +1,18 @@
 SPDXVersion: SPDX-2.1
 DataLicense: CC0-1.0
+SPDXID: SPDXRef-DOCUMENT
+DocumentName: wry
+DocumentNamespace: https://github.com/tauri-apps/wry/spdx/wry-0.55.1
+Creator: Person: Daniel Thompson-Yvetot
+Created: 2020-05-20T09:00:00Z
+
 PackageName: wry
-DataFormat: SPDXRef-1
+SPDXID: SPDXRef-Package
+PackageVersion: 0.55.1
 PackageSupplier: Organization: The Tauri Programme in the Commons Conservancy
 PackageHomePage: https://tauri.app
-PackageLicenseDeclared: Apache-2.0
-PackageLicenseDeclared: MIT
+PackageLicenseConcluded: Apache-2.0 OR MIT
+PackageLicenseDeclared: Apache-2.0 OR MIT
 PackageCopyrightText: 2020-2023, The Tauri Programme in the Commons Conservancy
-PackageSummary: <text>Wry is the official, rust-based webview
-windowing service for Tauri.
-                </text>
-PackageComment: <text>The package includes the following libraries; see
-Relationship information.
-                </text>
-Created: 2020-05-20T09:00:00Z
-PackageDownloadLocation: git://github.com/tauri-apps/wry
-PackageDownloadLocation: git+https://github.com/tauri-apps/wry.git
-PackageDownloadLocation: git+ssh://github.com/tauri-apps/wry.git
-Creator: Person: Daniel Thompson-Yvetot
+PackageSummary: <text>Wry is the official, rust-based webview windowing service for Tauri.</text>
+PackageDownloadLocation: https://github.com/tauri-apps/wry

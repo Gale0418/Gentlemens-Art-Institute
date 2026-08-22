@@ -98,9 +98,9 @@ Download the `cmdline-tools`
 cd ~/Downloads
 
 # if you are on Linux/WSL:
-wget https://dl.google.com/android/repository/commandlinetools-linux-8512546_latest.zip -O
+wget https://dl.google.com/android/repository/commandlinetools-linux-8512546_latest.zip -O cmdline-tools.zip
 # if you are on macos:
-wget https://dl.google.com/android/repository/commandlinetools-mac-8512546_latest.zip -O
+wget https://dl.google.com/android/repository/commandlinetools-mac-8512546_latest.zip -O cmdline-tools.zip
 
 unzip cmdline-tools.zip
 cd cmdline-tools

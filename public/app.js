@@ -276,6 +276,14 @@ async function initApp() {
 }
 
 // 綁定所有點擊與輸入事件
+function classifyBookmarkUpdateError(error) {
+  const message = error && error.message ? error.message : String(error);
+  return {
+    message,
+    stateWasUpdated: /狀態已更新|設定已更新|BOOKMARKS_UPDATED|PARTIAL_SUCCESS/i.test(message)
+  };
+}
+
 function bindEvents() {
   // 搜尋功能
   elements.searchInput.addEventListener('input', handleSearch);
@@ -503,6 +511,7 @@ function bindEvents() {
           alert('本環境不支援加入外部資料夾');
           return;
         }
+        let desiredBookmarks = null;
         try {
           const result = await window.electronAPI.openExternalFolder();
           if (result && result.bookmark) {
@@ -513,6 +522,7 @@ function bindEvents() {
             // 如果已經有同一個資料夾就不重複加
             if (!bookmarks.some(b => b.name === result.name && b.bookmark === result.bookmark)) {
               bookmarks.push({ bookmark: result.bookmark, name: result.name });
+              desiredBookmarks = bookmarks;
               await window.electronAPI.setBookmarks(bookmarks);
               localStorage.setItem('comic-reader:externalBookmarks', JSON.stringify(bookmarks));
               renderExternalBookmarks();
@@ -524,7 +534,15 @@ function bindEvents() {
           }
         } catch(e) {
           console.error(e);
-          alert('加入失敗：' + e);
+          const { message, stateWasUpdated } = classifyBookmarkUpdateError(e);
+          if (stateWasUpdated && desiredBookmarks) {
+            localStorage.setItem('comic-reader:externalBookmarks', JSON.stringify(desiredBookmarks));
+            renderExternalBookmarks();
+            alert('外部資料夾已更新，但舊資料夾權限釋放部分失敗：' + message + '\n目前設定已套用，掃描會在背景繼續。');
+            elements.refreshBtn.click();
+          } else {
+            alert('加入失敗：' + message);
+          }
         }
       });
     }
@@ -569,6 +587,7 @@ function bindEvents() {
     if (window.electronAPI.onSmbDownloadEnd) {
       window.electronAPI.onSmbDownloadEnd((data) => {
         clearTimeout(state._smbLoaderTimer);
+        state._smbLoaderTimer = null;
         hideLoader();
       });
     }
@@ -1297,6 +1316,8 @@ async function openReader(comicId) {
     const message = typeof e === 'string' ? e : (e && e.message) || String(e);
     alert('讀取漫畫資料失敗：' + message);
   } finally {
+    clearTimeout(state._smbLoaderTimer);
+    state._smbLoaderTimer = null;
     if (operation === state.readerOperation) hideLoader();
   }
 }
@@ -1862,7 +1883,7 @@ function handleReaderPointerClick(e) {
 
 function handleReaderAuxClick(e) {
   if (elements.readerOverlay.style.display === 'none') return;
-  if (e.target.closest?.('button, input, select, textarea') && e.key !== 'Escape') return;
+  if (e.target.closest?.('button, input, select, textarea')) return;
   if (e.button !== 3 && e.button !== 4) return;
   e.preventDefault();
 

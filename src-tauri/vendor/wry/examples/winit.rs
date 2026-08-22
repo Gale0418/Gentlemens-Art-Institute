@@ -36,8 +36,9 @@ impl ApplicationHandler for State {
   ) {
     match event {
       WindowEvent::Resized(size) => {
-        let window = self.window.as_ref().unwrap();
-        let webview = self.webview.as_ref().unwrap();
+        let (Some(window), Some(webview)) = (self.window.as_ref(), self.webview.as_ref()) else {
+          return;
+        };
 
         let size = size.to_logical::<u32>(window.scale_factor());
         webview

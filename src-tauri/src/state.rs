@@ -50,7 +50,7 @@ impl std::fmt::Debug for SmbConfig {
         f.debug_struct("SmbConfig")
             .field("host", &self.host)
             .field("share", &self.share)
-            .field("username", &self.username)
+            .field("username", &self.username.as_ref().map(|_| "***"))
             .field("password", &self.password.as_ref().map(|_| "***"))
             .finish()
     }
@@ -68,6 +68,7 @@ pub struct AppState {
     // BUG-13 修正：移除從未使用的 progress_data 欄位，避免混淆維護者
     pub scan_progress: Mutex<ScanProgress>,
     pub scan_generation: std::sync::atomic::AtomicU64,
+    pub scan_lifecycle: Mutex<()>,
     pub preload_generation: std::sync::atomic::AtomicU64,
     // (comic_id, page_index) -> byte array
     pub ram_cache_pool: std::sync::Mutex<HashMap<String, HashMap<usize, Vec<u8>>>>,
@@ -78,6 +79,7 @@ pub struct AppState {
     pub progress_file_lock: tokio::sync::Mutex<()>,
     pub active_bookmarks: std::sync::Mutex<HashMap<String, String>>,
     pub active_comic_id: std::sync::Mutex<Option<String>>,
+    pub pending_open_id: std::sync::Mutex<Option<String>>,
     pub comic_lifecycle: std::sync::Mutex<()>,
     pub reader_generation: std::sync::atomic::AtomicU64,
 }
@@ -95,6 +97,7 @@ impl AppState {
                 completed_at: None,
             }),
             scan_generation: std::sync::atomic::AtomicU64::new(0),
+            scan_lifecycle: Mutex::new(()),
             preload_generation: std::sync::atomic::AtomicU64::new(0),
             ram_cache_pool: std::sync::Mutex::new(HashMap::new()),
             opened_comic_files: std::sync::RwLock::new(HashMap::new()),
@@ -103,6 +106,7 @@ impl AppState {
             progress_file_lock: tokio::sync::Mutex::new(()),
             active_bookmarks: std::sync::Mutex::new(HashMap::new()),
             active_comic_id: std::sync::Mutex::new(None),
+            pending_open_id: std::sync::Mutex::new(None),
             comic_lifecycle: std::sync::Mutex::new(()),
             reader_generation: std::sync::atomic::AtomicU64::new(0),
         }

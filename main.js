@@ -39,7 +39,7 @@ function saveFavorites(favorites) {
 }
 
 
-const IMAGE_EXTENSIONS = ['.jpg', '.jpeg', '.png', '.webp', '.gif', '.svg'];
+const IMAGE_EXTENSIONS = ['.jpg', '.jpeg', '.png', '.webp', '.gif'];
 const MAX_IMAGE_BYTES = 64 * 1024 * 1024;
 const configuredScanDepth = Number.parseInt(process.env.COMIC_SCAN_MAX_DEPTH || '', 10);
 function isImage(n) { return IMAGE_EXTENSIONS.includes(path.extname(n).toLowerCase()); }
@@ -579,8 +579,26 @@ function getMime(ext) {
   if (ext === '.png') return 'image/png';
   if (ext === '.webp') return 'image/webp';
   if (ext === '.gif') return 'image/gif';
-  if (ext === '.svg') return 'image/svg+xml';
+  // SVG is served as inert data so uploaded markup cannot execute as active content.
+  if (ext === '.svg') return 'application/octet-stream';
   return 'image/jpeg';
+}
+
+function isStrictBase64Url(value) {
+  if (typeof value !== 'string' || value.length === 0 || !/^[A-Za-z0-9_-]+$/.test(value)) return false;
+  try {
+    return Buffer.from(value, 'base64url').toString('base64url') === value;
+  } catch (e) {
+    return false;
+  }
+}
+
+function isStrictPageIndex(value) {
+  return typeof value === 'string' && /^(0|[1-9]\d*)$/.test(value) && Number.isSafeInteger(Number(value));
+}
+
+function isWithinDirectory(candidate, directory) {
+  return candidate === directory || candidate.startsWith(directory + path.sep);
 }
 
 function registerComicProtocol() {
@@ -595,11 +613,29 @@ function registerComicProtocol() {
 
       if (host === 'folder') {
         // comic://folder/{base64folderPath}/{index}
+        if (parts.length !== 2 || !isStrictBase64Url(parts[0]) || !isStrictPageIndex(parts[1])) {
+          return new Response('invalid folder path', { status: 400 });
+        }
         const folderPath = Buffer.from(parts[0], 'base64url').toString('utf-8');
-        const index = parseInt(parts[1], 10);
+        const index = Number(parts[1]);
+
+        let resolvedFolder;
+        let resolvedScanDir;
+        try {
+          resolvedFolder = fs.realpathSync(folderPath);
+          resolvedScanDir = fs.realpathSync(currentScanDir);
+        } catch (e) {
+          return new Response('invalid folder path', { status: 403 });
+        }
+        if (!isWithinDirectory(resolvedFolder, resolvedScanDir)) {
+          return new Response('forbidden', { status: 403 });
+        }
         
-        // 🚀 檢查是否在極致 RAM 快取中
         const folderId = parts[0];
+        const images = getFolderImages(folderPath);
+        if (index < 0 || index >= images.length) return new Response('not found', { status: 404 });
+
+        // 🚀 檢查是否在極致 RAM 快取中
         if (ramCachePool.has(folderId)) {
           const bookCache = ramCachePool.get(folderId);
           if (bookCache.has(index)) {
@@ -608,8 +644,6 @@ function registerComicProtocol() {
           }
         }
 
-        const images = getFolderImages(folderPath);
-        if (index < 0 || index >= images.length) return new Response('not found', { status: 404 });
         const imgPath = path.join(folderPath, images[index]);
         const ext = path.extname(images[index]).toLowerCase();
         const data = await readImageFile(imgPath);
@@ -624,8 +658,11 @@ function registerComicProtocol() {
       }
 
       if (host === 'page' || host === 'cover') {
+        if (!parts[0] || !isStrictBase64Url(parts[0]) || (host === 'cover' && parts.length !== 1) || (host === 'page' && (parts.length !== 2 || !isStrictPageIndex(parts[1])))) {
+          return new Response('invalid page path', { status: 400 });
+        }
         const id = parts[0];
-        const pageIndex = host === 'cover' ? 0 : parseInt(parts[1], 10);
+        const pageIndex = host === 'cover' ? 0 : Number(parts[1]);
 
         // 🚀 檢查是否在極致 RAM 快取中
         if (ramCachePool.has(id)) {

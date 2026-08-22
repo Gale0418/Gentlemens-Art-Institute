@@ -222,14 +222,14 @@ mod imp {
 
         let boundary = random_boundary();
         let boundary_sep = format!("\r\n--{boundary}\r\n");
-        let boundary_closer = format!("\r\n--{boundary}\r\n");
+        let boundary_closer = format!("\r\n--{boundary}--\r\n");
 
         resp = resp.header(
           CONTENT_TYPE,
           format!("multipart/byteranges; boundary={boundary}"),
         );
 
-        for (end, start) in ranges {
+        for (start, end) in ranges {
           // a new range is being written, write the range boundary
           buf.write_all(boundary_sep.as_bytes())?;
 

@@ -205,6 +205,10 @@ impl ApplicationHandler for State {
   ) {
     match event {
       WindowEvent::Resized(size) => {
+        if size.width == 0 || size.height == 0 {
+          return;
+        }
+
         if let Some(gfx_state) = &mut self.gfx_state {
           gfx_state.config.width = size.width;
           gfx_state.config.height = size.height;

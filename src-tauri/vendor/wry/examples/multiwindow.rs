@@ -58,7 +58,9 @@ fn main() -> wry::Result<()> {
       }
 
       Event::UserEvent(UserEvent::NewTitle(id, title)) => {
-        webviews.get(&id).unwrap().0.set_title(&title);
+        if let Some((window, _)) = webviews.get(&id) {
+          window.set_title(&title);
+        }
       }
       _ => (),
     }

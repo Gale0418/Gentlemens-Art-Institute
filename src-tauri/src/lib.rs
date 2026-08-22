@@ -34,7 +34,12 @@ async fn open_comic(id: String, state: State<'_, Arc<AppState>>, app_handle: tau
         let comics = state.comics.lock().await;
         comics.iter().find(|c| c.id == id).cloned()
     }.ok_or_else(|| "找不到漫畫資料".to_string())?;
-    let reader_generation = state.reader_generation.fetch_add(1, std::sync::atomic::Ordering::SeqCst) + 1;
+    let reader_generation = {
+        let _lifecycle = state.comic_lifecycle.lock().unwrap();
+        let generation = state.reader_generation.fetch_add(1, std::sync::atomic::Ordering::SeqCst) + 1;
+        *state.pending_open_id.lock().unwrap() = Some(id.clone());
+        generation
+    };
 
     let is_smb = comic_info.r#type == "smb-archive";
     let is_external = comic_info.r#type.starts_with("external-");
@@ -233,6 +238,7 @@ async fn open_comic(id: String, state: State<'_, Arc<AppState>>, app_handle: tau
         state.opened_comic_files.write().unwrap().insert(id.clone(), opened_files);
         state.ram_cache_pool.lock().unwrap().clear();
         *state.active_comic_id.lock().unwrap() = Some(id.clone());
+        *state.pending_open_id.lock().unwrap() = None;
         state.preload_generation.fetch_add(1, std::sync::atomic::Ordering::SeqCst) + 1
     };
     let state_clone = state.inner().clone();
@@ -269,10 +275,18 @@ async fn close_comic(comic_id: Option<String>, state: State<'_, Arc<AppState>>, 
         };
         let _lifecycle = state.comic_lifecycle.lock().unwrap();
         let mut active_id = state.active_comic_id.lock().unwrap();
-        if active_id.as_ref().map(|active| active == id).unwrap_or(true) {
+        let mut pending_open_id = state.pending_open_id.lock().unwrap();
+        let closes_current = active_id.as_ref().is_some_and(|active| active == id)
+            || pending_open_id.as_ref().is_some_and(|pending| pending == id);
+        if closes_current {
             state.reader_generation.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
             state.preload_generation.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
-            *active_id = None;
+            if active_id.as_ref().is_some_and(|active| active == id) {
+                *active_id = None;
+            }
+            if pending_open_id.as_ref().is_some_and(|pending| pending == id) {
+                *pending_open_id = None;
+            }
         }
         // Scoped 清理指定 comic_id 的快取
         {
@@ -308,6 +322,7 @@ async fn close_comic(comic_id: Option<String>, state: State<'_, Arc<AppState>>, 
             state.reader_generation.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
             state.preload_generation.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
             *state.active_comic_id.lock().unwrap() = None;
+            *state.pending_open_id.lock().unwrap() = None;
             state.ram_cache_pool.lock().unwrap().clear();
             state.opened_comic_files.write().unwrap().clear();
         }
@@ -329,6 +344,7 @@ async fn get_config(state: State<'_, Arc<AppState>>) -> Result<serde_json::Value
 #[tauri::command]
 async fn set_config(data: serde_json::Value, state: State<'_, Arc<AppState>>, app_handle: tauri::AppHandle) -> Result<serde_json::Value, String> {
     if let Some(scan_dir) = data.get("scanDir").and_then(|v| v.as_str()) {
+        let _scan_lifecycle = state.scan_lifecycle.lock().await;
         {
             let mut sd = state.scan_dir.write().unwrap();
             *sd = scan_dir.to_string();
@@ -352,6 +368,7 @@ async fn set_config(data: serde_json::Value, state: State<'_, Arc<AppState>>, ap
 
 #[tauri::command]
 async fn set_smb_config(app_handle: tauri::AppHandle, state: State<'_, Arc<AppState>>, data: Option<crate::state::SmbConfig>) -> Result<serde_json::Value, String> {
+    let _scan_lifecycle = state.scan_lifecycle.lock().await;
     {
         let mut config = state.smb_config.write().unwrap();
         *config = data;
@@ -377,31 +394,44 @@ async fn set_smb_config(app_handle: tauri::AppHandle, state: State<'_, Arc<AppSt
 #[tauri::command]
 async fn set_bookmarks(data: Vec<crate::state::ExternalBookmark>, state: State<'_, Arc<AppState>>, app_handle: tauri::AppHandle) -> Result<(), String> {
     let old_bookmarks = { state.external_bookmarks.read().unwrap().clone() };
-    state.scan_generation.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
-
     let removed_bookmarks: Vec<_> = old_bookmarks.into_iter()
         .filter(|old| !data.iter().any(|new_b| new_b.bookmark == old.bookmark))
         .collect();
+    #[cfg(target_os = "ios")]
+    let mut stop_accessing_errors: Vec<String> = Vec::new();
+    #[cfg(not(target_os = "ios"))]
+    let stop_accessing_errors: Vec<String> = Vec::new();
 
-    for removed in removed_bookmarks {
-        #[cfg(target_os = "ios")]
-        {
-            use tauri_plugin_ios_folder::StopAccessingRequest;
-            use tauri_plugin_ios_folder::TauriPluginIosFolderExt;
-            app_handle.tauri_plugin_ios_folder().stop_accessing(StopAccessingRequest {
-                bookmark: removed.bookmark.clone(),
-            }).map_err(|error| format!("無法釋放外部資料夾權限: {error}"))?;
-        }
-        let mut active = state.active_bookmarks.lock().unwrap();
-        active.remove(&removed.bookmark);
+    // External permission calls stay outside scan_lifecycle; they may block or call platform code.
+    #[cfg(target_os = "ios")]
+    for removed in &removed_bookmarks {
+        use tauri_plugin_ios_folder::StopAccessingRequest;
+        use tauri_plugin_ios_folder::TauriPluginIosFolderExt;
+        app_handle.tauri_plugin_ios_folder().stop_accessing(StopAccessingRequest {
+            bookmark: removed.bookmark.clone(),
+        }).unwrap_or_else(|error| {
+            stop_accessing_errors.push(format!("{}: {error}", removed.name));
+        });
     }
 
-    *state.external_bookmarks.write().unwrap() = data;
+    {
+        let _scan_lifecycle = state.scan_lifecycle.lock().await;
+        let mut active = state.active_bookmarks.lock().unwrap();
+        for removed in &removed_bookmarks {
+            active.remove(&removed.bookmark);
+        }
+        *state.external_bookmarks.write().unwrap() = data;
+        state.scan_generation.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+    }
     let state_clone = state.inner().clone();
     tauri::async_runtime::spawn(async move {
         crate::scanner::start_background_scan(state_clone, app_handle).await;
     });
-    Ok(())
+    if stop_accessing_errors.is_empty() {
+        Ok(())
+    } else {
+        Err(format!("清單已更新，舊權限可能未完全釋放；無法釋放外部資料夾權限: {}", stop_accessing_errors.join("; ")))
+    }
 }
 
 #[tauri::command]
@@ -444,6 +474,7 @@ async fn trash_page(comic_id: String, page_index: usize, state: State<'_, Arc<Ap
 
     let scan_dir = { state.scan_dir.read().unwrap().clone() };
     let full_path = std::path::Path::new(&scan_dir).join(&relative_path_str);
+    let _lifecycle = state.comic_lifecycle.lock().unwrap();
 
     // Path Traversal 漏洞防護
     let canon_scan = std::path::Path::new(&scan_dir).canonicalize().map_err(|e| format!("掃描目錄無效: {}", e))?;
@@ -518,12 +549,79 @@ async fn save_imported_photo(state: State<'_, Arc<AppState>>, filename: String, 
         std::fs::create_dir_all(&import_dir).map_err(|e| e.to_string())?;
     }
 
-    // 為了防止同檔名覆蓋（例如多張 IMG_0001.JPG），加上精確的毫秒級前綴
-    let unique_filename = format!("{}_{}", chrono::Utc::now().timestamp_micros(), filename);
-    let file_path = import_dir.join(&unique_filename);
-    std::fs::write(&file_path, data).map_err(|e| e.to_string())?;
+    // 以 canonical 路徑確認匯入資料夾沒有透過 symlink 越出掃描根目錄，
+    // 並使用 canonical 目錄進行後續建立，避免父路徑在檢查後被替換。
+    let scan_root = std::path::Path::new(&scan_dir)
+        .canonicalize()
+        .map_err(|error| format!("掃描目錄無效: {error}"))?;
+    let canonical_import_dir = import_dir
+        .canonicalize()
+        .map_err(|error| format!("匯入目錄無效: {error}"))?;
+    if !canonical_import_dir.starts_with(&scan_root) || !canonical_import_dir.is_dir() {
+        return Err("匯入目錄超出掃描目錄".into());
+    }
+
+    let import_handle = cap_std::fs::Dir::open_ambient_dir(
+        &canonical_import_dir,
+        cap_std::ambient_authority(),
+    ).map_err(|error| format!("無法開啟匯入目錄: {error}"))?;
+    write_import_file(
+        &import_handle,
+        &filename,
+        &data,
+        chrono::Utc::now().timestamp_micros(),
+    )?;
 
     Ok(())
+}
+
+fn is_safe_import_filename(filename: &str) -> bool {
+    let path = std::path::Path::new(filename);
+    !filename.is_empty()
+        && !filename.contains('/')
+        && !filename.contains('\\')
+        && !filename.contains(':')
+        && !filename.chars().any(char::is_control)
+        && path.components().count() == 1
+        && matches!(path.components().next(), Some(std::path::Component::Normal(_)))
+        && path.file_name().and_then(|name| name.to_str()) == Some(filename)
+}
+
+fn write_import_file(
+    import_dir: &cap_std::fs::Dir,
+    filename: &str,
+    data: &[u8],
+    timestamp_micros: i64,
+) -> Result<(), String> {
+    if !is_safe_import_filename(filename) {
+        return Err("匯入檔名不安全".into());
+    }
+
+    for attempt in 0..100u32 {
+        let unique_filename = if attempt == 0 {
+            format!("{timestamp_micros}_{filename}")
+        } else {
+            format!("{timestamp_micros}_{attempt}_{filename}")
+        };
+        // A retained directory capability plus create_new keeps the final component
+        // relative to the verified directory and refuses an existing symlink atomically.
+        let mut file = match import_dir.open_with(
+            &unique_filename,
+            cap_std::fs::OpenOptions::new().write(true).create_new(true),
+        ) {
+            Ok(file) => file,
+            Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => continue,
+            Err(error) => return Err(format!("無法建立匯入檔案: {error}")),
+        };
+
+        if let Err(error) = file.write_all(data) {
+            let _ = import_dir.remove_file(&unique_filename);
+            return Err(format!("無法寫入匯入檔案: {error}"));
+        }
+        return Ok(());
+    }
+
+    Err("匯入檔案名稱碰撞，請稍後再試".into())
 }
 
 fn write_progress_file(scan_dir: &std::path::Path, id: &str, progress: Progress) -> Result<(), String> {
@@ -683,6 +781,31 @@ mod tests {
         assert_eq!(parsed["new"]["currentPage"], 5);
         assert!(fs::read_dir(&temp_dir).unwrap().all(|entry| !entry.unwrap().file_name().to_string_lossy().contains(".tmp.")));
 
+        fs::remove_dir_all(temp_dir).unwrap_or_default();
+    }
+
+    #[test]
+    fn import_filename_rejects_paths_and_dot_components() {
+        for filename in ["", ".", "..", "nested/photo.jpg", "..\\photo.jpg", "/photo.jpg", "photo:stream.jpg", "photo\0.jpg"] {
+            assert!(!is_safe_import_filename(filename), "accepted unsafe filename: {filename:?}");
+        }
+        for filename in ["photo.jpg", "照片.png"] {
+            assert!(is_safe_import_filename(filename), "rejected safe filename: {filename:?}");
+        }
+    }
+
+    #[test]
+    fn import_file_uses_create_new_on_collision() {
+        let temp_dir = std::env::temp_dir().join(format!("comic_test_import_create_new_{}", std::process::id()));
+        let _ = fs::remove_dir_all(&temp_dir);
+        fs::create_dir_all(&temp_dir).unwrap();
+        fs::write(temp_dir.join("123_photo.jpg"), b"existing").unwrap();
+
+        let import_dir = cap_std::fs::Dir::open_ambient_dir(&temp_dir, cap_std::ambient_authority()).unwrap();
+        write_import_file(&import_dir, "photo.jpg", b"new", 123).unwrap();
+
+        assert_eq!(fs::read(temp_dir.join("123_photo.jpg")).unwrap(), b"existing");
+        assert_eq!(fs::read(temp_dir.join("123_1_photo.jpg")).unwrap(), b"new");
         fs::remove_dir_all(temp_dir).unwrap_or_default();
     }
 

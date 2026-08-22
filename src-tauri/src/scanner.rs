@@ -6,21 +6,22 @@ use std::sync::Arc;
 pub const IMAGE_EXTENSIONS: [&str; 6] = [".jpg", ".jpeg", ".png", ".gif", ".webp", ".avif"];
 
 pub async fn start_background_scan(state: Arc<AppState>, app_handle: tauri::AppHandle) {
-    let scan_dir = { state.scan_dir.read().unwrap().clone() };
-    if scan_dir.is_empty() || !Path::new(&scan_dir).exists() {
-        return;
-    }
-    
-    let my_gen = state.scan_generation.fetch_add(1, std::sync::atomic::Ordering::SeqCst) + 1;
-    
-    {
+    // Serialize only scan generation/state coordination; filesystem scanning stays outside this lock.
+    let (scan_dir, my_gen) = {
+        let _scan_lifecycle = state.scan_lifecycle.lock().await;
+        let scan_dir = { state.scan_dir.read().unwrap().clone() };
+        if scan_dir.is_empty() || !Path::new(&scan_dir).exists() {
+            return;
+        }
+        let my_gen = state.scan_generation.fetch_add(1, std::sync::atomic::Ordering::SeqCst) + 1;
         let mut progress = state.scan_progress.lock().await;
         progress.is_scanning = true;
         progress.found = 0;
         progress.current_path = scan_dir.clone();
         progress.started_at = Some(chrono::Utc::now().to_rfc3339());
         progress.completed_at = None;
-    }
+        (scan_dir, my_gen)
+    };
 
     println!("⏳ 掃描漫畫庫: {}", scan_dir);
     
@@ -61,8 +62,16 @@ pub async fn start_background_scan(state: Arc<AppState>, app_handle: tauri::AppH
             let mut has_images = false;
             let mut subdirs = Vec::new();
             
-            use tauri::Emitter;
-            let _ = app_handle.emit("scan-progress", dir.to_string_lossy().into_owned());
+            // Emit only while holding the short coordination section so a stale scan
+            // cannot pass the generation check and emit after invalidation.
+            {
+                let _scan_lifecycle = state.scan_lifecycle.blocking_lock();
+                if state.scan_generation.load(std::sync::atomic::Ordering::Acquire) != my_gen {
+                    return;
+                }
+                use tauri::Emitter;
+                let _ = app_handle.emit("scan-progress", dir.to_string_lossy().into_owned());
+            }
             
             for entry_res in entries {
                 if let Ok(entry) = entry_res {
@@ -215,13 +224,18 @@ pub async fn start_background_scan(state: Arc<AppState>, app_handle: tauri::AppH
 
     match scanned_comics_task {
         Ok(comics) => {
+            // Serialize the final generation check, library write, and completion decision.
+            // The filesystem/SMB scan itself remains outside this short coordination lock.
+            let _scan_lifecycle = state.scan_lifecycle.lock().await;
             if state.scan_generation.load(std::sync::atomic::Ordering::SeqCst) != my_gen {
-                return; // 作廢
+                return;
             }
-            
+
             let mut state_comics = state.comics.lock().await;
-            *state_comics = comics.clone();
-            
+            *state_comics = comics;
+            let count = state_comics.len();
+            drop(state_comics);
+
             let smb_cfg = { state.smb_config.read().unwrap().clone() };
             if let Some(cfg) = smb_cfg {
                 let state_clone3 = state.clone();
@@ -230,28 +244,32 @@ pub async fn start_background_scan(state: Arc<AppState>, app_handle: tauri::AppH
                     println!("🌐 開始掃描 SMB NAS...");
                     if let Err(e) = crate::smb_scanner::scan_smb(cfg, state_clone3.clone(), my_gen).await {
                         eprintln!("❌ SMB 掃描錯誤: {}", e);
-                        // BUG-05 修正： SMB 失敗時也要更新狀態
-                        if state_clone3.scan_generation.load(std::sync::atomic::Ordering::SeqCst) == my_gen {
-                            let mut p = state_clone3.scan_progress.lock().await;
-                            p.is_scanning = false;
-                            p.completed_at = Some(chrono::Utc::now().to_rfc3339());
+                        let _scan_lifecycle = state_clone3.scan_lifecycle.lock().await;
+                        if state_clone3.scan_generation.load(std::sync::atomic::Ordering::SeqCst) != my_gen {
+                            return;
                         }
+                        let mut p = state_clone3.scan_progress.lock().await;
+                        p.is_scanning = false;
+                        p.completed_at = Some(chrono::Utc::now().to_rfc3339());
+                        use tauri::Emitter;
+                        let _ = ah.emit("library-changed", ());
                     } else {
-                        if state_clone3.scan_generation.load(std::sync::atomic::Ordering::SeqCst) == my_gen {
-                            let count = state_clone3.comics.lock().await.len();
-                            println!("✅ SMB 掃描完成，總共 {} 本漫畫", count);
-                            let mut p = state_clone3.scan_progress.lock().await;
-                            p.found = count;
-                            p.is_scanning = false;
-                            p.completed_at = Some(chrono::Utc::now().to_rfc3339());
+                        let _scan_lifecycle = state_clone3.scan_lifecycle.lock().await;
+                        if state_clone3.scan_generation.load(std::sync::atomic::Ordering::SeqCst) != my_gen {
+                            return;
                         }
+                        let count = state_clone3.comics.lock().await.len();
+                        println!("✅ SMB 掃描完成，總共 {} 本漫畫", count);
+                        let mut p = state_clone3.scan_progress.lock().await;
+                        p.found = count;
+                        p.is_scanning = false;
+                        p.completed_at = Some(chrono::Utc::now().to_rfc3339());
+                        use tauri::Emitter;
+                        let _ = ah.emit("library-changed", ());
                     }
-                    use tauri::Emitter;
-                    let _ = ah.emit("library-changed", ());
                 });
             } else {
                 // BUG-05 修正： 無 SMB 時也要設置 found 和 completed_at
-                let count = comics.len();
                 let mut progress = state.scan_progress.lock().await;
                 progress.is_scanning = false;
                 progress.found = count;
@@ -261,13 +279,15 @@ pub async fn start_background_scan(state: Arc<AppState>, app_handle: tauri::AppH
             }
         }
         Err(e) => {
-            if state.scan_generation.load(std::sync::atomic::Ordering::SeqCst) == my_gen {
-                let mut progress = state.scan_progress.lock().await;
-                progress.is_scanning = false;
-                eprintln!("❌ 掃描失敗: {:?}", e);
-                use tauri::Emitter;
-                let _ = app_handle.emit("library-changed", ());
+            let _scan_lifecycle = state.scan_lifecycle.lock().await;
+            if state.scan_generation.load(std::sync::atomic::Ordering::SeqCst) != my_gen {
+                return;
             }
+            let mut progress = state.scan_progress.lock().await;
+            progress.is_scanning = false;
+            eprintln!("❌ 掃描失敗: {:?}", e);
+            use tauri::Emitter;
+            let _ = app_handle.emit("library-changed", ());
         }
     }
 }

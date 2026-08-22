@@ -33,9 +33,13 @@ natord = "1.0.9"
 tauri-plugin-dialog = "2.0.0"
 smb2 = "0.11.3"
 tauri-plugin-ios-folder = { path = "./tauri-plugin-ios-folder" }
+cap-std = "=3.4.5"
 
 [target.'cfg(not(target_os = "ios"))'.dependencies]
 trash = "5.2.3"
 
+# Local stability/security pin: vendor/wry is upstream 0.55.1 with the iOS WebKit
+# startup-crash fix. Remove this patch and vendor/wry after an upstream release
+# at or above 0.55.2 contains the fix and its security review is complete.
 [patch.crates-io]
 wry = { path = "vendor/wry" }

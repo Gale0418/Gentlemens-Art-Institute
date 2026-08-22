@@ -1367,7 +1367,10 @@ pub fn platform_webview_version() -> Result<String> {
   // WKWebView is part of iOS. Looking up WebKit through NSBundle can return nil
   // on recent iOS versions and crashes before objc2 can turn it into Option.
   #[cfg(target_os = "ios")]
-  return Ok("WKWebView (iOS system framework)".into());
+  {
+    let (major, minor, patch) = operating_system_version();
+    return Ok(format!("{major}.{minor}.{patch}"));
+  }
 
   #[cfg(not(target_os = "ios"))]
   unsafe {

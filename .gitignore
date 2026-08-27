@@ -3,6 +3,7 @@ progress.json
 cache/
 dist/
 src-tauri/target/
+/target/
 .DS_Store
 config.json
 coderabbit_review*.json

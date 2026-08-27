@@ -33,6 +33,42 @@ const mustContain = (source, needle, label) => {
 };
 
 mustContain(html, 'id="continue-strip"', 'library layout');
+mustContain(html, 'id="organize-toggle"', 'catalog organizer');
+mustContain(html, 'id="organize-bar"', 'catalog organizer');
+mustContain(html, 'id="catalog-load-more"', 'bounded catalog rendering');
+mustContain(html, 'id="organize-inbox"', 'low-confidence organizer inbox');
+mustContain(html, 'id="organize-duplicates"', 'duplicate candidate review');
+mustContain(html, 'id="btn-ai-explain"', 'single-page AI explanation action');
+mustContain(html, 'id="btn-ai-suggest"', 'single-page AI metadata candidate action');
+mustContain(html, 'id="ai-api-key"', 'manual AI provider key input');
+mustContain(tauri, '"gpt-5.6-luna"', 'fixed low-cost Luna model');
+mustContain(tauri, '"gemma-4-26b-a4b-it"', 'fixed free-tier Gemma 4 model');
+mustContain(tauri, 'suggest_comic_metadata', 'AI metadata candidate command');
+mustContain(app, 'suggestCurrentPageMetadata', 'AI metadata candidate handler');
+assert.doesNotMatch(
+  app,
+  /localStorage\.setItem\([^\n]*api[-_ ]?key/i,
+  'AI API keys must never enter localStorage'
+);
+assert.match(
+  tauri,
+  /decoded\.len\(\) > 20 \* 1024 \* 1024/,
+  'single-page AI requests should enforce a 20 MiB image cap'
+);
+mustContain(html, 'id="organize-save-alias"', 'tag alias editor');
+mustContain(html, 'id="catalog-import-input"', 'versioned metadata exchange');
+mustContain(html, 'id="btn-crop"', 'reader crop control');
+mustContain(html, 'id="btn-brightness"', 'reader brightness control');
+assert.equal(
+  (app.match(/window\.electronAPI\.onCatalogChanged\(\(\) =>/g) || []).length,
+  1,
+  'catalog change listener should be registered exactly once'
+);
+assert.match(
+  scanner,
+  /schedule_catalog_sync\([\s\S]{0,240}generation: u64[\s\S]{0,900}scan_generation[\s\S]{0,240}!= generation[\s\S]{0,120}return;/,
+  'queued catalog sync should reject stale scan generations'
+);
 mustContain(tauriConfig, 'com.windsheep.comicreader', 'Tauri bundle identifier');
 mustContain(appleProject, 'com.windsheep.comicreader', 'Apple bundle identifier');
 mustContain(cargoManifest, 'wry = { path = "vendor/wry" }', 'local Wry patch');
@@ -73,6 +109,8 @@ const actionButtonBlock = css.slice(css.indexOf('.modal-action-btn,'), css.index
 assert.doesNotMatch(actionButtonBlock, /animation:\s*plated-flow/);
 
 mustContain(css, '.continue-strip', 'library styling');
+mustContain(css, '.organize-bar', 'catalog organizer styling');
+mustContain(css, '.organize-selected', 'catalog selection styling');
 mustContain(css, '.comic-inspector', 'library styling');
 mustContain(css, '.reader-context-menu', 'reader styling');
 mustContain(css, '.reader-overlay.reader-idle', 'reader idle styling');
@@ -93,11 +131,24 @@ mustContain(app, "window.electronAPI || httpAPI", 'browser fallback');
 mustContain(app, "'/api/library'", 'browser fallback');
 mustContain(app, 'const MAX_PRELOADED_IMAGES', 'reader preload budget');
 mustContain(app, 'function prunePreloadedImages', 'reader preload budget');
+mustContain(app, 'state.preloadedImages.delete(idx)', 'failed reader preload retry');
 mustContain(app, 'decoding = \'async\'', 'async image decoding');
 mustContain(app, 'fetchPriority = \'low\'', 'low-priority noncritical images');
 mustContain(app, 'function showLoaderProgress', 'loader progress UI');
 mustContain(app, 'function setLoaderProgress', 'loader progress UI');
 mustContain(app, 'function applyTheme', 'theme switching');
+mustContain(app, 'function setOrganizeMode', 'catalog organizer behavior');
+mustContain(app, "document.createElement(state.organizeMode && !comic.isDirectory ? 'button' : 'div')", 'organizer cards use native accessible buttons');
+mustContain(css, '.comic-card.organize-selectable', 'organizer accessible button reset');
+mustContain(app, 'function applyOrganizerBatch', 'batch metadata behavior');
+mustContain(app, 'function refreshCatalogSearch', 'SQLite catalog search behavior');
+mustContain(app, 'function showOrganizerInbox', 'low-confidence inbox behavior');
+mustContain(app, 'function showDuplicateCandidates', 'duplicate review behavior');
+mustContain(app, 'function saveOrganizerAlias', 'tag alias behavior');
+mustContain(app, 'function previewCatalogMetadataFile', 'metadata import preview');
+mustContain(app, 'function toggleCropEdges', 'reader crop behavior');
+mustContain(app, 'function cycleBrightness', 'reader brightness behavior');
+mustContain(app, 'state.filteredComics.slice(0, state.renderLimit)', 'bounded catalog DOM rendering');
 mustContain(app, 'function bindKeyboardActivation', 'keyboard activation helper');
 mustContain(app, 'function configureInteractiveItem', 'dynamic interactive semantics');
 mustContain(app, "setAttribute('aria-pressed'", 'pressed state semantics');
@@ -111,6 +162,10 @@ mustContain(app, 'renderGeneration', 'reader render invalidation');
 mustContain(app, 'async function clearSmbConfig()', 'SMB cleanup');
 mustContain(app, 'RAM 預載略過，將改為逐頁讀取', 'preload error fallback');
 mustContain(scanner, 'external_bookmark: external_bookmark.map(str::to_owned)', 'bookmark ownership');
+mustContain(tauri, 'search_catalog', 'catalog search command');
+mustContain(tauri, 'apply_batch_metadata', 'catalog batch command');
+mustContain(tauri, 'preview_catalog_import', 'catalog import preview command');
+mustContain(tauri, 'get_online_services_config', 'offline-by-default service contract');
 mustContain(iosFolderPlugin, 'startDownloadingUbiquitousItem', 'iCloud materialization');
 mustContain(iosFolderPlugin, 'NSFileCoordinator()', 'file provider coordination');
 mustContain(html, 'id="loader-progress"', 'loader progress UI');

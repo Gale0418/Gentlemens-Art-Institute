@@ -44,6 +44,7 @@ const httpAPI = {
   openFolderDialog: async () => null,
   browseFolders: (dirPath) => requestJson(`/api/browse-folders?path=${encodeURIComponent(dirPath || '')}`),
   onLibraryChanged: () => {},
+  onCatalogChanged: () => {},
   getFavorites: async () => {
     try {
       try {
@@ -65,6 +66,23 @@ const httpAPI = {
   },
   showItemInFolder: async () => null,
   trashPage: async (comicId, pageIndex) => ({ success: false, error: 'not-supported-in-web' }),
+  searchCatalog: null,
+  getComicMetadata: null,
+  applyBatchMetadata: null,
+  undoBatchMetadata: null,
+  upsertFolderTagRule: null,
+  reimportMetadata: null,
+  upsertTagAlias: null,
+  exportCatalogMetadata: null,
+  getCatalogExportPath: null,
+  saveCatalogMetadata: null,
+  listRelatedTags: null,
+  getAiSessionStatus: null,
+  setAiSessionConfig: null,
+  clearAiSessionConfig: null,
+  testAiSession: null,
+  explainPage: null,
+  suggestComicMetadata: null,
 };
 
 const eAPI = window.electronAPI || httpAPI;
@@ -104,11 +122,21 @@ let state = {
   scanStatusPollTimer: null,
   renderGeneration: 0,
   sharpenLevel: 0, // 0=關閉, 1=輕度, 2=中度, 3=強度
+  cropEdges: localStorage.getItem('readerCropEdges') === 'true',
+  brightness: Number(localStorage.getItem('readerBrightness')) || 100,
   loaderRefCount: 0, // 🔧 BUG-FIX：引用計數，防止多個 showLoader 互相覆蓋導致無法 hideLoader
   readerClosePromise: Promise.resolve(),
   readerOperation: 0,
   pendingComicId: null,
   dialogReturnFocus: null,
+  organizeMode: false,
+  organizeSelection: new Set(),
+  lastUndoToken: null,
+  catalogSearchIds: null,
+  catalogSearchItems: new Map(),
+  catalogSearchTotal: 0,
+  catalogSearchRequest: 0,
+  renderLimit: 200,
 };
 
 const THEME_STORAGE_KEY = 'comic-reader:theme';
@@ -130,6 +158,30 @@ const elements = {
   libraryPathLabel: document.getElementById('library-path-label'),
   continueStrip: document.getElementById('continue-strip'),
   comicInspector: document.getElementById('comic-inspector'),
+  organizeToggle: document.getElementById('organize-toggle'),
+  organizeBar: document.getElementById('organize-bar'),
+  organizeCount: document.getElementById('organize-count'),
+  organizeSelectVisible: document.getElementById('organize-select-visible'),
+  organizeClear: document.getElementById('organize-clear'),
+  organizeTag: document.getElementById('organize-tag'),
+  organizeAuthor: document.getElementById('organize-author'),
+  organizeSeries: document.getElementById('organize-series'),
+  organizeLanguage: document.getElementById('organize-language'),
+  organizeDirection: document.getElementById('organize-direction'),
+  organizeApply: document.getElementById('organize-apply'),
+  organizeExcludeTag: document.getElementById('organize-exclude-tag'),
+  organizeFolderRule: document.getElementById('organize-folder-rule'),
+  organizeReimport: document.getElementById('organize-reimport'),
+  organizeUndo: document.getElementById('organize-undo'),
+  organizeStatus: document.getElementById('organize-status'),
+  organizeInbox: document.getElementById('organize-inbox'),
+  organizeDuplicates: document.getElementById('organize-duplicates'),
+  organizeAlias: document.getElementById('organize-alias'),
+  organizeCanonical: document.getElementById('organize-canonical'),
+  organizeSaveAlias: document.getElementById('organize-save-alias'),
+  organizeInsightResults: document.getElementById('organize-insight-results'),
+  catalogFacets: document.getElementById('catalog-facets'),
+  catalogLoadMore: document.getElementById('catalog-load-more'),
   seriesFilterList: document.getElementById('series-filter-list'),
   totalCountBadge: document.getElementById('total-count-badge'),
   
@@ -164,6 +216,13 @@ const elements = {
   btnRotateLeft: document.getElementById('btn-rotate-left'),
   btnRotateRight: document.getElementById('btn-rotate-right'),
   btnSharpen: document.getElementById('btn-sharpen'),
+  btnCrop: document.getElementById('btn-crop'),
+  btnBrightness: document.getElementById('btn-brightness'),
+  btnAiExplain: document.getElementById('btn-ai-explain'),
+  btnAiSuggest: document.getElementById('btn-ai-suggest'),
+  aiPagePanel: document.getElementById('ai-page-panel'),
+  aiPageResult: document.getElementById('ai-page-result'),
+  aiPageClose: document.getElementById('ai-page-close'),
   btnFullscreen: document.getElementById('btn-fullscreen'),
   readerBackBtn: document.getElementById('reader-back-btn'),
   readerContextMenu: document.getElementById('reader-context-menu'),
@@ -191,6 +250,17 @@ const elements = {
   browserUpBtn: document.getElementById('browser-up-btn'),
   browserFoldersList: document.getElementById('browser-folders-list'),
   themePicker: document.getElementById('theme-picker'),
+  catalogExportBtn: document.getElementById('catalog-export-btn'),
+  catalogImportInput: document.getElementById('catalog-import-input'),
+  catalogImportPreview: document.getElementById('catalog-import-preview'),
+  aiProvider: document.getElementById('ai-provider'),
+  aiApiKey: document.getElementById('ai-api-key'),
+  aiGoogleDisclosureWrap: document.getElementById('ai-google-disclosure-wrap'),
+  aiGoogleDisclosure: document.getElementById('ai-google-disclosure'),
+  aiSaveBtn: document.getElementById('ai-save-btn'),
+  aiTestBtn: document.getElementById('ai-test-btn'),
+  aiClearBtn: document.getElementById('ai-clear-btn'),
+  aiSessionStatus: document.getElementById('ai-session-status'),
   
   // SMB 設定元素
   smbSetupBtn: document.getElementById('smb-setup-btn'),
@@ -290,8 +360,24 @@ function bindEvents() {
   elements.clearSearchBtn.addEventListener('click', () => {
     elements.searchInput.value = '';
     elements.clearSearchBtn.style.display = 'none';
+    clearTimeout(catalogSearchTimer);
+    catalogSearchTimer = null;
+    state.catalogSearchRequest++;
+    state.catalogSearchIds = null;
+    state.catalogSearchItems.clear();
+    state.catalogSearchTotal = 0;
+    renderCatalogFacets({});
+    state.renderLimit = 200;
     filterAndRenderGrid();
   });
+
+  bindOrganizerEvents();
+  if (window.electronAPI?.onCatalogChanged) {
+    window.electronAPI.onCatalogChanged(() => {
+      if (!state.currentComic) fetchLibrary();
+    });
+  }
+  refreshAiSessionStatus();
 
   // 重新整理
   elements.refreshBtn.addEventListener('click', async () => {
@@ -392,6 +478,8 @@ function bindEvents() {
 
   // 🪄 銀利化切換
   elements.btnSharpen.addEventListener('click', toggleSharpen);
+  elements.btnCrop.addEventListener('click', toggleCropEdges);
+  elements.btnBrightness.addEventListener('click', cycleBrightness);
 
   // 全螢幕切換
   elements.btnFullscreen.addEventListener('click', toggleFullscreen);
@@ -466,6 +554,22 @@ function bindEvents() {
     const option = event.target.closest('[data-theme-option]');
     if (option) applyTheme(option.dataset.themeOption);
   });
+  elements.catalogExportBtn?.addEventListener('click', exportCatalogMetadataFile);
+  elements.catalogImportInput?.addEventListener('change', previewCatalogMetadataFile);
+  document.querySelector('.catalog-import-label')?.addEventListener('keydown', event => {
+    if (event.key === 'Enter' || event.key === ' ') {
+      event.preventDefault();
+      elements.catalogImportInput?.click();
+    }
+  });
+  elements.aiProvider?.addEventListener('change', updateAiProviderDisclosure);
+  elements.aiSaveBtn?.addEventListener('click', saveAiSession);
+  elements.aiTestBtn?.addEventListener('click', testAiSession);
+  elements.aiClearBtn?.addEventListener('click', clearAiSession);
+  elements.btnAiExplain?.addEventListener('click', explainCurrentPage);
+  elements.btnAiSuggest?.addEventListener('click', suggestCurrentPageMetadata);
+  elements.aiPageClose?.addEventListener('click', () => { elements.aiPagePanel.hidden = true; });
+  updateAiProviderDisclosure();
   
   if (elements.smbSetupBtn) elements.smbSetupBtn.addEventListener('click', openSmbModal);
   const smbHeaderBtn = document.getElementById('smb-setup-btn-header');
@@ -616,14 +720,19 @@ function createReaderImage(src, priority = 'auto') {
   img.src = src;
   img.style.transform = `scale(${state.zoomPercentage / 100}) rotate(${state.rotationAngle}deg)`;
 
-  // 自動套用當前銳利化設定
-  if (state.sharpenLevel > 0) {
-    const filterMap = { 1: 'url(#sharpen-subtle)', 2: 'url(#sharpen-standard)', 3: 'url(#sharpen-strong)' };
-    const renderingMap = { 1: 'auto', 2: '-webkit-optimize-contrast', 3: 'pixelated' };
-    img.style.filter = filterMap[state.sharpenLevel] || 'none';
-    img.style.imageRendering = renderingMap[state.sharpenLevel] || 'auto';
-  }
+  applyImageEffects(img);
   return img;
+}
+
+function imageFilterValue() {
+  const sharpen = { 1: 'url(#sharpen-subtle)', 2: 'url(#sharpen-standard)', 3: 'url(#sharpen-strong)' }[state.sharpenLevel];
+  return [sharpen, `brightness(${state.brightness}%)`].filter(Boolean).join(' ');
+}
+
+function applyImageEffects(img) {
+  const renderingMap = { 1: 'auto', 2: '-webkit-optimize-contrast', 3: 'pixelated' };
+  img.style.filter = imageFilterValue();
+  img.style.imageRendering = renderingMap[state.sharpenLevel] || 'auto';
 }
 
 function shortPathLabel(pathValue) {
@@ -653,6 +762,261 @@ function applyLibraryFilter(filter) {
 // ==========================================================================
 // 📚 書架核心 API 串接與渲染
 // ==========================================================================
+
+function bindOrganizerEvents() {
+  if (!elements.organizeToggle) return;
+  elements.organizeToggle.addEventListener('click', () => setOrganizeMode(!state.organizeMode));
+  elements.organizeSelectVisible?.addEventListener('click', () => {
+    state.filteredComics.filter(comic => !comic.isDirectory).forEach(comic => state.organizeSelection.add(comic.id));
+    updateOrganizerUi();
+    renderGrid();
+  });
+  elements.organizeClear?.addEventListener('click', () => {
+    state.organizeSelection.clear();
+    updateOrganizerUi();
+    renderGrid();
+  });
+  elements.organizeApply?.addEventListener('click', () => applyOrganizerBatch('include'));
+  elements.organizeExcludeTag?.addEventListener('click', () => applyOrganizerBatch('exclude'));
+  elements.organizeFolderRule?.addEventListener('click', applyFolderTagRule);
+  elements.organizeReimport?.addEventListener('click', reimportSelectedMetadata);
+  elements.organizeUndo?.addEventListener('click', undoOrganizerBatch);
+  elements.organizeInbox?.addEventListener('click', showOrganizerInbox);
+  elements.organizeDuplicates?.addEventListener('click', showDuplicateCandidates);
+  elements.organizeSaveAlias?.addEventListener('click', saveOrganizerAlias);
+  elements.catalogLoadMore?.addEventListener('click', () => {
+    state.renderLimit += 200;
+    const query = elements.searchInput.value.trim();
+    if (query && state.catalogSearchIds && state.catalogSearchItems.size < state.catalogSearchTotal) refreshCatalogSearch(query, { append: true });
+    else renderGrid();
+  });
+}
+
+function setOrganizeMode(enabled) {
+  if (enabled && !eAPI?.applyBatchMetadata) {
+    alert('整理模式需要在 Tauri App 中使用。');
+    return;
+  }
+  state.organizeMode = Boolean(enabled);
+  if (!state.organizeMode) state.organizeSelection.clear();
+  elements.organizeToggle?.classList.toggle('active', state.organizeMode);
+  elements.organizeToggle?.setAttribute('aria-pressed', String(state.organizeMode));
+  if (elements.organizeBar) elements.organizeBar.hidden = !state.organizeMode;
+  document.body.classList.toggle('organize-mode', state.organizeMode);
+  updateOrganizerUi();
+  renderGrid();
+}
+
+function toggleOrganizerSelection(comicId) {
+  if (state.organizeSelection.has(comicId)) state.organizeSelection.delete(comicId);
+  else state.organizeSelection.add(comicId);
+  updateOrganizerUi();
+  const card = [...elements.comicGrid.children].find(item => item.dataset.comicId === comicId);
+  if (card) {
+    const selected = state.organizeSelection.has(comicId);
+    card.classList.toggle('organize-selected', selected);
+    card.setAttribute('aria-pressed', String(selected));
+  }
+  const comic = state.comics.find(item => item.id === comicId);
+  if (comic) renderComicInspector(comic, { keepSelection: true });
+}
+
+function updateOrganizerUi(message = '') {
+  const count = state.organizeSelection.size;
+  if (elements.organizeCount) elements.organizeCount.textContent = `已選 ${count} 本`;
+  if (elements.organizeStatus && message) elements.organizeStatus.textContent = message;
+  for (const button of [elements.organizeApply, elements.organizeExcludeTag, elements.organizeReimport]) {
+    if (button) button.disabled = count === 0;
+  }
+  if (elements.organizeUndo) elements.organizeUndo.disabled = !state.lastUndoToken;
+}
+
+function parseOrganizerTag() {
+  const raw = elements.organizeTag?.value.trim();
+  if (!raw) return null;
+  const separator = raw.indexOf(':');
+  if (separator > 0) return { namespace: raw.slice(0, separator).trim().toLowerCase(), value: raw.slice(separator + 1).trim() };
+  return { namespace: 'general', value: raw };
+}
+
+async function applyOrganizerBatch(tagAction) {
+  const comicIds = [...state.organizeSelection];
+  if (!comicIds.length) return;
+  const fields = {};
+  const author = elements.organizeAuthor?.value.trim();
+  const series = elements.organizeSeries?.value.trim();
+  const language = elements.organizeLanguage?.value.trim();
+  const direction = elements.organizeDirection?.value;
+  if (author) fields.creators = JSON.stringify({ artist: author.split(/[,;、]/).map(item => item.trim()).filter(Boolean) });
+  if (series) fields.series = series;
+  if (language) fields.language = language;
+  if (direction) fields.reading_direction = direction;
+  const tag = parseOrganizerTag();
+  const request = { comicIds, fields, addTags: tag && tagAction === 'include' ? [tag] : [], excludeTags: tag && tagAction === 'exclude' ? [tag] : [] };
+  if (!Object.keys(fields).length && !tag) {
+    updateOrganizerUi('請至少輸入一個欄位或標籤。');
+    return;
+  }
+  setOrganizerBusy(true, `正在更新 ${comicIds.length} 本漫畫…`);
+  try {
+    const result = await eAPI.applyBatchMetadata(request);
+    state.lastUndoToken = result.undoToken;
+    if (series) state.comics.filter(comic => state.organizeSelection.has(comic.id)).forEach(comic => { comic.series = series; });
+    updateOrganizerUi(`已更新 ${result.updated} 本；可撤銷本次操作。`);
+    await refreshCatalogSearch(elements.searchInput.value.trim());
+    if (state.selectedComicId) {
+      const comic = state.comics.find(item => item.id === state.selectedComicId);
+      if (comic) renderComicInspector(comic, { keepSelection: true });
+    }
+
+  } catch (error) {
+    updateOrganizerUi(`更新失敗：${error?.message || error}`);
+  } finally {
+    setOrganizerBusy(false);
+  }
+}
+
+async function applyFolderTagRule() {
+  const tag = parseOrganizerTag();
+  if (!tag) return updateOrganizerUi('請先輸入要繼承的標籤。');
+  const sample = state.comics.find(comic => state.organizeSelection.has(comic.id)) || state.filteredComics.find(comic => !comic.isDirectory);
+  if (!sample) return updateOrganizerUi('目前資料夾沒有可建立規則的漫畫。');
+  setOrganizerBusy(true, '正在建立資料夾繼承規則…');
+  try {
+    await eAPI.upsertFolderTagRule({ id: null, sourceId: sample.sourceId || 'local', folderPath: state.currentPath, tag, enabled: true });
+    updateOrganizerUi(`已讓「${state.currentPath || '書庫根目錄'}」繼承 ${tag.namespace}:${tag.value}。`);
+  } catch (error) {
+    updateOrganizerUi(`規則建立失敗：${error?.message || error}`);
+  } finally {
+    setOrganizerBusy(false);
+  }
+}
+
+async function reimportSelectedMetadata() {
+  const comicIds = [...state.organizeSelection];
+  if (!comicIds.length) return;
+  setOrganizerBusy(true, '正在重新讀取 metadata…');
+  try {
+    const result = await eAPI.reimportMetadata({ comicIds });
+    updateOrganizerUi(`已重新匯入 ${result.imported} 本，產生 ${result.diagnostics} 則診斷。`);
+    const comic = state.comics.find(item => item.id === state.selectedComicId);
+    if (comic) renderComicInspector(comic, { keepSelection: true });
+  } catch (error) {
+    updateOrganizerUi(`重新匯入失敗：${error?.message || error}`);
+  } finally {
+    setOrganizerBusy(false);
+  }
+}
+
+async function undoOrganizerBatch() {
+  if (!state.lastUndoToken) return;
+  setOrganizerBusy(true, '正在撤銷上次批次操作…');
+  try {
+    const count = await eAPI.undoBatchMetadata(state.lastUndoToken);
+    state.lastUndoToken = null;
+    updateOrganizerUi(`已還原 ${count} 本漫畫。`);
+    const comic = state.comics.find(item => item.id === state.selectedComicId);
+    if (comic) renderComicInspector(comic, { keepSelection: true });
+  } catch (error) {
+    updateOrganizerUi(`撤銷失敗：${error?.message || error}`);
+  } finally {
+    setOrganizerBusy(false);
+  }
+}
+
+async function saveOrganizerAlias() {
+  const alias = elements.organizeAlias?.value.trim();
+  const canonicalValue = elements.organizeCanonical?.value.trim();
+  if (!alias || !canonicalValue) return updateOrganizerUi('別名與標準標籤都要填。');
+  if (!eAPI?.upsertTagAlias) return updateOrganizerUi('標籤別名需要在 Tauri App 中使用。');
+  try {
+    await eAPI.upsertTagAlias({ namespace: 'general', alias, canonicalValue });
+    elements.organizeAlias.value = '';
+    elements.organizeCanonical.value = '';
+    updateOrganizerUi(`搜尋別名「${alias}」現在會對應 general:${canonicalValue}，原始 tag 未改寫。`);
+  } catch (error) {
+    updateOrganizerUi(`別名儲存失敗：${error?.message || error}`);
+  }
+}
+
+async function showOrganizerInbox() {
+  if (!eAPI?.listOrganizerInbox || !elements.organizeInsightResults) return;
+  elements.organizeInsightResults.textContent = '正在讀取低信心項目…';
+  try {
+    const items = await eAPI.listOrganizerInbox(100);
+    elements.organizeInsightResults.innerHTML = items.length ? items.map(item => `
+      <article><strong>${escapeHtml(item.title)}</strong><span>${escapeHtml(item.parserId || 'unknown')} · 信心 ${item.confidence ?? '—'}</span><small>${escapeHtml(item.reason)} · ${escapeHtml(item.sourcePath)}</small></article>`).join('') : '<p>目前沒有低信心項目。</p>';
+  } catch (error) {
+    elements.organizeInsightResults.textContent = `Inbox 載入失敗：${error?.message || error}`;
+  }
+}
+
+async function showDuplicateCandidates() {
+  if (!eAPI?.listDuplicateCandidates || !elements.organizeInsightResults) return;
+  elements.organizeInsightResults.textContent = '正在比對重複候選…';
+  try {
+    const items = await eAPI.listDuplicateCandidates(100);
+    elements.organizeInsightResults.innerHTML = items.length ? items.map(item => `
+      <article><strong>${item.comicIds.length} 本候選</strong><span>指紋 ${escapeHtml(item.fingerprint.slice(0, 12))}…</span><small>${item.locations.map(escapeHtml).join('、')}</small></article>`).join('') : '<p>目前沒有重複候選；系統不會自動合併或刪檔。</p>';
+  } catch (error) {
+    elements.organizeInsightResults.textContent = `重複候選載入失敗：${error?.message || error}`;
+  }
+}
+
+function setOrganizerBusy(busy, message = '') {
+  elements.organizeBar?.setAttribute('aria-busy', String(busy));
+  elements.organizeBar?.querySelectorAll('button, input, select').forEach(control => {
+    if (control === elements.organizeUndo && !busy) control.disabled = !state.lastUndoToken;
+    else if (control !== elements.organizeToggle) control.disabled = busy;
+  });
+  if (message && elements.organizeStatus) elements.organizeStatus.textContent = message;
+  if (!busy) updateOrganizerUi();
+}
+
+let catalogSearchTimer = null;
+let coverObserver = null;
+async function refreshCatalogSearch(query, { append = false } = {}) {
+  if (!query || !eAPI?.searchCatalog) {
+    state.catalogSearchIds = null;
+    state.catalogSearchItems.clear();
+    state.catalogSearchTotal = 0;
+    renderCatalogFacets({});
+    filterAndRenderGrid();
+    return;
+  }
+  const requestId = ++state.catalogSearchRequest;
+  try {
+    const result = await eAPI.searchCatalog({ query, offset: append ? state.catalogSearchItems.size : 0, limit: 200 });
+    if (requestId !== state.catalogSearchRequest) return;
+    const nextItems = append ? new Map(state.catalogSearchItems) : new Map();
+    result.items.filter(item => item.runtimeId).forEach(item => nextItems.set(item.runtimeId, item));
+    state.catalogSearchItems = nextItems;
+    state.catalogSearchIds = new Set(state.catalogSearchItems.keys());
+    state.catalogSearchTotal = result.total || state.catalogSearchItems.size;
+    renderCatalogFacets(result.facets || {});
+    filterAndRenderGrid();
+  } catch (error) {
+    console.warn('SQLite 目錄搜尋暫不可用，退回檔名搜尋：', error);
+    if (requestId !== state.catalogSearchRequest) return;
+    state.catalogSearchIds = null;
+    state.catalogSearchItems.clear();
+    state.catalogSearchTotal = 0;
+    renderCatalogFacets({});
+    filterAndRenderGrid();
+  }
+}
+
+function renderCatalogFacets(facets) {
+  if (!elements.catalogFacets) return;
+  const entries = Object.entries(facets).flatMap(([namespace, values]) => Object.entries(values).map(([value, count]) => ({ namespace, value, count }))).sort((a, b) => b.count - a.count).slice(0, 18);
+  elements.catalogFacets.hidden = entries.length === 0;
+  elements.catalogFacets.innerHTML = entries.map(item => `<button type="button" class="catalog-facet" data-query="${escapeHtml(item.namespace)}:${escapeHtml(item.value)}">${escapeHtml(item.namespace)}:${escapeHtml(item.value)} · ${item.count}</button>`).join('');
+  elements.catalogFacets.querySelectorAll('.catalog-facet').forEach(button => button.addEventListener('click', () => {
+    const addition = button.dataset.query;
+    elements.searchInput.value = `${elements.searchInput.value.trim()} ${addition}`.trim();
+    handleSearch({ target: elements.searchInput });
+  }));
+}
 
 // 獲取漫畫清單
 async function fetchLibrary() {
@@ -893,6 +1257,7 @@ function renderComicInspector(comic, options = {}) {
         <span><i class="fa-solid fa-sun"></i> 亮度</span>
         <span><i class="fa-solid fa-cloud-arrow-up"></i> 同步</span>
       </div>
+      ${isDirectory ? '' : `<section class="metadata-section" id="inspector-metadata"><p class="metadata-loading">正在讀取 SQLite metadata…</p></section>`}
     </div>
   `;
 
@@ -918,12 +1283,83 @@ function renderComicInspector(comic, options = {}) {
       if (state.activeFilter === 'favorite') filterAndRenderGrid();
     };
   }
+  if (!isDirectory) loadInspectorMetadata(comic);
+}
+
+async function loadInspectorMetadata(comic) {
+  const target = elements.comicInspector?.querySelector('#inspector-metadata');
+  if (!target || !eAPI?.getComicMetadata) {
+    if (target) target.innerHTML = '<p class="metadata-loading">重新掃描後即可建立整理資料。</p>';
+    return;
+  }
+  const requestedId = comic.id;
+  try {
+    const [metadata, suggestions] = await Promise.all([
+      eAPI.getComicMetadata(requestedId),
+      eAPI.listRelatedTags ? eAPI.listRelatedTags(requestedId, 8) : Promise.resolve([]),
+    ]);
+    if (state.selectedComicId !== requestedId) return;
+    const currentTarget = elements.comicInspector?.querySelector('#inspector-metadata');
+    if (!currentTarget) return;
+    const creators = Object.entries(metadata.creators || {}).flatMap(([role, names]) => names.map(name => `${role}:${name}`));
+    const tags = (metadata.tags || []).map(tag => `${tag.namespace}:${tag.value}`);
+    const sourceNames = [...new Set((metadata.candidates || []).map(candidate => candidate.parserId))];
+    const lock = field => (metadata.lockedFields || []).includes(field) ? ' <span class="metadata-lock" title="使用者覆寫">鎖定</span>' : '';
+    const rows = [
+      ['標題', metadata.title, 'title'],
+      ['系列', metadata.series || '—', 'series'],
+      ['作者', creators.join('、') || '—', 'creators'],
+      ['語言', metadata.language || '—', 'language'],
+      ['方向', metadata.readingDirection || '—', 'reading_direction'],
+      ['標籤', tags.join('、') || '—', 'tags'],
+      ['來源', sourceNames.join('、') || '檔名推測', 'sources'],
+      ['狀態', metadata.offline ? 'NAS／來源離線，資料已保留' : '來源在線', 'offline'],
+    ];
+    currentTarget.innerHTML = `
+      <h4>整理資料</h4>
+      <dl>${rows.map(([label, value, field]) => `<div class="metadata-row"><dt>${label}</dt><dd>${escapeHtml(String(value))}${lock(field)}</dd></div>`).join('')}</dl>
+      ${(suggestions || []).length ? `
+        <section class="metadata-suggestions" aria-labelledby="metadata-suggestions-title">
+          <h5 id="metadata-suggestions-title">相關標籤建議</h5>
+          <p>依收藏中的共同標籤提出；只有按下後才會套用。</p>
+          <div class="metadata-suggestion-list">
+            ${suggestions.map(item => `<button type="button" class="metadata-suggestion" data-suggest-namespace="${escapeHtml(item.tag.namespace)}" data-suggest-value="${escapeHtml(item.tag.value)}" title="${escapeHtml(item.reason)}">＋ ${escapeHtml(item.tag.namespace)}:${escapeHtml(item.tag.value)} <small>${item.sharedComics}</small></button>`).join('')}
+          </div>
+        </section>` : ''}
+      ${(metadata.diagnostics || []).slice(0, 3).map(item => `<p class="metadata-warning"><i class="fa-solid fa-triangle-exclamation"></i> ${escapeHtml(item.message)}</p>`).join('')}
+    `;
+    currentTarget.querySelectorAll('.metadata-suggestion').forEach(button => {
+      button.addEventListener('click', async () => {
+        if (!eAPI?.applyBatchMetadata) return;
+        button.disabled = true;
+        try {
+          await eAPI.applyBatchMetadata({
+            comicIds: [requestedId],
+            fields: {},
+            addTags: [{ namespace: button.dataset.suggestNamespace, value: button.dataset.suggestValue }],
+            excludeTags: [],
+          });
+          await loadInspectorMetadata(comic);
+        } catch (error) {
+          button.disabled = false;
+          button.title = error?.message || String(error);
+        }
+      });
+    });
+  } catch (error) {
+    if (state.selectedComicId !== requestedId) return;
+    const currentTarget = elements.comicInspector?.querySelector('#inspector-metadata');
+    if (currentTarget) currentTarget.innerHTML = `<p class="metadata-warning">metadata 尚未建立：${escapeHtml(error?.message || String(error))}</p>`;
+  }
 }
 
 // 搜尋過濾
 function handleSearch(e) {
   const query = e.target.value.trim();
   elements.clearSearchBtn.style.display = query ? 'block' : 'none';
+  state.renderLimit = 200;
+  clearTimeout(catalogSearchTimer);
+  catalogSearchTimer = setTimeout(() => refreshCatalogSearch(query), 180);
   filterAndRenderGrid();
 }
 
@@ -962,10 +1398,14 @@ function getDirectoryItems() {
   const query = elements.searchInput.value.toLowerCase().trim();
   if (query) {
     return baseFiltered.filter(comic => {
+      if (state.catalogSearchIds) return state.catalogSearchIds.has(comic.id);
       const matchTitle = comic.title.toLowerCase().includes(query);
       const matchPath = comic.relativePath.toLowerCase().includes(query);
       return matchTitle || matchPath;
-    }).map(c => ({ ...c, isDirectory: false }));
+    }).map(c => {
+      const metadata = state.catalogSearchItems.get(c.id);
+      return { ...c, title: metadata?.title || c.title, series: metadata?.series || c.series, metadataTags: metadata?.tags || [], offline: metadata?.offline || false, isDirectory: false };
+    });
   }
 
   // 3. 一般目錄導航模式：對漫畫相對路徑相對當前層進行折疊與過濾
@@ -1081,19 +1521,33 @@ function filterAndRenderGrid() {
 
 // 繪製漫畫卡片網格
 function renderGrid() {
+  coverObserver?.disconnect();
+  coverObserver = null;
   elements.comicGrid.innerHTML = '';
   
   if (state.filteredComics.length === 0) {
     elements.emptyState.style.display = 'flex';
+    if (elements.catalogLoadMore) elements.catalogLoadMore.hidden = true;
     return;
   }
   
   elements.emptyState.style.display = 'none';
 
-  state.filteredComics.forEach(comic => {
-    const card = document.createElement('div');
+  const visibleComics = state.filteredComics.slice(0, state.renderLimit);
+  if (elements.catalogLoadMore) {
+    const totalAvailable = state.catalogSearchIds ? Math.max(state.filteredComics.length, state.catalogSearchTotal) : state.filteredComics.length;
+    elements.catalogLoadMore.hidden = visibleComics.length >= state.filteredComics.length && state.filteredComics.length >= totalAvailable;
+    elements.catalogLoadMore.textContent = `顯示更多漫畫（${visibleComics.length} / ${totalAvailable}）`;
+  }
+
+  visibleComics.forEach(comic => {
+    const card = document.createElement(state.organizeMode && !comic.isDirectory ? 'button' : 'div');
+    if (card instanceof HTMLButtonElement) card.type = 'button';
     card.className = 'comic-card' + (comic.isDirectory ? ' folder-card' : '');
+    card.dataset.comicId = comic.id;
     if (state.selectedComicId === comic.id) card.classList.add('selected');
+    if (state.organizeMode && !comic.isDirectory) card.classList.add('organize-selectable');
+    if (state.organizeSelection.has(comic.id)) card.classList.add('organize-selected');
     
     if (comic.isDirectory) {
       // ==========================================
@@ -1152,6 +1606,7 @@ function renderGrid() {
 
       card.innerHTML = `
         <div class="comic-cover-wrapper">
+          ${state.organizeMode ? `<span class="organize-check" aria-hidden="true"><i class="fa-solid fa-check"></i></span>` : ''}
           <img class="comic-cover lazy-cover"
                data-src="${escapeHtml(getCoverUrl(comic.id))}"
                loading="lazy"
@@ -1165,9 +1620,9 @@ function renderGrid() {
           </div>
           
           <!-- 💖 收藏愛心按鈕 -->
-          <button class="favorite-toggle-btn ${isFavorite ? 'active' : ''}" title="${isFavorite ? '取消收藏' : '加入收藏'}">
+          ${state.organizeMode ? '' : `<button class="favorite-toggle-btn ${isFavorite ? 'active' : ''}" title="${isFavorite ? '取消收藏' : '加入收藏'}">
             <i class="${isFavorite ? 'fa-solid' : 'fa-regular'} fa-heart"></i>
-          </button>
+          </button>`}
 
           <span class="comic-format-tag ${String(comic.type || '').includes('archive') ? 'tag-archive' : 'tag-folder'}" data-ext="${escapeHtml(comic.ext || 'folder')}">${String(comic.type || '').includes('archive') ? escapeHtml((comic.ext || '.cbz').replace('.','').toUpperCase()) : '📁 目錄'}</span>
           ${badgeHtml}
@@ -1186,8 +1641,9 @@ function renderGrid() {
         </div>
       `;
 
-      card.onclick = () => openReader(comic.id);
-      configureInteractiveItem(card, `閱讀漫畫：${comic.title}`, card.onclick);
+      card.onclick = () => state.organizeMode ? toggleOrganizerSelection(comic.id) : openReader(comic.id);
+      configureInteractiveItem(card, state.organizeMode ? `選取漫畫：${comic.title}` : `閱讀漫畫：${comic.title}`, card.onclick);
+      card.setAttribute('aria-pressed', state.organizeMode ? String(state.organizeSelection.has(comic.id)) : 'false');
       card.onmouseenter = () => renderComicInspector(comic);
       card.oncontextmenu = (e) => showGridContextMenu(e, comic);
 
@@ -1229,7 +1685,7 @@ function renderGrid() {
 
   // IntersectionObserver 懶載入封面 — 只有卡片進入視窗才發封面請求
   // 一次最多約 20 張並行，從根源防止 549 個 AdmZip 同時炸掉記憶體！
-  const coverObserver = new IntersectionObserver((entries, observer) => {
+  coverObserver = new IntersectionObserver((entries, observer) => {
     entries.forEach(entry => {
       if (entry.isIntersecting) {
         const img = entry.target;
@@ -1539,6 +1995,7 @@ function renderPages() {
       img.loading = 'lazy';
       img.className = 'webtoon-img';
       img.dataset.index = idx;
+      applyImageEffects(img);
       elements.pagesContainer.appendChild(img);
     });
 
@@ -1940,10 +2397,10 @@ function handleReaderContextAction(action) {
       toggleFitMode();
       break;
     case 'crop':
-      showReaderToast('裁切白邊會在下一階段補上');
+      toggleCropEdges();
       break;
     case 'brightness':
-      showReaderToast('亮度調整會在下一階段補上');
+      cycleBrightness();
       break;
     case 'fullscreen':
       toggleFullscreen();
@@ -1979,6 +2436,11 @@ function preloadNextPages() {
       img.fetchPriority = 'low';
       img.src = pages[idx];
       state.preloadedImages.set(idx, img);
+      img.onerror = () => {
+        if (state.preloadedImages.get(idx) !== img) return;
+        img.removeAttribute('src');
+        state.preloadedImages.delete(idx);
+      };
     }
   });
 
@@ -2193,6 +2655,16 @@ function handleKeyDown(e) {
       e.preventDefault();
       toggleSharpen();
       break;
+    case 'c':
+    case 'C':
+      e.preventDefault();
+      toggleCropEdges();
+      break;
+    case 'b':
+    case 'B':
+      e.preventDefault();
+      cycleBrightness();
+      break;
     case 'Escape':
       e.preventDefault();
       if (state.readerContextMenuOpen) {
@@ -2221,6 +2693,11 @@ function updateReaderUiControls() {
     [elements.btnModeCatalog, 'catalog']
   ].forEach(([button, value]) => button.setAttribute('aria-pressed', String(mode === value)));
   elements.zoomValue.textContent = `${state.zoomPercentage}%`;
+  elements.readerOverlay.classList.toggle('reader-crop-edges', state.cropEdges);
+  elements.btnCrop.classList.toggle('active', state.cropEdges);
+  elements.btnCrop.setAttribute('aria-pressed', String(state.cropEdges));
+  elements.btnBrightness.classList.toggle('active', state.brightness !== 100);
+  elements.btnBrightness.setAttribute('aria-label', `目前亮度 ${state.brightness}%，按下切換`);
 
   // 條漫模式下不支援螢幕適應與旋轉
   if (mode === 'webtoon') {
@@ -2326,12 +2803,6 @@ function toggleSharpen() {
 
 // 套用銳利化濾鏡到當前所有閱讀器圖片
 function applySharpenFilter() {
-  const filterMap = {
-    0: 'none',
-    1: 'url(#sharpen-subtle)',
-    2: 'url(#sharpen-standard)',
-    3: 'url(#sharpen-strong)',
-  };
   const renderingMap = {
     0: 'auto',
     1: 'auto',
@@ -2339,7 +2810,6 @@ function applySharpenFilter() {
     3: 'pixelated',
   };
 
-  const svgFilter = filterMap[state.sharpenLevel];
   const imageRendering = renderingMap[state.sharpenLevel];
   const isActive = state.sharpenLevel > 0;
 
@@ -2356,9 +2826,29 @@ function applySharpenFilter() {
   // 套用到所有目前可見的閱讀器圖片
   const imgs = elements.pagesContainer.querySelectorAll('img');
   imgs.forEach(img => {
-    img.style.filter = svgFilter;
+    img.style.filter = imageFilterValue();
     img.style.imageRendering = imageRendering;
   });
+}
+
+function toggleCropEdges() {
+  state.cropEdges = !state.cropEdges;
+  localStorage.setItem('readerCropEdges', String(state.cropEdges));
+  elements.readerOverlay.classList.toggle('reader-crop-edges', state.cropEdges);
+  elements.btnCrop.classList.toggle('active', state.cropEdges);
+  elements.btnCrop.setAttribute('aria-pressed', String(state.cropEdges));
+  showReaderToast(state.cropEdges ? '⌗ 已非破壞式裁切頁面外緣 2%' : '⌗ 已顯示完整頁面');
+}
+
+function cycleBrightness() {
+  const levels = [100, 85, 70, 115];
+  const current = levels.indexOf(state.brightness);
+  state.brightness = levels[(current + 1) % levels.length];
+  localStorage.setItem('readerBrightness', String(state.brightness));
+  elements.btnBrightness.classList.toggle('active', state.brightness !== 100);
+  elements.btnBrightness.setAttribute('aria-label', `目前亮度 ${state.brightness}%，按下切換`);
+  elements.pagesContainer.querySelectorAll('img').forEach(applyImageEffects);
+  showReaderToast(`☀️ 亮度：${state.brightness}%`);
 }
 
 // 💬 顯示精緻的微提示 (Toast)
@@ -2589,6 +3079,65 @@ async function openSettingsModal() {
   }
 }
 
+async function exportCatalogMetadataFile() {
+  if (!eAPI?.exportCatalogMetadata) return;
+  try {
+    const payload = await eAPI.exportCatalogMetadata();
+    const filename = `少女漫畫閣-metadata-${new Date().toISOString().slice(0, 10)}.json`;
+    if (eAPI.saveCatalogMetadata) {
+      const defaultPath = eAPI.getCatalogExportPath ? await eAPI.getCatalogExportPath(filename) : filename;
+      const path = await eAPI.saveCatalogMetadata(defaultPath, payload);
+      if (path) updateOrganizerUi(`metadata 已匯出至 ${path}`);
+      return;
+    }
+    const url = URL.createObjectURL(new Blob([payload], { type: 'application/json' }));
+    const anchor = document.createElement('a');
+    anchor.href = url;
+    anchor.download = filename;
+    anchor.click();
+    setTimeout(() => URL.revokeObjectURL(url), 0);
+  } catch (error) {
+    updateOrganizerUi(`metadata 匯出失敗：${error?.message || error}`);
+  }
+}
+
+async function previewCatalogMetadataFile(event) {
+  const file = event.target.files?.[0];
+  if (!file || !eAPI?.previewCatalogImport || !elements.catalogImportPreview) return;
+  try {
+    const payload = await file.text();
+    const preview = await eAPI.previewCatalogImport(payload);
+    elements.catalogImportPreview.innerHTML = `
+      <strong>可配對 ${preview.matched} 本；未配對 ${preview.unmatched.length} 本；衝突 ${preview.conflicts.length} 項。</strong>
+      <p>「安全匯入」保留本機手動值；「採用匯入衝突值」會明確覆寫列出的衝突，兩者都可撤銷。</p>
+      <div class="catalog-exchange-actions">
+        <button type="button" class="modal-action-btn" data-import-strategy="safe">安全匯入</button>
+        ${preview.conflicts.length ? '<button type="button" class="modal-action-btn catalog-import-risk" data-import-strategy="incoming">採用匯入衝突值</button>' : ''}
+      </div>`;
+    elements.catalogImportPreview.querySelectorAll('[data-import-strategy]').forEach(button => {
+      button.addEventListener('click', async () => {
+        button.disabled = true;
+        const resolutions = button.dataset.importStrategy === 'incoming'
+          ? Object.fromEntries(preview.conflicts.map(conflict => [conflict.key, 'useIncoming']))
+          : {};
+        try {
+          const result = await eAPI.applyCatalogImport({ payload, resolutions });
+          state.lastUndoToken = result.undoToken;
+          elements.catalogImportPreview.textContent = `已更新 ${result.updated} 本，保留 ${result.skippedConflicts} 個本機衝突；可在整理列撤銷。`;
+          await fetchLibrary();
+        } catch (error) {
+          button.disabled = false;
+          elements.catalogImportPreview.textContent = `匯入失敗：${error?.message || String(error)}`;
+        }
+      });
+    });
+  } catch (error) {
+    elements.catalogImportPreview.textContent = `無法預覽交換檔：${error?.message || String(error)}`;
+  } finally {
+    event.target.value = '';
+  }
+}
+
 function bindKeyboardActivation(element, action) {
   if (!element) return;
   element.addEventListener('keydown', event => {
@@ -2798,6 +3347,170 @@ async function fetchBrowserFolders(dirPath) {
     });
   } catch (e) {
     console.error('讀取目錄失敗：', e);
+  }
+}
+
+function updateAiProviderDisclosure() {
+  if (!elements.aiGoogleDisclosureWrap) return;
+  elements.aiGoogleDisclosureWrap.hidden = elements.aiProvider?.value !== 'google';
+}
+
+function renderAiSessionStatus(status) {
+  if (!elements.aiSessionStatus) return;
+  if (!status?.configured) {
+    elements.aiSessionStatus.textContent = '尚未設定艦載 AI。Key 只保留到 App 關閉。';
+    return;
+  }
+  const label = status.provider === 'google' ? 'Google Gemma 4' : 'OpenAI Luna';
+  elements.aiSessionStatus.textContent = `已啟用 ${label} · ${status.model}（工作階段限定）`;
+}
+
+async function refreshAiSessionStatus() {
+  if (!eAPI?.getAiSessionStatus) return;
+  try {
+    renderAiSessionStatus(await eAPI.getAiSessionStatus());
+  } catch (error) {
+    console.error('讀取艦載 AI 狀態失敗', error);
+  }
+}
+
+async function saveAiSession() {
+  if (!eAPI?.setAiSessionConfig) return;
+  const apiKey = elements.aiApiKey?.value.trim() || '';
+  if (!apiKey) {
+    showReaderToast('請先手動輸入 API Key');
+    return;
+  }
+  elements.aiSaveBtn.disabled = true;
+  try {
+    const status = await eAPI.setAiSessionConfig({
+      provider: elements.aiProvider.value,
+      apiKey,
+      googleContentDisclosure: Boolean(elements.aiGoogleDisclosure?.checked)
+    });
+    elements.aiApiKey.value = '';
+    renderAiSessionStatus(status);
+    showReaderToast('艦載 AI 已啟用；Key 只存在本次工作階段');
+  } catch (error) {
+    showReaderToast('艦載 AI 設定失敗：' + (error?.message || error));
+  } finally {
+    elements.aiSaveBtn.disabled = false;
+  }
+}
+
+async function testAiSession() {
+  if (!eAPI?.testAiSession) return;
+  elements.aiTestBtn.disabled = true;
+  elements.aiSessionStatus.textContent = '正在用合成文字測試，不會送出漫畫內容…';
+  try {
+    const response = await eAPI.testAiSession();
+    elements.aiSessionStatus.textContent = response || '艦載 AI 連線成功。';
+  } catch (error) {
+    elements.aiSessionStatus.textContent = '測試失敗：' + (error?.message || error);
+  } finally {
+    elements.aiTestBtn.disabled = false;
+  }
+}
+
+async function clearAiSession() {
+  if (!eAPI?.clearAiSessionConfig) return;
+  await eAPI.clearAiSessionConfig();
+  if (elements.aiApiKey) elements.aiApiKey.value = '';
+  renderAiSessionStatus(null);
+  showReaderToast('已清除本次工作階段的 API Key');
+}
+
+function blobAsDataUrl(blob) {
+  return new Promise((resolve, reject) => {
+    const reader = new FileReader();
+    reader.onload = () => resolve(reader.result);
+    reader.onerror = () => reject(new Error('無法讀取目前頁面'));
+    reader.readAsDataURL(blob);
+  });
+}
+
+async function currentPageDataUrl() {
+  if (!state.currentComicPages.length) throw new Error('請先開啟一頁漫畫');
+  const source = state.currentComicPages[state.currentPageIndex];
+  const response = await fetch(source);
+  if (!response.ok) throw new Error(`頁面讀取失敗（HTTP ${response.status}）`);
+  const blob = await response.blob();
+  if (blob.size > 20 * 1024 * 1024) throw new Error('目前頁面超過 20 MiB 上限');
+  return blobAsDataUrl(blob);
+}
+
+async function explainCurrentPage() {
+  if (!eAPI?.explainPage || !state.currentComicPages.length) {
+    showReaderToast('請先開啟一頁漫畫');
+    return;
+  }
+  elements.aiPagePanel.hidden = false;
+  elements.aiPageResult.textContent = '艦載 AI 正在閱讀目前這一頁…';
+  elements.btnAiExplain.disabled = true;
+  try {
+    const dataUrl = await currentPageDataUrl();
+    elements.aiPageResult.textContent = await eAPI.explainPage({ dataUrl });
+  } catch (error) {
+    elements.aiPageResult.textContent = '艦載 AI 無法說明：' + (error?.message || error);
+  } finally {
+    elements.btnAiExplain.disabled = false;
+  }
+}
+
+function renderAiMetadataCandidates(candidates, comicId) {
+  if (!candidates?.length) {
+    elements.aiPageResult.textContent = '艦載 AI 沒有提出可確認的候選。';
+    return;
+  }
+  elements.aiPageResult.innerHTML = `
+    <strong>可審核候選</strong><small class="ai-candidate-note">尚未套用；請逐筆確認。</small>
+    <div class="ai-candidate-list">
+      ${candidates.map((candidate, index) => {
+        const value = candidate.field === 'tags'
+          ? (candidate.value || []).map(tag => `${tag.namespace}:${tag.value}`).join('、')
+          : String(candidate.value || '');
+        return `<div class="ai-candidate" data-candidate-index="${index}">
+          <div><span class="ai-candidate-field">${escapeHtml(candidate.field === 'tags' ? '標籤' : '摘要')}</span> ${escapeHtml(value)} <small>${Math.round(Number(candidate.confidence || 0) * 100)}%</small></div>
+          <button type="button" class="metadata-suggestion ai-candidate-apply">套用</button>
+        </div>`;
+      }).join('')}
+    </div>`;
+  elements.aiPageResult.querySelectorAll('.ai-candidate-apply').forEach(button => {
+    button.addEventListener('click', async () => {
+      const item = candidates[Number(button.closest('.ai-candidate')?.dataset.candidateIndex)];
+      if (!item || !eAPI?.applyBatchMetadata) return;
+      button.disabled = true;
+      try {
+        const request = item.field === 'tags'
+          ? { comicIds: [comicId], fields: {}, addTags: item.value, excludeTags: [] }
+          : { comicIds: [comicId], fields: { summary: String(item.value) }, addTags: [], excludeTags: [] };
+        await eAPI.applyBatchMetadata(request);
+        button.textContent = '已套用';
+        button.title = '已寫入使用者覆寫';
+      } catch (error) {
+        button.disabled = false;
+        button.title = error?.message || String(error);
+      }
+    });
+  });
+}
+
+async function suggestCurrentPageMetadata() {
+  if (!eAPI?.suggestComicMetadata || !state.currentComic?.id || !state.currentComicPages.length) {
+    showReaderToast('請先在 Tauri App 開啟一頁漫畫');
+    return;
+  }
+  elements.aiPagePanel.hidden = false;
+  elements.aiPageResult.textContent = '艦載 AI 正在提出可審核的摘要與標籤候選…';
+  elements.btnAiSuggest.disabled = true;
+  try {
+    const dataUrl = await currentPageDataUrl();
+    const candidates = await eAPI.suggestComicMetadata({ comicId: state.currentComic.id, dataUrl });
+    renderAiMetadataCandidates(candidates, state.currentComic.id);
+  } catch (error) {
+    elements.aiPageResult.textContent = '艦載 AI 候選失敗：' + (error?.message || error);
+  } finally {
+    elements.btnAiSuggest.disabled = false;
   }
 }
 

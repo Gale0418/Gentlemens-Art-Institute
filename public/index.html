@@ -17,6 +17,15 @@
 </head>
 <body>
 
+  <!--
+  THESIS: 五千本收藏的整理工作直接發生在熟悉的書架，不另造管理後台。
+  OWN-WORLD: 延續 Deep Aurora 深色工作台、暖粉主操作與精準的 8px 控件語言。
+  STORY: 使用者切換整理、選書、批次套用 metadata，並在同一側欄核對來源與警告。
+  FIRST VIEWPORT: 原書架保持主體；整理切換位於標題列，批次列貼近內容底部，metadata 沿用右側 inspector。
+  FORM: established-world local extension; code-first-organizer-v1。
+  FINISH: unreviewed and undocumented is unfinished; this build ends with the finish review, the verdict, and DESIGN.md
+  -->
+
   <a class="skip-link" href="#comic-grid">跳到漫畫書架</a>
 
   <!-- 隱藏式 SVG 銀利化濃鎮定義 -->
@@ -167,6 +176,7 @@
               <h2 id="library-title" aria-live="polite">全部漫畫</h2>
             </div>
             <div class="filter-options">
+              <button class="filter-btn organize-toggle" id="organize-toggle" aria-pressed="false"><i class="fa-solid fa-tags"></i> 整理</button>
               <button class="filter-btn active" data-filter="all" aria-pressed="true">全部</button>
               <button class="filter-btn" data-filter="reading" aria-pressed="false">閱讀中</button>
               <button class="filter-btn" data-filter="unread" aria-pressed="false">未讀取</button>
@@ -174,6 +184,8 @@
               <button class="filter-btn" data-filter="favorite" aria-pressed="false"><i class="fa-solid fa-heart" style="color: #ff6b8b; margin-right: 4px;"></i> 已收藏</button>
             </div>
           </div>
+
+          <div class="catalog-facets" id="catalog-facets" aria-live="polite" hidden></div>
 
           <!-- 資料夾層級導航列 (姬米妮貼心打造 ✨) -->
           <div class="folder-breadcrumbs" id="folder-breadcrumbs" style="display: none; align-items: center; gap: 8px; margin: -10px 0 20px 0; padding: 10px 16px; background: var(--bg-hover); border: 1px solid var(--border); border-radius: 10px; font-size: 13.5px; color: var(--text-light); overflow-x: auto; white-space: nowrap; scrollbar-width: none;">
@@ -183,6 +195,50 @@
           <div class="comic-grid" id="comic-grid" tabindex="-1">
             <!-- 漫畫卡片動態載入 -->
           </div>
+
+          <button class="catalog-load-more" id="catalog-load-more" type="button" hidden>顯示更多漫畫</button>
+
+          <section class="organize-bar" id="organize-bar" aria-label="批次整理工具" hidden>
+            <div class="organize-selection">
+              <strong id="organize-count">已選 0 本</strong>
+              <button type="button" id="organize-select-visible">選取目前結果</button>
+              <button type="button" id="organize-clear">清除</button>
+            </div>
+            <div class="organize-fields">
+              <label>標籤<input id="organize-tag" type="text" placeholder="例如：百合"></label>
+              <label>作者<input id="organize-author" type="text" placeholder="留空不修改"></label>
+              <label>系列<input id="organize-series" type="text" placeholder="留空不修改"></label>
+              <label>語言<input id="organize-language" type="text" placeholder="zh-TW"></label>
+              <label>閱讀方向
+                <select id="organize-direction">
+                  <option value="">不修改</option>
+                  <option value="ltr">由左至右</option>
+                  <option value="rtl">由右至左</option>
+                  <option value="vertical">條漫直向</option>
+                </select>
+              </label>
+            </div>
+            <div class="organize-actions">
+              <button type="button" class="organize-primary" id="organize-apply">套用</button>
+              <button type="button" id="organize-exclude-tag">排除標籤</button>
+              <button type="button" id="organize-folder-rule">設為資料夾規則</button>
+              <button type="button" id="organize-reimport">重新匯入</button>
+              <button type="button" id="organize-undo" disabled>撤銷上次操作</button>
+            </div>
+            <div class="organize-insights">
+              <div class="organize-insight-actions">
+                <button type="button" id="organize-inbox">低信心 Inbox</button>
+                <button type="button" id="organize-duplicates">重複候選</button>
+              </div>
+              <div class="organize-alias-form" aria-label="新增中文標籤別名">
+                <input id="organize-alias" type="text" placeholder="別名，例如：甜文">
+                <input id="organize-canonical" type="text" placeholder="標準標籤，例如：甜寵">
+                <button type="button" id="organize-save-alias">儲存別名</button>
+              </div>
+              <div id="organize-insight-results" class="organize-insight-results" aria-live="polite"></div>
+            </div>
+            <p class="organize-status" id="organize-status" role="status"></p>
+          </section>
 
           <!-- 漫畫庫為空時的顯示狀態 -->
           <div class="empty-state" id="empty-state" style="display: none;">
@@ -279,11 +335,37 @@
           <i class="fa-solid fa-wand-magic-sparkles"></i>
         </button>
 
+        <button class="control-action-btn" id="btn-crop" aria-pressed="false" title="裁切頁面邊緣 (C 鍵)">
+          <i class="fa-solid fa-crop-simple"></i>
+        </button>
+
+        <button class="control-action-btn" id="btn-brightness" title="循環調整亮度 (B 鍵)">
+          <i class="fa-solid fa-sun"></i>
+        </button>
+
+        <button class="control-action-btn ai-page-btn" id="btn-ai-explain" title="請艦載 AI 說明目前頁面">
+          <i class="fa-solid fa-wand-sparkles"></i>
+          <span>這頁在說什麼？</span>
+        </button>
+
+        <button class="control-action-btn ai-page-btn" id="btn-ai-suggest" title="請艦載 AI 提出可審核的摘要與標籤候選">
+          <i class="fa-solid fa-tags"></i>
+          <span>產生整理候選</span>
+        </button>
+
         <button class="control-action-btn" id="btn-fullscreen" title="切換全螢幕 (F 鍵)">
           <i class="fa-solid fa-expand"></i>
         </button>
       </div>
     </div>
+
+    <aside class="ai-page-panel" id="ai-page-panel" aria-live="polite" aria-labelledby="ai-page-title" hidden>
+      <div class="ai-page-panel-header">
+        <h3 id="ai-page-title"><i class="fa-solid fa-wand-sparkles"></i> 艦載 AI</h3>
+        <button id="ai-page-close" aria-label="關閉艦載 AI 面板"><i class="fa-solid fa-xmark"></i></button>
+      </div>
+      <p id="ai-page-result">按下 AI 按鈕後，只會送出目前這一頁；整理候選必須由你逐筆套用。</p>
+    </aside>
 
     <div class="reader-context-menu" id="reader-context-menu" style="display: none;">
       <button data-reader-action="single"><i class="fa-solid fa-file"></i> 單頁</button>
@@ -359,6 +441,43 @@
         <div id="external-bookmarks-list" style="margin-top: 10px; display: flex; flex-direction: column; gap: 8px;">
           <!-- 動態載入外部書籤 -->
         </div>
+
+        <section class="catalog-exchange" aria-labelledby="catalog-exchange-title">
+          <div>
+            <h3 id="catalog-exchange-title"><i class="fa-solid fa-arrow-right-arrow-left"></i> 整理資料交換</h3>
+            <p>只交換手動 metadata 與 tag，不搬漫畫檔；匯入前一定先預覽衝突。</p>
+          </div>
+          <div class="catalog-exchange-actions">
+            <button id="catalog-export-btn" class="modal-action-btn" type="button">匯出 JSON</button>
+            <label class="modal-action-btn catalog-import-label" for="catalog-import-input" role="button" tabindex="0">選擇匯入檔</label>
+            <input id="catalog-import-input" class="visually-hidden" type="file" accept="application/json,.json">
+          </div>
+          <div id="catalog-import-preview" class="catalog-import-preview" aria-live="polite"></div>
+        </section>
+
+        <section class="ai-settings" aria-labelledby="ai-settings-title">
+          <div>
+            <h3 id="ai-settings-title"><i class="fa-solid fa-wand-sparkles"></i> 艦載 AI</h3>
+            <p>Key 只保留到 App 關閉，不寫入硬碟。模型固定為省錢的 Luna 或免費 Gemma 4。</p>
+          </div>
+          <label for="ai-provider">供應商</label>
+          <select id="ai-provider">
+            <option value="openai">OpenAI · GPT-5.6 Luna</option>
+            <option value="google">Google · Gemma 4 26B（免費層）</option>
+          </select>
+          <label for="ai-api-key">API Key</label>
+          <input id="ai-api-key" type="password" autocomplete="off" spellcheck="false" placeholder="手動貼上，只保留本次執行階段">
+          <label class="ai-disclosure" id="ai-google-disclosure-wrap" hidden>
+            <input id="ai-google-disclosure" type="checkbox">
+            我了解 Google 免費層提交內容可能用於改善產品，並允許送出我主動選擇的目前頁面。
+          </label>
+          <div class="ai-settings-actions">
+            <button id="ai-save-btn" class="modal-action-btn primary" type="button">啟用本次工作階段</button>
+            <button id="ai-test-btn" class="modal-action-btn" type="button">用合成文字測試</button>
+            <button id="ai-clear-btn" class="modal-action-btn" type="button">清除 Key</button>
+          </div>
+          <p id="ai-session-status" class="input-tip" aria-live="polite">尚未設定艦載 AI。</p>
+        </section>
 
         <div class="folder-browser-section">
           <h3><i class="fa-solid fa-folder-open"></i> 後端路徑瀏覽器</h3>

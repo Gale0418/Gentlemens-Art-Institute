@@ -1,0 +1,81 @@
+{
+  "schemaVersion": 2,
+  "generatedAt": "2026-08-25T19:15:55Z",
+  "title": "Design System: 少女漫畫閣",
+  "extensions": {
+    "colorMeta": {
+      "midnight-canvas": { "role": "neutral", "displayName": "Midnight Canvas", "canonical": "#140508", "tonalRamp": ["#260209", "#3d0710", "#5c0b18", "#7d1021", "#a7192e", "#d63b4b", "#f48994", "#fff0f1"] },
+      "archive-red": { "role": "primary", "displayName": "Archive Red", "canonical": "#ff3d54", "tonalRamp": ["#300109", "#570512", "#820b1d", "#ad142b", "#d9273e", "#ff5266", "#ff9ba6", "#ffecef"] },
+      "text-primary": { "role": "neutral", "displayName": "Warm Paper", "canonical": "#fff5f2", "tonalRamp": ["#211b1a", "#413735", "#635452", "#877471", "#ac9691", "#d1bab5", "#ead8d4", "#fff5f2"] }
+    },
+    "typographyMeta": {
+      "display": { "displayName": "Editorial Display", "purpose": "頁面與主要收藏標題。" },
+      "body": { "displayName": "Working UI", "purpose": "長時間閱讀與所有操作介面。" },
+      "label": { "displayName": "Quiet Label", "purpose": "欄位、facet 與狀態。" }
+    },
+    "shadows": [
+      { "name": "surface-low", "value": "0 7px 20px rgba(9, 0, 2, 0.3)", "purpose": "輕度浮起的互動表面。" },
+      { "name": "surface-medium", "value": "0 20px 44px rgba(9, 0, 2, 0.4)", "purpose": "inspector 與浮動批次工具。" },
+      { "name": "surface-high", "value": "0 34px 76px rgba(8, 0, 2, 0.58)", "purpose": "需要明確前後關係的頂層面板。" }
+    ],
+    "motion": [
+      { "name": "ease-standard", "value": "cubic-bezier(0.2, 0.8, 0.2, 1)", "purpose": "控制狀態與面板轉場。" }
+    ],
+    "breakpoints": [
+      { "name": "organizer-stack", "value": "1280px" },
+      { "name": "compact", "value": "760px" }
+    ]
+  },
+  "components": [
+    {
+      "name": "Primary Button",
+      "kind": "button",
+      "refersTo": "button-primary",
+      "description": "操作群中的唯一主要動作。",
+      "html": "<button class=\"ds-btn-primary\">套用</button>",
+      "css": ".ds-btn-primary{min-height:44px;padding:0 16px;border:0;border-radius:var(--radius-sm);background:var(--accent-color);color:var(--on-accent,#fff);font:600 14px var(--font-ui);cursor:pointer;transition:background .2s var(--ease-standard),transform .2s var(--ease-standard)}.ds-btn-primary:hover{background:var(--accent-hover);transform:translateY(-1px)}.ds-btn-primary:focus-visible{outline:3px solid var(--focus-ring);outline-offset:3px}.ds-btn-primary:active{transform:none}"
+    },
+    {
+      "name": "Metadata Input",
+      "kind": "input",
+      "refersTo": "input",
+      "description": "整理列的短欄位輸入。",
+      "html": "<input class=\"ds-input\" value=\"百合\" aria-label=\"標籤\">",
+      "css": ".ds-input{min-height:44px;padding:0 12px;border:1px solid var(--line-subtle);border-radius:var(--radius-sm);background:var(--surface-raised);color:var(--text-primary);font:14px var(--font-ui)}.ds-input:hover{border-color:var(--accent-color)}.ds-input:focus-visible{outline:3px solid var(--focus-ring);outline-offset:3px}"
+    },
+    {
+      "name": "Facet Chip",
+      "kind": "chip",
+      "description": "以同一查詢語法產生的搜尋篩選。",
+      "html": "<button class=\"ds-chip\">百合 28</button>",
+      "css": ".ds-chip{min-height:32px;padding:6px 10px;border:1px solid var(--line-subtle);border-radius:999px;background:var(--surface-interactive);color:var(--text-secondary);font:500 12px var(--font-ui);cursor:pointer}.ds-chip:hover{color:var(--text-primary);border-color:var(--accent-color)}.ds-chip:focus-visible{outline:3px solid var(--focus-ring);outline-offset:3px}"
+    },
+    {
+      "name": "Comic Card",
+      "kind": "card",
+      "refersTo": "card",
+      "description": "書架的漫畫項目與整理選取單位。",
+      "html": "<article class=\"ds-card\"><strong>漫畫標題</strong><span>系列名稱</span></article>",
+      "css": ".ds-card{display:grid;gap:8px;padding:16px;border-radius:var(--radius-md);background:var(--surface-panel);color:var(--text-primary);font-family:var(--font-ui)}.ds-card span{color:var(--text-secondary);font-size:12px}.ds-card:hover{background:var(--surface-raised)}.ds-card:focus-within{outline:3px solid var(--focus-ring);outline-offset:3px}"
+    },
+    {
+      "name": "Organizer Bar",
+      "kind": "custom",
+      "description": "在書架內完成多選與批次 metadata 操作的浮動工作列。",
+      "html": "<section class=\"ds-organizer\"><strong>已選 20 本</strong><button>套用</button><span role=\"status\">變更可撤銷</span></section>",
+      "css": ".ds-organizer{display:flex;align-items:center;gap:12px;padding:14px;border:1px solid color-mix(in srgb,var(--accent-color) 32%,transparent);border-radius:12px;background:var(--panel-bg);color:var(--text-primary);box-shadow:var(--shadow-md);font-family:var(--font-ui)}.ds-organizer button{min-height:44px;padding:0 14px;border:0;border-radius:var(--radius-sm);background:var(--accent-color);color:var(--on-accent,#fff)}.ds-organizer button:focus-visible{outline:3px solid var(--focus-ring);outline-offset:3px}.ds-organizer span{color:var(--text-secondary);font-size:12px}"
+    }
+  ],
+  "narrative": {
+    "northStar": "深夜私人藏書室",
+    "overview": "少女漫畫閣把大型私人收藏呈現成一座安靜但有生命的深夜藏書室：內容永遠是主體，控制區則像可靠的整理桌。預設 Midnight 主題以酒紅黑、暖紅主操作與低亮度文字層級維持沉浸感；其他主題是同一結構的換裝，而不是各自另造元件。",
+    "keyCharacteristics": ["深色 local-first 收藏工作台", "內容優先、控制緊湊、狀態可見", "主題色透過語意 tokens 驅動", "滑鼠、鍵盤與 iPad 觸控共用一套元件"],
+    "rules": [
+      { "name": "Semantic Theme Rule", "body": "新元件只能使用現有語意變數；不得寫死某個主題的青綠、粉紅或橘色。", "section": "colors" },
+      { "name": "Quiet Label Rule", "body": "標籤靠尺寸與色階退後，不使用全大寫 eyebrow 或多餘前導標語。", "section": "typography" },
+      { "name": "Working Surface Rule", "body": "一個表面以邊框或陰影表達層級即可；避免寬陰影再疊高對比描邊。", "section": "elevation" }
+    ],
+    "dos": ["Do 讓新控制跟隨語意色彩與焦點 tokens。", "Do 為批次、離線、空狀態、錯誤與 loading 提供可讀文字。", "Do 在 iPad／粗指標環境維持至少 44px 的互動高度。"],
+    "donts": ["Don't 為單一功能寫死只適合某個主題的色彩。", "Don't 使用 Unicode 字元或 emoji 代替新增功能的圖示。", "Don't 把資料管理拆成另一套視覺與導覽完全不同的後台。"]
+  }
+}

@@ -9,6 +9,11 @@ use tauri::{Emitter, Manager};
 const MAX_PRELOAD_PAGES: usize = 5;
 const MAX_PRELOAD_BYTES: usize = 64 * 1024 * 1024;
 
+fn preload_window(total: usize, current_page: usize) -> std::ops::Range<usize> {
+    let start = current_page.min(total);
+    start..(start + MAX_PRELOAD_PAGES).min(total)
+}
+
 fn resolve_preload_path(
     comic_type: Option<&str>,
     scan_dir: &Path,
@@ -22,7 +27,12 @@ fn resolve_preload_path(
     }
 }
 
-pub async fn preload_comic(state: Arc<AppState>, app_handle: tauri::AppHandle, id: String, generation: u64) {
+pub async fn preload_comic(
+    state: Arc<AppState>,
+    app_handle: tauri::AppHandle,
+    id: String,
+    generation: u64,
+) {
     // 取得 relative_path
     let relative_path_bytes = match general_purpose::URL_SAFE_NO_PAD.decode(&id) {
         Ok(b) => b,
@@ -33,12 +43,13 @@ pub async fn preload_comic(state: Arc<AppState>, app_handle: tauri::AppHandle, i
         Err(_) => return,
     };
 
-    let comic_type = {
+    let (comic_type, current_page) = {
         let comics = state.comics.lock().await;
         comics
             .iter()
             .find(|comic| comic.id == id)
-            .map(|comic| comic.r#type.clone())
+            .map(|comic| (Some(comic.r#type.clone()), comic.progress.current_page))
+            .unwrap_or((None, 0))
     };
     let scan_dir = { state.scan_dir.read().unwrap().clone() };
     let smb_temp_dir = app_handle
@@ -55,9 +66,12 @@ pub async fn preload_comic(state: Arc<AppState>, app_handle: tauri::AppHandle, i
 
     if !full_path.exists() || full_path.is_dir() {
         // 資料夾模式速度極快，不太需要預載到記憶體
-        let _ = app_handle.emit("ram-cache-progress", serde_json::json!({
-            "id": id, "generation": generation, "loaded": 0, "total": 0, "finished": true
-        }));
+        let _ = app_handle.emit(
+            "ram-cache-progress",
+            serde_json::json!({
+                "id": id, "generation": generation, "loaded": 0, "total": 0, "finished": true
+            }),
+        );
         return;
     }
 
@@ -68,20 +82,28 @@ pub async fn preload_comic(state: Arc<AppState>, app_handle: tauri::AppHandle, i
     let completion_id = id.clone();
     let task = tokio::task::spawn_blocking(move || -> Result<Option<(usize, usize)>, String> {
         let file = File::open(&full_path).map_err(|error| format!("無法讀取預載 ZIP：{error}"))?;
-        let mut archive = zip::ZipArchive::new(file).map_err(|error| format!("預載 ZIP 格式無效：{error}"))?;
+        let mut archive =
+            zip::ZipArchive::new(file).map_err(|error| format!("預載 ZIP 格式無效：{error}"))?;
         let entry_names = {
             let opened = state.opened_comic_files.read().unwrap();
             opened.get(&id).cloned().unwrap_or_default()
         };
 
-        let preload_count = entry_names.len().min(MAX_PRELOAD_PAGES);
+        let preload_range = preload_window(entry_names.len(), current_page);
+        let preload_count = preload_range.len();
         let mut cached_bytes = 0;
         let mut loaded_count = 0;
-        for (i, target_name) in entry_names.iter().take(preload_count).enumerate() {
-            if state.preload_generation.load(std::sync::atomic::Ordering::Acquire) != generation {
+        for (loaded_index, page_index) in preload_range.enumerate() {
+            let target_name = &entry_names[page_index];
+            if state
+                .preload_generation
+                .load(std::sync::atomic::Ordering::Acquire)
+                != generation
+            {
                 return Ok(None);
             }
-            let mut file = archive.by_name(target_name)
+            let mut file = archive
+                .by_name(target_name)
                 .map_err(|error| format!("預載找不到 ZIP 頁面 {target_name}：{error}"))?;
             let expected_size = file.size() as usize;
             if expected_size > MAX_PRELOAD_BYTES.saturating_sub(cached_bytes) {
@@ -89,37 +111,57 @@ pub async fn preload_comic(state: Arc<AppState>, app_handle: tauri::AppHandle, i
             }
             let mut buf = Vec::new();
             let remaining = MAX_PRELOAD_BYTES.saturating_sub(cached_bytes);
-            file.by_ref().take((remaining + 1) as u64).read_to_end(&mut buf)
+            file.by_ref()
+                .take((remaining + 1) as u64)
+                .read_to_end(&mut buf)
                 .map_err(|error| format!("預載解壓 ZIP 頁面失敗：{error}"))?;
             if buf.len() > remaining {
                 break;
             }
-            if state.preload_generation.load(std::sync::atomic::Ordering::Acquire) != generation {
+            if state
+                .preload_generation
+                .load(std::sync::atomic::Ordering::Acquire)
+                != generation
+            {
                 return Ok(None);
             }
             cached_bytes += buf.len();
             let id_clone = id.clone();
             {
                 let _lifecycle = state.comic_lifecycle.lock().unwrap();
-                if state.preload_generation.load(std::sync::atomic::Ordering::Acquire) != generation {
+                if state
+                    .preload_generation
+                    .load(std::sync::atomic::Ordering::Acquire)
+                    != generation
+                {
                     return Ok(None);
                 }
                 let mut pool = state.ram_cache_pool.lock().unwrap();
-                pool.entry(id_clone.clone()).or_default().insert(i, buf);
+                pool.entry(id_clone.clone())
+                    .or_default()
+                    .insert(page_index, buf);
             }
-            loaded_count = i + 1;
-            let _ = app_handle.emit("ram-cache-progress", serde_json::json!({
-                "id": id_clone,
-                "generation": generation,
-                "loaded": loaded_count,
-                "total": preload_count,
-                "finished": false
-            }));
+            loaded_count = loaded_index + 1;
+            let _ = app_handle.emit(
+                "ram-cache-progress",
+                serde_json::json!({
+                    "id": id_clone,
+                    "generation": generation,
+                    "loaded": loaded_count,
+                    "total": preload_count,
+                    "finished": false
+                }),
+            );
         }
         Ok(Some((loaded_count, preload_count)))
-    }).await;
+    })
+    .await;
 
-    if completion_state.preload_generation.load(std::sync::atomic::Ordering::Acquire) != generation {
+    if completion_state
+        .preload_generation
+        .load(std::sync::atomic::Ordering::Acquire)
+        != generation
+    {
         return;
     }
     match task {
@@ -145,7 +187,7 @@ pub async fn preload_comic(state: Arc<AppState>, app_handle: tauri::AppHandle, i
 
 #[cfg(test)]
 mod tests {
-    use super::resolve_preload_path;
+    use super::{preload_window, resolve_preload_path};
     use std::path::Path;
 
     #[test]
@@ -170,5 +212,15 @@ mod tests {
         );
 
         assert_eq!(resolved, Path::new("/external/book.zip"));
+    }
+
+    #[test]
+    fn preload_window_starts_at_saved_progress_and_stays_bounded() {
+        assert_eq!(
+            preload_window(100, 42).collect::<Vec<_>>(),
+            vec![42, 43, 44, 45, 46]
+        );
+        assert_eq!(preload_window(3, 2).collect::<Vec<_>>(), vec![2]);
+        assert!(preload_window(3, 9).is_empty());
     }
 }

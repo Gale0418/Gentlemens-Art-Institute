@@ -23,8 +23,16 @@ pub struct ComicItem {
     pub updated_at: String, // ISO8601 String
     pub page_count: usize,
     pub progress: Progress,
+    #[serde(default = "default_source_id")]
+    pub source_id: String,
+    #[serde(skip)]
+    pub source_path: Option<String>,
     #[serde(skip)]
     pub external_bookmark: Option<String>,
+}
+
+fn default_source_id() -> String {
+    "local".to_string()
 }
 
 #[derive(Debug, Serialize, Deserialize, Clone)]
@@ -56,10 +64,52 @@ impl std::fmt::Debug for SmbConfig {
     }
 }
 
+#[derive(Debug, Default, Serialize, Deserialize, Clone, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct OnlineServicesConfig {
+    #[serde(default)]
+    pub source_matching_enabled: bool,
+    #[serde(default)]
+    pub translation_enabled: bool,
+    #[serde(default)]
+    pub sync_enabled: bool,
+    #[serde(default)]
+    pub opds_server_enabled: bool,
+    pub endpoint: Option<String>,
+    #[serde(default)]
+    pub disclosure_accepted: bool,
+}
+
+impl OnlineServicesConfig {
+    pub fn validate(self) -> Result<Self, String> {
+        let enabled = self.source_matching_enabled
+            || self.translation_enabled
+            || self.sync_enabled
+            || self.opds_server_enabled;
+        if enabled && !self.disclosure_accepted {
+            return Err("啟用線上服務前必須明確同意資料揭露".into());
+        }
+        if (self.source_matching_enabled || self.translation_enabled || self.sync_enabled)
+            && self.endpoint.as_deref().is_none_or(str::is_empty)
+        {
+            return Err("線上比對、翻譯或同步服務必須指定 endpoint".into());
+        }
+        Ok(self)
+    }
+}
+
 #[derive(Debug, Serialize, Deserialize, Clone)]
 pub struct ExternalBookmark {
     pub bookmark: String,
     pub name: String,
+}
+
+#[derive(Clone)]
+pub struct AiSessionConfig {
+    pub provider: String,
+    pub model: String,
+    pub api_key: String,
+    pub google_content_disclosure: bool,
 }
 
 pub struct AppState {
@@ -82,6 +132,11 @@ pub struct AppState {
     pub pending_open_id: std::sync::Mutex<Option<String>>,
     pub comic_lifecycle: std::sync::Mutex<()>,
     pub reader_generation: std::sync::atomic::AtomicU64,
+    pub catalog: std::sync::RwLock<Option<crate::catalog::CatalogStore>>,
+    pub catalog_sync: tokio::sync::Mutex<()>,
+    pub online_services: std::sync::RwLock<OnlineServicesConfig>,
+    /// Session-only by design: API keys never enter SQLite, localStorage, logs, or exports.
+    pub ai_session: std::sync::RwLock<Option<AiSessionConfig>>,
 }
 
 impl AppState {
@@ -109,7 +164,31 @@ impl AppState {
             pending_open_id: std::sync::Mutex::new(None),
             comic_lifecycle: std::sync::Mutex::new(()),
             reader_generation: std::sync::atomic::AtomicU64::new(0),
+            catalog: std::sync::RwLock::new(None),
+            catalog_sync: tokio::sync::Mutex::new(()),
+            online_services: std::sync::RwLock::new(OnlineServicesConfig::default()),
+            ai_session: std::sync::RwLock::new(None),
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::OnlineServicesConfig;
+
+    #[test]
+    fn online_services_are_off_by_default_and_require_disclosure() {
+        let defaults = OnlineServicesConfig::default();
+        assert!(!defaults.source_matching_enabled);
+        assert!(!defaults.translation_enabled);
+        assert!(!defaults.sync_enabled);
+        assert!(!defaults.opds_server_enabled);
+        let invalid = OnlineServicesConfig {
+            source_matching_enabled: true,
+            endpoint: Some("https://example.invalid".into()),
+            ..Default::default()
+        };
+        assert!(invalid.validate().is_err());
     }
 }
 

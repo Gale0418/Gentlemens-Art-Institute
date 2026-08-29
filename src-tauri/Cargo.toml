@@ -35,12 +35,13 @@ tauri-plugin-dialog = "2.0.0"
 smb2 = "0.11.3"
 tauri-plugin-ios-folder = { path = "./tauri-plugin-ios-folder" }
 cap-std = "=3.4.5"
-rusqlite = { version = "0.37", features = ["bundled", "modern_sqlite"] }
+rusqlite = { version = "=0.40.1", features = ["bundled", "modern_sqlite"] }
 uuid = { version = "1.18", features = ["v4", "serde"] }
 blake3 = "1.8"
 quick-xml = { version = "0.38", features = ["serialize"] }
 encoding_rs = "0.8"
 chardetng = "0.1"
+unicode-normalization = "0.1.24"
 reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls"] }
 rayon = "1.11"
 

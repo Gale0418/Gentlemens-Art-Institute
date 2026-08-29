@@ -35,15 +35,34 @@ const mustContain = (source, needle, label) => {
   assert.ok(source.includes(needle), `${label}: missing ${needle}`);
 };
 
+const bracedBlock = (source, marker, label) => {
+  const markerIndex = source.indexOf(marker);
+  assert.notEqual(markerIndex, -1, `${label}: missing ${marker}`);
+  const opening = source.indexOf('{', markerIndex);
+  assert.notEqual(opening, -1, `${label}: missing opening brace`);
+  let depth = 0;
+  for (let index = opening; index < source.length; index += 1) {
+    if (source[index] === '{') depth += 1;
+    if (source[index] === '}') depth -= 1;
+    if (depth === 0) return source.slice(opening + 1, index);
+  }
+  throw new Error(`${label}: missing closing brace`);
+};
+
 mustContain(html, 'id="continue-strip"', 'library layout');
-mustContain(html, 'id="organize-toggle"', 'catalog organizer');
 mustContain(html, 'id="organize-bar"', 'catalog organizer');
+mustContain(html, 'data-organize-panel="tags"', 'tag library organizer tab');
+mustContain(html, 'id="tag-library-list"', 'tag inventory library');
+mustContain(html, 'id="tag-editor-color"', 'custom tag color picker');
 mustContain(html, 'id="catalog-load-more"', 'bounded catalog rendering');
 mustContain(html, 'id="organize-inbox"', 'low-confidence organizer inbox');
 mustContain(html, 'id="organize-duplicates"', 'duplicate candidate review');
 mustContain(html, 'id="btn-ai-explain"', 'single-page AI explanation action');
 mustContain(html, 'id="btn-ai-auto-explain"', 'cost-bounded whole-book read-along action');
 mustContain(app, 'data-inspector-action="ai-suggest"', 'catalog AI metadata candidate action');
+mustContain(app, 'data-inspector-action="organize"', 'inspector TAG organizer entry point');
+mustContain(app, 'data-inspector-action="files"', 'inspector file manager entry point');
+mustContain(app, 'Math.round(Math.min(100, Math.max(0, rawPercent)))', 'bounded integer reading progress');
 mustContain(app, 'AI 建議摘要與標籤', 'clear AI metadata candidate label');
 mustContain(html, 'class="reader-rotate-icon"', 'unambiguous reader rotation icons');
 mustContain(html, 'id="ai-api-key"', 'manual AI provider key input');
@@ -131,6 +150,17 @@ assert.doesNotMatch(actionButtonBlock, /animation:\s*plated-flow/);
 
 mustContain(css, '.continue-strip', 'library styling');
 mustContain(css, '.organize-bar', 'catalog organizer styling');
+mustContain(css, '.organize-mode .loader-mask', 'organizer-safe background status placement');
+for (const tagColor of ['rose', 'amber', 'lime', 'cyan', 'blue', 'violet', 'fuchsia', 'slate']) {
+  mustContain(css, `[data-tag-color="${tagColor}"]`, `tag palette ${tagColor}`);
+}
+const organizerActions = [...css.matchAll(/\.organize-actions\s*\{([^}]*)\}/g)]
+  .map(match => match[1])
+  .find(block => /grid-column:/.test(block));
+assert.ok(organizerActions, 'organizer actions: missing grid layout block');
+assert.match(organizerActions, /grid-column:\s*1\s*\/\s*-1;/);
+assert.match(organizerActions, /grid-row:\s*2;/);
+assert.match(organizerActions, /justify-content:\s*flex-end;/);
 mustContain(css, '.organize-selected', 'catalog selection styling');
 mustContain(css, '.comic-inspector', 'library styling');
 mustContain(css, '.reader-context-menu', 'reader styling');
@@ -157,11 +187,19 @@ mustContain(app, 'const httpAPI', 'browser fallback');
 mustContain(app, "window.electronAPI || httpAPI", 'browser fallback');
 mustContain(app, "'/api/library'", 'browser fallback');
 mustContain(app, 'const MAX_PRELOADED_IMAGES', 'reader preload budget');
+mustContain(app, 'const READER_PRELOAD_RADIUS = 10', 'reader sliding preload radius');
+mustContain(app, 'function takePreloadedReaderImage', 'reader should reuse preloaded image elements');
+mustContain(app, 'function scheduleReaderCacheWindowUpdate', 'reader backend cache window scheduling');
+mustContain(tauriApi, "invoke('update_reader_cache_window'", 'reader cache window bridge');
 mustContain(app, 'function prunePreloadedImages', 'reader preload budget');
 mustContain(app, 'state.preloadedImages.delete(idx)', 'failed reader preload retry');
 mustContain(app, 'decoding = \'async\'', 'async image decoding');
 mustContain(app, 'fetchPriority = \'low\'', 'low-priority noncritical images');
 mustContain(app, 'function showLoaderProgress', 'loader progress UI');
+mustContain(tauriApi, "showItemInFolder: (comicId) => invoke('show_item_in_folder', { comicId })", 'Finder reveal must use a catalog identity instead of a raw path');
+mustContain(tauri, 'mutate_comic_file', 'catalog-identity file mutation command');
+mustContain(tauri, 'undo_comic_file_operation', 'recoverable file operation undo command');
+mustContain(tauriApi, "invoke('mutate_comic_file'", 'frontend file mutation bridge');
 mustContain(app, 'function setLoaderProgress', 'loader progress UI');
 mustContain(css, 'pointer-events: none', 'background work status must not block interaction');
 assert.match(
@@ -216,6 +254,10 @@ mustContain(catalog, "source_id LIKE 'local:%'", 'local root drift retirement');
 mustContain(tauri, 'store.get_runtime_item(&lookup_id)', 'catalog-only reader recovery');
 mustContain(tauri, 'search_catalog', 'catalog search command');
 mustContain(tauri, 'apply_batch_metadata', 'catalog batch command');
+mustContain(tauri, 'list_tag_inventory', 'tag inventory command');
+mustContain(tauri, 'rename_tag', 'tag rename command');
+mustContain(tauri, 'merge_tags', 'tag merge command');
+mustContain(tauri, 'undo_tag_operation', 'tag operation undo command');
 mustContain(tauri, 'preview_catalog_import', 'catalog import preview command');
 mustContain(tauri, 'get_online_services_config', 'offline-by-default service contract');
 mustContain(iosFolderPlugin, 'startDownloadingUbiquitousItem', 'iCloud materialization');
@@ -279,10 +321,17 @@ assert.match(
   /case 'Escape':[\s\S]{0,260}hideReaderContextMenu\(\);\s*triggerControlsActive\(\);\s*break;/,
   'closing the context menu with Escape should restart the idle timer'
 );
+const preloadNextPagesBody = bracedBlock(app, 'function preloadNextPages()', 'preloadNextPages');
+assert.match(preloadNextPagesBody, /prunePreloadedImages\(indicesToPreload\)/, 'preloading should prune images outside the active reading window');
 assert.match(
-  app,
-  /preloadNextPages[\s\S]{0,900}prunePreloadedImages\(indicesToPreload\)/,
-  'preloading should prune images outside the active reading window'
+  css,
+  /\.reader-bottom-bar\s*\{[\s\S]{0,420}left:\s*max\(16px,[\s\S]{0,180}width:\s*auto;[\s\S]{0,180}transform:\s*translateY\(120%\)/,
+  'reader bottom bar should use edge insets without a stale horizontal translation'
+);
+assert.match(
+  css,
+  /\.ai-page-btn\s*\{[\s\S]{0,260}flex:\s*0 0 auto;[\s\S]{0,260}white-space:\s*nowrap;/,
+  'reader AI actions should remain on one line'
 );
 assert.match(
   app,

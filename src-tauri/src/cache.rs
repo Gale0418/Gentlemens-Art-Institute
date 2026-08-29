@@ -1,17 +1,45 @@
+use crate::cache_policy::select_pages_for_budget;
 use crate::state::AppState;
 use base64::{engine::general_purpose, Engine as _};
+use std::collections::HashSet;
 use std::fs::File;
 use std::io::Read;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use tauri::{Emitter, Manager};
 
-const MAX_PRELOAD_PAGES: usize = 5;
-const MAX_PRELOAD_BYTES: usize = 64 * 1024 * 1024;
+#[derive(Debug)]
+struct PreloadError {
+    message: String,
+    loaded: usize,
+    total: usize,
+}
 
-fn preload_window(total: usize, current_page: usize) -> std::ops::Range<usize> {
-    let start = current_page.min(total);
-    start..(start + MAX_PRELOAD_PAGES).min(total)
+#[derive(Debug)]
+struct PreloadResult {
+    loaded: usize,
+    total: usize,
+    budget_bytes: usize,
+    cached_bytes: usize,
+    whole_book: bool,
+}
+
+impl PreloadError {
+    fn new(message: String) -> Self {
+        Self {
+            message,
+            loaded: 0,
+            total: 0,
+        }
+    }
+
+    fn with_progress(message: String, loaded: usize, total: usize) -> Self {
+        Self {
+            message,
+            loaded,
+            total,
+        }
+    }
 }
 
 fn resolve_preload_path(
@@ -33,7 +61,24 @@ pub async fn preload_comic(
     id: String,
     generation: u64,
 ) {
-    // 取得 relative_path
+    let current_page = {
+        let comics = state.comics.lock().await;
+        comics
+            .iter()
+            .find(|comic| comic.id == id)
+            .map(|comic| comic.progress.current_page)
+            .unwrap_or(0)
+    };
+    preload_comic_window(state, app_handle, id, current_page, generation).await;
+}
+
+pub async fn preload_comic_window(
+    state: Arc<AppState>,
+    app_handle: tauri::AppHandle,
+    id: String,
+    current_page: usize,
+    generation: u64,
+) {
     let relative_path_bytes = match general_purpose::URL_SAFE_NO_PAD.decode(&id) {
         Ok(b) => b,
         Err(_) => return,
@@ -43,13 +88,12 @@ pub async fn preload_comic(
         Err(_) => return,
     };
 
-    let (comic_type, current_page) = {
+    let comic_type = {
         let comics = state.comics.lock().await;
         comics
             .iter()
             .find(|comic| comic.id == id)
-            .map(|comic| (Some(comic.r#type.clone()), comic.progress.current_page))
-            .unwrap_or((None, 0))
+            .map(|comic| comic.r#type.clone())
     };
     let scan_dir = { state.scan_dir.read().unwrap().clone() };
     let smb_temp_dir = app_handle
@@ -69,7 +113,8 @@ pub async fn preload_comic(
         let _ = app_handle.emit(
             "ram-cache-progress",
             serde_json::json!({
-                "id": id, "generation": generation, "loaded": 0, "total": 0, "finished": true
+                "id": id, "generation": generation, "pageIndex": current_page,
+                "loaded": 0, "total": 0, "finished": true
             }),
         );
         return;
@@ -80,54 +125,33 @@ pub async fn preload_comic(
     let completion_handle = app_handle.clone();
     let completion_state = state.clone();
     let completion_id = id.clone();
-    let task = tokio::task::spawn_blocking(move || -> Result<Option<(usize, usize)>, String> {
-        let file = File::open(&full_path).map_err(|error| format!("無法讀取預載 ZIP：{error}"))?;
-        let mut archive =
-            zip::ZipArchive::new(file).map_err(|error| format!("預載 ZIP 格式無效：{error}"))?;
-        let entry_names = {
-            let opened = state.opened_comic_files.read().unwrap();
-            opened.get(&id).cloned().unwrap_or_default()
-        };
+    let task =
+        tokio::task::spawn_blocking(move || -> Result<Option<PreloadResult>, PreloadError> {
+            let file = File::open(&full_path)
+                .map_err(|error| PreloadError::new(format!("無法讀取預載 ZIP：{error}")))?;
+            let mut archive = zip::ZipArchive::new(file)
+                .map_err(|error| PreloadError::new(format!("預載 ZIP 格式無效：{error}")))?;
+            let entry_names = {
+                let opened = state.opened_comic_files.read().unwrap();
+                opened.get(&id).cloned().unwrap_or_default()
+            };
 
-        let preload_range = preload_window(entry_names.len(), current_page);
-        let preload_count = preload_range.len();
-        let mut cached_bytes = 0;
-        let mut loaded_count = 0;
-        for (loaded_index, page_index) in preload_range.enumerate() {
-            let target_name = &entry_names[page_index];
-            if state
-                .preload_generation
-                .load(std::sync::atomic::Ordering::Acquire)
-                != generation
-            {
-                return Ok(None);
-            }
-            let mut file = archive
-                .by_name(target_name)
-                .map_err(|error| format!("預載找不到 ZIP 頁面 {target_name}：{error}"))?;
-            let expected_size = file.size() as usize;
-            if expected_size > MAX_PRELOAD_BYTES.saturating_sub(cached_bytes) {
-                break;
-            }
-            let mut buf = Vec::new();
-            let remaining = MAX_PRELOAD_BYTES.saturating_sub(cached_bytes);
-            file.by_ref()
-                .take((remaining + 1) as u64)
-                .read_to_end(&mut buf)
-                .map_err(|error| format!("預載解壓 ZIP 頁面失敗：{error}"))?;
-            if buf.len() > remaining {
-                break;
-            }
-            if state
-                .preload_generation
-                .load(std::sync::atomic::Ordering::Acquire)
-                != generation
-            {
-                return Ok(None);
-            }
-            cached_bytes += buf.len();
-            let id_clone = id.clone();
-            {
+            let page_sizes = entry_names
+                .iter()
+                .map(|entry_name| {
+                    archive
+                        .by_name(entry_name)
+                        .map(|entry| entry.size())
+                        .map_err(|error| {
+                            PreloadError::new(format!("預載找不到 ZIP 頁面 {entry_name}：{error}"))
+                        })
+                })
+                .collect::<Result<Vec<_>, _>>()?;
+            let budget_bytes = state.refresh_cache_budget();
+            let selection = select_pages_for_budget(&page_sizes, current_page, budget_bytes);
+            let selected_pages: HashSet<_> = selection.indices.iter().copied().collect();
+            let preload_count = selection.indices.len();
+            let (mut cached_bytes, mut loaded_count) = {
                 let _lifecycle = state.comic_lifecycle.lock().unwrap();
                 if state
                     .preload_generation
@@ -137,25 +161,118 @@ pub async fn preload_comic(
                     return Ok(None);
                 }
                 let mut pool = state.ram_cache_pool.lock().unwrap();
-                pool.entry(id_clone.clone())
-                    .or_default()
-                    .insert(page_index, buf);
+                let book = pool.entry(id.clone()).or_default();
+                book.retain(|page_index, _| selected_pages.contains(page_index));
+                let bytes = book.values().map(Vec::len).sum();
+                let loaded = book.len();
+                (bytes, loaded)
+            };
+            let whole_book = selection.whole_book;
+            for page_index in selection.indices {
+                // Refresh before each allocation so a live Apple process
+                // advisory or native pressure event can immediately shrink
+                // the allowed cache.  Normal pressure ramps up gradually.
+                let budget_bytes = state.refresh_cache_budget();
+                if budget_bytes == 0 {
+                    break;
+                }
+                let target_name = &entry_names[page_index];
+                if state
+                    .preload_generation
+                    .load(std::sync::atomic::Ordering::Acquire)
+                    != generation
+                {
+                    return Ok(None);
+                }
+                let already_cached = {
+                    let pool = state.ram_cache_pool.lock().unwrap();
+                    pool.get(&id)
+                        .is_some_and(|pages| pages.contains_key(&page_index))
+                };
+                if already_cached {
+                    continue;
+                }
+                let mut file = archive.by_name(target_name).map_err(|error| {
+                    PreloadError::with_progress(
+                        format!("預載找不到 ZIP 頁面 {target_name}：{error}"),
+                        loaded_count,
+                        preload_count,
+                    )
+                })?;
+                let expected_size = file.size() as usize;
+                if expected_size > budget_bytes.saturating_sub(cached_bytes) {
+                    continue;
+                }
+                let mut buf = Vec::new();
+                let remaining = budget_bytes.saturating_sub(cached_bytes);
+                file.by_ref()
+                    .take((remaining + 1) as u64)
+                    .read_to_end(&mut buf)
+                    .map_err(|error| {
+                        PreloadError::with_progress(
+                            format!("預載解壓 ZIP 頁面失敗：{error}"),
+                            loaded_count,
+                            preload_count,
+                        )
+                    })?;
+                if buf.len() > remaining {
+                    break;
+                }
+                if state
+                    .preload_generation
+                    .load(std::sync::atomic::Ordering::Acquire)
+                    != generation
+                {
+                    return Ok(None);
+                }
+                let id_clone = id.clone();
+                {
+                    let _lifecycle = state.comic_lifecycle.lock().unwrap();
+                    if state
+                        .preload_generation
+                        .load(std::sync::atomic::Ordering::Acquire)
+                        != generation
+                    {
+                        return Ok(None);
+                    }
+                    let mut pool = state.ram_cache_pool.lock().unwrap();
+                    let book = pool.entry(id_clone.clone()).or_default();
+                    if book.contains_key(&page_index) {
+                        continue;
+                    }
+                    let current_bytes: usize = book.values().map(Vec::len).sum();
+                    let budget_bytes = state.current_cache_budget_bytes();
+                    if buf.len() > budget_bytes.saturating_sub(current_bytes) {
+                        continue;
+                    }
+                    cached_bytes = current_bytes.saturating_add(buf.len());
+                    book.insert(page_index, buf);
+                }
+                loaded_count += 1;
+                let _ = app_handle.emit(
+                    "ram-cache-progress",
+                    serde_json::json!({
+                        "id": id_clone,
+                        "generation": generation,
+                        "pageIndex": current_page,
+                        "loaded": loaded_count,
+                        "total": preload_count,
+                        "budgetBytes": budget_bytes,
+                        "cachedBytes": cached_bytes,
+                        "wholeBook": selection.whole_book,
+                        "finished": false
+                    }),
+                );
             }
-            loaded_count = loaded_index + 1;
-            let _ = app_handle.emit(
-                "ram-cache-progress",
-                serde_json::json!({
-                    "id": id_clone,
-                    "generation": generation,
-                    "loaded": loaded_count,
-                    "total": preload_count,
-                    "finished": false
-                }),
-            );
-        }
-        Ok(Some((loaded_count, preload_count)))
-    })
-    .await;
+            Ok(Some(PreloadResult {
+                loaded: loaded_count,
+                total: preload_count,
+                budget_bytes: state.current_cache_budget_bytes(),
+                cached_bytes,
+                whole_book,
+            }))
+        })
+        .await;
 
     if completion_state
         .preload_generation
@@ -165,29 +282,44 @@ pub async fn preload_comic(
         return;
     }
     match task {
-        Ok(Ok(Some((loaded, total)))) => {
-            let _ = completion_handle.emit("ram-cache-progress", serde_json::json!({
-                "id": completion_id, "generation": generation, "loaded": loaded, "total": total, "finished": true
-            }));
+        Ok(Ok(Some(result))) => {
+            let _ = completion_handle.emit(
+                "ram-cache-progress",
+                serde_json::json!({
+                    "id": completion_id, "generation": generation, "pageIndex": current_page,
+                    "loaded": result.loaded, "total": result.total,
+                    "budgetBytes": result.budget_bytes, "cachedBytes": result.cached_bytes,
+                    "wholeBook": result.whole_book, "finished": true
+                }),
+            );
         }
         Ok(Ok(None)) => {}
         Ok(Err(error)) => {
-            let _ = completion_handle.emit("ram-cache-progress", serde_json::json!({
-                "id": completion_id, "generation": generation, "loaded": 0, "total": 0, "finished": true, "error": error
-            }));
+            let _ = completion_handle.emit(
+                "ram-cache-progress",
+                serde_json::json!({
+                    "id": completion_id, "generation": generation, "pageIndex": current_page,
+                    "loaded": error.loaded, "total": error.total, "finished": true,
+                    "error": error.message
+                }),
+            );
         }
         Err(error) => {
-            let _ = completion_handle.emit("ram-cache-progress", serde_json::json!({
-                "id": completion_id, "generation": generation, "loaded": 0, "total": 0, "finished": true,
-                "error": format!("預載背景工作失敗：{error}")
-            }));
+            let _ = completion_handle.emit(
+                "ram-cache-progress",
+                serde_json::json!({
+                    "id": completion_id, "generation": generation, "pageIndex": current_page,
+                    "loaded": 0, "total": 0, "finished": true,
+                    "error": format!("預載背景工作失敗：{error}")
+                }),
+            );
         }
     }
 }
 
 #[cfg(test)]
 mod tests {
-    use super::{preload_window, resolve_preload_path};
+    use super::resolve_preload_path;
     use std::path::Path;
 
     #[test]
@@ -212,15 +344,5 @@ mod tests {
         );
 
         assert_eq!(resolved, Path::new("/external/book.zip"));
-    }
-
-    #[test]
-    fn preload_window_starts_at_saved_progress_and_stays_bounded() {
-        assert_eq!(
-            preload_window(100, 42).collect::<Vec<_>>(),
-            vec![42, 43, 44, 45, 46]
-        );
-        assert_eq!(preload_window(3, 2).collect::<Vec<_>>(), vec![2]);
-        assert!(preload_window(3, 9).is_empty());
     }
 }

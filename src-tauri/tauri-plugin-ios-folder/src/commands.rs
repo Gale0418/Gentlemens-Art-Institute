@@ -1,13 +1,11 @@
-use tauri::{AppHandle, command, Runtime};
+use tauri::{command, AppHandle, Runtime};
 
 use crate::models::*;
 use crate::Result;
 use crate::TauriPluginIosFolderExt;
 
 #[command]
-pub(crate) async fn pick_folder<R: Runtime>(
-    app: AppHandle<R>,
-) -> Result<PickFolderResponse> {
+pub(crate) async fn pick_folder<R: Runtime>(app: AppHandle<R>) -> Result<PickFolderResponse> {
     app.tauri_plugin_ios_folder().pick_folder()
 }
 

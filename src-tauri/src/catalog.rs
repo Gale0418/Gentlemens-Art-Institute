@@ -2,6 +2,7 @@ use crate::metadata::{
     self, NormalizedMetadata, ParsedMetadataSource, ParserDiagnostic, ScopedTag,
 };
 use crate::state::ComicItem;
+use base64::{engine::general_purpose, Engine as _};
 use rayon::prelude::*;
 use rusqlite::{params, Connection, OptionalExtension, Transaction};
 use serde::{Deserialize, Serialize};
@@ -11,6 +12,7 @@ use std::fs::File;
 use std::io::{Read, Seek, SeekFrom};
 use std::path::{Path, PathBuf};
 use std::time::Duration;
+use unicode_normalization::UnicodeNormalization;
 
 const FINGERPRINT_VERSION: &str = "blake3-sampled-v1";
 const ARCHIVE_SAMPLE_BYTES: usize = 256 * 1024;
@@ -30,7 +32,7 @@ pub struct CatalogStore {
     path: PathBuf,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
 #[serde(rename_all = "camelCase")]
 pub struct MetadataCandidate {
     pub field: String,
@@ -76,7 +78,7 @@ pub struct ComicMetadataView {
     pub diagnostics: Vec<ImportDiagnostic>,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct CatalogQuery {
     #[serde(default)]
@@ -154,10 +156,107 @@ pub struct DuplicateCandidate {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
+pub struct ComicLocationView {
+    pub id: i64,
+    pub comic_id: String,
+    pub runtime_id: Option<String>,
+    pub source_id: String,
+    pub relative_path: String,
+    pub actual_path: Option<String>,
+    pub kind: String,
+    pub fingerprint: Option<String>,
+    pub online: bool,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct FileOperationRecord {
+    pub id: String,
+    pub undo_token: String,
+    pub comic_id: String,
+    pub location_id: i64,
+    pub action: String,
+    pub source_id: String,
+    pub before_relative_path: String,
+    pub before_actual_path: Option<String>,
+    pub after_relative_path: Option<String>,
+    pub after_actual_path: Option<String>,
+    pub expected_fingerprint: Option<String>,
+    pub status: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+#[serde(rename_all = "camelCase")]
+pub struct FileReconcileResult {
+    pub completed: usize,
+    pub rolled_back: usize,
+    pub needs_attention: usize,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
 pub struct TagSuggestion {
     pub tag: ScopedTag,
     pub shared_comics: usize,
     pub reason: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct TagInventoryQuery {
+    #[serde(default)]
+    pub query: String,
+    #[serde(default)]
+    pub offset: usize,
+    #[serde(default = "default_page_size")]
+    pub limit: usize,
+}
+
+impl Default for TagInventoryQuery {
+    fn default() -> Self {
+        Self {
+            query: String::new(),
+            offset: 0,
+            limit: default_page_size(),
+        }
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct TagInventoryItem {
+    pub id: i64,
+    pub namespace: String,
+    pub display_value: String,
+    pub normalized_value: String,
+    pub work_count: usize,
+    pub pinned: bool,
+    pub usage_count: usize,
+    pub last_used_at: Option<String>,
+    pub color_key: Option<String>,
+    pub disabled: bool,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct TagInventoryResult {
+    pub items: Vec<TagInventoryItem>,
+    pub total: usize,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct TagStateUpdate {
+    pub tag_id: i64,
+    pub pinned: bool,
+    pub color_key: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct TagMutationResult {
+    pub affected_works: usize,
+    pub undo_token: String,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -350,6 +449,7 @@ impl CatalogStore {
             for (comic, signature, fingerprint, parse) in prepared {
                 let (comic_id, fingerprint_collision) =
                     upsert_location(&tx, &comic, signature, fingerprint.as_deref())?;
+                import_runtime_progress(&tx, &comic_id, &comic.progress)?;
                 affected.insert(comic_id.clone());
                 if let Some(outcome) = parse { replace_imports(&tx, &comic_id, outcome.sources, outcome.diagnostics)?; }
                 if fingerprint_collision {
@@ -378,6 +478,181 @@ impl CatalogStore {
         })
     }
 
+    pub fn get_location(&self, identifier: &str) -> Result<ComicLocationView, String> {
+        self.with_connection(|connection| {
+            let comic_id = resolve_comic_id(connection, identifier)?
+                .ok_or_else(|| "找不到已登記的漫畫位置".to_string())?;
+            connection.query_row(
+                "SELECT id,comic_id,runtime_id,source_id,relative_path,actual_path,kind,fingerprint,online
+                 FROM comic_locations WHERE comic_id=?1 ORDER BY online DESC,last_seen_at DESC LIMIT 1",
+                [comic_id],
+                |row| Ok(ComicLocationView {
+                    id: row.get(0)?, comic_id: row.get(1)?, runtime_id: row.get(2)?, source_id: row.get(3)?,
+                    relative_path: row.get(4)?, actual_path: row.get(5)?, kind: row.get(6)?,
+                    fingerprint: row.get(7)?, online: row.get::<_, i64>(8)? != 0,
+                }),
+            ).map_err(|error| error.to_string())
+        })
+    }
+
+    pub fn begin_file_operation(
+        &self,
+        location: &ComicLocationView,
+        action: &str,
+        after_relative_path: Option<&str>,
+        after_actual_path: Option<&str>,
+    ) -> Result<FileOperationRecord, String> {
+        let record = FileOperationRecord {
+            id: uuid::Uuid::new_v4().to_string(),
+            undo_token: uuid::Uuid::new_v4().to_string(),
+            comic_id: location.comic_id.clone(),
+            location_id: location.id,
+            action: action.to_string(),
+            source_id: location.source_id.clone(),
+            before_relative_path: location.relative_path.clone(),
+            before_actual_path: location.actual_path.clone(),
+            after_relative_path: after_relative_path.map(str::to_owned),
+            after_actual_path: after_actual_path.map(str::to_owned),
+            expected_fingerprint: location.fingerprint.clone(),
+            status: "pending".into(),
+        };
+        self.with_connection(|connection| {
+            connection.execute(
+                "INSERT INTO file_operations(id,undo_token,comic_id,location_id,action,source_id,before_relative_path,before_actual_path,after_relative_path,after_actual_path,expected_fingerprint,status)
+                 VALUES(?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,'pending')",
+                params![record.id, record.undo_token, record.comic_id, record.location_id, record.action,
+                    record.source_id, record.before_relative_path, record.before_actual_path,
+                    record.after_relative_path, record.after_actual_path, record.expected_fingerprint],
+            ).map_err(|error| error.to_string())?;
+            Ok(record.clone())
+        })
+    }
+
+    pub fn complete_file_operation(
+        &self,
+        operation_id: &str,
+        runtime_id: Option<&str>,
+        online: bool,
+    ) -> Result<(), String> {
+        self.with_connection(|connection| {
+            let tx = connection.transaction().map_err(|error| error.to_string())?;
+            let record = load_file_operation(&tx, operation_id, false)?;
+            if record.status != "pending" { return Err("檔案操作狀態已改變".into()); }
+            tx.execute(
+                "UPDATE comic_locations SET runtime_id=COALESCE(?2,runtime_id),relative_path=COALESCE(?3,relative_path),actual_path=?4,online=?5,last_seen_at=CURRENT_TIMESTAMP WHERE id=?1",
+                params![record.location_id, runtime_id, record.after_relative_path, record.after_actual_path, i64::from(online)],
+            ).map_err(|error| error.to_string())?;
+            tx.execute("UPDATE file_operations SET status='succeeded',completed_at=CURRENT_TIMESTAMP WHERE id=?1 AND status='pending'", [operation_id]).map_err(|error| error.to_string())?;
+            tx.execute("UPDATE comics SET offline=CASE WHEN EXISTS(SELECT 1 FROM comic_locations WHERE comic_id=?1 AND online=1) THEN 0 ELSE 1 END WHERE id=?1", [record.comic_id]).map_err(|error| error.to_string())?;
+            tx.commit().map_err(|error| error.to_string())
+        })
+    }
+
+    pub fn set_file_operation_destination(
+        &self,
+        operation_id: &str,
+        relative_path: &str,
+        actual_path: Option<&str>,
+    ) -> Result<(), String> {
+        self.with_connection(|connection| {
+            let changed = connection.execute(
+                "UPDATE file_operations SET after_relative_path=?2,after_actual_path=?3 WHERE id=?1 AND status='pending'",
+                params![operation_id, relative_path, actual_path],
+            ).map_err(|error| error.to_string())?;
+            if changed != 1 { return Err("檔案操作紀錄已改變".into()); }
+            Ok(())
+        })
+    }
+
+    pub fn fail_file_operation(&self, operation_id: &str, message: &str) -> Result<(), String> {
+        self.with_connection(|connection| {
+            connection.execute("UPDATE file_operations SET status='failed',error_message=?2,completed_at=CURRENT_TIMESTAMP WHERE id=?1 AND status='pending'", params![operation_id, message]).map_err(|error| error.to_string())?;
+            Ok(())
+        })
+    }
+
+    pub fn file_operation_for_undo(&self, token: &str) -> Result<FileOperationRecord, String> {
+        self.with_connection(|connection| load_file_operation(connection, token, true))
+    }
+
+    pub fn complete_file_operation_undo(
+        &self,
+        operation_id: &str,
+        runtime_id: Option<&str>,
+    ) -> Result<(), String> {
+        self.with_connection(|connection| {
+            let tx = connection.transaction().map_err(|error| error.to_string())?;
+            let record = load_file_operation(&tx, operation_id, false)?;
+            if record.status != "succeeded" { return Err("此檔案操作目前不可撤銷".into()); }
+            let changed = tx.execute(
+                "UPDATE comic_locations SET runtime_id=COALESCE(?2,runtime_id),relative_path=?3,actual_path=?4,online=1,last_seen_at=CURRENT_TIMESTAMP WHERE id=?1 AND relative_path=COALESCE(?5,relative_path)",
+                params![record.location_id, runtime_id, record.before_relative_path, record.before_actual_path, record.after_relative_path],
+            ).map_err(|error| error.to_string())?;
+            if changed != 1 { return Err("漫畫位置在操作後又被修改，已停止撤銷以避免覆寫".into()); }
+            tx.execute("UPDATE file_operations SET status='undone',undone_at=CURRENT_TIMESTAMP WHERE id=?1 AND status='succeeded'", [operation_id]).map_err(|error| error.to_string())?;
+            tx.execute("UPDATE comics SET offline=0 WHERE id=?1", [record.comic_id]).map_err(|error| error.to_string())?;
+            tx.commit().map_err(|error| error.to_string())
+        })
+    }
+
+    pub fn reconcile_file_operations(&self) -> Result<FileReconcileResult, String> {
+        let pending = self.with_connection(|connection| {
+            let mut statement = connection.prepare("SELECT id,undo_token,comic_id,location_id,action,source_id,before_relative_path,before_actual_path,after_relative_path,after_actual_path,expected_fingerprint,status FROM file_operations WHERE status='pending' ORDER BY created_at").map_err(|error| error.to_string())?;
+            let rows = statement.query_map([], |row| Ok(FileOperationRecord {
+                id: row.get(0)?, undo_token: row.get(1)?, comic_id: row.get(2)?, location_id: row.get(3)?, action: row.get(4)?, source_id: row.get(5)?,
+                before_relative_path: row.get(6)?, before_actual_path: row.get(7)?, after_relative_path: row.get(8)?, after_actual_path: row.get(9)?, expected_fingerprint: row.get(10)?, status: row.get(11)?,
+            })).map_err(|error| error.to_string())?.collect::<Result<Vec<_>, _>>().map_err(|error| error.to_string())?;
+            Ok(rows)
+        })?;
+        let mut result = FileReconcileResult::default();
+        for operation in pending {
+            let is_local =
+                operation.source_id == "local" || operation.source_id.starts_with("local:");
+            if !is_local {
+                self.with_connection(|connection| {
+                    connection.execute("UPDATE file_operations SET status='needs_reconcile',error_message='遠端操作需重新連線後人工確認' WHERE id=?1 AND status='pending'", [&operation.id]).map_err(|error| error.to_string())?;
+                    Ok(())
+                })?;
+                result.needs_attention += 1;
+                continue;
+            }
+            let before_exists = operation
+                .before_actual_path
+                .as_deref()
+                .is_some_and(|path| Path::new(path).exists());
+            let after_exists = operation
+                .after_actual_path
+                .as_deref()
+                .is_some_and(|path| Path::new(path).exists());
+            match (before_exists, after_exists) {
+                (false, true) => {
+                    let runtime_id = operation
+                        .after_relative_path
+                        .as_deref()
+                        .map(|path| general_purpose::URL_SAFE_NO_PAD.encode(path.as_bytes()));
+                    self.complete_file_operation(
+                        &operation.id,
+                        runtime_id.as_deref(),
+                        operation.action != "trash",
+                    )?;
+                    result.completed += 1;
+                }
+                (true, false) => {
+                    self.fail_file_operation(&operation.id, "啟動復原：檔案系統操作尚未發生")?;
+                    result.rolled_back += 1;
+                }
+                _ => {
+                    self.with_connection(|connection| {
+                        connection.execute("UPDATE file_operations SET status='needs_reconcile',error_message='來源與目的地狀態不唯一，已停止自動處理' WHERE id=?1 AND status='pending'", [&operation.id]).map_err(|error| error.to_string())?;
+                        Ok(())
+                    })?;
+                    result.needs_attention += 1;
+                }
+            }
+        }
+        Ok(result)
+    }
+
     pub fn overlay_library(
         &self,
         mut items: Vec<ComicItem>,
@@ -385,8 +660,10 @@ impl CatalogStore {
     ) -> Result<Vec<ComicItem>, String> {
         self.with_connection(|connection| {
             let mut statement = connection.prepare(
-                "SELECT l.runtime_id,c.title,c.series,l.online,l.last_seen_at,l.relative_path,l.actual_path,l.kind,l.source_id
+                "SELECT l.runtime_id,c.title,c.series,l.online,l.last_seen_at,l.relative_path,l.actual_path,l.kind,l.source_id,
+                        p.current_page,p.total_pages,p.percent,p.updated_at
                  FROM comic_locations l JOIN comics c ON c.id=l.comic_id
+                 LEFT JOIN reading_progress p ON p.comic_id=c.id
                  WHERE l.runtime_id IS NOT NULL
                  ORDER BY l.runtime_id,l.online DESC,l.last_seen_at DESC"
             ).map_err(|error| error.to_string())?;
@@ -394,6 +671,8 @@ impl CatalogStore {
                 row.get::<_, String>(0)?, row.get::<_, String>(1)?, row.get::<_, Option<String>>(2)?,
                 row.get::<_, i64>(3)? != 0, row.get::<_, String>(4)?, row.get::<_, String>(5)?,
                 row.get::<_, Option<String>>(6)?, row.get::<_, String>(7)?, row.get::<_, String>(8)?,
+                row.get::<_, Option<i64>>(9)?, row.get::<_, Option<i64>>(10)?,
+                row.get::<_, Option<f64>>(11)?, row.get::<_, Option<String>>(12)?,
             ))).map_err(|error| error.to_string())?;
             let mut metadata = HashMap::new();
             for row in rows {
@@ -403,12 +682,20 @@ impl CatalogStore {
             let mut present = BTreeSet::new();
             for item in &mut items {
                 present.insert(item.id.clone());
-                if let Some((_, title, series, _, _, _, _, _, _)) = metadata.get(&item.id) {
+                if let Some((_, title, series, _, _, _, _, _, _, current_page, total_pages, percent, progress_updated_at)) = metadata.get(&item.id) {
                     item.title.clone_from(title);
                     if let Some(series) = series { item.series.clone_from(series); }
+                    if let Some(current_page) = current_page {
+                        item.progress = crate::state::Progress {
+                            current_page: (*current_page).max(0) as usize,
+                            total_pages: total_pages.unwrap_or_default().max(0) as usize,
+                            percent: percent.unwrap_or_default(),
+                            updated_at: progress_updated_at.clone(),
+                        };
+                    }
                 }
             }
-            for (runtime_id, title, series, online, last_seen_at, relative_path, actual_path, kind, source_id) in metadata.into_values() {
+            for (runtime_id, title, series, online, last_seen_at, relative_path, actual_path, kind, source_id, current_page, total_pages, percent, progress_updated_at) in metadata.into_values() {
                 if present.contains(&runtime_id) { continue; }
                 if !catalog_only_sources.contains(&source_id) { continue; }
                 let Some(actual_path) = actual_path else { continue };
@@ -427,7 +714,12 @@ impl CatalogStore {
                     series: series.unwrap_or_else(|| "未分類".into()),
                     updated_at: last_seen_at,
                     page_count: 0,
-                    progress: crate::state::Progress { current_page: 0, total_pages: 0, percent: 0.0, updated_at: None },
+                    progress: crate::state::Progress {
+                        current_page: current_page.unwrap_or_default().max(0) as usize,
+                        total_pages: total_pages.unwrap_or_default().max(0) as usize,
+                        percent: percent.unwrap_or_default(),
+                        updated_at: progress_updated_at,
+                    },
                     source_id,
                     source_path: Some(actual_path),
                     external_bookmark: None,
@@ -441,8 +733,10 @@ impl CatalogStore {
         self.with_connection(|connection| {
             connection
                 .query_row(
-                    "SELECT l.runtime_id,c.title,c.series,l.online,l.last_seen_at,l.relative_path,l.actual_path,l.kind,l.source_id
+                    "SELECT l.runtime_id,c.title,c.series,l.online,l.last_seen_at,l.relative_path,l.actual_path,l.kind,l.source_id,
+                            p.current_page,p.total_pages,p.percent,p.updated_at
                      FROM comic_locations l JOIN comics c ON c.id=l.comic_id
+                     LEFT JOIN reading_progress p ON p.comic_id=c.id
                      WHERE l.runtime_id=?1 OR l.comic_id=?1
                      ORDER BY l.online DESC,l.last_seen_at DESC LIMIT 1",
                     [identifier],
@@ -456,6 +750,10 @@ impl CatalogStore {
                         let actual_path = row.get::<_, Option<String>>(6)?;
                         let kind = row.get::<_, String>(7)?;
                         let source_id = row.get::<_, String>(8)?;
+                        let current_page = row.get::<_, Option<i64>>(9)?.unwrap_or_default();
+                        let total_pages = row.get::<_, Option<i64>>(10)?.unwrap_or_default();
+                        let percent = row.get::<_, Option<f64>>(11)?.unwrap_or_default();
+                        let progress_updated_at = row.get::<_, Option<String>>(12)?;
                         let ext = actual_path
                             .as_deref()
                             .and_then(|path| Path::new(path).extension())
@@ -481,10 +779,10 @@ impl CatalogStore {
                             updated_at,
                             page_count: 0,
                             progress: crate::state::Progress {
-                                current_page: 0,
-                                total_pages: 0,
-                                percent: 0.0,
-                                updated_at: None,
+                                current_page: current_page.max(0) as usize,
+                                total_pages: total_pages.max(0) as usize,
+                                percent,
+                                updated_at: progress_updated_at,
                             },
                             source_id,
                             source_path: actual_path,
@@ -499,6 +797,222 @@ impl CatalogStore {
 
     pub fn search(&self, query: CatalogQuery) -> Result<CatalogSearchResult, String> {
         self.with_connection(|connection| search_catalog(connection, query))
+    }
+
+    pub fn tag_inventory(&self, query: TagInventoryQuery) -> Result<TagInventoryResult, String> {
+        self.with_connection(|connection| load_tag_inventory(connection, query))
+    }
+
+    pub fn update_tag_state(&self, update: TagStateUpdate) -> Result<(), String> {
+        let allowed_colors = [
+            "rose", "amber", "lime", "cyan", "blue", "violet", "fuchsia", "slate", "none",
+        ];
+        if update
+            .color_key
+            .as_deref()
+            .is_some_and(|color| !allowed_colors.contains(&color))
+        {
+            return Err("不支援的標籤色票".into());
+        }
+        self.with_connection(|connection| {
+            let exists: bool = connection
+                .query_row(
+                    "SELECT EXISTS(SELECT 1 FROM canonical_tags WHERE id=?1)",
+                    [update.tag_id],
+                    |row| row.get(0),
+                )
+                .map_err(|error| error.to_string())?;
+            if !exists {
+                return Err("找不到標籤".into());
+            }
+            connection
+                .execute(
+                    "INSERT INTO tag_user_state(tag_id,pinned,color_key) VALUES(?1,?2,?3)
+                     ON CONFLICT(tag_id) DO UPDATE SET pinned=excluded.pinned,color_key=excluded.color_key",
+                    params![update.tag_id, update.pinned, update.color_key],
+                )
+                .map_err(|error| error.to_string())?;
+            Ok(())
+        })
+    }
+
+    pub fn rename_tag(
+        &self,
+        tag_id: i64,
+        display_value: &str,
+    ) -> Result<TagMutationResult, String> {
+        let display_value = display_value.trim();
+        if display_value.is_empty() {
+            return Err("標籤名稱不可為空".into());
+        }
+        self.with_connection(|connection| {
+            let tx = connection.transaction().map_err(|error| error.to_string())?;
+            let (namespace, old_display, old_normalized, disabled): (String, String, String, i64) = tx
+                .query_row(
+                    "SELECT namespace,display_value,normalized_value,disabled FROM canonical_tags WHERE id=?1",
+                    [tag_id],
+                    |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?)),
+                )
+                .map_err(|error| format!("找不到標籤：{error}"))?;
+            let normalized = normalize_tag_key(display_value);
+            let collision: Option<i64> = tx
+                .query_row(
+                    "SELECT id FROM canonical_tags WHERE namespace=?1 AND normalized_value=?2 AND id<>?3",
+                    params![namespace, normalized, tag_id],
+                    |row| row.get(0),
+                )
+                .optional()
+                .map_err(|error| error.to_string())?;
+            if collision.is_some() {
+                return Err("新名稱已存在；請使用合併標籤以保留來源證據".into());
+            }
+            let affected_works = tag_work_count(&tx, tag_id)?;
+            tx.execute(
+                "UPDATE canonical_tags SET display_value=?2,normalized_value=?3,updated_at=CURRENT_TIMESTAMP WHERE id=?1",
+                params![tag_id, display_value, normalized],
+            )
+            .map_err(|error| error.to_string())?;
+            let token = uuid::Uuid::new_v4().to_string();
+            let snapshot = json!({
+                "version": 1,
+                "kind": "rename",
+                "tagId": tag_id,
+                "before": {"display": old_display, "normalized": old_normalized, "disabled": disabled},
+                "after": {"display": display_value, "normalized": normalized, "disabled": disabled}
+            });
+            tx.execute(
+                "INSERT INTO tag_operations(token,snapshot_json) VALUES(?1,?2)",
+                params![token, snapshot.to_string()],
+            )
+            .map_err(|error| error.to_string())?;
+            refresh_fts_for_canonical_tags(&tx, &[tag_id])?;
+            tx.commit().map_err(|error| error.to_string())?;
+            Ok(TagMutationResult { affected_works, undo_token: token })
+        })
+    }
+
+    pub fn merge_tags(
+        &self,
+        source_tag_id: i64,
+        target_tag_id: i64,
+    ) -> Result<TagMutationResult, String> {
+        if source_tag_id == target_tag_id {
+            return Err("來源與目標標籤不可相同".into());
+        }
+        self.with_connection(|connection| {
+            let tx = connection.transaction().map_err(|error| error.to_string())?;
+            let final_target = final_canonical_tag_id(&tx, target_tag_id)?;
+            if final_target == source_tag_id {
+                return Err("標籤合併會形成循環，已拒絕".into());
+            }
+            let source_disabled: i64 = tx
+                .query_row("SELECT disabled FROM canonical_tags WHERE id=?1", [source_tag_id], |row| row.get(0))
+                .map_err(|error| format!("找不到來源標籤：{error}"))?;
+            let previous_target: Option<i64> = tx
+                .query_row("SELECT target_tag_id FROM tag_redirects WHERE source_tag_id=?1", [source_tag_id], |row| row.get(0))
+                .optional().map_err(|error| error.to_string())?;
+            let incoming = {
+                let mut statement = tx.prepare("SELECT source_tag_id FROM tag_redirects WHERE target_tag_id=?1 AND source_tag_id<>?1 ORDER BY source_tag_id").map_err(|error| error.to_string())?;
+                let rows = statement.query_map([source_tag_id], |row| row.get::<_, i64>(0)).map_err(|error| error.to_string())?
+                    .collect::<Result<Vec<_>, _>>().map_err(|error| error.to_string())?;
+                rows
+            };
+            let affected_works = tag_work_count(&tx, source_tag_id)?;
+            tx.execute(
+                "UPDATE tag_redirects SET target_tag_id=?2 WHERE target_tag_id=?1",
+                params![source_tag_id, final_target],
+            ).map_err(|error| error.to_string())?;
+            tx.execute(
+                "INSERT INTO tag_redirects(source_tag_id,target_tag_id) VALUES(?1,?2)
+                 ON CONFLICT(source_tag_id) DO UPDATE SET target_tag_id=excluded.target_tag_id,created_at=CURRENT_TIMESTAMP",
+                params![source_tag_id, final_target],
+            ).map_err(|error| error.to_string())?;
+            tx.execute("UPDATE canonical_tags SET disabled=1,updated_at=CURRENT_TIMESTAMP WHERE id=?1", [source_tag_id])
+                .map_err(|error| error.to_string())?;
+            let token = uuid::Uuid::new_v4().to_string();
+            let snapshot = json!({
+                "version": 1, "kind": "merge", "sourceTagId": source_tag_id,
+                "before": {"target": previous_target, "disabled": source_disabled, "incoming": incoming},
+                "after": {"target": final_target, "disabled": 1}
+            });
+            tx.execute("INSERT INTO tag_operations(token,snapshot_json) VALUES(?1,?2)", params![token, snapshot.to_string()])
+                .map_err(|error| error.to_string())?;
+            refresh_fts_for_canonical_tags(&tx, &[source_tag_id, final_target])?;
+            tx.commit().map_err(|error| error.to_string())?;
+            Ok(TagMutationResult { affected_works, undo_token: token })
+        })
+    }
+
+    pub fn set_tag_disabled(
+        &self,
+        tag_id: i64,
+        disabled: bool,
+    ) -> Result<TagMutationResult, String> {
+        self.with_connection(|connection| {
+            let tx = connection
+                .transaction()
+                .map_err(|error| error.to_string())?;
+            let before: i64 = tx
+                .query_row(
+                    "SELECT disabled FROM canonical_tags WHERE id=?1",
+                    [tag_id],
+                    |row| row.get(0),
+                )
+                .map_err(|error| format!("找不到標籤：{error}"))?;
+            let after = i64::from(disabled);
+            let affected_works = tag_work_count(&tx, tag_id)?;
+            tx.execute(
+                "UPDATE canonical_tags SET disabled=?2,updated_at=CURRENT_TIMESTAMP WHERE id=?1",
+                params![tag_id, after],
+            )
+            .map_err(|error| error.to_string())?;
+            let token = uuid::Uuid::new_v4().to_string();
+            let snapshot =
+                json!({"version":1,"kind":"disable","tagId":tag_id,"before":before,"after":after});
+            tx.execute(
+                "INSERT INTO tag_operations(token,snapshot_json) VALUES(?1,?2)",
+                params![token, snapshot.to_string()],
+            )
+            .map_err(|error| error.to_string())?;
+            refresh_fts_for_canonical_tags(&tx, &[tag_id])?;
+            tx.commit().map_err(|error| error.to_string())?;
+            Ok(TagMutationResult {
+                affected_works,
+                undo_token: token,
+            })
+        })
+    }
+
+    pub fn undo_tag_operation(&self, token: &str) -> Result<bool, String> {
+        self.with_connection(|connection| undo_tag_mutation(connection, token))
+    }
+
+    pub fn save_progress(
+        &self,
+        identifier: &str,
+        progress: &crate::state::Progress,
+    ) -> Result<(), String> {
+        self.with_connection(|connection| {
+            let comic_id = resolve_comic_id(connection, identifier)?
+                .ok_or_else(|| format!("找不到漫畫進度身分：{identifier}"))?;
+            connection
+                .execute(
+                    "INSERT INTO reading_progress(comic_id,current_page,total_pages,percent,updated_at)
+                     VALUES(?1,?2,?3,?4,?5)
+                     ON CONFLICT(comic_id) DO UPDATE SET
+                       current_page=excluded.current_page,total_pages=excluded.total_pages,
+                       percent=excluded.percent,updated_at=excluded.updated_at",
+                    params![
+                        comic_id,
+                        progress.current_page as i64,
+                        progress.total_pages as i64,
+                        progress.percent,
+                        progress.updated_at
+                    ],
+                )
+                .map_err(|error| error.to_string())?;
+            Ok(())
+        })
     }
 
     pub fn apply_batch(&self, request: BatchEditRequest) -> Result<BatchEditResult, String> {
@@ -537,13 +1051,18 @@ impl CatalogStore {
                         params![comic_id, field, value_json],
                     ).map_err(|error| error.to_string())?;
                 }
-                for tag in &request.add_tags { set_tag_override(&tx, comic_id, tag, "include")?; }
+                for tag in &request.add_tags {
+                    let raw_tag_id = set_tag_override(&tx, comic_id, tag, "include")?;
+                    mark_tag_used(&tx, raw_tag_id)?;
+                }
                 for tag in &request.exclude_tags { set_tag_override(&tx, comic_id, tag, "exclude")?; }
                 resolve_effective_metadata(&tx, comic_id)?;
                 refresh_fts(&tx, comic_id)?;
             }
+            let after = snapshot_overrides(&tx, &comic_ids)?;
             let undo_token = uuid::Uuid::new_v4().to_string();
-            tx.execute("INSERT INTO batch_operations(token, snapshot_json, created_at) VALUES(?1, ?2, CURRENT_TIMESTAMP)", params![undo_token, before.to_string()]).map_err(|error| error.to_string())?;
+            let undo_snapshot = json!({"version": 2, "before": before, "after": after});
+            tx.execute("INSERT INTO batch_operations(token, snapshot_json, created_at) VALUES(?1, ?2, CURRENT_TIMESTAMP)", params![undo_token, undo_snapshot.to_string()]).map_err(|error| error.to_string())?;
             tx.commit().map_err(|error| error.to_string())?;
             Ok(BatchEditResult { updated: comic_ids.len(), undo_token })
         })
@@ -551,29 +1070,62 @@ impl CatalogStore {
 
     pub fn undo_batch(&self, token: &str) -> Result<usize, String> {
         self.with_connection(|connection| {
-            let tx = connection.transaction().map_err(|error| error.to_string())?;
-            let snapshot: String = tx.query_row("SELECT snapshot_json FROM batch_operations WHERE token = ?1", [token], |row| row.get(0)).optional().map_err(|error| error.to_string())?.ok_or("找不到可撤銷的批次操作")?;
-            let value: Value = serde_json::from_str(&snapshot).map_err(|error| error.to_string())?;
-            let comics = value.as_object().ok_or("撤銷快照格式錯誤")?;
-            for (comic_id, snapshot) in comics {
-                tx.execute("DELETE FROM user_field_overrides WHERE comic_id = ?1", [comic_id]).map_err(|error| error.to_string())?;
-                tx.execute("DELETE FROM comic_tag_overrides WHERE comic_id = ?1", [comic_id]).map_err(|error| error.to_string())?;
-                if let Some(fields) = snapshot.get("fields").and_then(Value::as_object) {
-                    for (field, value) in fields {
-                        tx.execute("INSERT INTO user_field_overrides(comic_id, field_key, value_json, updated_at) VALUES(?1, ?2, ?3, CURRENT_TIMESTAMP)", params![comic_id, field, value.as_str().unwrap_or("null")]).map_err(|error| error.to_string())?;
-                    }
-                }
-                if let Some(tags) = snapshot.get("tags").and_then(Value::as_array) {
-                    for item in tags {
-                        tx.execute("INSERT INTO comic_tag_overrides(comic_id, tag_id, action) VALUES(?1, ?2, ?3)", params![comic_id, item["tagId"].as_i64(), item["action"].as_str()]).map_err(|error| error.to_string())?;
-                    }
-                }
-                resolve_effective_metadata(&tx, comic_id)?;
-                refresh_fts(&tx, comic_id)?;
+            let tx = connection
+                .transaction()
+                .map_err(|error| error.to_string())?;
+            let snapshot: String = tx
+                .query_row(
+                    "SELECT snapshot_json FROM batch_operations WHERE token = ?1",
+                    [token],
+                    |row| row.get(0),
+                )
+                .optional()
+                .map_err(|error| error.to_string())?
+                .ok_or("找不到可撤銷的批次操作")?;
+            let value: Value =
+                serde_json::from_str(&snapshot).map_err(|error| error.to_string())?;
+            if value.get("version").and_then(Value::as_i64) != Some(2) {
+                return Err("這筆撤銷來自舊版格式；為避免刪除後續編輯，已安全拒絕".into());
             }
-            tx.execute("DELETE FROM batch_operations WHERE token = ?1", [token]).map_err(|error| error.to_string())?;
+            let before = value
+                .get("before")
+                .and_then(Value::as_object)
+                .ok_or("撤銷快照缺少 before")?;
+            let after = value
+                .get("after")
+                .and_then(Value::as_object)
+                .ok_or("撤銷快照缺少 after")?;
+            let comic_ids = before
+                .keys()
+                .chain(after.keys())
+                .cloned()
+                .collect::<BTreeSet<_>>();
+            let mut reverted = 0;
+            for comic_id in &comic_ids {
+                let ids = BTreeSet::from([comic_id.clone()]);
+                let current = snapshot_overrides(&tx, &ids)?;
+                let current = current
+                    .get(comic_id)
+                    .cloned()
+                    .unwrap_or_else(empty_override_snapshot);
+                let before_comic = before
+                    .get(comic_id)
+                    .cloned()
+                    .unwrap_or_else(empty_override_snapshot);
+                let after_comic = after
+                    .get(comic_id)
+                    .cloned()
+                    .unwrap_or_else(empty_override_snapshot);
+                if revert_override_delta(&tx, comic_id, &before_comic, &after_comic, &current)? {
+                    resolve_effective_metadata(&tx, comic_id)?;
+                    refresh_fts(&tx, comic_id)?;
+                    reverted += 1;
+                }
+            }
+            tx.execute("DELETE FROM batch_operations WHERE token = ?1", [token])
+                .map_err(|error| error.to_string())?;
             tx.commit().map_err(|error| error.to_string())?;
-            Ok(comics.len())
+            Ok(reverted)
         })
     }
 
@@ -731,7 +1283,7 @@ impl CatalogStore {
         self.with_connection(|connection| {
             connection.execute(
                 "INSERT INTO tag_aliases(namespace,alias,normalized_alias,canonical_value,updated_at) VALUES(?1,?2,?3,?4,CURRENT_TIMESTAMP) ON CONFLICT(namespace,normalized_alias) DO UPDATE SET alias=excluded.alias,canonical_value=excluded.canonical_value,updated_at=CURRENT_TIMESTAMP",
-                params![alias.namespace, alias.alias, alias.alias.to_lowercase(), alias.canonical_value],
+                params![alias.namespace, alias.alias, normalize_tag_key(&alias.alias), alias.canonical_value],
             ).map_err(|error| error.to_string())?;
             Ok(alias)
         })
@@ -791,10 +1343,7 @@ impl CatalogStore {
     }
 }
 
-fn migrate(connection: &mut Connection) -> Result<(), String> {
-    connection.execute_batch(
-        "BEGIN;
-        CREATE TABLE IF NOT EXISTS schema_migrations(version INTEGER PRIMARY KEY, applied_at TEXT NOT NULL);
+const MIGRATION_1: &str = "
         CREATE TABLE IF NOT EXISTS comics(
           id TEXT PRIMARY KEY, title TEXT NOT NULL, series TEXT, volume TEXT, number TEXT, summary TEXT,
           language TEXT, reading_direction TEXT, published_at TEXT, offline INTEGER NOT NULL DEFAULT 0,
@@ -828,11 +1377,6 @@ fn migrate(connection: &mut Connection) -> Result<(), String> {
           id INTEGER PRIMARY KEY, namespace TEXT NOT NULL, value TEXT NOT NULL, normalized_value TEXT NOT NULL,
           UNIQUE(namespace, normalized_value)
         );
-        CREATE TABLE IF NOT EXISTS tag_aliases(
-          id INTEGER PRIMARY KEY, namespace TEXT NOT NULL, alias TEXT NOT NULL, normalized_alias TEXT NOT NULL,
-          canonical_value TEXT NOT NULL, updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
-          UNIQUE(namespace, normalized_alias)
-        );
         CREATE TABLE IF NOT EXISTS comic_tag_candidates(
           comic_id TEXT NOT NULL REFERENCES comics(id) ON DELETE CASCADE, tag_id INTEGER NOT NULL REFERENCES tags(id) ON DELETE CASCADE,
           source_id INTEGER NOT NULL REFERENCES metadata_sources(id) ON DELETE CASCADE, PRIMARY KEY(comic_id, tag_id, source_id)
@@ -852,11 +1396,230 @@ fn migrate(connection: &mut Connection) -> Result<(), String> {
           source_path TEXT NOT NULL, severity TEXT NOT NULL, message TEXT NOT NULL, created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
         );
         CREATE TABLE IF NOT EXISTS batch_operations(token TEXT PRIMARY KEY, snapshot_json TEXT NOT NULL, created_at TEXT NOT NULL);
-        CREATE VIRTUAL TABLE IF NOT EXISTS catalog_fts USING fts5(comic_id UNINDEXED, title, series, path, creators, tags, language, tokenize='unicode61');
-        INSERT OR IGNORE INTO schema_migrations(version, applied_at) VALUES(1, CURRENT_TIMESTAMP);
-        INSERT OR IGNORE INTO schema_migrations(version, applied_at) VALUES(2, CURRENT_TIMESTAMP);
-        COMMIT;"
-    ).map_err(|error| format!("SQLite migration 失敗：{error}"))
+        CREATE VIRTUAL TABLE IF NOT EXISTS catalog_fts USING fts5(comic_id UNINDEXED, title, series, path, creators, tags, language, tokenize='unicode61');";
+
+const MIGRATION_2: &str = "
+        CREATE TABLE IF NOT EXISTS tag_aliases(
+          id INTEGER PRIMARY KEY, namespace TEXT NOT NULL, alias TEXT NOT NULL, normalized_alias TEXT NOT NULL,
+          canonical_value TEXT NOT NULL, updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+          UNIQUE(namespace, normalized_alias)
+        );";
+
+const MIGRATION_3: &str = "
+        CREATE TABLE IF NOT EXISTS reading_progress(
+          comic_id TEXT PRIMARY KEY REFERENCES comics(id) ON DELETE CASCADE,
+          current_page INTEGER NOT NULL DEFAULT 0,
+          total_pages INTEGER NOT NULL DEFAULT 0,
+          percent REAL NOT NULL DEFAULT 0,
+          updated_at TEXT
+        );";
+
+const MIGRATION_4: &str = "
+        CREATE TABLE IF NOT EXISTS canonical_tags(
+          id INTEGER PRIMARY KEY,
+          namespace TEXT NOT NULL,
+          normalized_value TEXT NOT NULL,
+          display_value TEXT NOT NULL,
+          disabled INTEGER NOT NULL DEFAULT 0,
+          created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+          updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+          UNIQUE(namespace, normalized_value)
+        );
+        CREATE TABLE IF NOT EXISTS tag_redirects(
+          source_tag_id INTEGER PRIMARY KEY REFERENCES canonical_tags(id) ON DELETE CASCADE,
+          target_tag_id INTEGER NOT NULL REFERENCES canonical_tags(id) ON DELETE RESTRICT,
+          created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+          CHECK(source_tag_id <> target_tag_id)
+        );
+        CREATE TABLE IF NOT EXISTS tag_user_state(
+          tag_id INTEGER PRIMARY KEY REFERENCES canonical_tags(id) ON DELETE CASCADE,
+          pinned INTEGER NOT NULL DEFAULT 0,
+          usage_count INTEGER NOT NULL DEFAULT 0,
+          last_used_at TEXT,
+          color_key TEXT,
+          CHECK(color_key IS NULL OR color_key IN ('rose','amber','lime','cyan','blue','violet','fuchsia','slate','none'))
+        );
+        ALTER TABLE tags ADD COLUMN canonical_tag_id INTEGER REFERENCES canonical_tags(id);
+        CREATE INDEX IF NOT EXISTS idx_tags_canonical ON tags(canonical_tag_id);";
+
+const MIGRATION_5: &str = "
+        CREATE TABLE IF NOT EXISTS tag_operations(
+          token TEXT PRIMARY KEY,
+          snapshot_json TEXT NOT NULL,
+          created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+        );";
+
+const MIGRATION_6: &str = "
+        CREATE TABLE IF NOT EXISTS file_operations(
+          id TEXT PRIMARY KEY,
+          undo_token TEXT NOT NULL UNIQUE,
+          comic_id TEXT NOT NULL REFERENCES comics(id) ON DELETE CASCADE,
+          location_id INTEGER NOT NULL REFERENCES comic_locations(id) ON DELETE CASCADE,
+          action TEXT NOT NULL CHECK(action IN ('rename','move','trash')),
+          source_id TEXT NOT NULL,
+          before_relative_path TEXT NOT NULL,
+          before_actual_path TEXT,
+          after_relative_path TEXT,
+          after_actual_path TEXT,
+          expected_fingerprint TEXT,
+          status TEXT NOT NULL CHECK(status IN ('pending','succeeded','failed','undone','needs_reconcile')),
+          error_message TEXT,
+          created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+          completed_at TEXT,
+          undone_at TEXT
+        );
+        CREATE INDEX IF NOT EXISTS idx_file_operations_comic ON file_operations(comic_id,created_at DESC);
+        CREATE INDEX IF NOT EXISTS idx_file_operations_status ON file_operations(status);";
+
+const MIGRATIONS: &[(i64, &str)] = &[
+    (1, MIGRATION_1),
+    (2, MIGRATION_2),
+    (3, MIGRATION_3),
+    (4, MIGRATION_4),
+    (5, MIGRATION_5),
+    (6, MIGRATION_6),
+];
+
+fn load_file_operation(
+    connection: &Connection,
+    identifier: &str,
+    by_undo_token: bool,
+) -> Result<FileOperationRecord, String> {
+    let predicate = if by_undo_token {
+        "undo_token=?1"
+    } else {
+        "id=?1"
+    };
+    connection.query_row(
+        &format!("SELECT id,undo_token,comic_id,location_id,action,source_id,before_relative_path,before_actual_path,after_relative_path,after_actual_path,expected_fingerprint,status FROM file_operations WHERE {predicate}"),
+        [identifier],
+        |row| Ok(FileOperationRecord {
+            id: row.get(0)?, undo_token: row.get(1)?, comic_id: row.get(2)?, location_id: row.get(3)?,
+            action: row.get(4)?, source_id: row.get(5)?, before_relative_path: row.get(6)?, before_actual_path: row.get(7)?,
+            after_relative_path: row.get(8)?, after_actual_path: row.get(9)?, expected_fingerprint: row.get(10)?, status: row.get(11)?,
+        }),
+    ).map_err(|error| error.to_string())
+}
+
+fn migrate(connection: &mut Connection) -> Result<(), String> {
+    connection
+        .execute_batch(
+            "CREATE TABLE IF NOT EXISTS schema_migrations(
+                version INTEGER PRIMARY KEY,
+                applied_at TEXT NOT NULL
+            );",
+        )
+        .map_err(|error| format!("無法建立 migration ledger：{error}"))?;
+
+    let applied = {
+        let mut statement = connection
+            .prepare("SELECT version FROM schema_migrations ORDER BY version")
+            .map_err(|error| format!("無法讀取 migration ledger：{error}"))?;
+        let versions = statement
+            .query_map([], |row| row.get::<_, i64>(0))
+            .map_err(|error| format!("無法查詢 migration ledger：{error}"))?
+            .collect::<Result<Vec<_>, _>>()
+            .map_err(|error| format!("無法解析 migration ledger：{error}"))?;
+        versions
+    };
+
+    let latest = MIGRATIONS.last().map_or(0, |(version, _)| *version);
+    if let Some(version) = applied.iter().copied().find(|version| *version > latest) {
+        return Err(format!(
+            "漫畫目錄資料庫版本 {version} 比此 App 支援的 {latest} 新，已停止以避免損壞資料"
+        ));
+    }
+    for (index, version) in applied.iter().copied().enumerate() {
+        let expected = index as i64 + 1;
+        if version != expected {
+            return Err(format!(
+                "migration ledger 不連續：預期版本 {expected}，實際為 {version}"
+            ));
+        }
+    }
+
+    for (version, sql) in MIGRATIONS
+        .iter()
+        .filter(|(version, _)| !applied.contains(version))
+    {
+        let tx = connection
+            .transaction()
+            .map_err(|error| format!("無法開始 SQLite migration {version}：{error}"))?;
+        tx.execute_batch(sql)
+            .map_err(|error| format!("SQLite migration {version} 失敗：{error}"))?;
+        tx.execute(
+            "INSERT INTO schema_migrations(version, applied_at) VALUES(?1, CURRENT_TIMESTAMP)",
+            [version],
+        )
+        .map_err(|error| format!("無法記錄 SQLite migration {version}：{error}"))?;
+        tx.pragma_update(None, "user_version", version)
+            .map_err(|error| format!("無法更新 SQLite user_version {version}：{error}"))?;
+        tx.commit()
+            .map_err(|error| format!("無法提交 SQLite migration {version}：{error}"))?;
+    }
+    backfill_canonical_tags(connection)?;
+    Ok(())
+}
+
+fn normalize_tag_key(value: &str) -> String {
+    value.nfkc().collect::<String>().trim().to_lowercase()
+}
+
+fn backfill_canonical_tags(connection: &mut Connection) -> Result<(), String> {
+    let missing: i64 = connection
+        .query_row(
+            "SELECT COUNT(*) FROM tags WHERE canonical_tag_id IS NULL",
+            [],
+            |row| row.get(0),
+        )
+        .map_err(|error| format!("無法檢查 canonical tags：{error}"))?;
+    if missing == 0 {
+        return Ok(());
+    }
+    let rows = {
+        let mut statement = connection
+            .prepare(
+                "SELECT id,namespace,value FROM tags WHERE canonical_tag_id IS NULL ORDER BY id",
+            )
+            .map_err(|error| error.to_string())?;
+        let rows = statement
+            .query_map([], |row| {
+                Ok((
+                    row.get::<_, i64>(0)?,
+                    row.get::<_, String>(1)?,
+                    row.get::<_, String>(2)?,
+                ))
+            })
+            .map_err(|error| error.to_string())?
+            .collect::<Result<Vec<_>, _>>()
+            .map_err(|error| error.to_string())?;
+        rows
+    };
+    let tx = connection
+        .transaction()
+        .map_err(|error| error.to_string())?;
+    for (raw_id, namespace, display_value) in rows {
+        let namespace = normalize_tag_key(&namespace);
+        let normalized = normalize_tag_key(&display_value);
+        tx.execute(
+            "INSERT OR IGNORE INTO canonical_tags(namespace,normalized_value,display_value) VALUES(?1,?2,?3)",
+            params![namespace, normalized, display_value],
+        )
+        .map_err(|error| error.to_string())?;
+        let canonical_id: i64 = tx
+            .query_row(
+                "SELECT id FROM canonical_tags WHERE namespace=?1 AND normalized_value=?2",
+                params![namespace, normalized],
+                |row| row.get(0),
+            )
+            .map_err(|error| error.to_string())?;
+        tx.execute(
+            "UPDATE tags SET canonical_tag_id=?2 WHERE id=?1",
+            params![raw_id, canonical_id],
+        )
+        .map_err(|error| error.to_string())?;
+    }
+    tx.commit().map_err(|error| error.to_string())
 }
 
 fn load_location_signatures(
@@ -892,6 +1655,63 @@ fn file_signature(path: &Path) -> Option<(Option<i64>, Option<String>)> {
                 .map(|time| chrono::DateTime::<chrono::Utc>::from(time).to_rfc3339()),
         )
     })
+}
+
+fn import_runtime_progress(
+    tx: &Transaction<'_>,
+    comic_id: &str,
+    progress: &crate::state::Progress,
+) -> Result<(), String> {
+    let Some(updated_at) = progress.updated_at.as_deref() else {
+        return Ok(());
+    };
+    let Ok(incoming) = chrono::DateTime::parse_from_rfc3339(updated_at) else {
+        // A damaged legacy sidecar must not abort the remaining catalog import.
+        return Ok(());
+    };
+    let incoming = incoming.with_timezone(&chrono::Utc);
+    let normalized_incoming = incoming.to_rfc3339_opts(chrono::SecondsFormat::Secs, true);
+    let existing: Option<String> = tx
+        .query_row(
+            "SELECT updated_at FROM reading_progress WHERE comic_id=?1",
+            [comic_id],
+            |row| row.get(0),
+        )
+        .optional()
+        .map_err(|error| error.to_string())?;
+    if let Some(existing) = existing {
+        if let Ok(parsed) = chrono::DateTime::parse_from_rfc3339(&existing) {
+            let parsed = parsed.with_timezone(&chrono::Utc);
+            let normalized_existing = parsed.to_rfc3339_opts(chrono::SecondsFormat::Secs, true);
+            if normalized_existing != existing {
+                tx.execute(
+                    "UPDATE reading_progress SET updated_at=?2 WHERE comic_id=?1",
+                    params![comic_id, normalized_existing],
+                )
+                .map_err(|error| error.to_string())?;
+            }
+            if incoming < parsed {
+                return Ok(());
+            }
+        }
+    }
+    tx.execute(
+        "INSERT INTO reading_progress(comic_id,current_page,total_pages,percent,updated_at)
+         VALUES(?1,?2,?3,?4,?5)
+         ON CONFLICT(comic_id) DO UPDATE SET
+           current_page=excluded.current_page,total_pages=excluded.total_pages,
+           percent=excluded.percent,updated_at=excluded.updated_at
+         ",
+        params![
+            comic_id,
+            progress.current_page as i64,
+            progress.total_pages as i64,
+            progress.percent,
+            normalized_incoming
+        ],
+    )
+    .map_err(|error| error.to_string())?;
+    Ok(())
 }
 
 fn upsert_location(
@@ -1093,7 +1913,7 @@ fn effective_creators(
 }
 
 fn effective_tags(connection: &Connection, comic_id: &str) -> Result<Vec<ScopedTag>, String> {
-    let mut tags: BTreeMap<i64, ScopedTag> = BTreeMap::new();
+    let mut raw_tags: BTreeMap<i64, ScopedTag> = BTreeMap::new();
     let mut statement = connection.prepare("SELECT DISTINCT t.id,t.namespace,t.value FROM comic_tag_candidates c JOIN tags t ON t.id=c.tag_id JOIN metadata_sources s ON s.id=c.source_id WHERE c.comic_id=?1 AND s.parser_id NOT LIKE 'ai:%'").map_err(|error| error.to_string())?;
     for row in statement
         .query_map([comic_id], |row| {
@@ -1108,7 +1928,7 @@ fn effective_tags(connection: &Connection, comic_id: &str) -> Result<Vec<ScopedT
         .map_err(|error| error.to_string())?
     {
         let (id, tag) = row.map_err(|error| error.to_string())?;
-        tags.insert(id, tag);
+        raw_tags.insert(id, tag);
     }
     let location: Option<(String, String)> = connection.query_row("SELECT source_id,relative_path FROM comic_locations WHERE comic_id=?1 ORDER BY online DESC,last_seen_at DESC LIMIT 1", [comic_id], |row| Ok((row.get(0)?, row.get(1)?))).optional().map_err(|error| error.to_string())?;
     if let Some((source_id, path)) = location {
@@ -1129,8 +1949,14 @@ fn effective_tags(connection: &Connection, comic_id: &str) -> Result<Vec<ScopedT
         {
             let (id, tag, folder) = row.map_err(|error| error.to_string())?;
             if path_is_within(&normalized, &folder) {
-                tags.insert(id, tag);
+                raw_tags.insert(id, tag);
             }
+        }
+    }
+    let mut tags = BTreeMap::new();
+    for raw_id in raw_tags.keys() {
+        if let Some((canonical_id, tag)) = project_tag(connection, *raw_id)? {
+            tags.insert(canonical_id, tag);
         }
     }
     let mut statement = connection.prepare("SELECT o.tag_id,o.action,t.namespace,t.value FROM comic_tag_overrides o JOIN tags t ON t.id=o.tag_id WHERE o.comic_id=?1").map_err(|error| error.to_string())?;
@@ -1147,7 +1973,10 @@ fn effective_tags(connection: &Connection, comic_id: &str) -> Result<Vec<ScopedT
         })
         .map_err(|error| error.to_string())?
     {
-        let (id, action, tag) = row.map_err(|error| error.to_string())?;
+        let (raw_id, action, _) = row.map_err(|error| error.to_string())?;
+        let Some((id, tag)) = project_tag(connection, raw_id)? else {
+            continue;
+        };
         if action == "exclude" {
             tags.remove(&id);
         } else {
@@ -1155,6 +1984,35 @@ fn effective_tags(connection: &Connection, comic_id: &str) -> Result<Vec<ScopedT
         }
     }
     Ok(tags.into_values().collect())
+}
+
+fn project_tag(
+    connection: &Connection,
+    raw_tag_id: i64,
+) -> Result<Option<(i64, ScopedTag)>, String> {
+    connection
+        .query_row(
+            "SELECT final.id,final.namespace,final.display_value,final.disabled
+               FROM tags raw
+               JOIN canonical_tags source ON source.id=raw.canonical_tag_id
+               LEFT JOIN tag_redirects redirect ON redirect.source_tag_id=source.id
+               JOIN canonical_tags final ON final.id=COALESCE(redirect.target_tag_id,source.id)
+              WHERE raw.id=?1",
+            [raw_tag_id],
+            |row| {
+                Ok((
+                    row.get::<_, i64>(0)?,
+                    ScopedTag {
+                        namespace: row.get(1)?,
+                        value: row.get(2)?,
+                    },
+                    row.get::<_, i64>(3)? != 0,
+                ))
+            },
+        )
+        .optional()
+        .map_err(|error| error.to_string())
+        .map(|result| result.and_then(|(id, tag, disabled)| (!disabled).then_some((id, tag))))
 }
 
 fn refresh_fts(tx: &Transaction<'_>, comic_id: &str) -> Result<(), String> {
@@ -1329,9 +2187,307 @@ fn search_catalog(
     })
 }
 
+const TAG_INVENTORY_CTE: &str = "
+WITH effective_ids(tag_id,comic_id) AS (
+  SELECT COALESCE(r.target_tag_id,t.canonical_tag_id),c.comic_id
+    FROM comic_tag_candidates c
+    JOIN metadata_sources s ON s.id=c.source_id AND s.parser_id NOT LIKE 'ai:%'
+    JOIN tags t ON t.id=c.tag_id
+    LEFT JOIN tag_redirects r ON r.source_tag_id=t.canonical_tag_id
+  UNION
+  SELECT COALESCE(r.target_tag_id,t.canonical_tag_id),o.comic_id
+    FROM comic_tag_overrides o
+    JOIN tags t ON t.id=o.tag_id
+    LEFT JOIN tag_redirects r ON r.source_tag_id=t.canonical_tag_id
+   WHERE o.action='include'
+  UNION
+  SELECT COALESCE(rd.target_tag_id,t.canonical_tag_id),l.comic_id
+    FROM folder_tag_rules f
+    JOIN tags t ON t.id=f.tag_id
+    LEFT JOIN tag_redirects rd ON rd.source_tag_id=t.canonical_tag_id
+    JOIN comic_locations l ON l.source_id=f.source_id
+     AND (l.relative_path=f.folder_path OR l.relative_path LIKE f.folder_path || '/%')
+   WHERE f.enabled=1
+), excluded_ids(tag_id,comic_id) AS (
+  SELECT COALESCE(r.target_tag_id,t.canonical_tag_id),o.comic_id
+    FROM comic_tag_overrides o
+    JOIN tags t ON t.id=o.tag_id
+    LEFT JOIN tag_redirects r ON r.source_tag_id=t.canonical_tag_id
+   WHERE o.action='exclude'
+), counts(tag_id,work_count) AS (
+  SELECT e.tag_id,COUNT(DISTINCT e.comic_id)
+    FROM effective_ids e
+   WHERE e.tag_id IS NOT NULL
+     AND NOT EXISTS(
+       SELECT 1 FROM excluded_ids x WHERE x.tag_id=e.tag_id AND x.comic_id=e.comic_id
+     )
+   GROUP BY e.tag_id
+) ";
+
+fn load_tag_inventory(
+    connection: &Connection,
+    query: TagInventoryQuery,
+) -> Result<TagInventoryResult, String> {
+    let normalized_query = normalize_tag_key(&query.query);
+    let pattern = format!("%{normalized_query}%");
+    let limit = query.limit.clamp(1, PAGE_SIZE_MAX);
+    let total_sql = format!(
+        "{TAG_INVENTORY_CTE}
+         SELECT COUNT(*) FROM canonical_tags c
+          WHERE ?1='' OR c.namespace LIKE ?2 OR c.normalized_value LIKE ?2"
+    );
+    let total: i64 = connection
+        .query_row(&total_sql, params![normalized_query, pattern], |row| {
+            row.get(0)
+        })
+        .map_err(|error| error.to_string())?;
+    let sql = format!(
+        "{TAG_INVENTORY_CTE}
+         SELECT c.id,c.namespace,c.display_value,c.normalized_value,
+                COALESCE(n.work_count,0),COALESCE(u.pinned,0),COALESCE(u.usage_count,0),
+                u.last_used_at,u.color_key,c.disabled
+           FROM canonical_tags c
+           LEFT JOIN counts n ON n.tag_id=c.id
+           LEFT JOIN tag_user_state u ON u.tag_id=c.id
+          WHERE ?1='' OR c.namespace LIKE ?2 OR c.normalized_value LIKE ?2
+          ORDER BY COALESCE(u.pinned,0) DESC,COALESCE(u.usage_count,0) DESC,
+                   COALESCE(n.work_count,0) DESC,c.namespace,c.normalized_value
+          LIMIT ?3 OFFSET ?4"
+    );
+    let mut statement = connection
+        .prepare(&sql)
+        .map_err(|error| error.to_string())?;
+    let items = statement
+        .query_map(
+            params![normalized_query, pattern, limit as i64, query.offset as i64],
+            |row| {
+                Ok(TagInventoryItem {
+                    id: row.get(0)?,
+                    namespace: row.get(1)?,
+                    display_value: row.get(2)?,
+                    normalized_value: row.get(3)?,
+                    work_count: row.get::<_, i64>(4)?.max(0) as usize,
+                    pinned: row.get::<_, i64>(5)? != 0,
+                    usage_count: row.get::<_, i64>(6)?.max(0) as usize,
+                    last_used_at: row.get(7)?,
+                    color_key: row.get(8)?,
+                    disabled: row.get::<_, i64>(9)? != 0,
+                })
+            },
+        )
+        .map_err(|error| error.to_string())?
+        .collect::<Result<Vec<_>, _>>()
+        .map_err(|error| error.to_string())?;
+    Ok(TagInventoryResult {
+        items,
+        total: total.max(0) as usize,
+    })
+}
+
+fn tag_work_count(connection: &Connection, tag_id: i64) -> Result<usize, String> {
+    let sql = format!(
+        "{TAG_INVENTORY_CTE} SELECT COALESCE((SELECT work_count FROM counts WHERE tag_id=?1),0)"
+    );
+    connection
+        .query_row(&sql, [tag_id], |row| row.get::<_, i64>(0))
+        .map(|count| count.max(0) as usize)
+        .map_err(|error| error.to_string())
+}
+
+fn final_canonical_tag_id(connection: &Connection, start: i64) -> Result<i64, String> {
+    let exists: bool = connection
+        .query_row(
+            "SELECT EXISTS(SELECT 1 FROM canonical_tags WHERE id=?1)",
+            [start],
+            |row| row.get(0),
+        )
+        .map_err(|error| error.to_string())?;
+    if !exists {
+        return Err("找不到目標標籤".into());
+    }
+    let mut current = start;
+    let mut seen = BTreeSet::new();
+    for _ in 0..32 {
+        if !seen.insert(current) {
+            return Err("標籤 redirect 已形成循環".into());
+        }
+        let next: Option<i64> = connection
+            .query_row(
+                "SELECT target_tag_id FROM tag_redirects WHERE source_tag_id=?1",
+                [current],
+                |row| row.get(0),
+            )
+            .optional()
+            .map_err(|error| error.to_string())?;
+        match next {
+            Some(next) => current = next,
+            None => return Ok(current),
+        }
+    }
+    Err("標籤 redirect 鏈過深".into())
+}
+
+fn refresh_fts_for_canonical_tags(connection: &Connection, tag_ids: &[i64]) -> Result<(), String> {
+    if tag_ids.is_empty() {
+        return Ok(());
+    }
+    let placeholders = (1..=tag_ids.len())
+        .map(|index| format!("?{index}"))
+        .collect::<Vec<_>>()
+        .join(",");
+    let sql = format!(
+        "SELECT DISTINCT comic_id FROM (
+           SELECT c.comic_id FROM comic_tag_candidates c JOIN tags t ON t.id=c.tag_id
+            LEFT JOIN tag_redirects r ON r.source_tag_id=t.canonical_tag_id
+            WHERE t.canonical_tag_id IN ({placeholders}) OR r.target_tag_id IN ({placeholders})
+           UNION
+           SELECT o.comic_id FROM comic_tag_overrides o JOIN tags t ON t.id=o.tag_id
+            LEFT JOIN tag_redirects r ON r.source_tag_id=t.canonical_tag_id
+            WHERE t.canonical_tag_id IN ({placeholders}) OR r.target_tag_id IN ({placeholders})
+           UNION
+           SELECT l.comic_id FROM folder_tag_rules f JOIN tags t ON t.id=f.tag_id
+            LEFT JOIN tag_redirects r ON r.source_tag_id=t.canonical_tag_id
+            JOIN comic_locations l ON l.source_id=f.source_id
+             AND (l.relative_path=f.folder_path OR l.relative_path LIKE f.folder_path || '/%')
+            WHERE t.canonical_tag_id IN ({placeholders}) OR r.target_tag_id IN ({placeholders})
+         )"
+    );
+    let mut statement = connection
+        .prepare(&sql)
+        .map_err(|error| error.to_string())?;
+    let comic_ids = statement
+        .query_map(rusqlite::params_from_iter(tag_ids.iter()), |row| {
+            row.get::<_, String>(0)
+        })
+        .map_err(|error| error.to_string())?
+        .collect::<Result<Vec<_>, _>>()
+        .map_err(|error| error.to_string())?;
+    for comic_id in comic_ids {
+        refresh_fts_inner(connection, &comic_id)?;
+    }
+    Ok(())
+}
+
+fn undo_tag_mutation(connection: &mut Connection, token: &str) -> Result<bool, String> {
+    let tx = connection
+        .transaction()
+        .map_err(|error| error.to_string())?;
+    let raw: String = tx
+        .query_row(
+            "SELECT snapshot_json FROM tag_operations WHERE token=?1",
+            [token],
+            |row| row.get(0),
+        )
+        .optional()
+        .map_err(|error| error.to_string())?
+        .ok_or("找不到可撤銷的標籤操作")?;
+    let snapshot: Value = serde_json::from_str(&raw).map_err(|error| error.to_string())?;
+    if snapshot.get("version").and_then(Value::as_i64) != Some(1) {
+        return Err("不支援的標籤撤銷格式".into());
+    }
+    let kind = snapshot
+        .get("kind")
+        .and_then(Value::as_str)
+        .ok_or("標籤撤銷缺少 kind")?;
+    let mut refresh_ids = Vec::new();
+    match kind {
+        "rename" => {
+            let tag_id = snapshot["tagId"].as_i64().ok_or("rename 缺少 tagId")?;
+            let current: (String, String, i64) = tx.query_row(
+                "SELECT display_value,normalized_value,disabled FROM canonical_tags WHERE id=?1",
+                [tag_id], |row| Ok((row.get(0)?,row.get(1)?,row.get(2)?)),
+            ).map_err(|error| error.to_string())?;
+            let after = &snapshot["after"];
+            if current.0 != after["display"].as_str().unwrap_or_default()
+                || current.1 != after["normalized"].as_str().unwrap_or_default()
+                || current.2 != after["disabled"].as_i64().unwrap_or_default()
+            {
+                return Err("標籤在此操作後又被修改；為避免覆蓋新變更，已拒絕撤銷".into());
+            }
+            let before = &snapshot["before"];
+            tx.execute(
+                "UPDATE canonical_tags SET display_value=?2,normalized_value=?3,disabled=?4,updated_at=CURRENT_TIMESTAMP WHERE id=?1",
+                params![tag_id,before["display"].as_str(),before["normalized"].as_str(),before["disabled"].as_i64()],
+            ).map_err(|error| error.to_string())?;
+            refresh_ids.push(tag_id);
+        }
+        "disable" => {
+            let tag_id = snapshot["tagId"].as_i64().ok_or("disable 缺少 tagId")?;
+            let current: i64 = tx
+                .query_row(
+                    "SELECT disabled FROM canonical_tags WHERE id=?1",
+                    [tag_id],
+                    |row| row.get(0),
+                )
+                .map_err(|error| error.to_string())?;
+            if current != snapshot["after"].as_i64().unwrap_or_default() {
+                return Err("標籤停用狀態已有新變更，已拒絕撤銷".into());
+            }
+            tx.execute(
+                "UPDATE canonical_tags SET disabled=?2,updated_at=CURRENT_TIMESTAMP WHERE id=?1",
+                params![tag_id, snapshot["before"].as_i64()],
+            )
+            .map_err(|error| error.to_string())?;
+            refresh_ids.push(tag_id);
+        }
+        "merge" => {
+            let source = snapshot["sourceTagId"]
+                .as_i64()
+                .ok_or("merge 缺少 sourceTagId")?;
+            let after_target = snapshot["after"]["target"]
+                .as_i64()
+                .ok_or("merge 缺少 target")?;
+            let current_target: Option<i64> = tx
+                .query_row(
+                    "SELECT target_tag_id FROM tag_redirects WHERE source_tag_id=?1",
+                    [source],
+                    |row| row.get(0),
+                )
+                .optional()
+                .map_err(|error| error.to_string())?;
+            let current_disabled: i64 = tx
+                .query_row(
+                    "SELECT disabled FROM canonical_tags WHERE id=?1",
+                    [source],
+                    |row| row.get(0),
+                )
+                .map_err(|error| error.to_string())?;
+            if current_target != Some(after_target) || current_disabled != 1 {
+                return Err("合併後標籤已有新變更，已拒絕撤銷".into());
+            }
+            tx.execute("DELETE FROM tag_redirects WHERE source_tag_id=?1", [source])
+                .map_err(|error| error.to_string())?;
+            if let Some(previous) = snapshot["before"]["target"].as_i64() {
+                tx.execute(
+                    "INSERT INTO tag_redirects(source_tag_id,target_tag_id) VALUES(?1,?2)",
+                    params![source, previous],
+                )
+                .map_err(|error| error.to_string())?;
+            }
+            tx.execute(
+                "UPDATE canonical_tags SET disabled=?2,updated_at=CURRENT_TIMESTAMP WHERE id=?1",
+                params![source, snapshot["before"]["disabled"].as_i64()],
+            )
+            .map_err(|error| error.to_string())?;
+            if let Some(incoming) = snapshot["before"]["incoming"].as_array() {
+                for incoming_source in incoming.iter().filter_map(Value::as_i64) {
+                    tx.execute("UPDATE tag_redirects SET target_tag_id=?2 WHERE source_tag_id=?1 AND target_tag_id=?3", params![incoming_source,source,after_target]).map_err(|error| error.to_string())?;
+                }
+            }
+            refresh_ids.extend([source, after_target]);
+        }
+        _ => return Err("未知標籤操作".into()),
+    }
+    refresh_fts_for_canonical_tags(&tx, &refresh_ids)?;
+    tx.execute("DELETE FROM tag_operations WHERE token=?1", [token])
+        .map_err(|error| error.to_string())?;
+    tx.commit().map_err(|error| error.to_string())?;
+    Ok(true)
+}
+
 fn normalize_tag_alias(alias: TagAlias) -> Result<TagAlias, String> {
     let alias = TagAlias {
-        namespace: alias.namespace.trim().to_ascii_lowercase(),
+        namespace: normalize_tag_key(&alias.namespace),
         alias: alias.alias.trim().to_string(),
         canonical_value: alias.canonical_value.trim().to_string(),
     };
@@ -1350,7 +2506,7 @@ fn resolve_query_aliases(connection: &Connection, parsed: &mut ParsedQuery) -> R
         };
         if let Some(canonical) = connection.query_row(
             "SELECT canonical_value FROM tag_aliases WHERE namespace=?1 AND normalized_alias=?2",
-            params![namespace, value.to_lowercase()],
+            params![namespace, normalize_tag_key(value)],
             |row| row.get::<_, String>(0),
         ).optional().map_err(|error| error.to_string())? {
             *value = canonical.to_lowercase();
@@ -1452,7 +2608,7 @@ fn resolve_comic_id_tx(tx: &Transaction<'_>, identifier: &str) -> Result<String,
 }
 
 fn ensure_tag(connection: &Connection, tag: &ScopedTag) -> Result<i64, String> {
-    let namespace = tag.namespace.trim().to_ascii_lowercase();
+    let namespace = normalize_tag_key(&tag.namespace);
     let value = tag.value.trim();
     if namespace.is_empty() || value.is_empty() {
         return Err("標籤 namespace 與內容不可為空".into());
@@ -1460,16 +2616,36 @@ fn ensure_tag(connection: &Connection, tag: &ScopedTag) -> Result<i64, String> {
     connection
         .execute(
             "INSERT OR IGNORE INTO tags(namespace,value,normalized_value) VALUES(?1,?2,?3)",
-            params![namespace, value, value.to_lowercase()],
+            params![namespace, value, normalize_tag_key(value)],
+        )
+        .map_err(|error| error.to_string())?;
+    let raw_id: i64 = connection
+        .query_row(
+            "SELECT id FROM tags WHERE namespace=?1 AND normalized_value=?2",
+            params![namespace, normalize_tag_key(value)],
+            |row| row.get(0),
         )
         .map_err(|error| error.to_string())?;
     connection
+        .execute(
+            "INSERT OR IGNORE INTO canonical_tags(namespace,normalized_value,display_value) VALUES(?1,?2,?3)",
+            params![namespace, normalize_tag_key(value), value],
+        )
+        .map_err(|error| error.to_string())?;
+    let canonical_id: i64 = connection
         .query_row(
-            "SELECT id FROM tags WHERE namespace=?1 AND normalized_value=?2",
-            params![namespace, value.to_lowercase()],
+            "SELECT id FROM canonical_tags WHERE namespace=?1 AND normalized_value=?2",
+            params![namespace, normalize_tag_key(value)],
             |row| row.get(0),
         )
-        .map_err(|error| error.to_string())
+        .map_err(|error| error.to_string())?;
+    connection
+        .execute(
+            "UPDATE tags SET canonical_tag_id=?2 WHERE id=?1 AND canonical_tag_id IS NULL",
+            params![raw_id, canonical_id],
+        )
+        .map_err(|error| error.to_string())?;
+    Ok(raw_id)
 }
 fn ensure_tag_tx(tx: &Transaction<'_>, tag: &ScopedTag) -> Result<i64, String> {
     ensure_tag(tx, tag)
@@ -1479,9 +2655,22 @@ fn set_tag_override(
     comic_id: &str,
     tag: &ScopedTag,
     action: &str,
-) -> Result<(), String> {
+) -> Result<i64, String> {
     let tag_id = ensure_tag_tx(tx, tag)?;
     tx.execute("INSERT INTO comic_tag_overrides(comic_id,tag_id,action) VALUES(?1,?2,?3) ON CONFLICT(comic_id,tag_id) DO UPDATE SET action=excluded.action", params![comic_id, tag_id, action]).map_err(|error| error.to_string())?;
+    Ok(tag_id)
+}
+
+fn mark_tag_used(connection: &Connection, raw_tag_id: i64) -> Result<(), String> {
+    connection
+        .execute(
+            "INSERT INTO tag_user_state(tag_id,usage_count,last_used_at)
+             SELECT canonical_tag_id,1,CURRENT_TIMESTAMP FROM tags WHERE id=?1
+             ON CONFLICT(tag_id) DO UPDATE SET
+               usage_count=tag_user_state.usage_count+1,last_used_at=CURRENT_TIMESTAMP",
+            [raw_tag_id],
+        )
+        .map_err(|error| error.to_string())?;
     Ok(())
 }
 
@@ -1516,6 +2705,111 @@ fn snapshot_overrides(tx: &Transaction<'_>, comic_ids: &BTreeSet<String>) -> Res
         snapshot.insert(comic_id.clone(), json!({"fields":fields,"tags":tags}));
     }
     Ok(Value::Object(snapshot))
+}
+
+fn empty_override_snapshot() -> Value {
+    json!({"fields": {}, "tags": []})
+}
+
+fn snapshot_tags(snapshot: &Value) -> BTreeMap<i64, String> {
+    snapshot
+        .get("tags")
+        .and_then(Value::as_array)
+        .into_iter()
+        .flatten()
+        .filter_map(|item| {
+            Some((
+                item.get("tagId")?.as_i64()?,
+                item.get("action")?.as_str()?.to_string(),
+            ))
+        })
+        .collect()
+}
+
+fn revert_override_delta(
+    tx: &Transaction<'_>,
+    comic_id: &str,
+    before: &Value,
+    after: &Value,
+    current: &Value,
+) -> Result<bool, String> {
+    let empty_fields = serde_json::Map::new();
+    let before_fields = before
+        .get("fields")
+        .and_then(Value::as_object)
+        .unwrap_or(&empty_fields);
+    let after_fields = after
+        .get("fields")
+        .and_then(Value::as_object)
+        .unwrap_or(&empty_fields);
+    let current_fields = current
+        .get("fields")
+        .and_then(Value::as_object)
+        .unwrap_or(&empty_fields);
+    let field_keys = before_fields
+        .keys()
+        .chain(after_fields.keys())
+        .cloned()
+        .collect::<BTreeSet<_>>();
+    let mut changed = false;
+    for field in field_keys {
+        let before_value = before_fields.get(&field);
+        let after_value = after_fields.get(&field);
+        if before_value == after_value || current_fields.get(&field) != after_value {
+            continue;
+        }
+        match before_value.and_then(Value::as_str) {
+            Some(value) => {
+                tx.execute(
+                    "INSERT INTO user_field_overrides(comic_id,field_key,value_json,updated_at) VALUES(?1,?2,?3,CURRENT_TIMESTAMP) ON CONFLICT(comic_id,field_key) DO UPDATE SET value_json=excluded.value_json,updated_at=CURRENT_TIMESTAMP",
+                    params![comic_id, field, value],
+                )
+                .map_err(|error| error.to_string())?;
+            }
+            None => {
+                tx.execute(
+                    "DELETE FROM user_field_overrides WHERE comic_id=?1 AND field_key=?2",
+                    params![comic_id, field],
+                )
+                .map_err(|error| error.to_string())?;
+            }
+        }
+        changed = true;
+    }
+
+    let before_tags = snapshot_tags(before);
+    let after_tags = snapshot_tags(after);
+    let current_tags = snapshot_tags(current);
+    let tag_ids = before_tags
+        .keys()
+        .chain(after_tags.keys())
+        .copied()
+        .collect::<BTreeSet<_>>();
+    for tag_id in tag_ids {
+        let before_action = before_tags.get(&tag_id);
+        let after_action = after_tags.get(&tag_id);
+        if before_action == after_action || current_tags.get(&tag_id) != after_action {
+            continue;
+        }
+        match before_action {
+            Some(action) => {
+                tx.execute(
+                    "INSERT INTO comic_tag_overrides(comic_id,tag_id,action) VALUES(?1,?2,?3) ON CONFLICT(comic_id,tag_id) DO UPDATE SET action=excluded.action",
+                    params![comic_id, tag_id, action],
+                )
+                .map_err(|error| error.to_string())?;
+            }
+            None => {
+                tx.execute(
+                    "DELETE FROM comic_tag_overrides WHERE comic_id=?1 AND tag_id=?2",
+                    params![comic_id, tag_id],
+                )
+                .map_err(|error| error.to_string())?;
+            }
+        }
+        changed = true;
+    }
+    Ok(changed)
 }
 
 fn load_diagnostics(
@@ -1923,8 +3217,10 @@ fn apply_exchange(
         resolve_effective_metadata(&tx, &comic_id)?;
         refresh_fts(&tx, &comic_id)?;
     }
+    let after = snapshot_overrides(&tx, &comic_ids)?;
     let undo_token = uuid::Uuid::new_v4().to_string();
-    tx.execute("INSERT INTO batch_operations(token,snapshot_json,created_at) VALUES(?1,?2,CURRENT_TIMESTAMP)", params![undo_token, before.to_string()]).map_err(|error| error.to_string())?;
+    let undo_snapshot = json!({"version": 2, "before": before, "after": after});
+    tx.execute("INSERT INTO batch_operations(token,snapshot_json,created_at) VALUES(?1,?2,CURRENT_TIMESTAMP)", params![undo_token, undo_snapshot.to_string()]).map_err(|error| error.to_string())?;
     tx.commit().map_err(|error| error.to_string())?;
     Ok(CatalogImportResult {
         updated: comic_ids.len(),
@@ -1966,7 +3262,7 @@ fn path_is_within(path: &str, folder: &str) -> bool {
     folder.is_empty() || path == folder || path.starts_with(&format!("{folder}/"))
 }
 
-fn sampled_fingerprint(path: &Path) -> Result<String, String> {
+pub(crate) fn sampled_fingerprint(path: &Path) -> Result<String, String> {
     let mut hasher = blake3::Hasher::new();
     hasher.update(FINGERPRINT_VERSION.as_bytes());
     if path.is_dir() {
@@ -2072,10 +3368,176 @@ mod tests {
         let store = store("migration");
         store.sync_library(&[comic("runtime", "a.zip")]).unwrap();
         CatalogStore::new(store.path().to_path_buf()).unwrap();
+        store
+            .with_connection(|connection| {
+                let versions = connection
+                    .prepare("SELECT version FROM schema_migrations ORDER BY version")
+                    .map_err(|error| error.to_string())?
+                    .query_map([], |row| row.get::<_, i64>(0))
+                    .map_err(|error| error.to_string())?
+                    .collect::<Result<Vec<_>, _>>()
+                    .map_err(|error| error.to_string())?;
+                assert_eq!(versions, vec![1, 2, 3, 4, 5, 6]);
+                assert_eq!(
+                    connection
+                        .pragma_query_value(None, "user_version", |row| row.get::<_, i64>(0))
+                        .map_err(|error| error.to_string())?,
+                    6
+                );
+                Ok(())
+            })
+            .unwrap();
         assert_eq!(store.mark_source_offline("local").unwrap(), 1);
         let view = store.get_metadata("runtime").unwrap();
         assert!(view.offline);
         assert_eq!(view.title, "a");
+    }
+
+    #[test]
+    fn reading_progress_survives_runtime_path_change() {
+        let store = store("stable_progress");
+        let mut item = comic("old-runtime", "舊資料夾/a.zip");
+        item.progress = crate::state::Progress {
+            current_page: 8,
+            total_pages: 20,
+            percent: 40.0,
+            updated_at: Some("2026-08-30T00:00:00+08:00".into()),
+        };
+        store.sync_library(&[item]).unwrap();
+        let loaded = store.get_runtime_item("old-runtime").unwrap().unwrap();
+        assert_eq!(loaded.progress.current_page, 8);
+
+        store
+            .save_progress(
+                "old-runtime",
+                &crate::state::Progress {
+                    current_page: 12,
+                    total_pages: 20,
+                    percent: 60.0,
+                    updated_at: Some("2026-08-30T00:10:00+08:00".into()),
+                },
+            )
+            .unwrap();
+        store
+            .with_connection(|connection| {
+                connection
+                    .execute(
+                        "UPDATE comic_locations SET runtime_id='new-runtime', relative_path='新資料夾/a.zip' WHERE runtime_id='old-runtime'",
+                        [],
+                    )
+                    .map_err(|error| error.to_string())?;
+                Ok(())
+            })
+            .unwrap();
+
+        let moved = store.get_runtime_item("new-runtime").unwrap().unwrap();
+        assert_eq!(moved.progress.current_page, 12);
+        assert_eq!(moved.progress.total_pages, 20);
+        assert_eq!(moved.progress.percent, 60.0);
+    }
+
+    #[test]
+    fn runtime_progress_compares_rfc3339_as_utc_instants() {
+        let store = store("progress_timezones");
+        store.with_connection(|connection| {
+            connection.execute("INSERT INTO comics(id,title) VALUES('stable','book')", []).map_err(|error| error.to_string())?;
+            connection.execute("INSERT INTO reading_progress(comic_id,current_page,total_pages,percent,updated_at) VALUES('stable',1,10,10,'2026-08-30T00:30:00+08:00')", []).map_err(|error| error.to_string())?;
+            let tx = connection.transaction().map_err(|error| error.to_string())?;
+            import_runtime_progress(&tx, "stable", &crate::state::Progress {
+                current_page: 2,
+                total_pages: 10,
+                percent: 20.0,
+                // This is later in UTC even though its calendar date sorts before the persisted offset string.
+                updated_at: Some("2026-08-29T17:00:00Z".into()),
+            })?;
+            tx.commit().map_err(|error| error.to_string())?;
+            let row: (i64, String) = connection.query_row("SELECT current_page,updated_at FROM reading_progress WHERE comic_id='stable'", [], |row| Ok((row.get(0)?, row.get(1)?))).map_err(|error| error.to_string())?;
+            assert_eq!(row, (2, "2026-08-29T17:00:00Z".into()));
+            let tx = connection.transaction().map_err(|error| error.to_string())?;
+            import_runtime_progress(&tx, "stable", &crate::state::Progress {
+                current_page: 9,
+                total_pages: 10,
+                percent: 90.0,
+                updated_at: Some("damaged legacy timestamp".into()),
+            })?;
+            tx.commit().map_err(|error| error.to_string())?;
+            let current_page: i64 = connection.query_row("SELECT current_page FROM reading_progress WHERE comic_id='stable'", [], |row| row.get(0)).map_err(|error| error.to_string())?;
+            assert_eq!(current_page, 2);
+            Ok(())
+        }).unwrap();
+    }
+
+    #[test]
+    fn version_one_fixture_upgrades_sequentially() {
+        let path = std::env::temp_dir().join(format!(
+            "comic_catalog_v1_{}_{}.sqlite3",
+            std::process::id(),
+            uuid::Uuid::new_v4()
+        ));
+        let connection = Connection::open(&path).unwrap();
+        connection
+            .execute_batch(
+                "CREATE TABLE schema_migrations(version INTEGER PRIMARY KEY, applied_at TEXT NOT NULL);",
+            )
+            .unwrap();
+        connection.execute_batch(MIGRATION_1).unwrap();
+        connection
+            .execute(
+                "INSERT INTO schema_migrations(version, applied_at) VALUES(1, CURRENT_TIMESTAMP)",
+                [],
+            )
+            .unwrap();
+        drop(connection);
+
+        let store = CatalogStore::new(path).unwrap();
+        store
+            .with_connection(|connection| {
+                let tag_aliases_exists: i64 = connection
+                    .query_row(
+                        "SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name='tag_aliases'",
+                        [],
+                        |row| row.get(0),
+                    )
+                    .map_err(|error| error.to_string())?;
+                let versions: i64 = connection
+                    .query_row("SELECT COUNT(*) FROM schema_migrations", [], |row| row.get(0))
+                    .map_err(|error| error.to_string())?;
+                assert_eq!(tag_aliases_exists, 1);
+                assert_eq!(versions, 6);
+                Ok(())
+            })
+            .unwrap();
+    }
+
+    #[test]
+    fn newer_database_version_is_rejected() {
+        let path = std::env::temp_dir().join(format!(
+            "comic_catalog_future_{}_{}.sqlite3",
+            std::process::id(),
+            uuid::Uuid::new_v4()
+        ));
+        let connection = Connection::open(&path).unwrap();
+        connection
+            .execute_batch(
+                "CREATE TABLE schema_migrations(version INTEGER PRIMARY KEY, applied_at TEXT NOT NULL);
+                 INSERT INTO schema_migrations(version, applied_at) VALUES(1, CURRENT_TIMESTAMP);
+                 INSERT INTO schema_migrations(version, applied_at) VALUES(2, CURRENT_TIMESTAMP);
+                 INSERT INTO schema_migrations(version, applied_at) VALUES(99, CURRENT_TIMESTAMP);",
+            )
+            .unwrap();
+        drop(connection);
+
+        let error = CatalogStore::new(path).unwrap_err();
+        assert!(error.contains("比此 App 支援"));
+    }
+
+    #[test]
+    fn bundled_sqlite_contains_the_wal_reset_fix() {
+        assert!(
+            rusqlite::version_number() >= 3_053_002,
+            "bundled SQLite {} is older than 3.53.2",
+            rusqlite::version()
+        );
     }
 
     #[test]
@@ -2243,6 +3705,74 @@ mod tests {
         assert!(view.tags.iter().any(|tag| tag.value == "百合"));
         store.undo_batch(&result.undo_token).unwrap();
         assert_eq!(store.get_metadata("runtime").unwrap().title, "a");
+    }
+
+    #[test]
+    fn undo_reverts_only_its_own_delta_and_preserves_later_edits() {
+        let store = store("delta_safe_undo");
+        store.sync_library(&[comic("runtime", "undo.zip")]).unwrap();
+        let first = store
+            .apply_batch(BatchEditRequest {
+                comic_ids: vec!["runtime".into()],
+                fields: BTreeMap::from([("title".into(), Some("第一版標題".into()))]),
+                add_tags: vec![ScopedTag {
+                    namespace: "general".into(),
+                    value: "第一批標籤".into(),
+                }],
+                exclude_tags: vec![],
+            })
+            .unwrap();
+        store
+            .apply_batch(BatchEditRequest {
+                comic_ids: vec!["runtime".into()],
+                fields: BTreeMap::from([
+                    ("title".into(), Some("後續標題".into())),
+                    ("series".into(), Some("後續系列".into())),
+                ]),
+                add_tags: vec![ScopedTag {
+                    namespace: "general".into(),
+                    value: "後續標籤".into(),
+                }],
+                exclude_tags: vec![],
+            })
+            .unwrap();
+
+        assert_eq!(store.undo_batch(&first.undo_token).unwrap(), 1);
+        let view = store.get_metadata("runtime").unwrap();
+        assert_eq!(view.title, "後續標題");
+        assert_eq!(view.series.as_deref(), Some("後續系列"));
+        assert!(!view.tags.iter().any(|tag| tag.value == "第一批標籤"));
+        assert!(view.tags.iter().any(|tag| tag.value == "後續標籤"));
+    }
+
+    #[test]
+    fn legacy_undo_snapshot_is_rejected_without_mutation() {
+        let store = store("legacy_undo");
+        store
+            .sync_library(&[comic("runtime", "legacy.zip")])
+            .unwrap();
+        let applied = store
+            .apply_batch(BatchEditRequest {
+                comic_ids: vec!["runtime".into()],
+                fields: BTreeMap::from([("title".into(), Some("保留標題".into()))]),
+                add_tags: vec![],
+                exclude_tags: vec![],
+            })
+            .unwrap();
+        store
+            .with_connection(|connection| {
+                connection
+                    .execute(
+                        "UPDATE batch_operations SET snapshot_json='{}' WHERE token=?1",
+                        [&applied.undo_token],
+                    )
+                    .map_err(|error| error.to_string())?;
+                Ok(())
+            })
+            .unwrap();
+
+        assert!(store.undo_batch(&applied.undo_token).is_err());
+        assert_eq!(store.get_metadata("runtime").unwrap().title, "保留標題");
     }
 
     #[test]
@@ -2421,6 +3951,210 @@ mod tests {
         assert!(result.items[0].tags.iter().any(|tag| tag.value == "甜寵"));
         assert!(!result.items[0].tags.iter().any(|tag| tag.value == "甜文"));
         assert_eq!(store.tag_aliases().unwrap()[0].namespace, "general");
+    }
+
+    #[test]
+    fn nfkc_lookup_unifies_compatible_forms_without_rewriting_display_text() {
+        let store = store("nfkc_tags");
+        store.sync_library(&[comic("runtime", "nfkc.zip")]).unwrap();
+        store
+            .apply_batch(BatchEditRequest {
+                comic_ids: vec!["runtime".into()],
+                fields: BTreeMap::new(),
+                add_tags: vec![ScopedTag {
+                    namespace: "ＡＲＴＩＳＴ".into(),
+                    value: "Ａｋａｍａｒｕ".into(),
+                }],
+                exclude_tags: vec![],
+            })
+            .unwrap();
+        store
+            .apply_batch(BatchEditRequest {
+                comic_ids: vec!["runtime".into()],
+                fields: BTreeMap::new(),
+                add_tags: vec![ScopedTag {
+                    namespace: "artist".into(),
+                    value: "Akamaru".into(),
+                }],
+                exclude_tags: vec![],
+            })
+            .unwrap();
+        store
+            .with_connection(|connection| {
+                let canonical_count: i64 = connection
+                    .query_row(
+                        "SELECT COUNT(*) FROM canonical_tags WHERE namespace='artist' AND normalized_value='akamaru'",
+                        [],
+                        |row| row.get(0),
+                    )
+                    .map_err(|error| error.to_string())?;
+                let display: String = connection
+                    .query_row(
+                        "SELECT display_value FROM canonical_tags WHERE namespace='artist' AND normalized_value='akamaru'",
+                        [],
+                        |row| row.get(0),
+                    )
+                    .map_err(|error| error.to_string())?;
+                assert_eq!(canonical_count, 1);
+                assert_eq!(display, "Ａｋａｍａｒｕ");
+                Ok(())
+            })
+            .unwrap();
+    }
+
+    #[test]
+    fn tag_inventory_counts_effective_works_and_ranks_user_state() {
+        let store = store("tag_inventory");
+        store
+            .sync_library(&[comic("one", "one.zip"), comic("two", "two.zip")])
+            .unwrap();
+        let tag = ScopedTag {
+            namespace: "type".into(),
+            value: "HameCG".into(),
+        };
+        store
+            .apply_batch(BatchEditRequest {
+                comic_ids: vec!["one".into(), "two".into()],
+                fields: BTreeMap::new(),
+                add_tags: vec![tag.clone()],
+                exclude_tags: vec![],
+            })
+            .unwrap();
+        let initial = store
+            .tag_inventory(TagInventoryQuery {
+                query: "hame".into(),
+                offset: 0,
+                limit: 20,
+            })
+            .unwrap();
+        assert_eq!(initial.total, 1);
+        assert_eq!(initial.items[0].work_count, 2);
+        assert_eq!(initial.items[0].usage_count, 2);
+
+        store
+            .update_tag_state(TagStateUpdate {
+                tag_id: initial.items[0].id,
+                pinned: true,
+                color_key: Some("fuchsia".into()),
+            })
+            .unwrap();
+        store
+            .apply_batch(BatchEditRequest {
+                comic_ids: vec!["two".into()],
+                fields: BTreeMap::new(),
+                add_tags: vec![],
+                exclude_tags: vec![tag],
+            })
+            .unwrap();
+        let updated = store
+            .tag_inventory(TagInventoryQuery {
+                query: "hamecg".into(),
+                offset: 0,
+                limit: 20,
+            })
+            .unwrap();
+        assert_eq!(updated.items[0].work_count, 1);
+        assert!(updated.items[0].pinned);
+        assert_eq!(updated.items[0].color_key.as_deref(), Some("fuchsia"));
+    }
+
+    #[test]
+    fn tag_rename_merge_disable_and_undo_preserve_raw_evidence() {
+        let store = store("tag_mutations");
+        store
+            .sync_library(&[comic("runtime", "mutations.zip")])
+            .unwrap();
+        store
+            .apply_batch(BatchEditRequest {
+                comic_ids: vec!["runtime".into()],
+                fields: BTreeMap::new(),
+                add_tags: vec![
+                    ScopedTag {
+                        namespace: "type".into(),
+                        value: "Mange".into(),
+                    },
+                    ScopedTag {
+                        namespace: "type".into(),
+                        value: "Manga".into(),
+                    },
+                ],
+                exclude_tags: vec![],
+            })
+            .unwrap();
+        let inventory = store.tag_inventory(TagInventoryQuery::default()).unwrap();
+        let source = inventory
+            .items
+            .iter()
+            .find(|tag| tag.display_value == "Mange")
+            .unwrap()
+            .id;
+        let target = inventory
+            .items
+            .iter()
+            .find(|tag| tag.display_value == "Manga")
+            .unwrap()
+            .id;
+
+        let merged = store.merge_tags(source, target).unwrap();
+        let merged_view = store.get_metadata("runtime").unwrap();
+        assert_eq!(
+            merged_view
+                .tags
+                .iter()
+                .filter(|tag| tag.namespace == "type")
+                .count(),
+            1
+        );
+        assert!(merged_view.tags.iter().any(|tag| tag.value == "Manga"));
+        assert!(store.merge_tags(target, source).is_err());
+        assert!(store.undo_tag_operation(&merged.undo_token).unwrap());
+        let restored = store.get_metadata("runtime").unwrap();
+        assert!(restored.tags.iter().any(|tag| tag.value == "Mange"));
+        assert!(restored.tags.iter().any(|tag| tag.value == "Manga"));
+
+        let renamed = store.rename_tag(target, "Manga 漫畫").unwrap();
+        assert!(store
+            .get_metadata("runtime")
+            .unwrap()
+            .tags
+            .iter()
+            .any(|tag| tag.value == "Manga 漫畫"));
+        assert!(store.undo_tag_operation(&renamed.undo_token).unwrap());
+        assert!(store
+            .get_metadata("runtime")
+            .unwrap()
+            .tags
+            .iter()
+            .any(|tag| tag.value == "Manga"));
+
+        let disabled = store.set_tag_disabled(source, true).unwrap();
+        assert!(!store
+            .get_metadata("runtime")
+            .unwrap()
+            .tags
+            .iter()
+            .any(|tag| tag.value == "Mange"));
+        assert!(store.undo_tag_operation(&disabled.undo_token).unwrap());
+        assert!(store
+            .get_metadata("runtime")
+            .unwrap()
+            .tags
+            .iter()
+            .any(|tag| tag.value == "Mange"));
+
+        store
+            .with_connection(|connection| {
+                let raw_tags: i64 = connection
+                    .query_row(
+                        "SELECT COUNT(*) FROM tags WHERE namespace='type' AND value IN ('Mange','Manga')",
+                        [],
+                        |row| row.get(0),
+                    )
+                    .map_err(|error| error.to_string())?;
+                assert_eq!(raw_tags, 2);
+                Ok(())
+            })
+            .unwrap();
     }
 
     #[test]

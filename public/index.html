@@ -166,7 +166,6 @@
                   <option value="all">全部系列</option>
                 </select>
               </label>
-              <button class="organize-toggle" id="organize-toggle" aria-pressed="false" title="批次整理 TAG 與 metadata"><i class="fa-solid fa-tags" aria-hidden="true"></i> TAG 整理</button>
               <button class="filter-btn active" data-filter="all" aria-pressed="true">全部</button>
               <button class="filter-btn" data-filter="reading" aria-pressed="false">閱讀中</button>
               <button class="filter-btn" data-filter="unread" aria-pressed="false">未讀取</button>
@@ -189,43 +188,70 @@
           <button class="catalog-load-more" id="catalog-load-more" type="button" hidden>顯示更多漫畫</button>
 
           <section class="organize-bar" id="organize-bar" aria-label="批次整理工具" hidden>
-            <div class="organize-selection">
+            <header class="organize-header">
               <strong id="organize-count">已選 0 本</strong>
-              <button type="button" id="organize-select-visible">選取目前結果</button>
-              <button type="button" id="organize-clear">清除</button>
-            </div>
-            <div class="organize-fields">
-              <label>標籤<input id="organize-tag" type="text" placeholder="例如：百合"></label>
-              <label>作者<input id="organize-author" type="text" placeholder="留空不修改"></label>
-              <label>系列<input id="organize-series" type="text" placeholder="留空不修改"></label>
-              <label>語言<input id="organize-language" type="text" placeholder="zh-TW"></label>
-              <label>閱讀方向
-                <select id="organize-direction">
-                  <option value="">不修改</option>
-                  <option value="ltr">由左至右</option>
-                  <option value="rtl">由右至左</option>
-                  <option value="vertical">條漫直向</option>
-                </select>
-              </label>
-            </div>
-            <div class="organize-actions">
-              <button type="button" class="organize-primary" id="organize-apply">套用</button>
-              <button type="button" id="organize-exclude-tag">排除標籤</button>
-              <button type="button" id="organize-folder-rule">設為資料夾規則</button>
-              <button type="button" id="organize-reimport">重新匯入</button>
-              <button type="button" id="organize-undo" disabled>撤銷上次操作</button>
-            </div>
-            <div class="organize-insights">
-              <div class="organize-insight-actions">
-                <button type="button" id="organize-inbox">低信心 Inbox</button>
-                <button type="button" id="organize-duplicates">重複候選</button>
+              <div class="organize-tabs" role="tablist" aria-label="整理功能">
+                <button type="button" role="tab" aria-selected="true" data-organize-panel="tags"><i class="fa-solid fa-tags"></i> 標籤庫</button>
+                <button type="button" role="tab" aria-selected="false" data-organize-panel="batch"><i class="fa-solid fa-layer-group"></i> 批次編輯</button>
+                <button type="button" role="tab" aria-selected="false" data-organize-panel="review"><i class="fa-solid fa-inbox"></i> 待確認</button>
               </div>
-              <div class="organize-alias-form" aria-label="新增中文標籤別名">
-                <input id="organize-alias" type="text" placeholder="別名，例如：甜文">
-                <input id="organize-canonical" type="text" placeholder="標準標籤，例如：甜寵">
-                <button type="button" id="organize-save-alias">儲存別名</button>
+            </header>
+
+            <div class="organize-panel tag-library-panel" data-organize-panel-content="tags" role="tabpanel">
+              <div class="tag-library-toolbar">
+                <label class="visually-hidden" for="tag-library-search">搜尋標籤庫</label>
+                <input id="tag-library-search" type="search" placeholder="搜尋作者、類型、原作或自訂標籤">
+                <button type="button" id="tag-library-refresh" title="重新整理標籤庫"><i class="fa-solid fa-rotate"></i><span>重新整理</span></button>
               </div>
-              <div id="organize-insight-results" class="organize-insight-results" aria-live="polite"></div>
+              <div class="tag-library-list" id="tag-library-list" role="listbox" aria-label="標籤庫" aria-live="polite"></div>
+              <form class="tag-library-editor" id="tag-library-editor" hidden>
+                <div class="tag-editor-heading"><strong id="tag-editor-name">選擇一個標籤</strong><span id="tag-editor-count"></span></div>
+                <label>顯示名稱<input id="tag-editor-display" type="text"></label>
+                <label>合併到<select id="tag-editor-target"><option value="">選擇目標標籤</option></select></label>
+                <label>顏色
+                  <select id="tag-editor-color">
+                    <option value="">自動</option><option value="none">無色</option><option value="rose">玫瑰</option>
+                    <option value="amber">琥珀</option><option value="lime">青檸</option><option value="cyan">青藍</option>
+                    <option value="blue">寶藍</option><option value="violet">紫晶</option><option value="fuchsia">桃紫</option><option value="slate">石板</option>
+                  </select>
+                </label>
+                <label class="tag-editor-pin"><input id="tag-editor-pinned" type="checkbox"> 置頂常用</label>
+                <div class="tag-editor-actions">
+                  <button type="submit" class="organize-primary">儲存名稱與外觀</button>
+                  <button type="button" id="tag-editor-merge">合併</button>
+                  <button type="button" id="tag-editor-disable">停用</button>
+                  <button type="button" id="tag-editor-undo" disabled>撤銷標籤操作</button>
+                </div>
+              </form>
+            </div>
+
+            <div class="organize-panel" data-organize-panel-content="batch" role="tabpanel" hidden>
+              <div class="organize-selection">
+                <button type="button" id="organize-select-visible">選取目前結果</button>
+                <button type="button" id="organize-clear">清除選取</button>
+              </div>
+              <div class="organize-fields">
+                <label>標籤<input id="organize-tag" type="text" placeholder="namespace:標籤，例如 artist:Akamaru"></label>
+                <label>作者<input id="organize-author" type="text" placeholder="留空不修改"></label>
+                <label>系列<input id="organize-series" type="text" placeholder="留空不修改"></label>
+                <label>語言<input id="organize-language" type="text" placeholder="例如 ja、zh-TW"></label>
+                <label>閱讀方向
+                  <select id="organize-direction"><option value="">不修改</option><option value="ltr">由左至右</option><option value="rtl">由右至左</option><option value="vertical">條漫直向</option></select>
+                </label>
+              </div>
+              <div class="organize-actions">
+                <button type="button" class="organize-primary" id="organize-apply">套用修改</button>
+                <button type="button" id="organize-exclude-tag">排除標籤</button>
+                <button type="button" id="organize-folder-rule">設為資料夾規則</button>
+                <button type="button" id="organize-reimport">重新匯入 metadata</button>
+                <button type="button" id="organize-undo" disabled>撤銷批次操作</button>
+              </div>
+            </div>
+
+            <div class="organize-panel organize-insights" data-organize-panel-content="review" role="tabpanel" hidden>
+              <div class="organize-insight-actions"><button type="button" id="organize-inbox">低信心 Inbox</button><button type="button" id="organize-duplicates">重複候選</button></div>
+              <div class="organize-alias-form" aria-label="新增搜尋別名"><input id="organize-alias" type="text" placeholder="別名，例如：甜文"><input id="organize-canonical" type="text" placeholder="標準標籤，例如：甜寵"><button type="button" id="organize-save-alias">儲存搜尋別名</button></div>
+              <div id="organize-insight-results" class="organize-insight-results" aria-live="polite"><p>選擇 Inbox 或重複候選開始整理；系統不會自動覆寫或刪檔。</p></div>
             </div>
             <p class="organize-status" id="organize-status" role="status"></p>
           </section>

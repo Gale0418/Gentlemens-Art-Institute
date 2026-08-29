@@ -32,6 +32,7 @@ const httpAPI = {
   getLibrary: () => requestJson('/api/library'),
   getScanStatus: () => requestJson('/api/scan-status'),
   openComic: (id) => requestJson(`/api/comic/${encodeURIComponent(id)}`),
+  updateReaderCacheWindow: null,
   saveProgress: (data) => requestJson('/api/progress', {
     method: 'POST',
     body: JSON.stringify(data)
@@ -77,6 +78,12 @@ const httpAPI = {
   getCatalogExportPath: null,
   saveCatalogMetadata: null,
   listRelatedTags: null,
+  listTagInventory: null,
+  updateTagState: null,
+  renameTag: null,
+  mergeTags: null,
+  setTagDisabled: null,
+  undoTagOperation: null,
   getAiSessionStatus: null,
   setAiSessionConfig: null,
   clearAiSessionConfig: null,
@@ -96,7 +103,9 @@ function getCoverUrl(comicId) {
   return `/api/cover?id=${encodedId}`;
 }
 
-const MAX_PRELOADED_IMAGES = 10;
+const READER_PRELOAD_RADIUS = 10;
+const MAX_PRELOADED_IMAGES = READER_PRELOAD_RADIUS * 2;
+const READER_CACHE_UPDATE_DELAY_MS = 120;
 const WEBTOON_EAGER_IMAGES = 3;
 
 // 全域狀態管理
@@ -116,6 +125,9 @@ let state = {
   currentPath: '', // 目錄樹當前路徑 (姬米妮貼心追加 ✨)
   selectedComicId: null,
   preloadedImages: new Map(), // 用來保存已預載的 Image 物件
+  readerCacheWindowTimer: null,
+  readerCacheWindowPage: null,
+  readerCacheReadyPage: null,
   readerIdleTimer: null,
   readerContextMenuOpen: false,
   webtoonScrollFrame: null,
@@ -138,6 +150,11 @@ let state = {
   organizeMode: false,
   organizeSelection: new Set(),
   lastUndoToken: null,
+  lastTagUndoToken: null,
+  tagInventoryItems: [],
+  selectedTagId: null,
+  organizerPanel: 'tags',
+  lastFileUndoToken: null,
   catalogSearchIds: null,
   catalogSearchItems: new Map(),
   catalogSearchTotal: 0,
@@ -164,7 +181,6 @@ const elements = {
   libraryPathLabel: document.getElementById('library-path-label'),
   continueStrip: document.getElementById('continue-strip'),
   comicInspector: document.getElementById('comic-inspector'),
-  organizeToggle: document.getElementById('organize-toggle'),
   organizeBar: document.getElementById('organize-bar'),
   organizeCount: document.getElementById('organize-count'),
   organizeSelectVisible: document.getElementById('organize-select-visible'),
@@ -186,6 +202,21 @@ const elements = {
   organizeCanonical: document.getElementById('organize-canonical'),
   organizeSaveAlias: document.getElementById('organize-save-alias'),
   organizeInsightResults: document.getElementById('organize-insight-results'),
+  organizeTabs: [...document.querySelectorAll('[data-organize-panel]')],
+  organizePanels: [...document.querySelectorAll('[data-organize-panel-content]')],
+  tagLibrarySearch: document.getElementById('tag-library-search'),
+  tagLibraryRefresh: document.getElementById('tag-library-refresh'),
+  tagLibraryList: document.getElementById('tag-library-list'),
+  tagLibraryEditor: document.getElementById('tag-library-editor'),
+  tagEditorName: document.getElementById('tag-editor-name'),
+  tagEditorCount: document.getElementById('tag-editor-count'),
+  tagEditorDisplay: document.getElementById('tag-editor-display'),
+  tagEditorTarget: document.getElementById('tag-editor-target'),
+  tagEditorColor: document.getElementById('tag-editor-color'),
+  tagEditorPinned: document.getElementById('tag-editor-pinned'),
+  tagEditorMerge: document.getElementById('tag-editor-merge'),
+  tagEditorDisable: document.getElementById('tag-editor-disable'),
+  tagEditorUndo: document.getElementById('tag-editor-undo'),
   catalogFacets: document.getElementById('catalog-facets'),
   catalogLoadMore: document.getElementById('catalog-load-more'),
   seriesFilterList: document.getElementById('series-filter-list'),
@@ -718,8 +749,16 @@ function bindEvents() {
 
     if (window.electronAPI.onRamCacheProgress) {
       window.electronAPI.onRamCacheProgress((data) => {
-        if (state.currentComic && data.id === state.currentComic.id && data.generation === state.currentComic.preloadGeneration) {
+        const matchesCurrentPage = !Number.isSafeInteger(data.pageIndex)
+          || data.pageIndex === state.currentPageIndex;
+        if (state.currentComic && data.id === state.currentComic.id && matchesCurrentPage
+          && data.generation >= state.currentComic.preloadGeneration) {
+          state.currentComic.preloadGeneration = data.generation;
           updateRamCacheProgress(data.loaded, data.total, data.finished, data.error);
+          if (data.finished && !data.error) {
+            state.readerCacheReadyPage = state.currentPageIndex;
+            preloadNextPages();
+          }
         }
       });
     }
@@ -768,6 +807,17 @@ function createReaderImage(src, priority = 'auto') {
   img.style.transform = `scale(${state.zoomPercentage / 100}) rotate(${state.rotationAngle}deg)`;
 
   applyImageEffects(img);
+  return img;
+}
+
+function takePreloadedReaderImage(pageIndex, priority = 'high') {
+  const img = state.preloadedImages.get(pageIndex)
+    || createReaderImage(state.currentComicPages[pageIndex], priority);
+  state.preloadedImages.delete(pageIndex);
+  img.decoding = 'async';
+  img.fetchPriority = priority;
+  applyImageEffects(img);
+  applyReaderImageTransform(img);
   return img;
 }
 
@@ -869,8 +919,17 @@ function applyLibraryFilter(filter) {
 // ==========================================================================
 
 function bindOrganizerEvents() {
-  if (!elements.organizeToggle) return;
-  elements.organizeToggle.addEventListener('click', () => setOrganizeMode(!state.organizeMode));
+  elements.organizeTabs.forEach(tab => tab.addEventListener('click', () => switchOrganizerPanel(tab.dataset.organizePanel)));
+  elements.tagLibraryRefresh?.addEventListener('click', refreshTagLibrary);
+  let tagSearchTimer = null;
+  elements.tagLibrarySearch?.addEventListener('input', () => {
+    clearTimeout(tagSearchTimer);
+    tagSearchTimer = setTimeout(refreshTagLibrary, 180);
+  });
+  elements.tagLibraryEditor?.addEventListener('submit', saveSelectedTag);
+  elements.tagEditorMerge?.addEventListener('click', mergeSelectedTag);
+  elements.tagEditorDisable?.addEventListener('click', toggleSelectedTagDisabled);
+  elements.tagEditorUndo?.addEventListener('click', undoLastTagOperation);
   elements.organizeSelectVisible?.addEventListener('click', () => {
     state.filteredComics.filter(comic => !comic.isDirectory).forEach(comic => state.organizeSelection.add(comic.id));
     updateOrganizerUi();
@@ -897,19 +956,163 @@ function bindOrganizerEvents() {
   });
 }
 
-function setOrganizeMode(enabled) {
-  if (enabled && !eAPI?.applyBatchMetadata) {
-    alert('整理模式需要在 Tauri App 中使用。');
+const TAG_NAMESPACE_COLORS = {
+  artist: 'rose', group: 'amber', series: 'violet', parody: 'violet', type: 'blue',
+  category: 'blue', language: 'cyan', character: 'fuchsia', female: 'fuchsia', male: 'blue',
+  mixed: 'amber', other: 'slate', general: 'slate'
+};
+
+function tagColorKey(tag) {
+  if (tag?.colorKey) return tag.colorKey;
+  return TAG_NAMESPACE_COLORS[String(tag?.namespace || 'general').toLowerCase()] || 'slate';
+}
+
+function switchOrganizerPanel(panel) {
+  state.organizerPanel = panel || 'tags';
+  elements.organizeTabs.forEach(tab => tab.setAttribute('aria-selected', String(tab.dataset.organizePanel === state.organizerPanel)));
+  elements.organizePanels.forEach(content => { content.hidden = content.dataset.organizePanelContent !== state.organizerPanel; });
+  if (state.organizerPanel === 'tags') refreshTagLibrary();
+}
+
+async function refreshTagLibrary() {
+  if (!state.organizeMode || !elements.tagLibraryList) return;
+  if (!eAPI?.listTagInventory) {
+    elements.tagLibraryList.innerHTML = '<p class="metadata-warning">標籤庫需要最新版 Tauri 後端。</p>';
     return;
   }
+  elements.tagLibraryList.setAttribute('aria-busy', 'true');
+  elements.tagLibraryList.innerHTML = '<p class="metadata-loading">正在整理標籤庫…</p>';
+  try {
+    const result = await eAPI.listTagInventory({ query: elements.tagLibrarySearch?.value.trim() || '', offset: 0, limit: 200 });
+    state.tagInventoryItems = result.items || [];
+    renderTagLibrary(result.total || 0);
+  } catch (error) {
+    elements.tagLibraryList.innerHTML = `<p class="metadata-warning">標籤庫載入失敗：${escapeHtml(error?.message || String(error))}</p>`;
+  } finally {
+    elements.tagLibraryList.setAttribute('aria-busy', 'false');
+  }
+}
+
+function renderTagLibrary(total = state.tagInventoryItems.length) {
+  if (!elements.tagLibraryList) return;
+  if (!state.tagInventoryItems.length) {
+    elements.tagLibraryList.innerHTML = '<p class="metadata-loading">沒有符合的標籤。可在「批次編輯」輸入自訂標籤後建立。</p>';
+    if (elements.tagLibraryEditor) elements.tagLibraryEditor.hidden = true;
+    return;
+  }
+  elements.tagLibraryList.innerHTML = state.tagInventoryItems.map(tag => `
+    <button type="button" class="tag-library-item" role="option" aria-selected="${tag.id === state.selectedTagId}" data-tag-id="${tag.id}" data-tag-color="${tagColorKey(tag)}" data-disabled="${tag.disabled}">
+      <strong>${tag.pinned ? '<i class="fa-solid fa-thumbtack" aria-label="已置頂"></i> ' : ''}${escapeHtml(tag.displayValue)}</strong>
+      <span class="tag-count">${tag.workCount}</span>
+      <small>${escapeHtml(tag.namespace)} · 使用 ${tag.usageCount} 次${tag.disabled ? ' · 已停用' : ''}</small>
+      <small>作品</small>
+    </button>`).join('');
+  elements.tagLibraryList.querySelectorAll('[data-tag-id]').forEach(button => {
+    button.addEventListener('click', () => selectTag(Number(button.dataset.tagId)));
+  });
+  if (total > state.tagInventoryItems.length) {
+    elements.tagLibraryList.insertAdjacentHTML('beforeend', `<p class="metadata-loading">顯示前 ${state.tagInventoryItems.length}／${total} 個；用搜尋縮小範圍。</p>`);
+  }
+  if (state.selectedTagId && state.tagInventoryItems.some(tag => tag.id === state.selectedTagId)) selectTag(state.selectedTagId, false);
+}
+
+function selectTag(tagId, rerender = true) {
+  const tag = state.tagInventoryItems.find(item => item.id === tagId);
+  if (!tag || !elements.tagLibraryEditor) return;
+  state.selectedTagId = tagId;
+  if (rerender) {
+    elements.tagLibraryList?.querySelectorAll('[data-tag-id]').forEach(button => button.setAttribute('aria-selected', String(Number(button.dataset.tagId) === tagId)));
+  }
+  elements.tagLibraryEditor.hidden = false;
+  elements.tagEditorName.textContent = `${tag.namespace}:${tag.displayValue}`;
+  elements.tagEditorCount.textContent = `${tag.workCount} 部作品使用`;
+  elements.tagEditorDisplay.value = tag.displayValue;
+  elements.tagEditorColor.value = tag.colorKey || '';
+  elements.tagEditorPinned.checked = Boolean(tag.pinned);
+  elements.tagEditorDisable.textContent = tag.disabled ? '恢復標籤' : '停用標籤';
+  elements.tagEditorUndo.disabled = !state.lastTagUndoToken;
+  elements.tagEditorTarget.innerHTML = '<option value="">選擇目標標籤</option>' + state.tagInventoryItems
+    .filter(item => item.id !== tagId && !item.disabled)
+    .map(item => `<option value="${item.id}">${escapeHtml(item.namespace)}:${escapeHtml(item.displayValue)} · ${item.workCount} 部</option>`).join('');
+}
+
+async function saveSelectedTag(event) {
+  event.preventDefault();
+  const tag = state.tagInventoryItems.find(item => item.id === state.selectedTagId);
+  if (!tag) return;
+  try {
+    const displayValue = elements.tagEditorDisplay.value.trim();
+    if (displayValue && displayValue !== tag.displayValue) {
+      const result = await eAPI.renameTag(tag.id, displayValue);
+      state.lastTagUndoToken = result.undoToken;
+    }
+    await eAPI.updateTagState({ tagId: tag.id, pinned: elements.tagEditorPinned.checked, colorKey: elements.tagEditorColor.value || null });
+    updateOrganizerUi(`已更新 ${tag.namespace}:${displayValue || tag.displayValue} 的名稱與外觀。`);
+    await refreshTagLibrary();
+    const comic = state.comics.find(item => item.id === state.selectedComicId);
+    if (comic) loadInspectorMetadata(comic);
+  } catch (error) {
+    updateOrganizerUi(`標籤更新失敗：${error?.message || error}`);
+  }
+}
+
+async function mergeSelectedTag() {
+  const source = state.tagInventoryItems.find(item => item.id === state.selectedTagId);
+  const targetId = Number(elements.tagEditorTarget?.value || 0);
+  if (!source || !targetId) return updateOrganizerUi('請先選擇合併目標。');
+  const target = state.tagInventoryItems.find(item => item.id === targetId);
+  if (!window.confirm(`合併預覽\n\n${source.namespace}:${source.displayValue}（${source.workCount} 部作品）\n→ ${target?.namespace || source.namespace}:${target?.displayValue || '目標標籤'}\n\n原始來源資料不會刪除，完成後可撤銷。`)) return;
+  try {
+    const result = await eAPI.mergeTags(source.id, targetId);
+    state.lastTagUndoToken = result.undoToken;
+    state.selectedTagId = targetId;
+    updateOrganizerUi(`已合併標籤，${result.affectedWorks} 部作品會顯示目標標籤；原始來源證據仍保留。`);
+    await refreshTagLibrary();
+  } catch (error) {
+    updateOrganizerUi(`標籤合併失敗：${error?.message || error}`);
+  }
+}
+
+async function toggleSelectedTagDisabled() {
+  const tag = state.tagInventoryItems.find(item => item.id === state.selectedTagId);
+  if (!tag) return;
+  try {
+    const result = await eAPI.setTagDisabled(tag.id, !tag.disabled);
+    state.lastTagUndoToken = result.undoToken;
+    updateOrganizerUi(`${tag.disabled ? '已恢復' : '已停用'} ${tag.namespace}:${tag.displayValue}；可撤銷本次操作。`);
+    await refreshTagLibrary();
+  } catch (error) {
+    updateOrganizerUi(`標籤狀態更新失敗：${error?.message || error}`);
+  }
+}
+
+async function undoLastTagOperation() {
+  if (!state.lastTagUndoToken) return;
+  try {
+    await eAPI.undoTagOperation(state.lastTagUndoToken);
+    state.lastTagUndoToken = null;
+    updateOrganizerUi('已撤銷上次標籤庫操作。');
+    await refreshTagLibrary();
+  } catch (error) {
+    updateOrganizerUi(`標籤撤銷失敗：${error?.message || error}`);
+  }
+}
+
+function setOrganizeMode(enabled) {
   state.organizeMode = Boolean(enabled);
   if (!state.organizeMode) state.organizeSelection.clear();
-  elements.organizeToggle?.classList.toggle('active', state.organizeMode);
-  elements.organizeToggle?.setAttribute('aria-pressed', String(state.organizeMode));
+  document.querySelectorAll('[data-inspector-action="organize"]').forEach(button => {
+    button.classList.toggle('active', state.organizeMode);
+    button.setAttribute('aria-pressed', String(state.organizeMode));
+  });
   if (elements.organizeBar) elements.organizeBar.hidden = !state.organizeMode;
   document.body.classList.toggle('organize-mode', state.organizeMode);
   updateOrganizerUi();
   renderGrid();
+  if (state.organizeMode) {
+    switchOrganizerPanel(state.organizerPanel || 'tags');
+    refreshTagLibrary();
+  }
 }
 
 function toggleOrganizerSelection(comicId) {
@@ -968,6 +1171,7 @@ async function applyOrganizerBatch(tagAction) {
     state.lastUndoToken = result.undoToken;
     if (series) state.comics.filter(comic => state.organizeSelection.has(comic.id)).forEach(comic => { comic.series = series; });
     updateOrganizerUi(`已更新 ${result.updated} 本；可撤銷本次操作。`);
+    refreshTagLibrary();
     await refreshCatalogSearch(elements.searchInput.value.trim());
     if (state.selectedComicId) {
       const comic = state.comics.find(item => item.id === state.selectedComicId);
@@ -1072,7 +1276,8 @@ function setOrganizerBusy(busy, message = '') {
   elements.organizeBar?.setAttribute('aria-busy', String(busy));
   elements.organizeBar?.querySelectorAll('button, input, select').forEach(control => {
     if (control === elements.organizeUndo && !busy) control.disabled = !state.lastUndoToken;
-    else if (control !== elements.organizeToggle) control.disabled = busy;
+    else if (control === elements.tagEditorUndo && !busy) control.disabled = !state.lastTagUndoToken;
+    else control.disabled = busy;
   });
   if (message && elements.organizeStatus) elements.organizeStatus.textContent = message;
   if (!busy) updateOrganizerUi();
@@ -1310,7 +1515,11 @@ function getProgressInfo(comic) {
   const progress = comic?.progress || {};
   const currentPage = Number(progress.currentPage || 0);
   const totalPages = Number(progress.totalPages || comic?.pageCount || 0);
-  const percent = totalPages > 0 ? Math.min(100, Math.max(0, Number(progress.percent || Math.round((currentPage / totalPages) * 100)))) : 0;
+  const suppliedPercent = Number(progress.percent);
+  const rawPercent = Number.isFinite(suppliedPercent)
+    ? suppliedPercent
+    : totalPages > 0 ? (currentPage / totalPages) * 100 : 0;
+  const percent = Math.round(Math.min(100, Math.max(0, rawPercent)));
   return {
     currentPage,
     totalPages,
@@ -1398,6 +1607,10 @@ function renderComicInspector(comic, options = {}) {
       <div class="inspector-shine"></div>
     </div>
     <div class="inspector-body">
+      <button class="organize-toggle inspector-organize-action ${state.organizeMode ? 'active' : ''}" type="button" data-inspector-action="organize" aria-pressed="${state.organizeMode}" title="批次整理 TAG 與書籍資料">
+        <i class="fa-solid fa-tags" aria-hidden="true"></i>
+        TAG 整理
+      </button>
       <span class="section-kicker">${format}</span>
       <h3 title="${escapeHtml(comic.title)}">${escapeHtml(comic.title)}</h3>
       <div class="inspector-tags">
@@ -1424,6 +1637,22 @@ function renderComicInspector(comic, options = {}) {
         `}
       </div>
       ${isDirectory ? '' : `
+        <button class="inspector-file-toggle" type="button" data-inspector-action="files" aria-expanded="false">
+          <i class="fa-solid fa-folder-tree" aria-hidden="true"></i>
+          <span><strong>檔案管理</strong><small>開啟位置、改名、移動或可復原移除</small></span>
+        </button>
+        <section class="inspector-file-panel" aria-label="漫畫檔案管理" hidden>
+          <div class="inspector-file-buttons">
+            <button type="button" data-file-action="reveal"><i class="fa-solid fa-folder-open"></i> 開啟位置</button>
+            <button type="button" data-file-action="rename"><i class="fa-solid fa-pen"></i> 改名</button>
+            <button type="button" data-file-action="move"><i class="fa-solid fa-folder-tree"></i> 移動</button>
+            <button type="button" data-file-action="trash" class="danger"><i class="fa-solid fa-box-archive"></i> 移到隔離區</button>
+            <button type="button" data-file-action="undo" disabled><i class="fa-solid fa-rotate-left"></i> 撤銷上次操作</button>
+          </div>
+          <p class="inspector-file-status" role="status" aria-live="polite">正在檢查來源能力…</p>
+        </section>
+      `}
+      ${isDirectory ? '' : `
         <button class="inspector-ai-action" type="button" data-inspector-action="ai-suggest" aria-expanded="false">
           <i class="fa-solid fa-tags" aria-hidden="true"></i>
           <span><strong>AI 建議摘要與標籤</strong><small>讀取封面／第一頁，只產生待確認建議</small></span>
@@ -1448,6 +1677,9 @@ function renderComicInspector(comic, options = {}) {
     };
   }
 
+  const organizeBtn = elements.comicInspector.querySelector('[data-inspector-action="organize"]');
+  if (organizeBtn) organizeBtn.onclick = () => setOrganizeMode(!state.organizeMode);
+
   const favoriteBtn = elements.comicInspector.querySelector('[data-inspector-action="favorite"]');
   if (favoriteBtn) {
     favoriteBtn.onclick = async () => {
@@ -1463,7 +1695,88 @@ function renderComicInspector(comic, options = {}) {
   if (aiSuggestBtn && aiResults) {
     aiSuggestBtn.onclick = () => suggestInspectorMetadata(comic, aiSuggestBtn, aiResults);
   }
+  const fileToggle = elements.comicInspector.querySelector('[data-inspector-action="files"]');
+  const filePanel = elements.comicInspector.querySelector('.inspector-file-panel');
+  if (fileToggle && filePanel) {
+    fileToggle.onclick = () => {
+      const open = filePanel.hidden;
+      filePanel.hidden = !open;
+      fileToggle.setAttribute('aria-expanded', String(open));
+      if (open) {
+        prepareInspectorFilePanel(comic, filePanel);
+        requestAnimationFrame(() => filePanel.scrollIntoView({ block: 'nearest', behavior: 'smooth' }));
+      }
+    };
+  }
   if (!isDirectory) loadInspectorMetadata(comic);
+}
+
+async function prepareInspectorFilePanel(comic, panel) {
+  const status = panel.querySelector('.inspector-file-status');
+  const buttons = Object.fromEntries([...panel.querySelectorAll('[data-file-action]')].map(button => [button.dataset.fileAction, button]));
+  const setBusy = busy => Object.values(buttons).forEach(button => { if (button.dataset.fileAction !== 'undo') button.disabled = busy; });
+  if (!eAPI?.getFileCapability) {
+    status.textContent = '檔案管理需要最新版 Tauri App；網頁預覽不會修改檔案。';
+    setBusy(true);
+    if (buttons.undo) buttons.undo.disabled = true;
+    return;
+  }
+  try {
+    const capability = await eAPI.getFileCapability(comic.id);
+    buttons.reveal.disabled = !capability.canReveal;
+    buttons.rename.disabled = !capability.canRename;
+    buttons.move.disabled = !capability.canMove;
+    buttons.trash.disabled = !capability.canTrash;
+    buttons.undo.disabled = !state.lastFileUndoToken;
+    status.textContent = capability.reason || `${capability.sourceKind === 'smb' ? 'NAS' : '本機'}來源可安全修改；移除會先進隔離區。`;
+    for (const [action, button] of Object.entries(buttons)) {
+      button.onclick = () => runInspectorFileAction(comic, panel, action);
+    }
+  } catch (error) {
+    setBusy(true);
+    if (buttons.undo) buttons.undo.disabled = true;
+    status.textContent = `無法檢查檔案能力：${error?.message || error}`;
+  }
+}
+
+async function runInspectorFileAction(comic, panel, action) {
+  const status = panel.querySelector('.inspector-file-status');
+  const buttons = [...panel.querySelectorAll('[data-file-action]')];
+  try {
+    if (action === 'reveal') {
+      await eAPI.showItemInFolder(comic.id);
+      status.textContent = '已在檔案管理器顯示漫畫位置。';
+      return;
+    }
+    if (action === 'undo') {
+      if (!state.lastFileUndoToken) return;
+      buttons.forEach(button => { button.disabled = true; });
+      await eAPI.undoComicFileOperation(state.lastFileUndoToken);
+      state.lastFileUndoToken = null;
+      status.textContent = '已還原上次檔案操作。';
+      await fetchLibrary();
+      return;
+    }
+    let destinationRelativePath = null;
+    if (action === 'rename') {
+      const currentName = String(comic.relativePath || comic.title).split('/').pop();
+      destinationRelativePath = window.prompt('輸入新檔名（保留 .cbz／.zip 副檔名）：', currentName);
+      if (!destinationRelativePath) return;
+    } else if (action === 'move') {
+      destinationRelativePath = window.prompt('輸入漫畫書庫內的目的相對路徑（包含檔名）：', comic.relativePath || '');
+      if (!destinationRelativePath || destinationRelativePath === comic.relativePath) return;
+    } else if (action === 'trash') {
+      if (!window.confirm(`要將「${comic.title}」移到可復原隔離區嗎？\n不會直接永久刪除。`)) return;
+    }
+    buttons.forEach(button => { button.disabled = true; });
+    status.textContent = action === 'trash' ? '正在移到隔離區…' : '正在安全更新檔案位置…';
+    const result = await eAPI.mutateComicFile({ comicId: comic.id, action, destinationRelativePath, expectedFingerprint: null });
+    state.lastFileUndoToken = result.undoToken;
+    status.textContent = `${action === 'trash' ? '已移到隔離區' : action === 'rename' ? '已改名' : '已移動'}；可在此撤銷。`;
+    await fetchLibrary();
+  } catch (error) {
+    status.textContent = `檔案操作失敗：${error?.message || error}`;
+  }
 }
 
 async function loadInspectorMetadata(comic) {
@@ -1482,7 +1795,7 @@ async function loadInspectorMetadata(comic) {
     const currentTarget = elements.comicInspector?.querySelector('#inspector-metadata');
     if (!currentTarget) return;
     const creators = Object.entries(metadata.creators || {}).flatMap(([role, names]) => names.map(name => `${role}:${name}`));
-    const tags = (metadata.tags || []).map(tag => `${tag.namespace}:${tag.value}`);
+    const tags = metadata.tags || [];
     const sourceNames = [...new Set((metadata.candidates || []).map(candidate => candidate.parserId))];
     const lock = field => (metadata.lockedFields || []).includes(field) ? ' <span class="metadata-lock" title="使用者覆寫">鎖定</span>' : '';
     const rows = [
@@ -1491,12 +1804,18 @@ async function loadInspectorMetadata(comic) {
       ['作者', creators.join('、') || '—', 'creators'],
       ['語言', metadata.language || '—', 'language'],
       ['方向', metadata.readingDirection || '—', 'reading_direction'],
-      ['標籤', tags.join('、') || '—', 'tags'],
       ['來源', sourceNames.join('、') || '檔名推測', 'sources'],
       ['狀態', metadata.offline ? 'NAS／來源離線，資料已保留' : '來源在線', 'offline'],
     ];
     currentTarget.innerHTML = `
       <h4>整理資料</h4>
+      <div class="metadata-tag-chips" aria-label="作品標籤">
+        ${tags.length ? tags.map(tag => {
+          const normalized = String(tag.value).normalize('NFKC').toLocaleLowerCase();
+          const inventory = state.tagInventoryItems.find(item => item.namespace === tag.namespace && item.normalizedValue === normalized);
+          return `<span class="metadata-tag-chip" data-tag-color="${tagColorKey(inventory || tag)}">${escapeHtml(tag.namespace)}:${escapeHtml(tag.value)}</span>`;
+        }).join('') : '<span class="metadata-loading">尚無標籤</span>'}
+      </div>
       <dl>${rows.map(([label, value, field]) => `<div class="metadata-row"><dt>${label}</dt><dd>${escapeHtml(String(value))}${lock(field)}</dd></div>`).join('')}</dl>
       ${(suggestions || []).length ? `
         <section class="metadata-suggestions" aria-labelledby="metadata-suggestions-title">
@@ -1772,7 +2091,7 @@ function renderGrid() {
       // ==========================================
       // 進度條樣式計算
       const hasProgress = comic.progress && comic.progress.currentPage > 0;
-      const percent = hasProgress ? comic.progress.percent : 0;
+      const percent = getProgressInfo(comic).percent;
       const isFinished = hasProgress && (percent >= 98 || comic.progress.currentPage >= comic.progress.totalPages - 1);
 
       // 進度徽章內容
@@ -1922,6 +2241,8 @@ async function openReader(comicId) {
     state.aiExplainPendingPage = null;
     
     state.currentPageIndex = (data.progress && data.progress.currentPage) ? data.progress.currentPage : 0;
+    state.readerCacheWindowPage = state.currentPageIndex;
+    state.readerCacheReadyPage = null;
     
     const lowerTitle = data.title.toLowerCase();
     if (lowerTitle.includes('webtoon') || lowerTitle.includes('條漫') || lowerTitle.includes('manga_scroll')) {
@@ -2018,6 +2339,10 @@ async function closeReader() {
 }
 
 function releasePreloadedImages() {
+  clearTimeout(state.readerCacheWindowTimer);
+  state.readerCacheWindowTimer = null;
+  state.readerCacheWindowPage = null;
+  state.readerCacheReadyPage = null;
   for (const img of state.preloadedImages.values()) {
     img.removeAttribute('src');
   }
@@ -2048,7 +2373,7 @@ function renderPages() {
     elements.nextZone.style.width = '15%';
 
     const targetSrc = state.currentComicPages[state.currentPageIndex];
-    const tempImg = createReaderImage(targetSrc, 'high');
+    const tempImg = takePreloadedReaderImage(state.currentPageIndex);
 
     // 🚀 顯示頁面載入/解碼中旋轉動畫
     showPageLoadingSpinner(true);
@@ -2094,7 +2419,7 @@ function renderPages() {
     // 如果是第一頁 (Cover)，通常為單頁顯示，後續兩兩一組
     if (state.currentPageIndex === 0) {
       const targetSrc = state.currentComicPages[0];
-      const tempImg = createReaderImage(targetSrc, 'high');
+      const tempImg = takePreloadedReaderImage(0);
 
       showPageLoadingSpinner(true);
 
@@ -2122,10 +2447,10 @@ function renderPages() {
       const src1 = state.currentComicPages[page1Index];
       const src2 = page2Index !== null ? state.currentComicPages[page2Index] : null;
 
-      const img1 = createReaderImage(src1, 'high');
+      const img1 = takePreloadedReaderImage(page1Index);
       let img2 = null;
       if (page2Index !== null) {
-        img2 = createReaderImage(src2, 'high');
+        img2 = takePreloadedReaderImage(page2Index);
       }
 
       showPageLoadingSpinner(true);
@@ -2215,6 +2540,8 @@ function renderPages() {
     elements.progressSlider.max = totalPages;
     elements.progressSlider.value = state.currentPageIndex + 1;
   }
+
+  scheduleReaderCacheWindowUpdate();
 
   // 儲存進度到伺服器
   saveReadingProgress();
@@ -2596,18 +2923,16 @@ function handleReaderContextAction(action) {
 // ⚡ 快取與預載機制 (Performance Optimization)
 // ==========================================================================
 
-// 非同步預載前後頁，確保翻頁零延遲
+// 後端依實際頁面容量保留壓縮資料；前端只解碼目前頁附近，避免 GPU/像素記憶體膨脹。
 function preloadNextPages() {
   const pages = state.currentComicPages;
   const current = state.currentPageIndex;
   const total = pages.length;
-  
-  // 我們預載後面 3 頁與前面 1 頁
-  const indicesToPreload = [current + 1, current + 2, current + 3, current - 1];
-  
-  if (state.readingMode === 'double' || state.readingMode === 'double-rtl') {
-    // 雙頁模式預載後面 2 組雙頁 (4頁)
-    indicesToPreload.push(current + 4);
+
+  const preloadRadius = state.readerCacheReadyPage === current ? READER_PRELOAD_RADIUS : 2;
+  const indicesToPreload = [];
+  for (let distance = 1; distance <= preloadRadius; distance++) {
+    indicesToPreload.push(current + distance, current - distance);
   }
 
   indicesToPreload.forEach(idx => {
@@ -2617,6 +2942,7 @@ function preloadNextPages() {
       img.fetchPriority = 'low';
       img.src = pages[idx];
       state.preloadedImages.set(idx, img);
+      if (Math.abs(idx - current) <= 2) img.decode().catch(() => {});
       img.onerror = () => {
         if (state.preloadedImages.get(idx) !== img) return;
         img.removeAttribute('src');
@@ -2626,6 +2952,32 @@ function preloadNextPages() {
   });
 
   prunePreloadedImages(indicesToPreload);
+}
+
+function scheduleReaderCacheWindowUpdate() {
+  clearTimeout(state.readerCacheWindowTimer);
+  if (!state.currentComic || typeof eAPI.updateReaderCacheWindow !== 'function') return;
+
+  const comicId = state.currentComic.id;
+  const pageIndex = state.currentPageIndex;
+  if (state.readerCacheWindowPage === pageIndex) return;
+  state.readerCacheWindowPage = pageIndex;
+  state.readerCacheReadyPage = null;
+  state.readerCacheWindowTimer = setTimeout(async () => {
+    state.readerCacheWindowTimer = null;
+    if (!state.currentComic || state.currentComic.id !== comicId) return;
+    try {
+      const generation = await eAPI.updateReaderCacheWindow(comicId, pageIndex);
+      if (state.currentComic?.id === comicId && Number.isSafeInteger(generation)) {
+        state.currentComic.preloadGeneration = generation;
+      }
+    } catch (error) {
+      if (state.currentComic?.id === comicId && state.readerCacheWindowPage === pageIndex) {
+        state.readerCacheWindowPage = null;
+      }
+      console.warn('[RAM cache window]', error);
+    }
+  }, READER_CACHE_UPDATE_DELAY_MS);
 }
 
 function prunePreloadedImages(indicesToPreload = []) {
@@ -3129,7 +3481,7 @@ function updateRamCacheProgress(loaded, total, finished = false, error = null) {
   }
   
   if (finished || loaded >= total) {
-    elements.statusRam.innerHTML = '<i class="fa-solid fa-memory" style="color: var(--accent);"></i> ⚡ RAM 已全載入';
+    elements.statusRam.innerHTML = `<i class="fa-solid fa-memory" style="color: var(--accent);"></i> ⚡ 已預載 ${loaded} 頁`;
     elements.statusRam.style.color = 'var(--accent)';
     
     // 貼心隱藏：滿載顯示 2 秒讓主人安心，隨後優雅隱藏，還給主人 100% 乾淨的閱讀畫面！
@@ -3888,7 +4240,7 @@ function showGridContextMenu(e, comic) {
   // 綁定事件
   menu.querySelector('[data-action="open-folder"]').onclick = () => {
     if (eAPI && eAPI.showItemInFolder) {
-      eAPI.showItemInFolder(comic.relativePath);
+      eAPI.showItemInFolder(comic.id);
     } else {
       alert('網頁版不支援開啟本地資料夾喔！');
     }

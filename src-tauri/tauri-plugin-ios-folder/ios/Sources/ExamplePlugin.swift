@@ -3,6 +3,11 @@ import Tauri
 import UIKit
 import UniformTypeIdentifiers
 
+// Kept as a tiny C ABI so the native pressure notifications can invalidate
+// the Rust preload generation without routing through the JavaScript runtime.
+@_silgen_name("gai_memory_pressure")
+private func gaiMemoryPressure(_ level: UInt8)
+
 class StartAccessingArgs: Decodable {
   let bookmark: String
 }
@@ -20,6 +25,48 @@ class ExamplePlugin: Plugin, UIDocumentPickerDelegate {
   var activePickers: [UIDocumentPickerViewController: Invoke] = [:]
   var activeAccesses: [String: URL] = [:]
   private let accessQueue = DispatchQueue(label: "com.windsheep.gai.security-scope")
+  #if os(iOS)
+  private var memoryPressureSource: DispatchSourceMemoryPressure?
+  private var memoryWarningObserver: NSObjectProtocol?
+
+  override init() {
+    super.init()
+    startMemoryPressureMonitoring()
+  }
+
+  deinit {
+    memoryWarningObserver.map(NotificationCenter.default.removeObserver)
+    memoryPressureSource?.cancel()
+  }
+
+  private func startMemoryPressureMonitoring() {
+    let source = DispatchSource.makeMemoryPressureSource(
+      eventMask: [.normal, .warning, .critical],
+      queue: DispatchQueue.global(qos: .utility)
+    )
+    source.setEventHandler { [weak self] in
+      guard let self else { return }
+      let events = source.data
+      if events.contains(.critical) {
+        gaiMemoryPressure(2)
+      } else if events.contains(.warning) {
+        gaiMemoryPressure(1)
+      } else {
+        gaiMemoryPressure(0)
+      }
+    }
+    memoryPressureSource = source
+    source.resume()
+
+    memoryWarningObserver = NotificationCenter.default.addObserver(
+      forName: UIApplication.didReceiveMemoryWarningNotification,
+      object: nil,
+      queue: nil
+    ) { _ in
+      gaiMemoryPressure(2)
+    }
+  }
+  #endif
 
   @objc public func pickFolder(_ invoke: Invoke) throws {
     DispatchQueue.main.async {

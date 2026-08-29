@@ -14,7 +14,7 @@ const __dirname = path.dirname(__filename);
 const app = express();
 const PORT = 4000; // 使用 4000 埠避免與一般 3000 衝突
 
-const BASE_DIR = path.resolve(process.env.COMIC_BASE_DIR || __dirname);
+const BASE_DIR = path.resolve(process.env.GAI_BASE_DIR || __dirname);
 const PROGRESS_FILE = path.join(BASE_DIR, 'progress.json');
 const CONFIG_FILE = path.join(BASE_DIR, 'config.json');
 const METADATA_FILE = path.join(BASE_DIR, 'metadata.json');
@@ -70,7 +70,7 @@ app.use(express.static(path.join(__dirname, 'public')));
 // 支援的圖片副檔名
 const IMAGE_EXTENSIONS = ['.jpg', '.jpeg', '.png', '.webp', '.gif'];
 const MAX_IMAGE_BYTES = 64 * 1024 * 1024;
-const configuredScanDepth = Number.parseInt(process.env.COMIC_SCAN_MAX_DEPTH || '', 10);
+const configuredScanDepth = Number.parseInt(process.env.GAI_SCAN_MAX_DEPTH || '', 10);
 
 function isImage(filename) {
   const ext = path.extname(filename).toLowerCase();

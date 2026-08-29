@@ -33,15 +33,19 @@ if (window.__TAURI__) {
     getBookmarks: () => invoke('get_bookmarks'),
     setBookmarks: (data) => invoke('set_bookmarks', { data }),
     openExternalFolder: () => invoke('plugin:ios-folder|pick_folder'),
-    openFolderDialog: async () => {
-    try {
-      const result = await invoke('plugin:dialog|open', { directory: true, multiple: false });
-      return result;
-    } catch (e) {
-      console.error(e);
-      return null;
-    }
-  },
+    openFolderDialog: async (defaultPath) => {
+      const selected = await invoke('plugin:dialog|open', {
+        options: {
+          directory: true,
+          multiple: false,
+          defaultPath: defaultPath || undefined,
+          title: '選擇漫畫資料夾',
+          canCreateDirectories: true,
+        },
+      });
+      if (typeof selected === 'string') return selected;
+      return selected?.path || null;
+    },
     browseFolders: (dirPath) => invoke('browse_folders', { dirPath }),
     onLibraryChanged: (callback) => {
       return listen('library-changed', (event) => {
@@ -64,7 +68,7 @@ if (window.__TAURI__) {
     // Favorites 原本是存在 localStorage，這裡我們直接用原本前端的邏輯，或者未來移交後端
     getFavorites: async () => {
       try {
-        return JSON.parse(localStorage.getItem('comic-reader:favorites') || '[]');
+        return JSON.parse(localStorage.getItem('gai:favorites') || '[]');
       } catch(e) {
         return [];
       }
@@ -74,7 +78,7 @@ if (window.__TAURI__) {
       const index = favorites.indexOf(id);
       if (index >= 0) favorites.splice(index, 1);
       else favorites.push(id);
-      localStorage.setItem('comic-reader:favorites', JSON.stringify(favorites));
+      localStorage.setItem('gai:favorites', JSON.stringify(favorites));
       return favorites;
     },
     showItemInFolder: (path) => invoke('show_item_in_folder', { path }),

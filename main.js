@@ -41,7 +41,7 @@ function saveFavorites(favorites) {
 
 const IMAGE_EXTENSIONS = ['.jpg', '.jpeg', '.png', '.webp', '.gif'];
 const MAX_IMAGE_BYTES = 64 * 1024 * 1024;
-const configuredScanDepth = Number.parseInt(process.env.COMIC_SCAN_MAX_DEPTH || '', 10);
+const configuredScanDepth = Number.parseInt(process.env.GAI_SCAN_MAX_DEPTH || '', 10);
 function isImage(n) { return IMAGE_EXTENSIONS.includes(path.extname(n).toLowerCase()); }
 function isSystemFile(n) { return path.basename(n).startsWith('.') || n.includes('__MACOSX'); }
 async function readImageFile(filePath) {
@@ -573,7 +573,7 @@ function clearReaderCaches() {
 }
 
 // ======================================================
-// comic:// 自訂協定 — 圖片直接串流給 renderer
+// gai:// 自訂協定 — 圖片直接串流給 renderer
 // ======================================================
 function getMime(ext) {
   if (ext === '.png') return 'image/png';
@@ -602,17 +602,17 @@ function isWithinDirectory(candidate, directory) {
 }
 
 function registerComicProtocol() {
-  // comic://page/{id}/{pageIndex}        — 取得漫畫特定頁
-  // comic://cover/{id}                   — 取得封面 (page 0)
-  // comic://folder/{base64path}/{index}  — 資料夾圖片
-  protocol.handle('comic', async (request) => {
+  // gai://page/{id}/{pageIndex}        — 取得漫畫特定頁
+  // gai://cover/{id}                   — 取得封面 (page 0)
+  // gai://folder/{base64path}/{index}  — 資料夾圖片
+  protocol.handle('gai', async (request) => {
     try {
       const url = new URL(request.url);
       const host = url.hostname; // 'page', 'cover', 'folder'
       const parts = url.pathname.split('/').filter(Boolean);
 
       if (host === 'folder') {
-        // comic://folder/{base64folderPath}/{index}
+        // gai://folder/{base64folderPath}/{index}
         if (parts.length !== 2 || !isStrictBase64Url(parts[0]) || !isStrictPageIndex(parts[1])) {
           return new Response('invalid folder path', { status: 400 });
         }
@@ -746,7 +746,7 @@ function registerComicProtocol() {
 
       return new Response('unknown route', { status: 404 });
     } catch(e) {
-      console.error('comic:// protocol error:', e);
+      console.error('gai:// protocol error:', e);
       return new Response(e.message, { status: 500 });
     }
   });
@@ -776,7 +776,7 @@ function setupIPC() {
 
   ipcMain.handle('get-scan-status', () => getScanProgress());
 
-  // 打開漫畫（取得頁數和 comic:// URL 陣列）
+  // 打開漫畫（取得頁數和 gai:// URL 陣列）
   ipcMain.handle('open-comic', async (_, id) => {
     const relativePath = Buffer.from(id, 'base64url').toString('utf-8');
     const fullPath = path.join(currentScanDir, relativePath);
@@ -798,10 +798,10 @@ function setupIPC() {
       const imgs = getFolderImages(fullPath);
       filenames = imgs;
       const folderBase64 = Buffer.from(fullPath).toString('base64url');
-      pages = imgs.map((_, i) => `comic://folder/${folderBase64}/${i}`);
+      pages = imgs.map((_, i) => `gai://folder/${folderBase64}/${i}`);
     } else {
       const handle = await getZipHandle(id, fullPath);
-      pages = handle.entryNames.map((_, i) => `comic://page/${id}/${i}`);
+      pages = handle.entryNames.map((_, i) => `gai://page/${id}/${i}`);
 
       // 更新頁數 metadata
       if (!comicMetadata[id] || comicMetadata[id].pageCount !== pages.length) {
@@ -1084,9 +1084,9 @@ let mainWindow = null;
 function setAppMenu() {
   const template = [
     {
-      label: '少女漫畫閣',
+      label: "紳士藝術研究所 Gentlemen's Art Institute",
       submenu: [
-        { label: '關於少女漫畫閣', role: 'about' },
+        { label: "關於紳士藝術研究所 Gentlemen's Art Institute", role: 'about' },
         { type: 'separator' },
         { label: '偏好設定…', accelerator: 'Cmd+,', click: () => mainWindow?.webContents.executeJavaScript('openSettingsModal()') },
         { type: 'separator' },
@@ -1129,7 +1129,7 @@ function createWindow() {
     height: prefs.height || 800,
     x: prefs.x, y: prefs.y,
     minWidth: 800, minHeight: 600,
-    title: '少女漫畫閣',
+    title: "紳士藝術研究所 Gentlemen's Art Institute",
     backgroundColor: '#0b0f19',
     titleBarStyle: 'hiddenInset',
     trafficLightPosition: { x: 16, y: 16 },
@@ -1155,7 +1155,7 @@ function createWindow() {
 // ======================================================
 // 在 ready 前就要 handle protocol
 protocol.registerSchemesAsPrivileged([
-  { scheme: 'comic', privileges: { standard: false, secure: true, supportFetchAPI: true, bypassCSP: true } }
+  { scheme: 'gai', privileges: { standard: false, secure: true, supportFetchAPI: true, bypassCSP: true } }
 ]);
 
 app.whenReady().then(() => {

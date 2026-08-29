@@ -5,12 +5,12 @@
 所有指令都從專案根目錄執行，Cargo manifest 位於 `src-tauri/Cargo.toml`：
 
 ```sh
-cargo fmt --manifest-path src-tauri/Cargo.toml --package app -- --check
+cargo fmt --manifest-path src-tauri/Cargo.toml --package gai -- --check
 cargo test --manifest-path src-tauri/Cargo.toml --lib
 cargo clippy --manifest-path src-tauri/Cargo.toml --lib --bins --no-deps -- -D warnings
 ```
 
-`.cargo/config.toml` 將 target-dir 固定在 `/tmp/comic-cargo-target`，避免把建置產物寫到主人選定的漫畫／NAS 路徑，也避開 `/Volumes/MyGame` 不支援 incremental lock 的檔案系統限制。
+`.cargo/config.toml` 將 target-dir 固定在 `/tmp/gai-cargo-target`，避免把建置產物寫到主人選定的漫畫／NAS 路徑，也避開 `/Volumes/MyGame` 不支援 incremental lock 的檔案系統限制。
 
 ## panic 與 unsafe 稽核
 

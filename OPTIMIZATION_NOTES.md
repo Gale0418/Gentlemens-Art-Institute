@@ -1,6 +1,6 @@
 # 多專家視角優化分析報告
 
-> 模擬多位技術專家，從各個角度深度審查「少女漫畫閣」的打包流程與程式架構。
+> 模擬多位技術專家，從各個角度深度審查「紳士藝術研究所 Gentlemen's Art Institute」的打包流程與程式架構。
 
 ---
 
@@ -100,7 +100,7 @@ let client_result = timeout(
 ### 問題：每次讀圖片都即時解壓縮 ZIP
 
 ```
-comic://page/{id}/{index}  → protocol.rs 每次請求都打開 ZIP 檔、找到第 N 個 entry、讀取
+gai://page/{id}/{index}  → protocol.rs 每次請求都打開 ZIP 檔、找到第 N 個 entry、讀取
 ```
 
 對於 100+ 頁的漫畫，每翻一頁都重新打開 ZIP 是 I/O 浪費。建議在 `opened_comic_files` 之外，用 `Mutex<ZipArchive>` 或把已解壓縮的頁面緩存在 `ram_cache_pool` 裡（目前只預載前 5 頁，後面的頁面都是即時解壓）。

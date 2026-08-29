@@ -13,5 +13,6 @@ metadata.json
 *.dmg
 MissionCenter/
 scratch/
+output/
 *_tmp_*
 *.patch

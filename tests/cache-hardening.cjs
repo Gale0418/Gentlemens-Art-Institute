@@ -55,9 +55,9 @@ assert.match(appText, /let desiredBookmarks = null/);
 assert.match(appText, /stateWasUpdated && desiredBookmarks/);
 assert.match(appText, /JSON\.stringify\(desiredBookmarks\)/);
 assert.match(guideText, /validate_build_paths\(\) \{/);
-assert.match(guideText, /require_nonempty COMIC_DEVICE_ID/);
+assert.match(guideText, /require_nonempty GAI_DEVICE_ID/);
 assert.match(guideText, /paths_overlap/);
-assert.match(guideText, /COMIC_PROJECT_DIR 不可為 \/ 或 HOME/);
+assert.match(guideText, /GAI_PROJECT_DIR 不可為 \/ 或 HOME/);
 assert.ok(guideText.indexOf('validate_build_paths') < guideText.indexOf('rm -rf'), 'build paths must be validated before destructive commands');
 
 const isStrictPageIndex = value => {
@@ -93,6 +93,6 @@ assert.equal(rejectedError.stateWasUpdated, false);
 sandbox.eAPI = sandbox.httpAPI;
 assert.strictEqual(sandbox.getCoverUrl('test/id'), '/api/cover?id=test%2Fid');
 sandbox.eAPI = { isElectron: true };
-assert.strictEqual(sandbox.getCoverUrl('test/id'), 'comic://cover/test%2Fid');
+assert.strictEqual(sandbox.getCoverUrl('test/id'), 'gai://cover/test%2Fid');
 
-console.log('PASS: ComicReader cache and routing hardening checks look correct');
+console.log('PASS: G.A.I cache and routing hardening checks look correct');

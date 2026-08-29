@@ -1,7 +1,7 @@
-use app_lib::catalog::CatalogStore;
-use app_lib::scanner::IMAGE_EXTENSIONS;
-use app_lib::state::{ComicItem, Progress};
 use base64::{engine::general_purpose, Engine as _};
+use gai_lib::catalog::CatalogStore;
+use gai_lib::scanner::IMAGE_EXTENSIONS;
+use gai_lib::state::{ComicItem, Progress};
 use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 use walkdir::{DirEntry, WalkDir};

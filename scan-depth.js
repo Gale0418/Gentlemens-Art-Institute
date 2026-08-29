@@ -4,7 +4,7 @@ export function parseScanDepth(rawValue) {
   return /^\d+$/.test(value) ? Number.parseInt(value, 10) : 3;
 }
 
-export const configuredScanDepth = parseScanDepth(process.env.COMIC_SCAN_MAX_DEPTH);
+export const configuredScanDepth = parseScanDepth(process.env.GAI_SCAN_MAX_DEPTH);
 
 export function hasReachedScanDepth(depth, maximumDepth = configuredScanDepth) {
   return Number.isFinite(maximumDepth) && depth > maximumDepth;

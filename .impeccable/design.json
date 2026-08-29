@@ -1,7 +1,7 @@
 {
   "schemaVersion": 2,
   "generatedAt": "2026-08-25T19:15:55Z",
-  "title": "Design System: 少女漫畫閣",
+  "title": "Design System: 紳士藝術研究所 Gentlemen's Art Institute",
   "extensions": {
     "colorMeta": {
       "midnight-canvas": { "role": "neutral", "displayName": "Midnight Canvas", "canonical": "#140508", "tonalRamp": ["#260209", "#3d0710", "#5c0b18", "#7d1021", "#a7192e", "#d63b4b", "#f48994", "#fff0f1"] },
@@ -68,7 +68,7 @@
   ],
   "narrative": {
     "northStar": "深夜私人藏書室",
-    "overview": "少女漫畫閣把大型私人收藏呈現成一座安靜但有生命的深夜藏書室：內容永遠是主體，控制區則像可靠的整理桌。預設 Midnight 主題以酒紅黑、暖紅主操作與低亮度文字層級維持沉浸感；其他主題是同一結構的換裝，而不是各自另造元件。",
+    "overview": "紳士藝術研究所 Gentlemen's Art Institute 把大型私人收藏呈現成一座安靜但有生命的深夜藏書室：內容永遠是主體，控制區則像可靠的整理桌。預設 Midnight 主題以酒紅黑、暖紅主操作與低亮度文字層級維持沉浸感；其他主題是同一結構的換裝，而不是各自另造元件。",
     "keyCharacteristics": ["深色 local-first 收藏工作台", "內容優先、控制緊湊、狀態可見", "主題色透過語意 tokens 驅動", "滑鼠、鍵盤與 iPad 觸控共用一套元件"],
     "rules": [
       { "name": "Semantic Theme Rule", "body": "新元件只能使用現有語意變數；不得寫死某個主題的青綠、粉紅或橘色。", "section": "colors" },

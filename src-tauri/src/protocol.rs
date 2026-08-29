@@ -149,7 +149,9 @@ pub fn detect_mime(buf: &[u8], ext_fallback: &str) -> &'static str {
     } else if buf.len() >= 12
         && &buf[4..8] == b"ftyp"
         && buf[8..buf.len().min(32)]
-            .chunks_exact(4)
+            .as_chunks::<4>()
+            .0
+            .iter()
             .any(|brand| brand == b"avif" || brand == b"avis")
     {
         "image/avif"
@@ -163,7 +165,7 @@ pub fn handle_comic_request(
     request: Request<Vec<u8>>,
 ) -> Result<Response<Vec<u8>>, Box<dyn std::error::Error>> {
     let uri = request.uri().to_string();
-    let path_str = uri.strip_prefix("comic://").unwrap_or(&uri);
+    let path_str = uri.strip_prefix("gai://").unwrap_or(&uri);
     let path_str = path_str.strip_prefix("localhost/").unwrap_or(path_str);
 
     let parts: Vec<&str> = path_str.split('/').filter(|s| !s.is_empty()).collect();

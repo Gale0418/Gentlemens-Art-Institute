@@ -3,12 +3,12 @@
 <head>
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover">
-  <meta name="description" content="少女漫畫閣，專為本機漫畫收藏打造的沉浸式閱讀器。">
+  <meta name="description" content="紳士藝術研究所 Gentlemen's Art Institute，專為本機漫畫收藏打造的沉浸式閱讀器。">
   <meta name="theme-color" content="#140508">
-  <title>少女漫畫閣 | 本機漫畫閱讀器</title>
+  <title>紳士藝術研究所 Gentlemen's Art Institute | 本機漫畫閱讀器</title>
   <script>
     try {
-      document.documentElement.dataset.theme = localStorage.getItem('comic-reader:theme') || 'midnight';
+      document.documentElement.dataset.theme = localStorage.getItem('gai:theme') || 'midnight';
     } catch (_) {
       document.documentElement.dataset.theme = 'midnight';
     }
@@ -61,7 +61,7 @@
       <div class="logo">
         <span class="logo-emoji">✦</span>
         <div class="logo-text">
-          <h1>少女漫畫閣</h1>
+          <h1>紳士藝術研究所 Gentlemen's Art Institute</h1>
           <p>Private manga archive</p>
         </div>
       </div>
@@ -74,16 +74,13 @@
           <i class="fa-solid fa-magnifying-glass search-icon"></i>
           <label for="search-input" class="visually-hidden">搜尋漫畫、作者、標籤</label>
           <input type="text" id="search-input" placeholder="搜尋漫畫、作者、標籤">
-          <button id="clear-search-btn" class="clear-btn" style="display: none;"><i class="fa-solid fa-xmark"></i></button>
+          <button id="clear-search-btn" class="clear-btn" aria-label="清除搜尋" title="清除搜尋" style="display: none;"><i class="fa-solid fa-xmark" aria-hidden="true"></i></button>
         </div>
         <button id="refresh-btn" class="action-btn" title="重新整理書架">
           <i class="fa-solid fa-rotate-right"></i> 重新整理
         </button>
         <button id="import-photo-btn" class="action-btn" title="從相簿匯入圖片" style="display: none; background: rgba(255, 255, 255, 0.05); border-color: var(--card-border); color: var(--text-muted);">
           <i class="fa-regular fa-images"></i> 匯入圖片
-        </button>
-        <button id="smb-setup-btn-header" class="action-btn" title="設定 NAS (SMB)" style="background: rgba(255, 255, 255, 0.05); border-color: var(--card-border); color: var(--accent);">
-          <i class="fa-solid fa-globe"></i> SMB 設定
         </button>
         <button id="settings-btn" class="action-btn" title="設定" style="background: rgba(255, 255, 255, 0.05); border-color: var(--card-border); color: var(--text-muted);">
           <i class="fa-solid fa-gear"></i> 設定
@@ -95,34 +92,13 @@
     <div class="main-layout">
       <!-- 側邊欄 -->
       <aside class="sidebar">
-        <div class="sidebar-section smart-collections">
-          <h3><i class="fa-solid fa-wand-magic-sparkles"></i> 智慧收藏</h3>
-          <button class="smart-item active" data-filter-shortcut="all">
-            <span><i class="fa-solid fa-layer-group"></i> 全部漫畫</span>
-            <i class="fa-solid fa-chevron-right"></i>
-          </button>
-          <button class="smart-item" data-filter-shortcut="reading">
-            <span><i class="fa-solid fa-book-open-reader"></i> 閱讀中</span>
-            <i class="fa-solid fa-chevron-right"></i>
-          </button>
-          <button class="smart-item" data-filter-shortcut="favorite">
-            <span><i class="fa-solid fa-heart"></i> 已收藏</span>
-            <i class="fa-solid fa-chevron-right"></i>
-          </button>
-          <button class="smart-item" data-filter-shortcut="finished">
-            <span><i class="fa-solid fa-circle-check"></i> 已看完</span>
-            <i class="fa-solid fa-chevron-right"></i>
-          </button>
-        </div>
-
         <div class="sidebar-section">
-          <h3><i class="fa-solid fa-folder-tree"></i> 漫畫系列</h3>
-          <ul class="series-list" id="series-filter-list">
-            <li class="active" data-series="all">
-              <span class="series-name">全部漫畫</span>
+          <h3><i class="fa-solid fa-folder-tree" aria-hidden="true"></i> 漫畫系列</h3>
+          <ul class="series-list" id="series-filter-list" aria-label="漫畫系列">
+            <li class="active" data-series="all" aria-current="true">
+              <span class="series-name">全部系列</span>
               <span class="badge" id="total-count-badge">0</span>
             </li>
-            <!-- 動態插入系列清單 -->
           </ul>
         </div>
 
@@ -152,12 +128,19 @@
       <section class="library-workspace">
         <!-- 漫畫書架網格 -->
         <main class="content-area">
-          <nav class="tablet-collections" aria-label="智慧收藏快捷篩選">
-            <button class="smart-item active" data-filter-shortcut="all" aria-pressed="true"><i class="fa-solid fa-layer-group"></i> 全部漫畫</button>
-            <button class="smart-item" data-filter-shortcut="reading" aria-pressed="false"><i class="fa-solid fa-book-open-reader"></i> 閱讀中</button>
-            <button class="smart-item" data-filter-shortcut="favorite" aria-pressed="false"><i class="fa-solid fa-heart"></i> 已收藏</button>
-            <button class="smart-item" data-filter-shortcut="finished" aria-pressed="false"><i class="fa-solid fa-circle-check"></i> 已看完</button>
-          </nav>
+          <section class="library-source-alert" id="library-source-alert" role="status" aria-live="polite" hidden>
+            <div class="library-source-alert-copy">
+              <span class="library-source-alert-icon" aria-hidden="true"><i class="fa-solid fa-hard-drive"></i></span>
+              <div>
+                <strong>漫畫來源目前離線</strong>
+                <p id="library-source-alert-message">原本的漫畫目錄目前無法存取；收藏、標籤與閱讀進度都已安全保留。</p>
+              </div>
+            </div>
+            <button type="button" id="library-source-settings-btn">
+              <i class="fa-solid fa-folder-open" aria-hidden="true"></i>
+              選擇新的漫畫目錄
+            </button>
+          </section>
 
           <section class="continue-panel" aria-labelledby="continue-title">
             <div class="section-title-row">
@@ -176,7 +159,14 @@
               <h2 id="library-title" aria-live="polite">全部漫畫</h2>
             </div>
             <div class="filter-options">
-              <button class="filter-btn organize-toggle" id="organize-toggle" aria-pressed="false"><i class="fa-solid fa-tags"></i> 整理</button>
+              <label class="series-filter-field" for="series-filter-select">
+                <i class="fa-solid fa-folder-tree" aria-hidden="true"></i>
+                <span class="visually-hidden">篩選漫畫系列</span>
+                <select id="series-filter-select" aria-label="篩選漫畫系列">
+                  <option value="all">全部系列</option>
+                </select>
+              </label>
+              <button class="organize-toggle" id="organize-toggle" aria-pressed="false" title="批次整理 TAG 與 metadata"><i class="fa-solid fa-tags" aria-hidden="true"></i> TAG 整理</button>
               <button class="filter-btn active" data-filter="all" aria-pressed="true">全部</button>
               <button class="filter-btn" data-filter="reading" aria-pressed="false">閱讀中</button>
               <button class="filter-btn" data-filter="unread" aria-pressed="false">未讀取</button>
@@ -299,7 +289,7 @@
 
       <!-- 進度拉條 -->
       <div class="bottom-bar-center">
-        <input type="range" class="progress-slider" id="progress-slider" min="1" max="100" value="1">
+        <input type="range" class="progress-slider" id="progress-slider" min="1" max="100" value="1" aria-label="目前頁面">
       </div>
 
       <div class="bottom-bar-right">
@@ -323,12 +313,16 @@
           <i class="fa-solid fa-compress"></i>
         </button>
 
-        <button class="control-action-btn" id="btn-rotate-left" title="向左旋轉 90° (L 鍵)">
-          <i class="fa-solid fa-rotate-left"></i>
+        <button class="control-action-btn" id="btn-rotate-left" type="button" aria-label="向左旋轉 90 度" title="向左旋轉 90° (L 鍵)">
+          <svg class="reader-rotate-icon" viewBox="0 0 24 24" aria-hidden="true">
+            <path d="M3 12a9 9 0 1 0 3-6.7M3 3v5h5"></path>
+          </svg>
         </button>
 
-        <button class="control-action-btn" id="btn-rotate-right" title="向右旋轉 90° (R 鍵)">
-          <i class="fa-solid fa-rotate-right"></i>
+        <button class="control-action-btn" id="btn-rotate-right" type="button" aria-label="向右旋轉 90 度" title="向右旋轉 90° (R 鍵)">
+          <svg class="reader-rotate-icon" viewBox="0 0 24 24" aria-hidden="true">
+            <path d="M21 12a9 9 0 1 1-3-6.7M21 3v5h-5"></path>
+          </svg>
         </button>
 
         <button class="control-action-btn" id="btn-sharpen" title="銀利化模式 (S 鍵) - 進階清晰">
@@ -348,9 +342,12 @@
           <span>這頁在說什麼？</span>
         </button>
 
-        <button class="control-action-btn ai-page-btn" id="btn-ai-suggest" title="請艦載 AI 提出可審核的摘要與標籤候選">
-          <i class="fa-solid fa-tags"></i>
-          <span>產生整理候選</span>
+        <button class="control-action-btn ai-page-btn" id="btn-ai-auto-explain" type="button" aria-pressed="false" title="開啟全書隨讀翻譯；只分析實際翻到的頁面">
+          <svg class="ai-auto-icon" viewBox="0 0 24 24" aria-hidden="true">
+            <path d="M4 5h9M8.5 3v2M6 5c.6 3 2.2 5.2 5 6.5M11 5c-.7 3.4-3 6.2-6.5 8"></path>
+            <path d="M14 19l3.5-8 3.5 8M15.2 16h4.6"></path>
+          </svg>
+          <span>全書隨讀</span>
         </button>
 
         <button class="control-action-btn" id="btn-fullscreen" title="切換全螢幕 (F 鍵)">
@@ -427,15 +424,15 @@
           <label for="scan-dir-input">當前掃描漫畫目錄：</label>
           <div class="path-input-row">
             <input type="text" id="scan-dir-input" placeholder="請輸入絕對路徑">
-            <button id="native-browse-btn" class="modal-action-btn" style="display: none; background: var(--bg-hover); color: var(--text-light); border: 1px solid var(--border); padding: 0 15px; border-radius: 8px; font-weight: 500; cursor: pointer; transition: all 0.2s;"><i class="fa-solid fa-folder-open"></i> 選擇...</button>
+            <button id="native-browse-btn" class="modal-action-btn" type="button" aria-describedby="scan-dir-status" style="display: none; background: var(--bg-hover); color: var(--text-light); border: 1px solid var(--border); padding: 0 15px; border-radius: 8px; font-weight: 500; cursor: pointer; transition: all 0.2s;"><i class="fa-solid fa-folder-open"></i> 選擇資料夾…</button>
             <button id="save-path-btn" class="modal-action-btn primary">儲存套用</button>
           </div>
-          <p class="input-tip">小提示：您可使用「選擇...」按鈕選擇資料夾，或直接貼上絕對路徑。✨</p>
+          <p class="input-tip" id="scan-dir-status" aria-live="polite">會開啟系統原生的資料夾選擇器；您也可以直接貼上絕對路徑。</p>
         </div>
         
         <div class="advanced-settings-group" style="margin-top: 15px; display: flex; gap: 10px; flex-wrap: wrap;">
           <button id="smb-setup-btn" class="modal-action-btn" style="background: var(--bg-hover); color: var(--text-light); border: 1px solid var(--border); padding: 8px 15px; border-radius: 8px; cursor: pointer;"><i class="fa-solid fa-globe"></i> 設定 NAS (SMB)</button>
-          <button id="native-external-btn" class="modal-action-btn" style="background: var(--bg-hover); color: var(--text-light); border: 1px solid var(--border); padding: 8px 15px; border-radius: 8px; cursor: pointer;"><i class="fa-solid fa-folder-open"></i> 直接讀取外部資料夾 (iOS)</button>
+          <button id="native-external-btn" class="modal-action-btn" style="display: none; background: var(--bg-hover); color: var(--text-light); border: 1px solid var(--border); padding: 8px 15px; border-radius: 8px; cursor: pointer;"><i class="fa-solid fa-folder-open"></i> 直接讀取外部資料夾 (iOS)</button>
         </div>
         
         <div id="external-bookmarks-list" style="margin-top: 10px; display: flex; flex-direction: column; gap: 8px;">
@@ -479,7 +476,7 @@
           <p id="ai-session-status" class="input-tip" aria-live="polite">尚未設定艦載 AI。</p>
         </section>
 
-        <div class="folder-browser-section">
+        <div class="folder-browser-section" id="fallback-folder-browser">
           <h3><i class="fa-solid fa-folder-open"></i> 後端路徑瀏覽器</h3>
           <div class="browser-path-display">
             <span id="browser-current-path">/</span>
@@ -525,10 +522,10 @@
     </div>
   </div>
 
-  <!-- 全局載入遮罩 -->
+  <!-- 非阻塞背景工作狀態列 -->
   <div class="loader-mask" id="loader-mask" role="status" aria-live="polite" style="display: none;">
     <div class="loader-content">
-      <div class="spinner"></div>
+      <div class="spinner" aria-hidden="true"></div>
       <p id="loader-text">天才少女正在為主人召喚漫畫中...</p>
       <div class="loader-progress" id="loader-progress" style="display: none;">
         <span id="loader-progress-bar"></span>

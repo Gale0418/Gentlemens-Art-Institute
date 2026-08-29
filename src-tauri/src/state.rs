@@ -172,6 +172,12 @@ impl AppState {
     }
 }
 
+impl Default for AppState {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::OnlineServicesConfig;
@@ -189,11 +195,5 @@ mod tests {
             ..Default::default()
         };
         assert!(invalid.validate().is_err());
-    }
-}
-
-impl Default for AppState {
-    fn default() -> Self {
-        Self::new()
     }
 }

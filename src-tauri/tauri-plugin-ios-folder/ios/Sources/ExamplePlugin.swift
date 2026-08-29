@@ -19,7 +19,7 @@ class EnsureAvailableArgs: Decodable {
 class ExamplePlugin: Plugin, UIDocumentPickerDelegate {
   var activePickers: [UIDocumentPickerViewController: Invoke] = [:]
   var activeAccesses: [String: URL] = [:]
-  private let accessQueue = DispatchQueue(label: "com.windsheep.comicreader.security-scope")
+  private let accessQueue = DispatchQueue(label: "com.windsheep.gai.security-scope")
 
   @objc public func pickFolder(_ invoke: Invoke) throws {
     DispatchQueue.main.async {
@@ -167,7 +167,7 @@ class ExamplePlugin: Plugin, UIDocumentPickerDelegate {
           }
           if values.ubiquitousItemDownloadingStatus == .notDownloaded {
             throw NSError(
-              domain: "com.windsheep.comicreader",
+              domain: "com.windsheep.gai",
               code: 408,
               userInfo: [NSLocalizedDescriptionKey: "Timed out waiting for iCloud download"]
             )

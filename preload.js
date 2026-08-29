@@ -9,7 +9,7 @@ contextBridge.exposeInMainWorld('electronAPI', {
   getScanStatus: () => ipcRenderer.invoke('get-scan-status'),
   scanLibrary: () => ipcRenderer.invoke('scan-library'),
 
-  // 打開與關閉漫畫（回傳 { id, title, pages: ['comic://page/...'], progress }）
+  // 打開與關閉漫畫（回傳 { id, title, pages: ['gai://page/...'], progress }）
   openComic: (id) => ipcRenderer.invoke('open-comic', id),
   closeComic: () => ipcRenderer.invoke('close-comic'),
 

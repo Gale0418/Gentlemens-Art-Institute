@@ -1,4 +1,4 @@
 [build]
 # Keep build artefacts on a local filesystem with file locking. The checkout
 # may live on /Volumes/MyGame, which does not support Cargo incremental locks.
-target-dir = "/tmp/comic-cargo-target"
+target-dir = "/tmp/gai-cargo-target"

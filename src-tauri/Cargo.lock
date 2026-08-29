@@ -128,38 +128,6 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "7f202df86484c868dbad7eaa557ef785d5c66295e41b460ef922eca0723b842c"
 
 [[package]]
-name = "app"
-version = "1.0.0"
-dependencies = [
- "base64 0.22.1",
- "blake3",
- "cap-std",
- "chardetng",
- "chrono",
- "encoding_rs",
- "log",
- "mime_guess",
- "natord",
- "quick-xml 0.38.4",
- "rayon",
- "reqwest 0.12.28",
- "rusqlite",
- "serde",
- "serde_json",
- "smb2",
- "tauri",
- "tauri-build",
- "tauri-plugin-dialog",
- "tauri-plugin-ios-folder",
- "tauri-plugin-log",
- "tokio",
- "trash",
- "uuid",
- "walkdir",
- "zip",
-]
-
-[[package]]
 name = "arrayvec"
 version = "0.7.7"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1417,6 +1385,38 @@ dependencies = [
  "memchr",
  "pin-project-lite",
  "slab",
+]
+
+[[package]]
+name = "gai"
+version = "1.0.0"
+dependencies = [
+ "base64 0.22.1",
+ "blake3",
+ "cap-std",
+ "chardetng",
+ "chrono",
+ "encoding_rs",
+ "log",
+ "mime_guess",
+ "natord",
+ "quick-xml 0.38.4",
+ "rayon",
+ "reqwest 0.12.28",
+ "rusqlite",
+ "serde",
+ "serde_json",
+ "smb2",
+ "tauri",
+ "tauri-build",
+ "tauri-plugin-dialog",
+ "tauri-plugin-ios-folder",
+ "tauri-plugin-log",
+ "tokio",
+ "trash",
+ "uuid",
+ "walkdir",
+ "zip",
 ]
 
 [[package]]

@@ -1,7 +1,7 @@
 {
-  "name": "comic-reader",
+  "name": "gai",
   "version": "1.0.0",
-  "description": "A beautiful local comic reader — 少女漫畫閣",
+  "description": "A beautiful local comic reader — 紳士藝術研究所 Gentlemen's Art Institute",
   "main": "main.js",
   "type": "module",
   "scripts": {
@@ -25,8 +25,8 @@
     "electron-builder": "^26.8.1"
   },
   "build": {
-    "appId": "com.windsheep.comicreader",
-    "productName": "少女漫畫閣",
+    "appId": "com.windsheep.gai",
+    "productName": "紳士藝術研究所 Gentlemen's Art Institute",
     "asar": true,
     "mac": {
       "category": "public.app-category.entertainment",

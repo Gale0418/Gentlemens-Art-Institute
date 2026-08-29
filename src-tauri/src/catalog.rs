@@ -321,8 +321,31 @@ impl CatalogStore {
         });
         self.with_connection(|connection| {
             let tx = connection.transaction().map_err(|error| error.to_string())?;
-            let source_ids = prepared.iter().map(|(comic, _, _, _)| comic.source_id.as_str()).collect::<BTreeSet<_>>();
-            for source_id in source_ids { tx.execute("UPDATE comic_locations SET online = 0 WHERE source_id = ?1", [source_id]).map_err(|error| error.to_string())?; }
+            let source_ids = prepared
+                .iter()
+                .map(|(comic, _, _, _)| comic.source_id.clone())
+                .collect::<BTreeSet<_>>();
+            if source_ids.iter().any(|source_id| source_id.starts_with("local:")) {
+                // The app has one active local library root. When macOS remounts the
+                // same NAS under a different path, retire every previous root before
+                // the current locations are upserted below. Historical locations stay
+                // in SQLite, so metadata/progress are never discarded.
+                tx.execute(
+                    "UPDATE comic_locations SET online = 0 WHERE source_id = 'local' OR source_id LIKE 'local:%'",
+                    [],
+                )
+                .map_err(|error| error.to_string())?;
+            }
+            for source_id in source_ids
+                .iter()
+                .filter(|source_id| *source_id != "local" && !source_id.starts_with("local:"))
+            {
+                tx.execute(
+                    "UPDATE comic_locations SET online = 0 WHERE source_id = ?1",
+                    [source_id],
+                )
+                .map_err(|error| error.to_string())?;
+            }
             let mut affected = BTreeSet::new();
             for (comic, signature, fingerprint, parse) in prepared {
                 let (comic_id, fingerprint_collision) =
@@ -355,7 +378,11 @@ impl CatalogStore {
         })
     }
 
-    pub fn overlay_library(&self, mut items: Vec<ComicItem>) -> Result<Vec<ComicItem>, String> {
+    pub fn overlay_library(
+        &self,
+        mut items: Vec<ComicItem>,
+        catalog_only_sources: &BTreeSet<String>,
+    ) -> Result<Vec<ComicItem>, String> {
         self.with_connection(|connection| {
             let mut statement = connection.prepare(
                 "SELECT l.runtime_id,c.title,c.series,l.online,l.last_seen_at,l.relative_path,l.actual_path,l.kind,l.source_id
@@ -383,6 +410,7 @@ impl CatalogStore {
             }
             for (runtime_id, title, series, online, last_seen_at, relative_path, actual_path, kind, source_id) in metadata.into_values() {
                 if present.contains(&runtime_id) { continue; }
+                if !catalog_only_sources.contains(&source_id) { continue; }
                 let Some(actual_path) = actual_path else { continue };
                 let ext = Path::new(&actual_path).extension().and_then(|value| value.to_str()).map(|value| format!(".{value}")).unwrap_or_default();
                 let item_type = if online {
@@ -406,6 +434,66 @@ impl CatalogStore {
                 });
             }
             Ok(items)
+        })
+    }
+
+    pub fn get_runtime_item(&self, identifier: &str) -> Result<Option<ComicItem>, String> {
+        self.with_connection(|connection| {
+            connection
+                .query_row(
+                    "SELECT l.runtime_id,c.title,c.series,l.online,l.last_seen_at,l.relative_path,l.actual_path,l.kind,l.source_id
+                     FROM comic_locations l JOIN comics c ON c.id=l.comic_id
+                     WHERE l.runtime_id=?1 OR l.comic_id=?1
+                     ORDER BY l.online DESC,l.last_seen_at DESC LIMIT 1",
+                    [identifier],
+                    |row| {
+                        let runtime_id = row.get::<_, String>(0)?;
+                        let title = row.get::<_, String>(1)?;
+                        let series = row.get::<_, Option<String>>(2)?;
+                        let online = row.get::<_, i64>(3)? != 0;
+                        let updated_at = row.get::<_, String>(4)?;
+                        let relative_path = row.get::<_, String>(5)?;
+                        let actual_path = row.get::<_, Option<String>>(6)?;
+                        let kind = row.get::<_, String>(7)?;
+                        let source_id = row.get::<_, String>(8)?;
+                        let ext = actual_path
+                            .as_deref()
+                            .and_then(|path| Path::new(path).extension())
+                            .and_then(|value| value.to_str())
+                            .map(|value| format!(".{value}"))
+                            .unwrap_or_default();
+                        let item_type = if online {
+                            if kind == "folder" {
+                                "external-folder"
+                            } else {
+                                "external-archive"
+                            }
+                        } else {
+                            "offline"
+                        };
+                        Ok(ComicItem {
+                            id: runtime_id,
+                            r#type: item_type.into(),
+                            relative_path,
+                            ext,
+                            title,
+                            series: series.unwrap_or_else(|| "未分類".into()),
+                            updated_at,
+                            page_count: 0,
+                            progress: crate::state::Progress {
+                                current_page: 0,
+                                total_pages: 0,
+                                percent: 0.0,
+                                updated_at: None,
+                            },
+                            source_id,
+                            source_path: actual_path,
+                            external_bookmark: None,
+                        })
+                    },
+                )
+                .optional()
+                .map_err(|error| error.to_string())
         })
     }
 
@@ -2017,7 +2105,8 @@ mod tests {
         item.source_path = Some("/Volumes/Comics/作者/a.zip".into());
         store.sync_library(&[item]).unwrap();
 
-        let shelf = store.overlay_library(Vec::new()).unwrap();
+        let active_sources = BTreeSet::from(["local:root-a".to_string()]);
+        let shelf = store.overlay_library(Vec::new(), &active_sources).unwrap();
         assert_eq!(shelf.len(), 1);
         assert_eq!(shelf[0].id, "relative-runtime");
         assert_eq!(shelf[0].title, "a");
@@ -2026,6 +2115,112 @@ mod tests {
             shelf[0].source_path.as_deref(),
             Some("/Volumes/Comics/作者/a.zip")
         );
+        let resolved = store.get_runtime_item("relative-runtime").unwrap().unwrap();
+        assert_eq!(resolved.id, "relative-runtime");
+        assert_eq!(resolved.r#type, "external-archive");
+    }
+
+    #[test]
+    fn catalog_overlay_does_not_mix_inactive_library_roots() {
+        let store = store("overlay_source_scope");
+        let mut old = comic("old-runtime", "old/book.zip");
+        old.source_id = "local:old-root".into();
+        old.source_path = Some("/Volumes/Old/old/book.zip".into());
+        store.sync_library(&[old]).unwrap();
+
+        let mut current = comic("current-runtime", "current/book.zip");
+        current.source_id = "local:current-root".into();
+        current.source_path = Some("/Volumes/Current/current/book.zip".into());
+        store.sync_library(&[current]).unwrap();
+
+        let active_sources = BTreeSet::from(["local:current-root".to_string()]);
+        let shelf = store.overlay_library(Vec::new(), &active_sources).unwrap();
+        assert_eq!(shelf.len(), 1);
+        assert_eq!(shelf[0].id, "current-runtime");
+    }
+
+    #[test]
+    fn local_root_drift_rebinds_unique_fingerprint_and_retires_old_location() {
+        let store = store("local_root_drift");
+        let archive = std::env::temp_dir().join(format!(
+            "comic_root_drift_{}_{}.zip",
+            std::process::id(),
+            uuid::Uuid::new_v4()
+        ));
+        std::fs::write(&archive, b"same comic bytes across a remounted volume").unwrap();
+
+        let mut old = comic("stable-runtime", "A1/book.zip");
+        old.source_id = "local:old-root".into();
+        old.source_path = Some(archive.to_string_lossy().into_owned());
+        store.sync_library(&[old]).unwrap();
+
+        let mut current = comic("stable-runtime", "A1/book.zip");
+        current.source_id = "local:new-root".into();
+        current.source_path = Some(archive.to_string_lossy().into_owned());
+        store.sync_library(&[current]).unwrap();
+
+        store
+            .with_connection(|connection| {
+                let comic_count: i64 = connection
+                    .query_row("SELECT COUNT(*) FROM comics", [], |row| row.get(0))
+                    .map_err(|error| error.to_string())?;
+                let old_online: i64 = connection
+                    .query_row(
+                        "SELECT online FROM comic_locations WHERE source_id='local:old-root'",
+                        [],
+                        |row| row.get(0),
+                    )
+                    .map_err(|error| error.to_string())?;
+                let new_online: i64 = connection
+                    .query_row(
+                        "SELECT online FROM comic_locations WHERE source_id='local:new-root'",
+                        [],
+                        |row| row.get(0),
+                    )
+                    .map_err(|error| error.to_string())?;
+                assert_eq!(comic_count, 1);
+                assert_eq!(old_online, 0);
+                assert_eq!(new_online, 1);
+                Ok(())
+            })
+            .unwrap();
+        std::fs::remove_file(archive).unwrap();
+    }
+
+    #[test]
+    fn mixed_local_and_external_sync_retires_stale_external_locations() {
+        let store = store("mixed_source_retirement");
+        let mut old_smb = comic("old-smb", "old.zip");
+        old_smb.source_id = "smb".into();
+        store.sync_library(&[old_smb]).unwrap();
+
+        let mut local = comic("current-local", "local.zip");
+        local.source_id = "local:current-root".into();
+        let mut current_smb = comic("current-smb", "current.zip");
+        current_smb.source_id = "smb".into();
+        store.sync_library(&[local, current_smb]).unwrap();
+
+        store
+            .with_connection(|connection| {
+                let old_online: i64 = connection
+                    .query_row(
+                        "SELECT online FROM comic_locations WHERE source_id='smb' AND relative_path='old.zip'",
+                        [],
+                        |row| row.get(0),
+                    )
+                    .map_err(|error| error.to_string())?;
+                let current_online: i64 = connection
+                    .query_row(
+                        "SELECT online FROM comic_locations WHERE source_id='smb' AND relative_path='current.zip'",
+                        [],
+                        |row| row.get(0),
+                    )
+                    .map_err(|error| error.to_string())?;
+                assert_eq!(old_online, 0);
+                assert_eq!(current_online, 1);
+                Ok(())
+            })
+            .unwrap();
     }
 
     #[test]
@@ -2153,7 +2348,7 @@ mod tests {
             samples.push(started.elapsed());
         }
         samples.sort();
-        if std::env::var_os("COMIC_PERF_TEST").is_some() {
+        if std::env::var_os("GAI_PERF_TEST").is_some() {
             assert!(
                 samples[18] < Duration::from_millis(200),
                 "p95 was {:?}",

@@ -10,8 +10,8 @@ configs:
 settingGroups:
   app:
     base:
-      PRODUCT_NAME: 少女漫畫閣
-      PRODUCT_BUNDLE_IDENTIFIER: com.windsheep.comicreader
+      PRODUCT_NAME: "紳士藝術研究所 Gentlemen's Art Institute"
+      PRODUCT_BUNDLE_IDENTIFIER: com.windsheep.gai
 targetTemplates:
   app:
     type: application

@@ -1,5 +1,5 @@
 ---
-name: 少女漫畫閣
+name: 紳士藝術研究所 Gentlemen's Art Institute
 description: 深色、沉浸且可長時間操作的私人漫畫收藏工作台
 colors:
   midnight-canvas: "#140508"
@@ -55,13 +55,13 @@ components:
     padding: "16px"
 ---
 
-# Design System: 少女漫畫閣
+# Design System: 紳士藝術研究所 Gentlemen's Art Institute
 
 ## Overview
 
 **Creative North Star: "深夜私人藏書室"**
 
-少女漫畫閣把大型私人收藏呈現成一座安靜但有生命的深夜藏書室：內容永遠是主體，控制區則像可靠的整理桌。預設 Midnight 主題以酒紅黑、暖紅主操作與低亮度文字層級維持沉浸感；Sakura、Ink 與 Aurora 是同一結構的換裝，而不是各自另造元件。
+紳士藝術研究所 Gentlemen's Art Institute 把大型私人收藏呈現成一座安靜但有生命的深夜藏書室：內容永遠是主體，控制區則像可靠的整理桌。預設 Midnight 主題以酒紅黑、暖紅主操作與低亮度文字層級維持沉浸感；Sakura、Ink 與 Aurora 是同一結構的換裝，而不是各自另造元件。
 
 介面密度偏工作型，但群組、標題和狀態要清楚。整理模式直接延伸既有書架，批次列貼近選取內容，metadata inspector 沿用右側閱讀順序。
 

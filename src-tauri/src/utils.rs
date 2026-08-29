@@ -104,7 +104,7 @@ mod tests {
     use std::io::Write;
 
     fn temp_zip_path(name: &str) -> PathBuf {
-        std::env::temp_dir().join(format!("comic-reader-{name}-{}.zip", std::process::id()))
+        std::env::temp_dir().join(format!("gai-{name}-{}.zip", std::process::id()))
     }
 
     #[test]

@@ -27,6 +27,9 @@ const iosFolderPlugin = readRequiredFile(
   'iOS folder plugin'
 );
 const scanner = readRequiredFile('src-tauri/src/scanner.rs', 'Tauri scanner');
+const catalog = readRequiredFile('src-tauri/src/catalog.rs', 'SQLite catalog');
+const tauriApi = readRequiredFile('public/tauri-api.js', 'Tauri frontend bridge');
+const capabilities = readRequiredFile('src-tauri/capabilities/default.json', 'Tauri capabilities');
 
 const mustContain = (source, needle, label) => {
   assert.ok(source.includes(needle), `${label}: missing ${needle}`);
@@ -39,12 +42,25 @@ mustContain(html, 'id="catalog-load-more"', 'bounded catalog rendering');
 mustContain(html, 'id="organize-inbox"', 'low-confidence organizer inbox');
 mustContain(html, 'id="organize-duplicates"', 'duplicate candidate review');
 mustContain(html, 'id="btn-ai-explain"', 'single-page AI explanation action');
-mustContain(html, 'id="btn-ai-suggest"', 'single-page AI metadata candidate action');
+mustContain(html, 'id="btn-ai-auto-explain"', 'cost-bounded whole-book read-along action');
+mustContain(app, 'data-inspector-action="ai-suggest"', 'catalog AI metadata candidate action');
+mustContain(app, 'AI 建議摘要與標籤', 'clear AI metadata candidate label');
+mustContain(html, 'class="reader-rotate-icon"', 'unambiguous reader rotation icons');
 mustContain(html, 'id="ai-api-key"', 'manual AI provider key input');
+mustContain(html, 'id="scan-dir-status"', 'native folder picker status');
+mustContain(html, 'id="library-source-alert"', 'offline library recovery status');
+mustContain(html, 'id="library-source-settings-btn"', 'offline library recovery action');
 mustContain(tauri, '"gpt-5.6-luna"', 'fixed low-cost Luna model');
 mustContain(tauri, '"gemma-4-26b-a4b-it"', 'fixed free-tier Gemma 4 model');
 mustContain(tauri, 'suggest_comic_metadata', 'AI metadata candidate command');
-mustContain(app, 'suggestCurrentPageMetadata', 'AI metadata candidate handler');
+mustContain(tauriApi, "invoke('plugin:dialog|open'", 'native folder picker command');
+mustContain(tauriApi, 'directory: true', 'folder-only native picker');
+mustContain(tauriApi, 'defaultPath: defaultPath || undefined', 'native picker starts from current library');
+mustContain(capabilities, 'dialog:allow-open', 'native open-dialog permission');
+mustContain(tauri, 'fn gemma_response_text', 'Gemma final-answer filtering');
+mustContain(tauri, '"thinkingLevel": "minimal"', 'cost-bounded Gemma reasoning');
+mustContain(tauri, 'gemma-4-31b-it', 'single Gemma quota fallback');
+mustContain(app, 'suggestInspectorMetadata', 'catalog AI metadata candidate handler');
 assert.doesNotMatch(
   app,
   /localStorage\.setItem\([^\n]*api[-_ ]?key/i,
@@ -69,8 +85,8 @@ assert.match(
   /schedule_catalog_sync\([\s\S]{0,240}generation: u64[\s\S]{0,900}scan_generation[\s\S]{0,240}!= generation[\s\S]{0,120}return;/,
   'queued catalog sync should reject stale scan generations'
 );
-mustContain(tauriConfig, 'com.windsheep.comicreader', 'Tauri bundle identifier');
-mustContain(appleProject, 'com.windsheep.comicreader', 'Apple bundle identifier');
+mustContain(tauriConfig, 'com.windsheep.gai', 'Tauri bundle identifier');
+mustContain(appleProject, 'com.windsheep.gai', 'Apple bundle identifier');
 mustContain(cargoManifest, 'wry = { path = "vendor/wry" }', 'local Wry patch');
 assert.match(
   patchedWry,
@@ -87,7 +103,12 @@ mustContain(html, 'id="comic-grid" tabindex="-1"', 'library focus target');
 mustContain(html, 'id="reader-context-menu"', 'reader context menu');
 mustContain(html, 'id="theme-picker"', 'theme picker');
 mustContain(html, 'viewport-fit=cover', 'iPad safe-area viewport');
-mustContain(html, 'class="tablet-collections"', 'tablet collection shortcuts');
+mustContain(html, 'id="series-filter-list"', 'desktop series sidebar');
+mustContain(html, 'id="series-filter-select"', 'compact series filter');
+assert.doesNotMatch(html, /data-filter-shortcut=/, 'duplicate smart collection buttons should be removed');
+assert.doesNotMatch(html, /id="smb-setup-btn-header"/, 'SMB setup should live in settings only');
+mustContain(html, 'id="fallback-folder-browser"', 'web-only folder browser fallback');
+mustContain(app, "elements.fallbackFolderBrowser.style.display = 'none'", 'native builds hide duplicate folder browser');
 mustContain(html, 'role="dialog" aria-modal="true" aria-labelledby="reader-comic-title"', 'reader dialog semantics');
 mustContain(html, 'role="dialog" aria-modal="true" aria-labelledby="settings-title"', 'settings dialog semantics');
 assert.equal(
@@ -121,6 +142,12 @@ mustContain(css, 'env(safe-area-inset-bottom)', 'safe-area adaptation');
 mustContain(app, 'function jumpToFirstPage()', 'keyboard navigation');
 mustContain(app, 'function jumpToLastPage()', 'keyboard navigation');
 mustContain(app, 'function handleReaderPointerClick', 'mouse navigation');
+mustContain(app, "#ai-page-panel", 'AI panel reader-navigation boundary');
+mustContain(app, 'function readerImageFitScale', 'rotation-aware reader fitting');
+mustContain(app, 'function replaceReaderImages', 'reader transform refresh after image mount');
+mustContain(app, 'function scheduleAutoPageExplanation', 'latest-page-only read-along queue');
+mustContain(app, 'RESOURCE_EXHAUSTED', 'AI quota exhaustion should stop read-along retries');
+mustContain(css, '.ai-page-panel.reader-rotated', 'lying-down AI panel orientation');
 mustContain(app, 'function handleReaderContextMenu', 'mouse context menu');
 mustContain(app, 'function handleReaderAuxClick', 'mouse side buttons');
 mustContain(app, 'state._smbLoaderTimer = null;', 'SMB loader timer cleanup');
@@ -136,10 +163,32 @@ mustContain(app, 'decoding = \'async\'', 'async image decoding');
 mustContain(app, 'fetchPriority = \'low\'', 'low-priority noncritical images');
 mustContain(app, 'function showLoaderProgress', 'loader progress UI');
 mustContain(app, 'function setLoaderProgress', 'loader progress UI');
+mustContain(css, 'pointer-events: none', 'background work status must not block interaction');
+assert.match(
+  app,
+  /async function fetchLibrary\(\)[\s\S]*if \(scanStillRunning && !failed\)[\s\S]*updateLoaderScanProgress\(latestScanStatus\);[\s\S]*state\.loaderHideTimer = window\.setTimeout\(hideLoader, 6000\);[\s\S]*hideLoader\(\);[\s\S]*\}/,
+  'library loading must keep background scan status visible until completion'
+);
+assert.match(
+  app,
+  /function updateLoaderScanProgress\(status\)[\s\S]{0,420}if \(!status\.isScanning\)[\s\S]{0,220}stopScanStatusPolling\(\)[\s\S]{0,220}setTimeout\(hideLoader, 250\)/,
+  'scan status polling must dismiss the loader when no library-changed event is emitted'
+);
+assert.match(
+  app,
+  /if \(!elements\.seriesFilterSelect\.value\) \{\s*state\.activeSeries = 'all';\s*state\.currentPath = '';\s*\}/,
+  'missing series selections must reset both series and path filters'
+);
+assert.doesNotMatch(
+  html,
+  /class="filter-btn organize-toggle"/,
+  'organizer toggle must not trigger the library filter handler'
+);
 mustContain(app, 'function applyTheme', 'theme switching');
 mustContain(app, 'function setOrganizeMode', 'catalog organizer behavior');
 mustContain(app, "document.createElement(state.organizeMode && !comic.isDirectory ? 'button' : 'div')", 'organizer cards use native accessible buttons');
 mustContain(css, '.comic-card.organize-selectable', 'organizer accessible button reset');
+mustContain(css, '.comic-card.source-offline', 'offline comic styling');
 mustContain(app, 'function applyOrganizerBatch', 'batch metadata behavior');
 mustContain(app, 'function refreshCatalogSearch', 'SQLite catalog search behavior');
 mustContain(app, 'function showOrganizerInbox', 'low-confidence inbox behavior');
@@ -152,16 +201,19 @@ mustContain(app, 'state.filteredComics.slice(0, state.renderLimit)', 'bounded ca
 mustContain(app, 'function bindKeyboardActivation', 'keyboard activation helper');
 mustContain(app, 'function configureInteractiveItem', 'dynamic interactive semantics');
 mustContain(app, "setAttribute('aria-pressed'", 'pressed state semantics');
-mustContain(app, "const THEME_STORAGE_KEY = 'comic-reader:theme'", 'theme persistence');
+mustContain(app, "const THEME_STORAGE_KEY = 'gai:theme'", 'theme persistence');
 mustContain(app, 'function getCoverUrl(comicId)', 'cross-runtime cover routing');
 mustContain(app, "`/api/cover?id=${encodedId}`", 'browser cover routing');
-mustContain(app, '`comic://cover/${encodedId}`', 'desktop cover routing');
+mustContain(app, '`gai://cover/${encodedId}`', 'desktop cover routing');
 mustContain(app, '!img.getAttribute(\'src\')', 'webtoon lazy image detection');
 mustContain(app, 'img.removeAttribute(\'src\')', 'reader preload cleanup');
 mustContain(app, 'renderGeneration', 'reader render invalidation');
 mustContain(app, 'async function clearSmbConfig()', 'SMB cleanup');
 mustContain(app, 'RAM 預載略過，將改為逐頁讀取', 'preload error fallback');
 mustContain(scanner, 'external_bookmark: external_bookmark.map(str::to_owned)', 'bookmark ownership');
+mustContain(scanner, 'store.mark_source_offline(&source_id)', 'missing local source retention');
+mustContain(catalog, "source_id LIKE 'local:%'", 'local root drift retirement');
+mustContain(tauri, 'store.get_runtime_item(&lookup_id)', 'catalog-only reader recovery');
 mustContain(tauri, 'search_catalog', 'catalog search command');
 mustContain(tauri, 'apply_batch_metadata', 'catalog batch command');
 mustContain(tauri, 'preview_catalog_import', 'catalog import preview command');
@@ -172,7 +224,7 @@ mustContain(html, 'id="loader-progress"', 'loader progress UI');
 mustContain(css, '.loader-progress', 'loader progress styling');
 mustContain(server, 'folderImageListCache', 'folder image list cache');
 mustContain(server, 'function getCachedFolderImageFiles', 'folder image list cache');
-mustContain(server, 'process.env.COMIC_BASE_DIR', 'server base dir');
+mustContain(server, 'process.env.GAI_BASE_DIR', 'server base dir');
 const main = readRequiredFile('main.js', 'main script');
 mustContain(main, 'folderImageListCache', 'electron folder image list cache');
 mustContain(main, 'function getCachedFolderImages', 'electron folder image list cache');
@@ -188,7 +240,7 @@ assert.match(
 );
 assert.match(
   app,
-  /await window\.electronAPI\.setBookmarks\(bookmarks\);[\s\S]{0,180}localStorage\.setItem\('comic-reader:externalBookmarks'/,
+  /await window\.electronAPI\.setBookmarks\(bookmarks\);[\s\S]{0,180}localStorage\.setItem\('gai:externalBookmarks'/,
   'external bookmarks should persist only after backend activation succeeds'
 );
 assert.match(
@@ -198,7 +250,7 @@ assert.match(
 );
 assert.doesNotMatch(
   server,
-  /const BASE_DIR = '\/Volumes\/MyGame\/comic'/,
+  /const BASE_DIR = '\/Volumes\/MyGame\/G\.A\.I'/,
   'server should not hard-code a macOS-only base directory'
 );
 
@@ -239,7 +291,7 @@ assert.match(
 );
 
 assert.equal(
-  (app.match(/comic:\/\/cover\//g) || []).length,
+  (app.match(/gai:\/\/cover\//g) || []).length,
   1,
   'all cover consumers should route through getCoverUrl'
 );
@@ -269,7 +321,7 @@ assert.match(
 );
 assert.match(
   tauri,
-  /comic:\/\/folder\/\{\}\/\{\}", id, i/,
+  /gai:\/\/folder\/\{\}\/\{\}", id, i/,
   'folder pages should use comic id as capability token'
 );
 assert.match(

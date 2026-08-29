@@ -5,7 +5,7 @@ use std::sync::Arc;
 
 pub const IMAGE_EXTENSIONS: [&str; 6] = [".jpg", ".jpeg", ".png", ".gif", ".webp", ".avif"];
 
-fn local_source_id(root: &Path) -> String {
+pub(crate) fn local_source_id(root: &Path) -> String {
     format!(
         "local:{}",
         general_purpose::URL_SAFE_NO_PAD.encode(root.to_string_lossy().as_bytes())
@@ -49,6 +49,70 @@ async fn schedule_catalog_sync(
 }
 
 pub async fn start_background_scan(state: Arc<AppState>, app_handle: tauri::AppHandle) {
+    let unavailable = {
+        let _scan_lifecycle = state.scan_lifecycle.lock().await;
+        let configured_dir = { state.scan_dir.read().unwrap().clone() };
+        if configured_dir.is_empty() {
+            return;
+        }
+        if Path::new(&configured_dir).exists() {
+            None
+        } else {
+            let generation = state
+                .scan_generation
+                .fetch_add(1, std::sync::atomic::Ordering::SeqCst)
+                + 1;
+            {
+                let mut comics = state.comics.lock().await;
+                comics.clear();
+            }
+            {
+                let mut progress = state.scan_progress.lock().await;
+                progress.is_scanning = false;
+                progress.found = 0;
+                progress.current_path = configured_dir.clone();
+                progress.started_at = Some(chrono::Utc::now().to_rfc3339());
+                progress.completed_at = Some(chrono::Utc::now().to_rfc3339());
+            }
+            Some((configured_dir, generation))
+        }
+    };
+    if let Some((configured_dir, generation)) = unavailable {
+        let store = state
+            .catalog
+            .read()
+            .ok()
+            .and_then(|catalog| catalog.clone());
+        let mut is_current = false;
+        if let Some(store) = store {
+            let source_id = local_source_id(Path::new(&configured_dir));
+            let _catalog_sync = state.catalog_sync.lock().await;
+            is_current = state
+                .scan_generation
+                .load(std::sync::atomic::Ordering::Acquire)
+                == generation;
+            if is_current {
+                match tokio::task::spawn_blocking(move || store.mark_source_offline(&source_id))
+                    .await
+                {
+                    Ok(Ok(count)) => println!("📴 漫畫來源離線，保留 {count} 個位置記錄"),
+                    Ok(Err(error)) => eprintln!("⚠️ 標記離線來源失敗：{error}"),
+                    Err(error) => eprintln!("⚠️ 離線來源背景工作失敗：{error}"),
+                }
+                is_current = state
+                    .scan_generation
+                    .load(std::sync::atomic::Ordering::Acquire)
+                    == generation;
+            }
+        }
+        if is_current {
+            use tauri::Emitter;
+            let _ = app_handle.emit("library-changed", 0usize);
+            let _ = app_handle.emit("catalog-changed", 0usize);
+        }
+        return;
+    }
+
     // Serialize only scan generation/state coordination; filesystem scanning stays outside this lock.
     let (scan_dir, my_gen) = {
         let _scan_lifecycle = state.scan_lifecycle.lock().await;

@@ -12,11 +12,11 @@ jobs:
         working-directory: src-tauri
     steps:
       - uses: actions/checkout@v4
-      - uses: dtolnay/rust-toolchain@stable
+      - uses: dtolnay/rust-toolchain@1.98.0
         with:
           components: rustfmt, clippy
       - name: fmt
-        run: cargo fmt --package app -- --check
+        run: cargo fmt --package gai -- --check
       - name: test
         run: cargo test --lib
       - name: clippy

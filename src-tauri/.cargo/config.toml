@@ -1,5 +1,5 @@
 [build]
-target-dir = "/tmp/comic-target"
+target-dir = "/tmp/gai-cargo-target"
 
 [env]
 CARGO_INCREMENTAL = "0"

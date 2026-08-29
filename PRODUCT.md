@@ -12,7 +12,7 @@ web
 
 ## Product Purpose
 
-少女漫畫閣是一套 local-first、NAS-first 的私人漫畫書架與閱讀器。成功代表使用者不必搬動或改寫原始漫畫檔，也能為大量收藏建立可搜尋、可維護且離線仍保留的整理資料。
+紳士藝術研究所 Gentlemen's Art Institute 是一套 local-first、NAS-first 的私人漫畫書架與閱讀器。成功代表使用者不必搬動或改寫原始漫畫檔，也能為大量收藏建立可搜尋、可維護且離線仍保留的整理資料。
 
 ## Positioning
 
@@ -35,7 +35,7 @@ web
 
 ## Brand Commitments
 
-- 產品名稱為「少女漫畫閣」。
+- 產品名稱為「紳士藝術研究所 Gentlemen's Art Institute」。
 - 保留深色主題系統（預設 Midnight，另有 Sakura／Ink／Aurora）、Archive Red（#ff3d54）主操作色、精緻但熟悉的工作型介面與繁體中文語氣。
 
 ## Evidence on Hand

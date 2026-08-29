@@ -1,8 +1,8 @@
 {
   "$schema": "../node_modules/@tauri-apps/cli/config.schema.json",
-  "productName": "少女漫畫閣",
+  "productName": "紳士藝術研究所 Gentlemen's Art Institute",
   "version": "1.0.0",
-  "identifier": "com.windsheep.comicreader",
+  "identifier": "com.windsheep.gai",
   "build": {
     "frontendDist": "../public"
   },
@@ -10,7 +10,7 @@
     "withGlobalTauri": true,
     "windows": [
       {
-        "title": "少女漫畫閣",
+        "title": "紳士藝術研究所 Gentlemen's Art Institute",
         "width": 800,
         "height": 600,
         "resizable": true,
@@ -18,7 +18,7 @@
       }
     ],
     "security": {
-      "csp": "default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; font-src 'self'; connect-src 'self' comic: http://localhost:4000; img-src 'self' comic: http://localhost:4000 data: blob:; object-src 'none'; base-uri 'self';"
+      "csp": "default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; font-src 'self'; connect-src 'self' gai: http://localhost:4000; img-src 'self' gai: http://localhost:4000 data: blob:; object-src 'none'; base-uri 'self';"
     }
   },
   "bundle": {

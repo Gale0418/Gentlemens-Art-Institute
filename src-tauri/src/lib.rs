@@ -12,6 +12,52 @@ use std::io::Write;
 use std::sync::Arc;
 use tauri::{AppHandle, Manager, State};
 
+const SCAN_DIRECTORY_SETTINGS_FILE: &str = "scan-directory.txt";
+
+fn register_comic_capability(comics: &mut Vec<ComicItem>, item: &ComicItem) {
+    if !comics.iter().any(|comic| comic.id == item.id) {
+        comics.push(item.clone());
+    }
+}
+
+fn validate_scan_directory(input: &str) -> Result<String, String> {
+    let trimmed = input.trim();
+    let path = std::path::Path::new(trimmed);
+    if trimmed.is_empty() || !path.is_absolute() {
+        return Err("漫畫目錄必須是非空白的絕對路徑".into());
+    }
+
+    let resolved = path.canonicalize().unwrap_or_else(|_| path.to_path_buf());
+    let volumes_root = std::path::Path::new("/Volumes");
+    let is_volume_root = resolved.parent() == Some(volumes_root);
+    let is_home = std::env::var_os("HOME")
+        .map(std::path::PathBuf::from)
+        .is_some_and(|home| resolved == home);
+    if resolved.parent().is_none() || resolved == volumes_root || is_volume_root || is_home {
+        return Err("為避免掃描整台電腦，請選擇磁碟內實際存放漫畫的子資料夾".into());
+    }
+    Ok(trimmed.to_string())
+}
+
+fn persist_scan_directory(app_handle: &AppHandle, scan_dir: &str) -> Result<(), String> {
+    let settings_dir = app_handle
+        .path()
+        .app_local_data_dir()
+        .map_err(|error| format!("無法取得 App 設定目錄：{error}"))?;
+    std::fs::create_dir_all(&settings_dir)
+        .map_err(|error| format!("無法建立 App 設定目錄：{error}"))?;
+    std::fs::write(
+        settings_dir.join(SCAN_DIRECTORY_SETTINGS_FILE),
+        scan_dir.as_bytes(),
+    )
+    .map_err(|error| format!("無法儲存漫畫目錄設定：{error}"))
+}
+
+fn load_persisted_scan_directory(settings_dir: &std::path::Path) -> Option<String> {
+    let saved = std::fs::read_to_string(settings_dir.join(SCAN_DIRECTORY_SETTINGS_FILE)).ok()?;
+    validate_scan_directory(&saved).ok()
+}
+
 fn catalog_store(state: &State<'_, Arc<AppState>>) -> Result<catalog::CatalogStore, String> {
     state
         .catalog
@@ -236,9 +282,16 @@ async fn get_library(state: State<'_, Arc<AppState>>) -> Result<Vec<ComicItem>, 
     let mut items = comics.clone();
     drop(comics);
     if let Ok(store) = catalog_store(&state) {
-        items = tokio::task::spawn_blocking(move || store.overlay_library(items))
-            .await
-            .map_err(|error| error.to_string())??;
+        let mut catalog_only_sources = std::collections::BTreeSet::new();
+        let scan_dir = state.scan_dir.read().unwrap().clone();
+        if !scan_dir.is_empty() && !std::path::Path::new(&scan_dir).exists() {
+            catalog_only_sources.insert(scanner::local_source_id(std::path::Path::new(&scan_dir)));
+        }
+        items = tokio::task::spawn_blocking(move || {
+            store.overlay_library(items, &catalog_only_sources)
+        })
+        .await
+        .map_err(|error| error.to_string())??;
     }
     Ok(items)
 }
@@ -255,19 +308,26 @@ async fn open_comic(
     state: State<'_, Arc<AppState>>,
     app_handle: tauri::AppHandle,
 ) -> Result<serde_json::Value, String> {
-    use base64::{engine::general_purpose, Engine as _};
     use std::path::Path;
 
-    let relative_path_bytes = general_purpose::URL_SAFE_NO_PAD
-        .decode(&id)
-        .map_err(|e| e.to_string())?;
-    let relative_path_str = String::from_utf8(relative_path_bytes).map_err(|e| e.to_string())?;
-
-    let comic_info = {
+    let comic_info = if let Some(item) = {
         let comics = state.comics.lock().await;
         comics.iter().find(|c| c.id == id).cloned()
+    } {
+        item
+    } else {
+        let store = catalog_store(&state)?;
+        let lookup_id = id.clone();
+        tokio::task::spawn_blocking(move || store.get_runtime_item(&lookup_id))
+            .await
+            .map_err(|error| error.to_string())??
+            .ok_or_else(|| "找不到漫畫資料，請重新掃描書庫".to_string())?
+    };
+    {
+        let mut comics = state.comics.lock().await;
+        register_comic_capability(&mut comics, &comic_info);
     }
-    .ok_or_else(|| "找不到漫畫資料".to_string())?;
+    let relative_path_str = comic_info.relative_path.clone();
     let reader_generation = {
         let _lifecycle = state.comic_lifecycle.lock().unwrap();
         let generation = state
@@ -410,7 +470,7 @@ async fn open_comic(
         } else {
             return Err("未設定 SMB 連線".into());
         }
-    } else if is_external {
+    } else if is_external || comic_info.r#type == "offline" {
         full_path = comic_info
             .source_path
             .as_deref()
@@ -453,7 +513,10 @@ async fn open_comic(
             }
         }
         if !full_path.exists() {
-            return Err("找不到外部漫畫！".into());
+            return Err(format!(
+                "漫畫來源目前離線：{}。請重新連線原本的磁碟，或在設定中選擇新的漫畫目錄後重新掃描。",
+                full_path.display()
+            ));
         }
         is_dir = full_path.is_dir();
     } else {
@@ -486,7 +549,7 @@ async fn open_comic(
         // 將結果存入快取 (URL 統一使用 capability token id)
         let mut cached_files = Vec::new();
         for (i, p) in images.iter().enumerate() {
-            pages.push(format!("comic://folder/{}/{}", id, i));
+            pages.push(format!("gai://folder/{}/{}", id, i));
             cached_files.push(p.to_string_lossy().to_string());
         }
 
@@ -496,22 +559,16 @@ async fn open_comic(
         let entry_names =
             crate::utils::get_archive_images(&full_path).map_err(|error| error.to_string())?;
         for i in 0..entry_names.len() {
-            pages.push(format!("comic://page/{}/{}", id, i));
+            pages.push(format!("gai://page/{}/{}", id, i));
         }
 
         // 將結果存入快取
         entry_names
     };
 
-    // 從 comics 清單中找尋漫畫的 Metadata
-    let (title, r#type, progress) = {
-        let comics = state.comics.lock().await;
-        let c = comics
-            .iter()
-            .find(|c| c.id == id)
-            .ok_or_else(|| "漫畫已從書庫移除".to_string())?;
-        (c.title.clone(), c.r#type.clone(), c.progress.clone())
-    };
+    let title = comic_info.title.clone();
+    let r#type = comic_info.r#type.clone();
+    let progress = comic_info.progress.clone();
 
     // 只允許最新的 open command 提交 reader session，避免關閉後舊請求復活。
     let preload_generation = {
@@ -665,7 +722,8 @@ async fn close_comic(
 #[tauri::command]
 async fn get_config(state: State<'_, Arc<AppState>>) -> Result<serde_json::Value, String> {
     let dir = state.scan_dir.read().unwrap();
-    Ok(serde_json::json!({ "scanDir": dir.clone() }))
+    let available = dir.is_empty() || std::path::Path::new(dir.as_str()).exists();
+    Ok(serde_json::json!({ "scanDir": dir.clone(), "available": available }))
 }
 
 #[tauri::command]
@@ -675,10 +733,24 @@ async fn set_config(
     app_handle: tauri::AppHandle,
 ) -> Result<serde_json::Value, String> {
     if let Some(scan_dir) = data.get("scanDir").and_then(|v| v.as_str()) {
+        let scan_dir = validate_scan_directory(scan_dir)?;
+        let current_scan_dir = state.scan_dir.read().unwrap().clone();
+        if current_scan_dir == scan_dir {
+            return Ok(serde_json::json!({ "success": true, "changed": false }));
+        }
+
+        let settings_handle = app_handle.clone();
+        let saved_scan_dir = scan_dir.clone();
+        tokio::task::spawn_blocking(move || {
+            persist_scan_directory(&settings_handle, &saved_scan_dir)
+        })
+        .await
+        .map_err(|error| format!("漫畫目錄設定工作失敗：{error}"))??;
+
         let _scan_lifecycle = state.scan_lifecycle.lock().await;
         {
             let mut sd = state.scan_dir.write().unwrap();
-            *sd = scan_dir.to_string();
+            *sd = scan_dir;
         }
 
         {
@@ -696,7 +768,7 @@ async fn set_config(
             crate::scanner::start_background_scan(state_clone, app_handle).await;
         });
     }
-    Ok(serde_json::json!({ "success": true }))
+    Ok(serde_json::json!({ "success": true, "changed": true }))
 }
 
 #[tauri::command]
@@ -850,6 +922,21 @@ fn response_text(value: &serde_json::Value) -> Option<String> {
         .map(str::to_string)
 }
 
+fn gemma_response_text(value: &serde_json::Value) -> Option<String> {
+    value
+        .pointer("/candidates/0/content/parts")?
+        .as_array()?
+        .iter()
+        .filter(|part| part.get("thought").and_then(|value| value.as_bool()) != Some(true))
+        .filter_map(|part| part.get("text").and_then(|value| value.as_str()))
+        .next_back()
+        .map(str::to_string)
+}
+
+fn should_try_gemma_fallback(status: reqwest::StatusCode, model: &str) -> bool {
+    status == reqwest::StatusCode::TOO_MANY_REQUESTS && model == "gemma-4-26b-a4b-it"
+}
+
 async fn call_ai(
     config: crate::state::AiSessionConfig,
     image: Option<(&str, &str)>,
@@ -899,25 +986,36 @@ async fn call_ai(
             parts.push(serde_json::json!({ "inlineData": { "mimeType": mime, "data": data } }));
         }
         parts.push(serde_json::json!({ "text": prompt }));
-        let endpoint = format!(
-            "https://generativelanguage.googleapis.com/v1beta/models/{}:generateContent",
-            config.model
-        );
-        let response = client
-            .post(endpoint)
-            .header("x-goog-api-key", &config.api_key)
-            .json(&serde_json::json!({
-                "contents": [{ "role": "user", "parts": parts }],
-                "generationConfig": { "maxOutputTokens": 700 }
-            }))
-            .send()
-            .await
-            .map_err(|error| format!("Gemma 4 連線失敗：{error}"))?;
-        let status = response.status();
-        let value: serde_json::Value = response.json().await.map_err(|error| error.to_string())?;
-        if !status.is_success() {
+        let models = [config.model.as_str(), "gemma-4-31b-it"];
+        for (index, model) in models.iter().enumerate() {
+            let endpoint = format!(
+                "https://generativelanguage.googleapis.com/v1beta/models/{model}:generateContent"
+            );
+            let response = client
+                .post(endpoint)
+                .header("x-goog-api-key", &config.api_key)
+                .json(&serde_json::json!({
+                    "contents": [{ "role": "user", "parts": parts.clone() }],
+                    "generationConfig": {
+                        "maxOutputTokens": 700,
+                        "thinkingConfig": { "thinkingLevel": "minimal" }
+                    }
+                }))
+                .send()
+                .await
+                .map_err(|error| format!("Gemma 4 連線失敗：{error}"))?;
+            let status = response.status();
+            let value: serde_json::Value =
+                response.json().await.map_err(|error| error.to_string())?;
+            if status.is_success() {
+                return gemma_response_text(&value)
+                    .ok_or_else(|| "Gemma 4 沒有回傳可顯示文字".to_string());
+            }
+            if index == 0 && should_try_gemma_fallback(status, model) {
+                continue;
+            }
             return Err(format!(
-                "Gemma 4 拒絕請求（HTTP {}）：{}",
+                "Gemma 4 拒絕請求（{model}，HTTP {}）：{}",
                 status.as_u16(),
                 value
                     .pointer("/error/message")
@@ -925,11 +1023,7 @@ async fn call_ai(
                     .unwrap_or("未知錯誤")
             ));
         }
-        value
-            .pointer("/candidates/0/content/parts/0/text")
-            .and_then(|value| value.as_str())
-            .map(str::to_string)
-            .ok_or_else(|| "Gemma 4 沒有回傳可顯示文字".to_string())
+        Err("Gemma 4 沒有可用的備援模型".to_string())
     }
 }
 
@@ -1461,7 +1555,7 @@ pub fn run() {
         .plugin(tauri_plugin_dialog::init())
         .plugin(tauri_plugin_ios_folder::init())
         .manage(app_state.clone())
-        .register_uri_scheme_protocol("comic", |app, request| {
+        .register_uri_scheme_protocol("gai", |app, request| {
             protocol::handle_comic_request(app.app_handle(), request).unwrap_or_else(|e| {
                 tauri::http::Response::builder()
                     .status(500)
@@ -1480,6 +1574,12 @@ pub fn run() {
                 .catalog
                 .write()
                 .map_err(|_| std::io::Error::other("無法初始化漫畫目錄"))? = Some(catalog);
+            if let Some(scan_dir) = load_persisted_scan_directory(&catalog_dir) {
+                *app_state
+                    .scan_dir
+                    .write()
+                    .map_err(|_| std::io::Error::other("無法載入漫畫目錄設定"))? = scan_dir;
+            }
             #[cfg(target_os = "ios")]
             {
                 use tauri::Manager;
@@ -1550,6 +1650,50 @@ pub fn run() {
 mod tests {
     use super::*;
     use std::fs;
+
+    fn capability_comic(id: &str, title: &str) -> ComicItem {
+        ComicItem {
+            id: id.into(),
+            r#type: "external-archive".into(),
+            relative_path: "book.zip".into(),
+            ext: ".zip".into(),
+            title: title.into(),
+            series: "系列".into(),
+            updated_at: chrono::Utc::now().to_rfc3339(),
+            page_count: 1,
+            progress: Progress {
+                current_page: 0,
+                total_pages: 1,
+                percent: 0.0,
+                updated_at: None,
+            },
+            external_bookmark: None,
+            source_id: "local:test".into(),
+            source_path: Some("/tmp/book.zip".into()),
+        }
+    }
+
+    #[test]
+    fn catalog_only_comic_registers_protocol_capability_without_replacing_existing_item() {
+        let existing = capability_comic("existing", "目前書架資料");
+        let mut comics = vec![existing.clone()];
+        register_comic_capability(&mut comics, &capability_comic("existing", "較舊的目錄資料"));
+        register_comic_capability(&mut comics, &capability_comic("catalog-only", "目錄找回"));
+
+        assert_eq!(comics.len(), 2);
+        assert_eq!(comics[0].title, existing.title);
+        assert!(comics.iter().any(|comic| comic.id == "catalog-only"));
+    }
+
+    #[test]
+    fn scan_directory_rejects_broad_system_roots() {
+        assert!(validate_scan_directory("/").is_err());
+        assert!(validate_scan_directory("/Volumes").is_err());
+        if let Some(home) = std::env::var_os("HOME") {
+            assert!(validate_scan_directory(&home.to_string_lossy()).is_err());
+        }
+        assert!(validate_scan_directory("/Volumes/ExampleNAS/Comics").is_ok());
+    }
 
     #[test]
     fn progress_write_is_atomic_and_preserves_existing_entries() {
@@ -1681,6 +1825,32 @@ mod tests {
         })
         .unwrap();
         assert_eq!(google.model, "gemma-4-26b-a4b-it");
+    }
+
+    #[test]
+    fn gemma_response_hides_thinking_parts() {
+        let response = serde_json::json!({
+            "candidates": [{
+                "content": {
+                    "parts": [
+                        { "thought": true, "text": "internal reasoning" },
+                        { "text": "艦載 AI 連線成功。" }
+                    ]
+                }
+            }]
+        });
+        assert_eq!(
+            gemma_response_text(&response).as_deref(),
+            Some("艦載 AI 連線成功。")
+        );
+        assert!(should_try_gemma_fallback(
+            reqwest::StatusCode::TOO_MANY_REQUESTS,
+            "gemma-4-26b-a4b-it"
+        ));
+        assert!(!should_try_gemma_fallback(
+            reqwest::StatusCode::BAD_REQUEST,
+            "gemma-4-26b-a4b-it"
+        ));
     }
 
     #[test]

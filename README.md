@@ -2,45 +2,32 @@
 
 **G.A.I** 是一套 **local-first / NAS-first** 的私人漫畫書架、整理器與閱讀器，目標是在 macOS 與 iPhone/iPad 上管理大型本機或 NAS 收藏，同時讓原始漫畫檔維持預設只讀。
 
-正式產品路線使用 **Tauri 2 + Rust + SQLite + Vanilla HTML/CSS/JavaScript**。Electron / Express 仍保留為相容與緊急回退層，但新功能與 release hardening 應優先落在 `src-tauri/` 與共享 `public/`。
+專案現在是 **Tauri 2 + Rust + SQLite + Vanilla HTML/CSS/JavaScript** 的單一路線產品。2026-09-04 起，舊 Electron / Express / browser fallback runtime、對應套件、scripts、測試與包裝資產已正式移除；不再維護第二套後端。
+
+> `public/app.js` 仍透過 `window.electronAPI` 這個歷史名稱呼叫 native facade，實際物件由 `public/tauri-api.js` 在 Tauri WebView 內建立。這只是為了避免大規模重寫共享前端 API 名稱，**不是 Electron runtime 或相依套件**。
 
 ## Current status
 
 - **唯一正式分支：`main`**；repository 採 trunk-only。
+- **唯一 runtime：Tauri 2**；Electron、Express、`main.js`、`preload.js`、`server.js`、`scan-depth.js` 都已移除。
 - **Rust release toolchain：1.98.1**，由 `rust-toolchain.toml` 與 `src-tauri/Cargo.toml` 同步鎖定。
 - **目前不使用 GitHub Actions**；Actions 額度不可用期間，品質閘門全部改成 repository 內可重跑的 `npm run quality`。
 - SQLite catalog 是 metadata / location / progress 的主要本機 authority；來源離線不等於資料刪除。
-- 本機、iOS security-scoped folder 與 SMB/NAS 是獨立來源；其中一個來源離線不應清除其他來源或 catalog 紀錄。
+- 本機、iOS security-scoped folder 與單一 SMB/NAS 是獨立來源；其中一個來源離線不應清除其他來源或 catalog 紀錄。
 - 內建全年齡原創 demo 可在乾淨安裝、沒有 NAS／帳號／第三方下載的情況下直接驗證核心 reader。
 - App Store / TestFlight 資料目前仍是 **`draft-blocked`**；未完成真實 processed build、實機錄影、Privacy Policy / Support URL、App Privacy、Age Rating、export compliance 等證據前，不應送審。
 - `src-tauri/vendor/wry/` 是**刻意保留的 iOS WebKit startup patch**，目前仍由 Cargo `[patch.crates-io]` 使用；不要因為它看起來像 vendor 目錄就清掉。
-
-## 2026-09-04 hardening audit
-
-本輪從平台 API、scanner、SMB、ZIP、file mutation journal、RAM preload、iOS security scope、protocol 與 frontend/native 契約重新檢查。已修正的高價值問題包括：
-
-- macOS 不再連結 Apple 標示 unavailable 的 `os_proc_available_memory()`；只有 iOS 使用該 process advisory API。
-- SMB connect/share/metadata/rename/create-directory 加入 deadline，避免 NAS 異常時無限等待。
-- SMB 檔案操作只有 typed `NotFound` 才視為「目的地不存在」；AccessDenied、ConnectionLost、timeout 等全部 fail closed。
-- SMB runtime capability 加入 source scope，避免與相同 relative path 的 local comic 產生 ID collision。
-- SMB-only library 可以啟動掃描；NAS cold-start 離線時會從 SQLite 回填 offline shelf，而不是把收藏看成消失。
-- 空 `scanDir` 不再被當成 current working directory；filesystem symlink 在 scanner 與 page-serving 兩層拒絕。
-- ZIP entry 同時防 `/`、`\\`、absolute、`.`、`..` 與 control-character path；不安全 entry 不會先進書架再等翻頁時才報錯。
-- RAM preload 單頁上限與 serving protocol 統一為 64 MiB，超大頁仍可 on-demand 讀取但不進背景 cache。
-- iOS security-scoped bookmark 在失敗與 plugin deinit 路徑正確釋放；availability check 先 resolve symlink。
-- Tauri bridge 會正規化 stale / out-of-range reader progress；最後一頁 progress 可一致呈現為 100%。
-- 新增 `tests/release-hardening.mjs` 鎖定上述 invariants，避免後續重構讓這批 bug 復活。
 
 ## Architecture
 
 | Layer | Authority / role |
 | --- | --- |
-| `public/` | 共享 UI、reader、catalog organizer、Tauri bridge |
-| `src-tauri/src/` | 正式 native backend：scanner、protocol、cache、catalog、file ops、AI session |
+| `public/` | Tauri WebView UI、reader、catalog organizer、native bridge |
+| `src-tauri/src/` | native backend：scanner、protocol、cache、catalog、file ops、AI session |
 | SQLite (`catalog.sqlite3`) | catalog / metadata / location / progress 的本機權威資料 |
 | Original comic files / sidecars | 預設只讀；不因整理或來源離線被自動改寫／刪除 |
-| `main.js` / `preload.js` | Legacy Electron fallback |
-| `server.js` / `scan-depth.js` | Legacy browser / HTTP fallback 與 regression compatibility |
+| `src-tauri/tauri-plugin-ios-folder/` | iOS security-scoped folder / iCloud materialization bridge |
+| `src-tauri/vendor/wry/` | iOS WebKit startup patch，受 Cargo patch 明確引用 |
 
 ### Reader cache
 
@@ -50,8 +37,24 @@
 
 - Local source ID 使用**使用者已配置的 root 字串**衍生，刻意保持來源拔除後仍可重現；不要在每次掃描時動態 canonicalize，否則同一 removable/NAS-backed source 可能在 online/offline 狀態得到不同 ID。若未來要改成 canonical identity，必須先把 resolved identity 持久化再做 migration。
 - iOS external folder 使用 security-scoped bookmark；symlink 不可逃出使用者選擇的 root。
+- 專案目前只支援**一組 SMB/NAS 設定**。要換 NAS 就更新設定並重新掃描，不維護多 NAS namespace。
 - SMB 掃描與檔案操作均有 timeout；成功掃描才把 current NAS state 標 online，失敗則保留 SQLite location 並回填 offline shelf。
 - offline 是 location 狀態，不代表 comic metadata 被刪除。
+
+## 2026-09-04 hardening highlights
+
+近期完整 audit 已修正：
+
+- macOS 不再連結 Apple 標示 unavailable 的 `os_proc_available_memory()`；只有 iOS 使用該 advisory API。
+- SMB connect/share/read/stat/rename/create-directory 都有 deadline，避免 NAS 異常時無限等待。
+- SMB mutation 使用 typed `NotFound`、journal、版本前置條件與誠實 rollback 狀態。
+- SMB-only library 與 cold-start offline shelf 由 SQLite 正確恢復。
+- ZIP、folder scanner、protocol 同步拒絕 traversal、symlink、hidden/unsafe entry 與超大 page preload。
+- iOS security-scoped bookmark 會正確釋放並先 resolve symlink 再驗授權 root。
+- reader progress 由 SQLite 權威資料與 Tauri bridge 正規化，不讓 stale background refresh 倒退閱讀位置。
+- mutable folder page URL 使用 `no-store`，刪頁後不會被 WebView 舊快取污染。
+- catalog migration / backfill 不再混入每次 connection 的熱路徑。
+- 舊 Electron / Express runtime 已在功能與 hardening 全部移到 Tauri 後正式退役。
 
 ## Quick start
 
@@ -63,7 +66,7 @@ npm run quality
 
 `npm run quality` 會執行：
 
-1. Node regression suite：UI / HTTP / cache / scan-depth / AI consent / release-hardening。
+1. Tauri-only Node regressions：UI/native packaging smoke、AI consent、release hardening。
 2. `cargo fmt --check`。
 3. `cargo test --locked --lib`。
 4. `cargo clippy --locked --lib --bins --no-deps -- -D warnings`。
@@ -73,6 +76,8 @@ npm run quality
 ```sh
 npm run verify
 ```
+
+`package-lock.json` 現在只鎖 `@tauri-apps/cli` 與其平台 binary；沒有 Electron、Express 或舊 browser-server runtime dependencies。
 
 Cargo build output 統一放在 `/tmp/gai-cargo-target`，並關閉 incremental compilation，避免外接磁碟／NAS-backed checkout 的 lock 與大量 local target 問題。
 
@@ -85,11 +90,8 @@ npm run tauri dev
 # 正式 macOS app / DMG
 npm run build
 
-# Legacy Electron fallback
-npm run electron
-
-# Legacy browser fallback
-npm start
+# iOS/iPadOS
+npm run tauri ios build
 ```
 
 iOS/iPadOS 有額外的本機檔案系統、Xcode、簽名與實機驗證要求，請依 [`BUILD_GUIDE.md`](BUILD_GUIDE.md) 操作；不要從歷史 blocker 文件複製舊路徑或假設舊磁碟狀態仍成立。
@@ -120,21 +122,21 @@ Impeccable 的共享專案檔案可以進 Git：
 .
 ├── .cargo/                  # shared Cargo build policy
 ├── .impeccable/             # shared Impeccable config + design artifact
-├── assets/                  # legacy Electron packaging source icon
 ├── docs/
 │   ├── history/             # dated evidence / old blockers; not current truth
 │   ├── release/             # canonical App Store / TestFlight preparation
 │   ├── E6-E8-DECISIONS.md   # durable architecture / release decisions
 │   └── RUST-QUALITY.md      # local Rust / release quality contract
-├── public/                  # shared frontend
+├── public/                  # Tauri WebView frontend
 ├── scripts/release/         # local-only release metadata guard
-├── src-tauri/               # formal Tauri / Rust application
-├── tests/                   # Node regression suite
+├── src-tauri/               # Tauri / Rust application
+├── tests/                   # Tauri-only Node regression suite
 ├── BUILD_GUIDE.md
 ├── DESIGN.md
-├── LEGACY.md
 ├── PRODUCT.md
-└── README.md
+├── README.md
+├── package.json
+└── package-lock.json
 ```
 
 ## Documentation authority
@@ -145,18 +147,19 @@ Impeccable 的共享專案檔案可以進 Git：
 - [`DESIGN.md`](DESIGN.md) — current design / UX contract。
 - [`docs/E6-E8-DECISIONS.md`](docs/E6-E8-DECISIONS.md) — durable technical and release decisions。
 - [`docs/RUST-QUALITY.md`](docs/RUST-QUALITY.md) — Rust 1.98.1 local quality gate and native trust boundaries。
-- [`BUILD_GUIDE.md`](BUILD_GUIDE.md) — current build and iOS workflow。
+- [`BUILD_GUIDE.md`](BUILD_GUIDE.md) — current Tauri macOS / iOS build workflow。
 - [`docs/release/`](docs/release/) — current TestFlight / App Store metadata and outstanding evidence。
 
 ### Historical evidence
 
 [`docs/history/`](docs/history/) 保留特定日期的匯入結果、舊 blocker 與舊診斷。它們用來回答「當時發生了什麼」，**不能優先於目前程式碼或 current-source-of-truth 文件**。
 
-## Legacy policy
+## Tauri-only policy
 
-`main.js`、`preload.js`、`server.js`、`scan-depth.js` 暫時保留，因為 package scripts 與 regression tests 仍使用 Electron / browser fallback。不要在沒有先移除對應 scripts、dependencies、tests 與 `LEGACY.md` 契約的情況下單獨刪除它們。
-
-新功能不得只做在 legacy layer；正式產品能力應優先實作於 Tauri/Rust backend 與共享 frontend。Legacy fallback 仍需維持 loopback-only browser server、context isolation、nodeIntegration off 與相同的 path traversal / image size safety boundary。
+- 不重新加入 Electron、Express、browser HTTP fallback 或第二套 native backend。
+- 不新增 `main.js`、`preload.js`、`server.js`、Electron Builder packaging config 或對應 runtime dependencies。
+- 新能力直接落在 `src-tauri/` 與 `public/`。
+- 如果某個功能在 Tauri 上缺能力，應修 Tauri bridge / Rust command，而不是復活舊 runtime。
 
 ## Release gate
 
@@ -169,8 +172,6 @@ Impeccable 的共享專案檔案可以進 Git：
 任何 signed artifact、實機資訊、API key、NAS 密碼或真實裝置 identifier 都不應提交進 repository。
 
 ## Repository policy
-
-這個 repository 採 **trunk-only**：
 
 - `main` 是唯一正式 branch。
 - 不建立 feature / release branch 作為長期狀態。

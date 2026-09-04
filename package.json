@@ -1,61 +1,19 @@
 {
   "name": "gai",
   "version": "1.0.0",
-  "description": "A beautiful local comic reader — 紳士藝術研究所 Gentlemen's Art Institute",
-  "main": "main.js",
+  "description": "A beautiful local-first comic reader — 紳士藝術研究所 Gentlemen's Art Institute",
   "type": "module",
   "scripts": {
-    "start": "node server.js",
-    "electron": "electron .",
-    "test": "node tests/ui-smoke.mjs && node tests/cache-hardening.cjs && node tests/scan-depth-behavior.mjs && node tests/ai-consent.mjs && node tests/release-hardening.mjs",
+    "test": "node tests/tauri-ui-smoke.mjs && node tests/ai-consent.mjs && node tests/release-hardening.mjs",
     "test:rust": "cargo test --manifest-path src-tauri/Cargo.toml --locked --lib",
     "check:rustfmt": "cargo fmt --manifest-path src-tauri/Cargo.toml --package gai -- --check",
     "check:clippy": "cargo clippy --manifest-path src-tauri/Cargo.toml --locked --lib --bins --no-deps -- -D warnings",
     "verify": "npm test && npm run test:rust",
     "quality": "npm test && npm run check:rustfmt && npm run test:rust && npm run check:clippy",
     "build": "tauri build --bundles app,dmg",
-    "build:electron": "electron-builder --mac --dir",
     "tauri": "tauri"
   },
-  "dependencies": {
-    "express": "^4.19.2",
-    "open": "11.0.0",
-    "yauzl": "^3.3.1"
-  },
-  "overrides": {
-    "body-parser": "1.20.6"
-  },
   "devDependencies": {
-    "@tauri-apps/cli": "^2.11.3",
-    "electron": "^42.2.0",
-    "electron-builder": "^26.8.1"
-  },
-  "build": {
-    "appId": "com.windsheep.gai",
-    "productName": "紳士藝術研究所 Gentlemen's Art Institute",
-    "asar": true,
-    "mac": {
-      "category": "public.app-category.entertainment",
-      "icon": "assets/icon.png",
-      "target": [
-        {
-          "target": "dir",
-          "arch": [
-            "arm64"
-          ]
-        }
-      ]
-    },
-    "files": [
-      "**/*",
-      "!src-tauri/**/*",
-      "!*.md",
-      "!.git",
-      "!.gitignore",
-      "!progress.json",
-      "!metadata.json",
-      "!config.json"
-    ],
-    "extraResources": []
+    "@tauri-apps/cli": "^2.11.3"
   }
 }

@@ -4,7 +4,7 @@
 
 ## Platform
 
-web
+Tauri 2 native app：macOS + iPhone/iPadOS。
 
 ## Users
 
@@ -16,22 +16,23 @@ web
 
 ## Positioning
 
-以本機 SQLite 作為權威資料庫，將瀏覽器直載、資料夾、ZIP/CBZ 與多種既有漫畫 metadata 格式統一成可人工覆寫的收藏目錄；NAS 暫時離線時仍保留完整整理成果。
+以本機 SQLite 作為權威資料庫，將本機資料夾、iOS security-scoped 外部資料夾、單一 SMB NAS、ZIP/CBZ 與多種既有漫畫 metadata 格式統一成可人工覆寫的收藏目錄；來源暫時離線時仍保留完整整理成果。
 
 ## Operating Context
 
-- 漫畫主要來自本機資料夾、外接裝置與 SMB NAS。
+- 漫畫主要來自本機資料夾、外接裝置與一組 SMB NAS；要換 NAS 就更新連線設定並重新掃描，不維護多 NAS namespace。
 - 現有收藏多數沒有 sidecar，檔名也不足以可靠推斷作者或標籤。
 - 使用者會在書架內多選漫畫、批次套用標籤、建立資料夾繼承規則，並以作者、系列、語言與標籤搜尋。
 - 漫畫檔與 sidecar 預設只讀；整理資料寫入 App Local Data。
 
 ## Capabilities and Constraints
 
-- 既有 Tauri 2、Rust 與 vanilla HTML/CSS/JavaScript 架構必須保留。
+- **唯一 runtime 是 Tauri 2 + Rust + vanilla HTML/CSS/JavaScript**；Electron、Express 與 browser HTTP fallback 不屬於產品架構，也不應重新加入。
 - 既有閱讀進度、收藏、單頁／雙頁／RTL／Webtoon／目錄模式、ZIP/CBZ、圖片資料夾與 SMB 行為不可退化。
 - 首批 metadata 匯入涵蓋 ComicInfo.xml、gallery-dl JSON、HDoujin JSON/TXT、galleryinfo.txt、EHDL info.txt 與低信心檔名推測。
-- 使用者覆寫永遠高於外部匯入；NAS 失聯不得刪除資料。
-- 網路比對、AI 自動寫入、跨裝置同步與 RAR/CBR 內嵌解析不屬於目前里程碑。
+- 使用者覆寫永遠高於外部匯入；來源失聯不得刪除資料。
+- 網路比對、AI 自動寫入、跨裝置同步、RAR/CBR 內嵌解析與多 NAS namespace 不屬於目前里程碑。
+- 圖片讀取維持既有 byte-size 安全上限；目前不額外引入 decode 前的像素總量限制。
 
 ## Brand Commitments
 
@@ -51,6 +52,7 @@ web
 - 大型收藏操作必須批次、可撤銷且保持流暢。
 - 離線是正常狀態，不是刪除訊號。
 - 匯入器可替換，核心資料模型不綁特定網站。
+- 單一路線優先：缺 native 能力時修 Tauri/Rust bridge，不建立第二套 runtime。
 
 ## Accessibility & Inclusion
 

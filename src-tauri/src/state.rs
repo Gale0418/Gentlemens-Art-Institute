@@ -12,7 +12,7 @@ const MEMORY_SAFE_RATIO_DENOMINATOR: u64 = 2;
 const NORMAL_RECOVERY_STEP_BYTES: usize = 64 * 1024 * 1024;
 
 /// OS memory pressure is deliberately kept separate from the free-memory
-/// probe.  The latter is only an input to the budget, never the sole signal.
+/// probe. The latter is only an input to the budget, never the sole signal.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[repr(u8)]
 pub enum MemoryPressure {
@@ -72,7 +72,7 @@ pub const fn pressure_cache_budget(device_budget: usize, pressure: MemoryPressur
     }
 }
 
-/// Pure budget policy.  A process-level advisory signal is reduced by half
+/// Pure budget policy. A process-level advisory signal is reduced by half
 /// to leave room for WebKit, decoding and the rest of the application.
 pub fn calculate_memory_budget(inputs: MemoryBudgetInputs) -> usize {
     let device_budget = device_cache_budget(inputs.physical_memory_bytes);
@@ -126,7 +126,7 @@ fn physical_memory_bytes() -> Option<u64> {
 
 #[cfg(not(any(target_os = "ios", target_os = "macos")))]
 fn physical_memory_bytes() -> Option<u64> {
-    // Total RAM is used only for tier selection.  We intentionally do not use
+    // Total RAM is used only for tier selection. We intentionally do not use
     // MemAvailable/free RAM as the process budget on non-Apple platforms.
     let total = std::fs::read_to_string("/proc/meminfo")
         .ok()?
@@ -137,26 +137,31 @@ fn physical_memory_bytes() -> Option<u64> {
     total.checked_mul(1024)
 }
 
-#[cfg(any(target_os = "ios", target_os = "macos"))]
+#[cfg(target_os = "ios")]
 fn process_available_memory_bytes() -> Option<u64> {
-    // Apple documents this as an advisory estimate of the bytes the process
-    // can allocate before hitting its memory limit; unlike free RAM it is
-    // process-scoped and accounts for the platform's memory policy.
+    // Apple exposes os_proc_available_memory on iOS-family platforms as a
+    // process-scoped advisory. It is explicitly unavailable on macOS, so keep
+    // this symbol out of macOS binaries instead of risking a missing-symbol
+    // launch failure.
     unsafe extern "C" {
         fn os_proc_available_memory() -> usize;
     }
     let available = unsafe { os_proc_available_memory() as u64 };
-    // A zero result means that the advisory is unavailable on this OS/build;
-    // use the conservative non-Apple-style fallback rather than permanently
-    // disabling preload.  A real low-memory notification still enters the
-    // critical path through the native pressure bridge.
     (available > 0).then_some(available)
+}
+
+#[cfg(target_os = "macos")]
+fn process_available_memory_bytes() -> Option<u64> {
+    // os_proc_available_memory is API_UNAVAILABLE(macos). Falling back to a
+    // conservative fraction of physical memory is safer than linking a symbol
+    // that is not part of the supported macOS API surface.
+    None
 }
 
 #[cfg(not(any(target_os = "ios", target_os = "macos")))]
 fn process_available_memory_bytes() -> Option<u64> {
     // A cgroup limit/current pair is the closest process/container-scoped
-    // signal available without adding a platform dependency.  If unavailable
+    // signal available without adding a platform dependency. If unavailable
     // we fall back to a deliberately conservative quarter of total RAM.
     let max = std::fs::read_to_string("/sys/fs/cgroup/memory.max").ok()?;
     let max = max.trim().parse::<u64>().ok()?;
@@ -211,12 +216,12 @@ pub struct Progress {
 #[serde(rename_all = "camelCase")]
 pub struct ComicItem {
     pub id: String,
-    pub r#type: String, // "folder" or "archive"
+    pub r#type: String,
     pub relative_path: String,
     pub ext: String,
     pub title: String,
     pub series: String,
-    pub updated_at: String, // ISO8601 String
+    pub updated_at: String,
     pub page_count: usize,
     pub progress: Progress,
     #[serde(default = "default_source_id")]
@@ -311,19 +316,13 @@ pub struct AiSessionConfig {
 pub struct AppState {
     pub scan_dir: std::sync::RwLock<String>,
     pub comics: Mutex<Vec<ComicItem>>,
-    // BUG-13 修正：移除從未使用的 progress_data 欄位，避免混淆維護者
     pub scan_progress: Mutex<ScanProgress>,
     pub scan_generation: std::sync::atomic::AtomicU64,
     pub scan_lifecycle: Mutex<()>,
     pub preload_generation: std::sync::atomic::AtomicU64,
-    /// Native memory pressure is an independent signal from available bytes.
     pub memory_pressure: AtomicU8,
-    /// Effective budget is ramped up after normal pressure to avoid a burst
-    /// allocation immediately after an iOS warning.
     pub cache_budget_bytes: AtomicUsize,
-    // (comic_id, page_index) -> byte array
     pub ram_cache_pool: std::sync::Mutex<HashMap<String, HashMap<usize, Vec<u8>>>>,
-    // (comic_id) -> list of entry paths (for folder) or names (for archive)
     pub opened_comic_files: std::sync::RwLock<HashMap<String, Vec<String>>>,
     pub smb_config: std::sync::RwLock<Option<SmbConfig>>,
     pub external_bookmarks: std::sync::RwLock<Vec<ExternalBookmark>>,
@@ -337,7 +336,6 @@ pub struct AppState {
     pub catalog: std::sync::RwLock<Option<crate::catalog::CatalogStore>>,
     pub catalog_sync: tokio::sync::Mutex<()>,
     pub online_services: std::sync::RwLock<OnlineServicesConfig>,
-    /// Session-only by design: API keys never enter SQLite, localStorage, logs, or exports.
     pub ai_session: std::sync::RwLock<Option<AiSessionConfig>>,
 }
 
@@ -357,8 +355,6 @@ impl AppState {
             scan_lifecycle: Mutex::new(()),
             preload_generation: std::sync::atomic::AtomicU64::new(0),
             memory_pressure: AtomicU8::new(MemoryPressure::Normal as u8),
-            // Start with the live device/process budget. Only recovery after
-            // a pressure event ramps in 64 MiB steps.
             cache_budget_bytes: AtomicUsize::new(measured_memory_budget(MemoryPressure::Normal)),
             ram_cache_pool: std::sync::Mutex::new(HashMap::new()),
             opened_comic_files: std::sync::RwLock::new(HashMap::new()),
@@ -386,8 +382,6 @@ impl AppState {
         self.cache_budget_bytes.load(Ordering::Acquire)
     }
 
-    /// Refreshes the budget from live platform signals.  Downward changes are
-    /// immediate; recovery is deliberately capped to a small step per call.
     pub fn refresh_cache_budget(&self) -> usize {
         let pressure = self.memory_pressure_level();
         let desired = measured_memory_budget(pressure);
@@ -414,8 +408,6 @@ impl AppState {
         let current = self.current_cache_budget_bytes();
         let next = match pressure {
             MemoryPressure::Critical => 0,
-            // Do not jump back to the full budget on a normal notification;
-            // refresh_cache_budget will add one recovery step at a time.
             MemoryPressure::Normal => current.min(desired),
             MemoryPressure::Warning => desired,
         };
@@ -424,8 +416,6 @@ impl AppState {
         if pressure == MemoryPressure::Critical
             && MemoryPressure::from_raw(previous) != MemoryPressure::Critical
         {
-            // Take the same lifecycle lock as open/close/preload insertion so
-            // an in-flight preload cannot repopulate a cache after cleanup.
             let _lifecycle = self.comic_lifecycle.lock().unwrap();
             self.ram_cache_pool.lock().unwrap().clear();
             self.preload_generation.fetch_add(1, Ordering::SeqCst);
@@ -436,32 +426,44 @@ impl AppState {
     }
 
     fn trim_cache_to_budget_locked(&self, budget: usize) {
+        let active_comic = self.active_comic_id.lock().unwrap().clone();
         let mut pool = self.ram_cache_pool.lock().unwrap();
         let mut total = pool
             .values()
             .flat_map(|pages| pages.values())
             .map(Vec::len)
             .sum::<usize>();
-        while total > budget {
-            let candidate = pool
-                .iter()
-                .flat_map(|(id, pages)| {
-                    pages
-                        .iter()
-                        .map(move |(page_index, bytes)| (bytes.len(), id.clone(), *page_index))
+        if total <= budget {
+            return;
+        }
+
+        let mut candidates = pool
+            .iter()
+            .flat_map(|(id, pages)| {
+                let is_active = active_comic.as_ref().is_some_and(|active| active == id);
+                pages.iter().map(move |(page_index, bytes)| {
+                    (is_active, bytes.len(), id.clone(), *page_index)
                 })
-                .max_by_key(|(bytes, _, _)| *bytes);
-            let Some((bytes, id, page_index)) = candidate else {
+            })
+            .collect::<Vec<_>>();
+        candidates.sort_unstable_by(|left, right| {
+            left.0
+                .cmp(&right.0)
+                .then_with(|| right.1.cmp(&left.1))
+                .then_with(|| left.2.cmp(&right.2))
+                .then_with(|| left.3.cmp(&right.3))
+        });
+
+        for (_, bytes, id, page_index) in candidates {
+            if total <= budget {
                 break;
-            };
+            }
             if pool
                 .get_mut(&id)
                 .and_then(|pages| pages.remove(&page_index))
                 .is_some()
             {
                 total = total.saturating_sub(bytes);
-            } else {
-                break;
             }
         }
         pool.retain(|_, pages| !pages.is_empty());
@@ -477,9 +479,10 @@ impl Default for AppState {
 #[cfg(test)]
 mod tests {
     use super::{
-        calculate_memory_budget, device_cache_budget, MemoryBudgetInputs, MemoryPressure,
-        OnlineServicesConfig, GIB, MAX_COMPRESSED_PAGE_CACHE_BYTES,
+        calculate_memory_budget, device_cache_budget, AppState, MemoryBudgetInputs,
+        MemoryPressure, OnlineServicesConfig, GIB, MAX_COMPRESSED_PAGE_CACHE_BYTES,
     };
+    use std::collections::HashMap;
 
     #[test]
     fn online_services_are_off_by_default_and_require_disclosure() {
@@ -529,5 +532,39 @@ mod tests {
             pressure: MemoryPressure::Normal,
         });
         assert_eq!(process_limited, 50 * 1024 * 1024);
+    }
+
+    #[test]
+    fn pressure_eviction_discards_inactive_books_before_the_active_reader() {
+        let state = AppState::new();
+        *state.active_comic_id.lock().unwrap() = Some("active".into());
+        {
+            let mut pool = state.ram_cache_pool.lock().unwrap();
+            pool.insert("active".into(), HashMap::from([(0, vec![0; 60])]));
+            pool.insert("old".into(), HashMap::from([(0, vec![0; 80])]));
+        }
+
+        state.trim_cache_to_budget_locked(60);
+        let pool = state.ram_cache_pool.lock().unwrap();
+        assert!(pool.contains_key("active"));
+        assert!(!pool.contains_key("old"));
+    }
+
+    #[test]
+    fn pressure_eviction_removes_largest_pages_without_rescanning_the_pool() {
+        let state = AppState::new();
+        {
+            let mut pool = state.ram_cache_pool.lock().unwrap();
+            pool.insert(
+                "book".into(),
+                HashMap::from([(0, vec![0; 10]), (1, vec![0; 40]), (2, vec![0; 20])]),
+            );
+        }
+
+        state.trim_cache_to_budget_locked(30);
+        let pool = state.ram_cache_pool.lock().unwrap();
+        let mut remaining = pool["book"].keys().copied().collect::<Vec<_>>();
+        remaining.sort_unstable();
+        assert_eq!(remaining, vec![0, 2]);
     }
 }

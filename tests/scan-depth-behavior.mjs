@@ -15,6 +15,9 @@ fs.writeFileSync(path.join(current, 'page.jpg'), 'fixture');
 assert.equal(parseScanDepth(undefined), 3);
 assert.equal(parseScanDepth('not-a-number'), 3);
 assert.equal(parseScanDepth('-1'), 3);
+assert.equal(parseScanDepth(Number.NaN), 3);
+assert.equal(parseScanDepth('NaN'), 3);
+assert.equal(parseScanDepth('999999999999999999999999'), 3);
 assert.equal(parseScanDepth('0'), 0);
 assert.equal(parseScanDepth('UNLIMITED'), Infinity);
 

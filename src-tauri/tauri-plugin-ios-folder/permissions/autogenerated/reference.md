@@ -1,10 +1,10 @@
 ## Default Permission
 
-Default permissions for the plugin
+No plugin commands are granted implicitly; the app must opt in explicitly.
 
 #### This default permission set includes the following:
 
-- `allow-ping`
+- No commands.
 
 ## Permission Table
 
@@ -13,7 +13,6 @@ Default permissions for the plugin
 <th>Identifier</th>
 <th>Description</th>
 </tr>
-
 
 <tr>
 <td>
@@ -37,32 +36,6 @@ Enables the pick_folder command without any pre-configured scope.
 <td>
 
 Denies the pick_folder command without any pre-configured scope.
-
-</td>
-</tr>
-
-<tr>
-<td>
-
-`ios-folder:allow-ping`
-
-</td>
-<td>
-
-Enables the ping command without any pre-configured scope.
-
-</td>
-</tr>
-
-<tr>
-<td>
-
-`ios-folder:deny-ping`
-
-</td>
-<td>
-
-Denies the ping command without any pre-configured scope.
 
 </td>
 </tr>

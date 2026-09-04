@@ -164,7 +164,10 @@ pub struct ComicLocationView {
     pub relative_path: String,
     pub actual_path: Option<String>,
     pub kind: String,
+    pub size: Option<i64>,
+    pub mtime: Option<String>,
     pub fingerprint: Option<String>,
+    pub fingerprint_collision: bool,
     pub online: bool,
 }
 
@@ -483,13 +486,21 @@ impl CatalogStore {
             let comic_id = resolve_comic_id(connection, identifier)?
                 .ok_or_else(|| "找不到已登記的漫畫位置".to_string())?;
             connection.query_row(
-                "SELECT id,comic_id,runtime_id,source_id,relative_path,actual_path,kind,fingerprint,online
-                 FROM comic_locations WHERE comic_id=?1 ORDER BY online DESC,last_seen_at DESC LIMIT 1",
+                "SELECT l.id,l.comic_id,l.runtime_id,l.source_id,l.relative_path,l.actual_path,l.kind,l.size,l.mtime,l.fingerprint,
+                        CASE WHEN l.fingerprint IS NOT NULL AND EXISTS(
+                          SELECT 1 FROM comic_locations other
+                           WHERE other.fingerprint=l.fingerprint
+                             AND other.fingerprint_version=l.fingerprint_version
+                             AND other.comic_id<>l.comic_id
+                        ) THEN 1 ELSE 0 END,l.online
+                 FROM comic_locations l WHERE l.comic_id=?1 ORDER BY l.online DESC,l.last_seen_at DESC LIMIT 1",
                 [comic_id],
                 |row| Ok(ComicLocationView {
                     id: row.get(0)?, comic_id: row.get(1)?, runtime_id: row.get(2)?, source_id: row.get(3)?,
                     relative_path: row.get(4)?, actual_path: row.get(5)?, kind: row.get(6)?,
-                    fingerprint: row.get(7)?, online: row.get::<_, i64>(8)? != 0,
+                    size: row.get(7)?, mtime: row.get(8)?, fingerprint: row.get(9)?,
+                    fingerprint_collision: row.get::<_, i64>(10)? != 0,
+                    online: row.get::<_, i64>(11)? != 0,
                 }),
             ).map_err(|error| error.to_string())
         })
@@ -560,6 +571,25 @@ impl CatalogStore {
                 params![operation_id, relative_path, actual_path],
             ).map_err(|error| error.to_string())?;
             if changed != 1 { return Err("檔案操作紀錄已改變".into()); }
+            Ok(())
+        })
+    }
+
+    pub fn set_file_operation_expected_fingerprint(
+        &self,
+        operation_id: &str,
+        expected_fingerprint: &str,
+    ) -> Result<(), String> {
+        self.with_connection(|connection| {
+            let changed = connection
+                .execute(
+                    "UPDATE file_operations SET expected_fingerprint=?2 WHERE id=?1 AND status='pending'",
+                    params![operation_id, expected_fingerprint],
+                )
+                .map_err(|error| error.to_string())?;
+            if changed != 1 {
+                return Err("檔案操作紀錄已改變".into());
+            }
             Ok(())
         })
     }
@@ -1645,7 +1675,7 @@ fn load_location_signatures(
         .map_err(|error| error.to_string())
 }
 
-fn file_signature(path: &Path) -> Option<(Option<i64>, Option<String>)> {
+pub(crate) fn file_signature(path: &Path) -> Option<(Option<i64>, Option<String>)> {
     std::fs::metadata(path).ok().map(|metadata| {
         (
             Some(metadata.len() as i64),
@@ -1655,6 +1685,28 @@ fn file_signature(path: &Path) -> Option<(Option<i64>, Option<String>)> {
                 .map(|time| chrono::DateTime::<chrono::Utc>::from(time).to_rfc3339()),
         )
     })
+}
+
+/// A metadata revision token is deliberately not called a content hash: it only
+/// proves that the registered location's size and modification time are the same.
+pub(crate) fn location_revision(
+    source_id: &str,
+    relative_path: &str,
+    size: Option<i64>,
+    mtime: Option<&str>,
+) -> Option<String> {
+    let (Some(size), Some(mtime)) = (size, mtime) else {
+        return None;
+    };
+    Some(format!(
+        "location-revision-v1:{}",
+        serde_json::json!({
+            "source": source_id,
+            "path": relative_path,
+            "size": size,
+            "mtime": mtime,
+        })
+    ))
 }
 
 fn import_runtime_progress(
@@ -2128,36 +2180,12 @@ fn search_catalog(
             facets: BTreeMap::new(),
         });
     }
-    let ids = if seed_terms.is_empty() {
-        let mut statement = connection
-            .prepare("SELECT id FROM comics ORDER BY updated_at DESC,title COLLATE NOCASE")
-            .map_err(|error| error.to_string())?;
-        let rows = statement
-            .query_map([], |row| row.get(0))
-            .map_err(|error| error.to_string())?;
-        rows.collect::<Result<Vec<String>, _>>()
-            .map_err(|error| error.to_string())?
-    } else {
-        let fts = seed_terms
-            .iter()
-            .map(|term| format!("\"{}\"", term.replace('"', "\"\"")))
-            .collect::<Vec<_>>()
-            .join(" AND ");
-        let mut statement = connection
-            .prepare("SELECT comic_id FROM catalog_fts WHERE catalog_fts MATCH ?1 ORDER BY rank")
-            .map_err(|error| error.to_string())?;
-        let rows = statement
-            .query_map([fts], |row| row.get(0))
-            .map_err(|error| error.to_string())?;
-        rows.collect::<Result<Vec<String>, _>>()
-            .map_err(|error| error.to_string())?
-    };
     let offset = query.offset;
     let limit = query.limit.clamp(1, PAGE_SIZE_MAX);
     let mut total = 0usize;
     let mut items = Vec::with_capacity(limit);
     let mut facets: BTreeMap<String, BTreeMap<String, usize>> = BTreeMap::new();
-    for id in ids {
+    let mut process_id = |id: String| -> Result<(), String> {
         let view = build_view(connection, &id)?;
         if parsed.matches(&view) {
             total += 1;
@@ -2178,6 +2206,35 @@ fn search_catalog(
             if total > offset && items.len() < limit {
                 items.push(view);
             }
+        }
+        Ok(())
+    };
+    if seed_terms.is_empty() {
+        // Keep the result cursor on SQLite instead of materializing every ID in
+        // memory. This matters for exclusion-only searches over large catalogs.
+        let mut statement = connection
+            .prepare("SELECT id FROM comics ORDER BY updated_at DESC,title COLLATE NOCASE")
+            .map_err(|error| error.to_string())?;
+        let rows = statement
+            .query_map([], |row| row.get::<_, String>(0))
+            .map_err(|error| error.to_string())?;
+        for row in rows {
+            process_id(row.map_err(|error| error.to_string())?)?;
+        }
+    } else {
+        let fts = seed_terms
+            .iter()
+            .map(|term| format!("\"{}\"", term.replace('"', "\"\"")))
+            .collect::<Vec<_>>()
+            .join(" AND ");
+        let mut statement = connection
+            .prepare("SELECT comic_id FROM catalog_fts WHERE catalog_fts MATCH ?1 ORDER BY rank")
+            .map_err(|error| error.to_string())?;
+        let rows = statement
+            .query_map([fts], |row| row.get::<_, String>(0))
+            .map_err(|error| error.to_string())?;
+        for row in rows {
+            process_id(row.map_err(|error| error.to_string())?)?;
         }
     }
     Ok(CatalogSearchResult {
@@ -3364,6 +3421,21 @@ mod tests {
     }
 
     #[test]
+    fn location_revision_is_explicitly_metadata_only_and_requires_size_and_mtime() {
+        let revision = location_revision(
+            "smb",
+            "folder/book.cbz",
+            Some(123),
+            Some("2026-09-01T00:00:00Z"),
+        )
+        .unwrap();
+        assert!(revision.starts_with("location-revision-v1:"));
+        assert!(revision.contains("\"size\":123"));
+        assert!(location_revision("smb", "book.cbz", None, Some("mtime")).is_none());
+        assert!(location_revision("smb", "book.cbz", Some(123), None).is_none());
+    }
+
+    #[test]
     fn migrations_are_idempotent_and_offline_rows_survive() {
         let store = store("migration");
         store.sync_library(&[comic("runtime", "a.zip")]).unwrap();
@@ -4245,6 +4317,8 @@ mod tests {
         assert_eq!(candidates.len(), 1);
         assert_eq!(candidates[0].comic_ids.len(), 2);
         assert_eq!(candidates[0].locations.len(), 2);
+        assert!(store.get_location("one").unwrap().fingerprint_collision);
+        assert!(store.get_location("two").unwrap().fingerprint_collision);
         assert!(store.get_metadata("one").is_ok());
         assert!(store.get_metadata("two").is_ok());
     }

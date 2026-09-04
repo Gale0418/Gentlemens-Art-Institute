@@ -1,4 +1,4 @@
-const COMMANDS: &[&str] = &["pick_folder", "start_accessing", "stop_accessing", "ping"];
+const COMMANDS: &[&str] = &["pick_folder", "start_accessing", "stop_accessing"];
 
 fn main() {
     tauri_plugin::Builder::new(COMMANDS)

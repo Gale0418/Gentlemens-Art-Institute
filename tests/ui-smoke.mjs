@@ -31,6 +31,13 @@ const catalog = readRequiredFile('src-tauri/src/catalog.rs', 'SQLite catalog');
 const tauriApi = readRequiredFile('public/tauri-api.js', 'Tauri frontend bridge');
 const capabilities = readRequiredFile('src-tauri/capabilities/default.json', 'Tauri capabilities');
 
+const demoAssetRoot = 'public/assets/demo/moonlit-archive';
+for (const asset of ['cover.jpg', 'page-01.jpg', 'page-02.jpg']) {
+  const assetPath = `${demoAssetRoot}/${asset}`;
+  const stat = fs.statSync(assetPath, { throwIfNoEntry: false });
+  assert.ok(stat?.isFile() && stat.size > 0, `built-in demo asset should exist: ${assetPath}`);
+}
+
 const mustContain = (source, needle, label) => {
   assert.ok(source.includes(needle), `${label}: missing ${needle}`);
 };
@@ -38,7 +45,7 @@ const mustContain = (source, needle, label) => {
 const bracedBlock = (source, marker, label) => {
   const markerIndex = source.indexOf(marker);
   assert.notEqual(markerIndex, -1, `${label}: missing ${marker}`);
-  const opening = source.indexOf('{', markerIndex);
+  const opening = source.indexOf('{', markerIndex + marker.length);
   assert.notEqual(opening, -1, `${label}: missing opening brace`);
   let depth = 0;
   for (let index = opening; index < source.length; index += 1) {
@@ -63,10 +70,29 @@ mustContain(app, 'data-inspector-action="ai-suggest"', 'catalog AI metadata cand
 mustContain(app, 'data-inspector-action="organize"', 'inspector TAG organizer entry point');
 mustContain(app, 'data-inspector-action="files"', 'inspector file manager entry point');
 mustContain(app, 'Math.round(Math.min(100, Math.max(0, rawPercent)))', 'bounded integer reading progress');
+mustContain(app, 'function scheduleLibraryRefresh', 'coalesced progressive library refresh');
+mustContain(app, 'fetchLibrary({ background: true })', 'scan events use silent background refresh');
+mustContain(app, 'skipUnchanged && renderSignature === lastGridRenderSignature', 'unchanged visible shelf skips DOM rebuild');
+mustContain(app, "elements.comicGrid.classList.toggle('background-refresh', background)", 'changed background shelf suppresses replayed entrance motion');
+mustContain(app, 'const existingItems = new Map(', 'series sidebar updates existing nodes instead of flashing the whole list');
+assert.match(
+  app,
+  /if \(!item\) \{[\s\S]*?item\.append\(name, badge\);\s*\}\s*item\.onclick = \(\) => selectSeries\(seriesName\);\s*configureInteractiveItem/,
+  'reused and static series entries must retain pointer and keyboard activation'
+);
+mustContain(app, "event.pointerType === 'touch' && readerTouchMoved", 'reader swipe must not also trigger pointer-zone navigation');
+mustContain(app, "comic.comicsCount || 0", 'virtual folder count changes invalidate the grid render signature');
+mustContain(app, 'ensureInspectorSelection({ skipUnchanged: Boolean(options.skipUnchanged) })', 'background scan updates only a changed visible inspector');
+mustContain(app, 'renderSignature === lastContinueRenderSignature', 'unchanged continue-reading strip skips DOM rebuild');
+mustContain(scanner, 'publish_partial_library', 'progressive scanner result publication');
+mustContain(scanner, 'PARTIAL_LIBRARY_INTERVAL', 'bounded partial publication cadence');
+mustContain(scanner, 'merge_discovered_comics', 'partial refresh keeps the previous shelf visible until scan completion');
+assert.doesNotMatch(server, /import AdmZip from ['"]adm-zip['"]/, 'unused vulnerable adm-zip runtime must stay removed');
 mustContain(app, 'AI 建議摘要與標籤', 'clear AI metadata candidate label');
 mustContain(html, 'class="reader-rotate-icon"', 'unambiguous reader rotation icons');
 mustContain(html, 'id="ai-api-key"', 'manual AI provider key input');
 mustContain(html, 'id="scan-dir-status"', 'native folder picker status');
+mustContain(html, 'id="library-source-btn"', 'unified library source action');
 mustContain(html, 'id="library-source-alert"', 'offline library recovery status');
 mustContain(html, 'id="library-source-settings-btn"', 'offline library recovery action');
 mustContain(tauri, '"gpt-5.6-luna"', 'fixed low-cost Luna model');
@@ -76,10 +102,32 @@ mustContain(tauriApi, "invoke('plugin:dialog|open'", 'native folder picker comma
 mustContain(tauriApi, 'directory: true', 'folder-only native picker');
 mustContain(tauriApi, 'defaultPath: defaultPath || undefined', 'native picker starts from current library');
 mustContain(capabilities, 'dialog:allow-open', 'native open-dialog permission');
+mustContain(capabilities, 'ios-folder:allow-pick-folder', 'iOS folder picker permission');
 mustContain(tauri, 'fn gemma_response_text', 'Gemma final-answer filtering');
 mustContain(tauri, '"thinkingLevel": "minimal"', 'cost-bounded Gemma reasoning');
 mustContain(tauri, 'gemma-4-31b-it', 'single Gemma quota fallback');
 mustContain(app, 'suggestInspectorMetadata', 'catalog AI metadata candidate handler');
+mustContain(app, "'assets/demo/moonlit-archive/cover.jpg'", 'built-in demo cover asset');
+mustContain(app, "'assets/demo/moonlit-archive/page-01.jpg'", 'built-in demo page 1 asset');
+mustContain(app, "'assets/demo/moonlit-archive/page-02.jpg'", 'built-in demo page 2 asset');
+mustContain(app, "relativePath: 'all-ages-demo'", 'built-in demo stays visible at the library root');
+mustContain(app, "const supportsNativeInert = 'inert' in elements.librarySidebar", 'sidebar detects inert support');
+mustContain(app, 'elements.librarySidebar.hidden = !supportsNativeInert && isCollapsed', 'sidebar has an iOS 14 keyboard-focus fallback');
+assert.match(
+  app,
+  /const data = isBuiltInDemoComic\(shelfComic\)\s*\?\s*builtInDemoReaderData\(shelfComic\)\s*:\s*await eAPI\.openComic\(comicId\)/,
+  'built-in demo opens static reader data without openComic'
+);
+assert.match(
+  app,
+  /if \(!state\.currentComic \|\| isBuiltInDemoComic\(state\.currentComic\)\) return;/,
+  'built-in demo does not persist reading progress'
+);
+assert.match(
+  app,
+  /if \(!state\.currentComic \|\| isBuiltInDemoComic\(state\.currentComic\) \|\| typeof eAPI\.updateReaderCacheWindow !== 'function'\) return;/,
+  'built-in demo does not call the formal reader cache command'
+);
 assert.doesNotMatch(
   app,
   /localStorage\.setItem\([^\n]*api[-_ ]?key/i,
@@ -120,9 +168,15 @@ assert.match(
 mustContain(html, 'id="comic-inspector"', 'library layout');
 mustContain(html, 'id="comic-grid" tabindex="-1"', 'library focus target');
 mustContain(html, 'id="reader-context-menu"', 'reader context menu');
+mustContain(html, 'class="nav-zone prev-zone" id="prev-zone"', 'invisible previous-page hit zone');
+mustContain(html, 'class="nav-zone next-zone" id="next-zone"', 'invisible next-page hit zone');
+assert.doesNotMatch(html, /class="nav-arrow"/, 'reader edge arrows should not cover comic pages');
+assert.doesNotMatch(html, /id="(?:prev|next)-zone"[^>]*(?:role=|tabindex=)/, 'invisible reader hit zones must not enter keyboard focus order');
 mustContain(html, 'id="theme-picker"', 'theme picker');
+mustContain(html, 'id="library-card-size"', 'persistent library cover size control');
 mustContain(html, 'viewport-fit=cover', 'iPad safe-area viewport');
 mustContain(html, 'id="series-filter-list"', 'desktop series sidebar');
+mustContain(html, 'id="sidebar-collapse-btn"', 'collapsible desktop and iPad series sidebar');
 mustContain(html, 'id="series-filter-select"', 'compact series filter');
 assert.doesNotMatch(html, /data-filter-shortcut=/, 'duplicate smart collection buttons should be removed');
 assert.doesNotMatch(html, /id="smb-setup-btn-header"/, 'SMB setup should live in settings only');
@@ -163,6 +217,9 @@ assert.match(organizerActions, /grid-row:\s*2;/);
 assert.match(organizerActions, /justify-content:\s*flex-end;/);
 mustContain(css, '.organize-selected', 'catalog selection styling');
 mustContain(css, '.comic-inspector', 'library styling');
+mustContain(css, '.comic-grid.background-refresh .comic-card', 'background refresh does not replay card entrance animation');
+mustContain(css, '.main-layout.sidebar-collapsed', 'persisted sidebar collapsed layout');
+mustContain(css, '@media (min-width: 901px) and (max-width: 1180px)', 'iPad landscape master-detail layout');
 mustContain(css, '.reader-context-menu', 'reader styling');
 mustContain(css, '.reader-overlay.reader-idle', 'reader idle styling');
 mustContain(css, 'Impeccable polish', 'bounded visual polish layer');
@@ -172,6 +229,13 @@ mustContain(css, 'env(safe-area-inset-bottom)', 'safe-area adaptation');
 mustContain(app, 'function jumpToFirstPage()', 'keyboard navigation');
 mustContain(app, 'function jumpToLastPage()', 'keyboard navigation');
 mustContain(app, 'function handleReaderPointerClick', 'mouse navigation');
+mustContain(app, 'function activateGridComic(comic)', 'two-stage comic card activation');
+mustContain(app, 'if (state.selectedComicId === comic.id)', 'selected comic opens only on repeated activation');
+mustContain(app, 'card.onclick = () => activateGridComic(comic)', 'grid cards route through staged activation');
+mustContain(app, 'configureInteractiveItem(card, `開啟資料夾：${comic.title}`', 'folder cards retain single-step navigation');
+assert.doesNotMatch(app, /continue-card'[\s\S]{0,300}mouseenter/, 'continue cards must not silently replace inspector selection on hover');
+mustContain(app, 'function applySidebarCollapsed', 'persistent sidebar collapse behavior');
+mustContain(app, 'elements.librarySidebar.inert = isCollapsed', 'collapsed sidebar leaves the keyboard focus order');
 mustContain(app, "#ai-page-panel", 'AI panel reader-navigation boundary');
 mustContain(app, 'function readerImageFitScale', 'rotation-aware reader fitting');
 mustContain(app, 'function replaceReaderImages', 'reader transform refresh after image mount');
@@ -202,9 +266,14 @@ mustContain(tauri, 'undo_comic_file_operation', 'recoverable file operation undo
 mustContain(tauriApi, "invoke('mutate_comic_file'", 'frontend file mutation bridge');
 mustContain(app, 'function setLoaderProgress', 'loader progress UI');
 mustContain(css, 'pointer-events: none', 'background work status must not block interaction');
-assert.match(
+const performLibraryFetchBody = bracedBlock(
   app,
-  /async function fetchLibrary\(\)[\s\S]*if \(scanStillRunning && !failed\)[\s\S]*updateLoaderScanProgress\(latestScanStatus\);[\s\S]*state\.loaderHideTimer = window\.setTimeout\(hideLoader, 6000\);[\s\S]*hideLoader\(\);[\s\S]*\}/,
+  'async function performLibraryFetch({ background = false } = {})',
+  'performLibraryFetch'
+);
+assert.match(
+  performLibraryFetchBody,
+  /if \(scanStillRunning && !failed\)[\s\S]*updateLoaderScanProgress\(latestScanStatus\);[\s\S]*state\.loaderHideTimer = window\.setTimeout\(hideLoader, 6000\);[\s\S]*hideLoader\(\);/,
   'library loading must keep background scan status visible until completion'
 );
 assert.match(
@@ -223,6 +292,10 @@ assert.doesNotMatch(
   'organizer toggle must not trigger the library filter handler'
 );
 mustContain(app, 'function applyTheme', 'theme switching');
+mustContain(app, 'function applyLibraryCardSize', 'live library cover size preference');
+mustContain(app, "value === null || value === undefined || value === ''", 'missing cover size preference uses the standard default');
+mustContain(app, "localStorage.setItem(LIBRARY_CARD_SIZE_STORAGE_KEY, String(size))", 'persistent library cover size preference');
+mustContain(css, 'var(--library-card-min-width, 150px)', 'responsive library cover sizing');
 mustContain(app, 'function setOrganizeMode', 'catalog organizer behavior');
 mustContain(app, "document.createElement(state.organizeMode && !comic.isDirectory ? 'button' : 'div')", 'organizer cards use native accessible buttons');
 mustContain(css, '.comic-card.organize-selectable', 'organizer accessible button reset');
@@ -247,7 +320,9 @@ mustContain(app, '!img.getAttribute(\'src\')', 'webtoon lazy image detection');
 mustContain(app, 'img.removeAttribute(\'src\')', 'reader preload cleanup');
 mustContain(app, 'renderGeneration', 'reader render invalidation');
 mustContain(app, 'async function clearSmbConfig()', 'SMB cleanup');
-mustContain(app, 'RAM 預載略過，將改為逐頁讀取', 'preload error fallback');
+assert.doesNotMatch(html, /id="status-ram"/, 'background RAM preload diagnostics should not cover comic pages');
+assert.doesNotMatch(app, /function updateRamCacheProgress/, 'removed RAM badge must not retain dead rendering code');
+mustContain(app, "console.warn('[RAM preload] 已改用逐頁讀取：'", 'preload errors silently fall back to per-page reads');
 mustContain(scanner, 'external_bookmark: external_bookmark.map(str::to_owned)', 'bookmark ownership');
 mustContain(scanner, 'store.mark_source_offline(&source_id)', 'missing local source retention');
 mustContain(catalog, "source_id LIKE 'local:%'", 'local root drift retirement');
@@ -378,5 +453,41 @@ assert.match(
   /fn write_progress_file[\s\S]*\.comic_progress\.json\.tmp[\s\S]*progress_file_lock\.lock\(\)\.await/,
   'save_progress should write to a temporary file before renaming atomically'
 );
+assert.match(
+  app,
+  /function renderCatalogGrid\(\)[\s\S]{0,260}pagesContainer\.replaceChildren\(\)/,
+  'catalog redraw should replace the previous thumbnail grid'
+);
+assert.match(
+  app,
+  /expectedFingerprint:\s*panel\.dataset\.expectedFingerprint \|\| null/,
+  'file mutations should return the capability fingerprint precondition'
+);
+assert.match(
+  app,
+  /const selected = state\.filteredComics\.find[\s\S]{0,260}renderInspectorEmpty\(\)/,
+  'changing folders or filters should clear a stale inspector selection'
+);
+assert.match(
+  app,
+  /function resetLibraryNavigationState\(\)[\s\S]{0,700}catalogSearchItems\.clear\(\)[\s\S]{0,700}renderCatalogFacets\(\[\]\)/,
+  'switching the library root should clear folder, selection, and catalog search state'
+);
+assert.match(
+  app,
+  /function selectSeries\(seriesName\)[\s\S]{0,700}state\.currentPath = ''/,
+  'metadata series filtering should not masquerade as folder navigation'
+);
+assert.match(
+  app,
+  /if \(idx < state\.currentPageIndex\) state\.currentPageIndex -= 1/,
+  'deleting an earlier catalog page should preserve the visible logical page'
+);
+assert.match(
+  css,
+  /@media \(hover: none\), \(pointer: coarse\)[\s\S]{0,650}\.inspector-primary,[\s\S]{0,650}min-height:\s*44px/,
+  'iPad inspector actions should meet the 44px touch target floor'
+);
+assert.doesNotMatch(css, /var\(--bg-dark\)/, 'all UI surfaces should use defined design tokens');
 
 console.log('UI smoke checks passed.');

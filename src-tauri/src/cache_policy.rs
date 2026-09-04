@@ -6,6 +6,28 @@ pub(crate) struct PageSelection {
     pub whole_book: bool,
 }
 
+fn nearest_first_indices(page_count: usize, current_page: usize) -> Vec<usize> {
+    if page_count == 0 || current_page >= page_count {
+        return Vec::new();
+    }
+
+    let mut indices = Vec::with_capacity(page_count);
+    for distance in 0..page_count {
+        if let Some(forward) = current_page
+            .checked_add(distance)
+            .filter(|index| *index < page_count)
+        {
+            indices.push(forward);
+        }
+        if distance > 0 {
+            if let Some(backward) = current_page.checked_sub(distance) {
+                indices.push(backward);
+            }
+        }
+    }
+    indices
+}
+
 /// Selects encoded image pages by their actual ZIP entry sizes.
 ///
 /// Small books fit entirely. Larger books expand from the current page in
@@ -25,13 +47,14 @@ pub(crate) fn select_pages_for_budget(
         };
     }
 
+    let nearest_first = nearest_first_indices(page_sizes.len(), current_page);
     let budget = budget_bytes as u64;
     let book_bytes = page_sizes
         .iter()
         .try_fold(0_u64, |total, size| total.checked_add(*size));
     if book_bytes.is_some_and(|total| total <= budget) {
         return PageSelection {
-            indices: (0..page_sizes.len()).collect(),
+            indices: nearest_first,
             selected_bytes: book_bytes.unwrap_or(0),
             whole_book: true,
         };
@@ -39,20 +62,11 @@ pub(crate) fn select_pages_for_budget(
 
     let mut indices = Vec::new();
     let mut selected_bytes = 0_u64;
-    for distance in 0..page_sizes.len() {
-        let forward = current_page
-            .checked_add(distance)
-            .filter(|index| *index < page_sizes.len());
-        let backward = (distance > 0)
-            .then(|| current_page.checked_sub(distance))
-            .flatten();
-
-        for page_index in [forward, backward].into_iter().flatten() {
-            let page_bytes = page_sizes[page_index];
-            if page_bytes <= budget.saturating_sub(selected_bytes) {
-                indices.push(page_index);
-                selected_bytes = selected_bytes.saturating_add(page_bytes);
-            }
+    for page_index in nearest_first {
+        let page_bytes = page_sizes[page_index];
+        if page_bytes <= budget.saturating_sub(selected_bytes) {
+            indices.push(page_index);
+            selected_bytes = selected_bytes.saturating_add(page_bytes);
         }
     }
 
@@ -65,16 +79,25 @@ pub(crate) fn select_pages_for_budget(
 
 #[cfg(test)]
 mod tests {
-    use super::select_pages_for_budget;
+    use super::{nearest_first_indices, select_pages_for_budget};
 
     const MIB: u64 = 1024 * 1024;
 
     #[test]
-    fn small_book_uses_the_whole_budget_window() {
-        let selection = select_pages_for_budget(&vec![MIB; 120], 60, 256 * MIB as usize);
+    fn nearest_first_order_covers_every_page_once() {
+        assert_eq!(nearest_first_indices(7, 3), vec![3, 4, 2, 5, 1, 6, 0]);
+        assert_eq!(nearest_first_indices(4, 0), vec![0, 1, 2, 3]);
+        assert_eq!(nearest_first_indices(4, 3), vec![3, 2, 1, 0]);
+        assert!(nearest_first_indices(0, 0).is_empty());
+        assert!(nearest_first_indices(3, 3).is_empty());
+    }
+
+    #[test]
+    fn small_book_uses_the_whole_budget_but_starts_at_current_page() {
+        let selection = select_pages_for_budget(&vec![MIB; 7], 3, 256 * MIB as usize);
         assert!(selection.whole_book);
-        assert_eq!(selection.indices, (0..120).collect::<Vec<_>>());
-        assert_eq!(selection.selected_bytes, 120 * MIB);
+        assert_eq!(selection.indices, vec![3, 4, 2, 5, 1, 6, 0]);
+        assert_eq!(selection.selected_bytes, 7 * MIB);
     }
 
     #[test]

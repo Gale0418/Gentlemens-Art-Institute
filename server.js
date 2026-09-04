@@ -1,18 +1,20 @@
 import express from 'express';
-import cors from 'cors';
 import path from 'path';
 import fs from 'fs';
 import open from 'open';
-import AdmZip from 'adm-zip';
 import yauzl from 'yauzl';
 import os from 'os';
 import { fileURLToPath } from 'url';
+import { hasReachedScanDepth } from './scan-depth.js';
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
 
 const app = express();
-const PORT = 4000; // 使用 4000 埠避免與一般 3000 衝突
+const requestedPort = Number(process.env.GAI_PORT || 4000);
+const PORT = Number.isSafeInteger(requestedPort) && requestedPort >= 1 && requestedPort <= 65535
+  ? requestedPort
+  : 4000;
 
 const BASE_DIR = path.resolve(process.env.GAI_BASE_DIR || __dirname);
 const PROGRESS_FILE = path.join(BASE_DIR, 'progress.json');
@@ -32,8 +34,12 @@ function loadConfig() {
   if (fs.existsSync(CONFIG_FILE)) {
     try {
       const config = JSON.parse(fs.readFileSync(CONFIG_FILE, 'utf-8'));
-      if (config.scanDir && fs.existsSync(config.scanDir)) {
-        currentComicDir = config.scanDir;
+      if (typeof config.scanDir === 'string' && config.scanDir.length > 0 && !config.scanDir.includes('\0')) {
+        const configuredPath = path.resolve(config.scanDir.replace(/^~(?=\/|$)/, os.homedir()));
+        const canonicalPath = fs.realpathSync(configuredPath);
+        if (fs.statSync(canonicalPath).isDirectory()) {
+          currentComicDir = canonicalPath;
+        }
       }
     } catch (e) {
       console.error('讀取設定失敗，使用預設值。', e);
@@ -63,14 +69,27 @@ function saveMetadata() {
   }
 }
 
-app.use(cors());
+// 瀏覽器 API 僅接受同源請求；server 本身只綁定 loopback，避免被區網直接存取。
+app.use((req, res, next) => {
+  const origin = req.get('Origin');
+  if (!origin) return next();
+  try {
+    const originUrl = new URL(origin);
+    const requestHost = String(req.get('Host') || '').toLowerCase();
+    if (originUrl.protocol !== 'http:' || originUrl.host.toLowerCase() !== requestHost) {
+      return res.status(403).json({ error: '僅允許同源請求！' });
+    }
+  } catch (e) {
+    return res.status(403).json({ error: '無效的來源！' });
+  }
+  next();
+});
 app.use(express.json());
 app.use(express.static(path.join(__dirname, 'public')));
 
 // 支援的圖片副檔名
 const IMAGE_EXTENSIONS = ['.jpg', '.jpeg', '.png', '.webp', '.gif'];
 const MAX_IMAGE_BYTES = 64 * 1024 * 1024;
-const configuredScanDepth = Number.parseInt(process.env.GAI_SCAN_MAX_DEPTH || '', 10);
 
 function isImage(filename) {
   const ext = path.extname(filename).toLowerCase();
@@ -107,14 +126,36 @@ function isStrictPageIndex(value) {
     && Number.isSafeInteger(Number(value));
 }
 
+function isPathWithin(parentPath, candidatePath) {
+  const relative = path.relative(parentPath, candidatePath);
+  return relative === '' || (!relative.startsWith('..') && !path.isAbsolute(relative));
+}
+
+function resolveComicPath(id) {
+  if (!isStrictBase64Url(id)) return { status: 400, error: '漫畫識別碼格式不正確！' };
+  const relativePath = Buffer.from(id, 'base64url').toString('utf-8');
+  if (!relativePath || relativePath.includes('\0')) return { status: 403, error: '無效的路徑存取！' };
+  const candidate = path.resolve(currentComicDir, relativePath);
+  if (!isPathWithin(path.resolve(currentComicDir), candidate)) {
+    return { status: 403, error: '無效的路徑存取！' };
+  }
+  if (!fs.existsSync(candidate)) return { status: 404, error: '找不到該漫畫檔案或路徑！' };
+  try {
+    const canonicalLibrary = fs.realpathSync(currentComicDir);
+    const canonicalCandidate = fs.realpathSync(candidate);
+    if (!isPathWithin(canonicalLibrary, canonicalCandidate)) {
+      return { status: 403, error: '漫畫路徑超出書庫範圍！' };
+    }
+    return { relativePath, fullPath: canonicalCandidate };
+  } catch (e) {
+    return { status: 403, error: '漫畫路徑無法安全解析！' };
+  }
+}
+
 // 避開系統隱藏檔案與 macOS 垃圾資料夾
 function isSystemFile(filepath) {
   const base = path.basename(filepath);
   return base.startsWith('.') || filepath.includes('__MACOSX');
-}
-
-function hasReachedScanDepth(depth) {
-  return Number.isFinite(configuredScanDepth) && configuredScanDepth >= 0 && depth > configuredScanDepth;
 }
 
 function clearCoverCacheDirectory() {
@@ -151,6 +192,7 @@ const pageCountCache = new Map();
 const archiveEntriesCache = new Map();
 // 封面圖片快取 (Buffer)，避免重複解壓同一本書的封面
 const coverBufferCache = new Map();
+const coverDiskCache = new Map();
 
 // ===================================================================
 // 🚀 YauzlHandle 常駐快取 (核心效能大殺器！yauzl 版)
@@ -531,11 +573,34 @@ function clearLibraryCaches() {
   pageCountCache.clear();
   archiveEntriesCache.clear();
   coverBufferCache.clear();
+  coverDiskCache.clear();
   clearZipHandleCache();
   folderImageListCache.clear();
   cachedComics = [];
   scanProgress = { isScanning: false, found: 0, currentPath: currentComicDir, startedAt: null, completedAt: null };
   clearCoverCacheDirectory();
+}
+
+function getCachedCoverPath(id) {
+  const key = `${id}:0`;
+  if (coverDiskCache.has(key)) return coverDiskCache.get(key);
+
+  // Cache files are generated with a normalized extension. Probe exact names
+  // instead of scanning the whole cache directory or accepting id prefixes.
+  for (const extension of IMAGE_EXTENSIONS) {
+    const candidate = path.join(COVER_CACHE_DIR, `${id}_p0${extension}`);
+    try {
+      const stat = fs.statSync(candidate);
+      if (stat.isFile() && stat.size <= MAX_IMAGE_BYTES) {
+        coverDiskCache.set(key, candidate);
+        return candidate;
+      }
+    } catch (e) {
+      // A missing or unreadable candidate is simply a cache miss.
+    }
+  }
+  coverDiskCache.set(key, null);
+  return null;
 }
 
 // 背景掃描任務
@@ -601,17 +666,11 @@ app.get('/api/scan-status', (req, res) => {
 // API: 獲取漫畫分頁清單
 app.get('/api/comic/:id', async (req, res) => {
   try {
-    const relativePath = Buffer.from(req.params.id, 'base64url').toString('utf-8');
-    const fullPath = path.resolve(currentComicDir, relativePath);
-
-    const rel = path.relative(currentComicDir, fullPath);
-    if (rel.startsWith('..') || path.isAbsolute(rel)) {
-      return res.status(403).json({ error: '無效的路徑存取！' });
+    const comic = resolveComicPath(req.params.id);
+    if (comic.status) {
+      return res.status(comic.status).json({ error: comic.error });
     }
-
-    if (!fs.existsSync(fullPath)) {
-      return res.status(404).json({ error: '找不到該漫畫檔案或路徑！' });
-    }
+    const { relativePath, fullPath } = comic;
 
     const isDir = fs.statSync(fullPath).isDirectory();
     const comicType = isDir ? 'folder' : 'archive';
@@ -734,10 +793,9 @@ async function serveComicPage(req, res, forcedPage = null) {
         return res.end(cached.buf);
       }
 
-      const coverDir = fs.readdirSync(COVER_CACHE_DIR).filter(f => f.startsWith(`${id}_p0`));
-      if (coverDir.length > 0) {
-        const cached = path.join(COVER_CACHE_DIR, coverDir[0]);
-        const ext = path.extname(coverDir[0]).toLowerCase();
+      const cached = getCachedCoverPath(id);
+      if (cached) {
+        const ext = path.extname(cached).toLowerCase();
         const mime = getImageMime(ext);
         res.setHeader('Content-Type', mime);
         res.setHeader('Cache-Control', 'public, max-age=86400');
@@ -758,7 +816,9 @@ async function serveComicPage(req, res, forcedPage = null) {
     if (pageIndex === 0) {
       const cacheFilePath = path.join(COVER_CACHE_DIR, `${id}_p0${entryExt}`);
       if (coverBufferCache.size < 200) coverBufferCache.set(`${id}:0`, { buf: buffer, mime: mimeType });
-      fs.promises.writeFile(cacheFilePath, buffer).catch(() => {});
+      fs.promises.writeFile(cacheFilePath, buffer)
+        .then(() => coverDiskCache.set(`${id}:0`, cacheFilePath))
+        .catch(() => {});
     }
 
     res.setHeader('Content-Type', mimeType);
@@ -785,17 +845,28 @@ app.get('/api/cover', async (req, res) => {
 // API: 儲存閱讀進度
 app.post('/api/progress', (req, res) => {
   try {
+    if (!req.body || typeof req.body !== 'object' || Array.isArray(req.body)) {
+      return res.status(400).json({ error: '進度資料格式不正確' });
+    }
     const { id, currentPage, totalPages } = req.body;
-    if (!id || currentPage === undefined || totalPages === undefined) {
-      return res.status(400).json({ error: '缺少必要參數' });
+    if (!isStrictBase64Url(id) || !isStrictPageIndex(currentPage) || !isStrictPageIndex(totalPages)) {
+      return res.status(400).json({ error: '進度參數格式不正確' });
+    }
+    const comic = resolveComicPath(id);
+    if (comic.status) return res.status(comic.status).json({ error: comic.error });
+
+    const current = Number(currentPage);
+    const total = Number(totalPages);
+    if (total > 0 && current >= total) {
+      return res.status(400).json({ error: '目前頁碼超出範圍' });
     }
 
     const progressData = getProgressData();
-    const percent = totalPages > 0 ? Math.round((currentPage / totalPages) * 100) : 0;
+    const percent = total > 0 ? Math.min(100, Math.max(0, Math.round((current / total) * 100))) : 0;
 
     progressData[id] = {
-      currentPage: parseInt(currentPage, 10),
-      totalPages: parseInt(totalPages, 10),
+      currentPage: current,
+      totalPages: total,
       percent,
       updatedAt: new Date().toISOString()
     };
@@ -815,16 +886,20 @@ app.get('/api/config', (req, res) => {
 // API: 儲存設定目錄路徑
 app.post('/api/config', (req, res) => {
   try {
+    if (!req.body || typeof req.body !== 'object' || Array.isArray(req.body)) {
+      return res.status(400).json({ error: '設定資料格式不正確' });
+    }
     const { scanDir } = req.body;
-    if (!scanDir) {
+    if (typeof scanDir !== 'string' || scanDir.length === 0 || scanDir.length > 4096 || scanDir.includes('\0')) {
       return res.status(400).json({ error: '缺少路徑參數' });
     }
 
-    const resolved = path.resolve(scanDir.replace(/^~/, os.homedir()));
-    if (!fs.existsSync(resolved)) {
+    let resolved;
+    try {
+      resolved = fs.realpathSync(path.resolve(scanDir.replace(/^~(?=\/|$)/, os.homedir())));
+    } catch (e) {
       return res.status(400).json({ error: '指定的資料夾不存在！' });
     }
-
     const stat = fs.statSync(resolved);
     if (!stat.isDirectory()) {
       return res.status(400).json({ error: '指定的路徑不是資料夾！' });
@@ -845,15 +920,28 @@ app.post('/api/config', (req, res) => {
 app.get('/api/browse-folders', (req, res) => {
   try {
     let queryPath = req.query.path;
+    if (queryPath !== undefined && typeof queryPath !== 'string') {
+      return res.status(400).json({ error: '路徑格式不正確！' });
+    }
     if (!queryPath) {
       queryPath = currentComicDir;
     }
 
-    const targetPath = path.resolve(queryPath.replace(/^~/, os.homedir()));
+    const targetPath = path.resolve(queryPath.replace(/^~(?=\/|$)/, os.homedir()));
     
     // 防堵路徑穿越，限制只能在設定的漫畫庫目錄或主目錄下瀏覽 (依據專案需求與安全建議)
-    const relDir = path.relative(currentComicDir, targetPath);
-    const relHome = path.relative(os.homedir(), targetPath);
+    let canonicalTarget;
+    let canonicalLibrary;
+    let canonicalHome;
+    try {
+      canonicalTarget = fs.realpathSync(targetPath);
+      canonicalLibrary = fs.realpathSync(currentComicDir);
+      canonicalHome = fs.realpathSync(os.homedir());
+    } catch (e) {
+      return res.status(404).json({ error: '找不到路徑！' });
+    }
+    const relDir = path.relative(canonicalLibrary, canonicalTarget);
+    const relHome = path.relative(canonicalHome, canonicalTarget);
     if ((relDir.startsWith('..') || path.isAbsolute(relDir)) && (relHome.startsWith('..') || path.isAbsolute(relHome))) {
        return res.status(403).json({ error: '基於安全考量，只能瀏覽主目錄或漫畫庫目錄！' });
     }
@@ -862,19 +950,19 @@ app.get('/api/browse-folders', (req, res) => {
       return res.status(404).json({ error: '找不到路徑！' });
     }
 
-    const stat = fs.statSync(targetPath);
+    const stat = fs.statSync(canonicalTarget);
     if (!stat.isDirectory()) {
       return res.status(400).json({ error: '此路徑非資料夾！' });
     }
 
-    const items = fs.readdirSync(targetPath);
+    const items = fs.readdirSync(canonicalTarget);
     const subfolders = [];
-    const parentPath = path.dirname(targetPath);
-    const isRoot = parentPath === targetPath;
+    const parentPath = path.dirname(canonicalTarget);
+    const isRoot = parentPath === canonicalTarget;
 
     for (const item of items) {
       if (item.startsWith('.') || item === 'node_modules' || item.includes('__MACOSX')) continue;
-      const full = path.join(targetPath, item);
+      const full = path.join(canonicalTarget, item);
       try {
         if (fs.statSync(full).isDirectory()) {
           subfolders.push({
@@ -890,7 +978,7 @@ app.get('/api/browse-folders', (req, res) => {
     subfolders.sort((a, b) => a.name.localeCompare(b.name, undefined, { numeric: true, sensitivity: 'base' }));
 
     res.json({
-      currentPath: targetPath,
+      currentPath: canonicalTarget,
       parentPath: isRoot ? null : parentPath,
       folders: subfolders
     });
@@ -900,7 +988,7 @@ app.get('/api/browse-folders', (req, res) => {
 });
 
 // 啟動伺服器並自動開啟網頁
-app.listen(PORT, () => {
+app.listen(PORT, '127.0.0.1', () => {
   const url = `http://localhost:${PORT}`;
   console.log(`✨ 天才少女漫畫伺服器已成功升空！`);
   console.log(`🌐 傳送門在此：${url}`);

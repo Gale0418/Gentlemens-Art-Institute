@@ -1,5 +1,0 @@
-[build]
-target-dir = "/tmp/gai-cargo-target"
-
-[env]
-CARGO_INCREMENTAL = "0"

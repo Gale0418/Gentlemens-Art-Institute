@@ -1,4 +1,4 @@
-use crate::state::AppState;
+use crate::state::{AppState, ComicItem};
 use base64::{engine::general_purpose, Engine as _};
 use std::fs::File;
 use std::io::{self, Read};
@@ -8,6 +8,8 @@ use tauri::http::{Request, Response, StatusCode};
 use tauri::Manager;
 
 const MAX_IMAGE_BYTES: u64 = 64 * 1024 * 1024;
+const MUTABLE_IMAGE_CACHE_CONTROL: &str = "no-store";
+const ARCHIVE_IMAGE_CACHE_CONTROL: &str = "private, max-age=300";
 
 #[derive(Debug)]
 enum ArchivePageError {
@@ -75,6 +77,30 @@ fn is_page_out_of_range(page_count: usize, page_index: usize) -> bool {
     page_count > 0 && page_index >= page_count
 }
 
+fn route_shape_is_valid(parts: &[&str]) -> bool {
+    matches!(
+        (parts.first().copied(), parts.len()),
+        (Some("folder"), 3) | (Some("page"), 3) | (Some("cover"), 2)
+    )
+}
+
+fn cache_control_for_comic(comic: &ComicItem) -> &'static str {
+    // Folder URLs are index-based: deleting page 3 makes the former page 4
+    // become /3, so any WebView cache would serve the wrong image. Archive
+    // entry indexes are stable for the current reader session and benefit from
+    // a small private cache, especially when a large shelf asks for covers.
+    if comic.r#type.contains("folder") || comic.ext.is_empty() {
+        MUTABLE_IMAGE_CACHE_CONTROL
+    } else {
+        ARCHIVE_IMAGE_CACHE_CONTROL
+    }
+}
+
+fn decode_capability_path(id: &str) -> Result<String, ()> {
+    let bytes = general_purpose::URL_SAFE_NO_PAD.decode(id).map_err(|_| ())?;
+    String::from_utf8(bytes).map_err(|_| ())
+}
+
 fn canonical_image_within(image_path: &Path, folder_path: &Path) -> Option<std::path::PathBuf> {
     let canonical_image = image_path.canonicalize().ok()?;
     let canonical_folder = folder_path.canonicalize().ok()?;
@@ -106,7 +132,7 @@ fn read_archive_page(
     zip_path: &Path,
     target_name: &str,
 ) -> Result<(Vec<u8>, String), ArchivePageError> {
-    if !safe_archive_entry_name(target_name) {
+    if !crate::utils::safe_archive_entry_name(target_name) {
         return Err(ArchivePageError::InvalidZip(
             "archive entry path escapes the archive root".to_string(),
         ));
@@ -131,10 +157,6 @@ fn read_archive_page(
         .and_then(|value| value.to_str())
         .unwrap_or("");
     Ok((buf, format!(".{extension}")))
-}
-
-fn safe_archive_entry_name(name: &str) -> bool {
-    !name.is_empty() && !name.starts_with('/') && !name.split(['/', '\\']).any(|part| part == "..")
 }
 
 pub fn detect_mime(buf: &[u8], ext_fallback: &str) -> &'static str {
@@ -168,7 +190,7 @@ pub fn handle_comic_request(
     let path_str = uri.strip_prefix("gai://").unwrap_or(&uri);
     let path_str = path_str.strip_prefix("localhost/").unwrap_or(path_str);
 
-    let parts: Vec<&str> = path_str.split('/').filter(|s| !s.is_empty()).collect();
+    let parts: Vec<&str> = path_str.split('/').filter(|segment| !segment.is_empty()).collect();
     if parts.is_empty() {
         return Response::builder()
             .status(StatusCode::BAD_REQUEST)
@@ -177,16 +199,34 @@ pub fn handle_comic_request(
     }
 
     let host = parts[0];
+    if !route_shape_is_valid(&parts) {
+        let status = if matches!(host, "folder" | "page" | "cover") {
+            StatusCode::BAD_REQUEST
+        } else {
+            StatusCode::NOT_FOUND
+        };
+        return Response::builder()
+            .status(status)
+            .body(b"invalid comic route".to_vec())
+            .map_err(Into::into);
+    }
     let state = app.state::<Arc<AppState>>();
 
-    if host == "folder" && parts.len() >= 3 {
+    if host == "folder" {
         let folder_id = parts[1];
-        let index: usize = parts[2].parse().unwrap_or(0);
+        let index: usize = match parts[2].parse() {
+            Ok(index) => index,
+            Err(_) => {
+                return Response::builder()
+                    .status(StatusCode::BAD_REQUEST)
+                    .body(b"invalid page index".to_vec())
+                    .map_err(Into::into)
+            }
+        };
 
-        // IDs are capabilities: reject unknown IDs before touching any cache or path.
         let comic_info = {
             let comics = state.comics.blocking_lock();
-            comics.iter().find(|c| c.id == folder_id).cloned()
+            comics.iter().find(|comic| comic.id == folder_id).cloned()
         };
         let comic_info = match comic_info {
             Some(info) => info,
@@ -198,10 +238,15 @@ pub fn handle_comic_request(
             }
         };
 
-        let relative_path_bytes = general_purpose::URL_SAFE_NO_PAD
-            .decode(folder_id)
-            .unwrap_or_default();
-        let relative_path_str = String::from_utf8(relative_path_bytes).unwrap_or_default();
+        let relative_path_str = match decode_capability_path(folder_id) {
+            Ok(path) => path,
+            Err(()) => {
+                return Response::builder()
+                    .status(StatusCode::BAD_REQUEST)
+                    .body(b"invalid capability".to_vec())
+                    .map_err(Into::into)
+            }
+        };
         if Path::new(&relative_path_str)
             .components()
             .any(|component| matches!(component, Component::ParentDir))
@@ -212,8 +257,8 @@ pub fn handle_comic_request(
                 .map_err(Into::into);
         }
 
-        let is_external = comic_info.r#type.starts_with("external-");
-
+        let is_external = comic_info.source_id.starts_with("external:")
+            || comic_info.r#type.starts_with("external-");
         let folder_path = if is_external {
             let path = Path::new(&relative_path_str).to_path_buf();
             #[cfg(target_os = "ios")]
@@ -227,47 +272,47 @@ pub fn handle_comic_request(
             }
             path
         } else {
-            let scan_dir = { state.scan_dir.read().unwrap().clone() };
+            let scan_dir = state.scan_dir.read().unwrap().clone();
             if scan_dir.is_empty() {
                 return Response::builder()
                     .status(StatusCode::FORBIDDEN)
                     .body(b"scan directory is not configured".to_vec())
                     .map_err(Into::into);
             }
-            let p = Path::new(&scan_dir).join(&relative_path_str);
-            if !scan_dir.is_empty() {
-                match (p.canonicalize(), Path::new(&scan_dir).canonicalize()) {
-                    (Ok(canon_p), Ok(canon_scan)) if !canon_p.starts_with(&canon_scan) => {
-                        return Response::builder()
-                            .status(StatusCode::FORBIDDEN)
-                            .body(b"forbidden".to_vec())
-                            .map_err(Into::into);
-                    }
-                    (Err(_), _) => {
-                        return Response::builder()
-                            .status(StatusCode::FORBIDDEN)
-                            .body(b"forbidden".to_vec())
-                            .map_err(Into::into);
-                    }
-                    _ => {}
+            let path = Path::new(&scan_dir).join(&relative_path_str);
+            match (path.canonicalize(), Path::new(&scan_dir).canonicalize()) {
+                (Ok(canonical_path), Ok(canonical_scan))
+                    if !canonical_path.starts_with(&canonical_scan) =>
+                {
+                    return Response::builder()
+                        .status(StatusCode::FORBIDDEN)
+                        .body(b"forbidden".to_vec())
+                        .map_err(Into::into)
                 }
+                (Err(_), _) => {
+                    return Response::builder()
+                        .status(StatusCode::FORBIDDEN)
+                        .body(b"forbidden".to_vec())
+                        .map_err(Into::into)
+                }
+                _ => {}
             }
-            p
+            path
         };
 
         if folder_path.is_dir() {
-            // 從快取讀取檔案路徑（以 capability folder_id 作 key）
             let cached_path = {
                 let opened = state.opened_comic_files.read().unwrap();
                 opened
                     .get(folder_id)
                     .and_then(|files| files.get(index).cloned())
             };
-
-            if let Some(img_path_str) = cached_path {
-                let img_path = Path::new(&img_path_str);
-                if let Some(canonical_image) = canonical_image_within(img_path, &folder_path) {
-                    let mut f = match File::open(&canonical_image) {
+            let image_path = cached_path
+                .map(std::path::PathBuf::from)
+                .or_else(|| crate::utils::get_folder_images(&folder_path).get(index).cloned());
+            if let Some(image_path) = image_path {
+                if let Some(canonical_image) = canonical_image_within(&image_path, &folder_path) {
+                    let mut file = match File::open(&canonical_image) {
                         Ok(file) => file,
                         Err(_) => {
                             return Response::builder()
@@ -276,76 +321,44 @@ pub fn handle_comic_request(
                                 .map_err(Into::into)
                         }
                     };
-                    let buf = match read_image_limited(&mut f) {
+                    let buf = match read_image_limited(&mut file) {
                         Ok(buf) => buf,
-                        Err(_) => {
+                        Err(error) if error.kind() == io::ErrorKind::InvalidData => {
                             return Response::builder()
                                 .status(StatusCode::PAYLOAD_TOO_LARGE)
                                 .body(b"image too large".to_vec())
                                 .map_err(Into::into)
                         }
+                        Err(_) => {
+                            return Response::builder()
+                                .status(StatusCode::UNPROCESSABLE_ENTITY)
+                                .body(b"image read failed".to_vec())
+                                .map_err(Into::into)
+                        }
                     };
                     let ext = canonical_image
                         .extension()
-                        .and_then(|s| s.to_str())
+                        .and_then(|value| value.to_str())
                         .unwrap_or("");
-                    let mime = detect_mime(&buf, &format!(".{}", ext));
-
+                    let mime = detect_mime(&buf, &format!(".{ext}"));
                     return Response::builder()
                         .header("Content-Type", mime)
-                        .header("Cache-Control", "public, max-age=86400")
+                        .header("Cache-Control", MUTABLE_IMAGE_CACHE_CONTROL)
+                        .header("X-Content-Type-Options", "nosniff")
                         .header("Access-Control-Allow-Origin", "*")
                         .body(buf)
                         .map_err(Into::into);
                 }
-            } else {
-                // Fallback (cache miss)
-                let images = crate::utils::get_folder_images(&folder_path);
-                if index < images.len() {
-                    let img_path = &images[index];
-                    if let Some(canonical_image) = canonical_image_within(img_path, &folder_path) {
-                        let mut f = match File::open(&canonical_image) {
-                            Ok(file) => file,
-                            Err(_) => {
-                                return Response::builder()
-                                    .status(StatusCode::NOT_FOUND)
-                                    .body(b"not found".to_vec())
-                                    .map_err(Into::into)
-                            }
-                        };
-                        let buf = match read_image_limited(&mut f) {
-                            Ok(buf) => buf,
-                            Err(_) => {
-                                return Response::builder()
-                                    .status(StatusCode::PAYLOAD_TOO_LARGE)
-                                    .body(b"image too large".to_vec())
-                                    .map_err(Into::into)
-                            }
-                        };
-                        let ext = canonical_image
-                            .extension()
-                            .and_then(|s| s.to_str())
-                            .unwrap_or("");
-                        let mime = detect_mime(&buf, &format!(".{}", ext));
-
-                        return Response::builder()
-                            .header("Content-Type", mime)
-                            .header("Cache-Control", "public, max-age=86400")
-                            .header("Access-Control-Allow-Origin", "*")
-                            .body(buf)
-                            .map_err(Into::into);
-                    }
-                }
             }
         }
-    } else if (host == "page" || host == "cover") && parts.len() >= 2 {
+    } else if host == "page" || host == "cover" {
         let id = parts[1];
         let page_index: usize = if host == "cover" {
             0
         } else {
-            match parts.get(2).and_then(|s| s.parse().ok()) {
-                Some(index) => index,
-                None => {
+            match parts[2].parse() {
+                Ok(index) => index,
+                Err(_) => {
                     return Response::builder()
                         .status(StatusCode::BAD_REQUEST)
                         .body(b"invalid page index".to_vec())
@@ -354,10 +367,9 @@ pub fn handle_comic_request(
             }
         };
 
-        // IDs are capabilities: reject unknown IDs before touching any cache or path.
         let comic_info = {
             let comics = state.comics.blocking_lock();
-            comics.iter().find(|c| c.id == id).cloned()
+            comics.iter().find(|comic| comic.id == id).cloned()
         };
         let comic_info = match comic_info {
             Some(info) => info,
@@ -368,6 +380,7 @@ pub fn handle_comic_request(
                     .map_err(Into::into)
             }
         };
+        let cache_control = cache_control_for_comic(&comic_info);
         let page_count = {
             let opened = state.opened_comic_files.read().unwrap();
             opened
@@ -375,8 +388,6 @@ pub fn handle_comic_request(
                 .map(|pages| pages.len())
                 .unwrap_or(comic_info.page_count)
         };
-        // 掃描階段的 0 代表「尚未計算」，不是一本零頁漫畫。
-        // 封面與尚未開啟的頁面請求應繼續交由實體檔案內容判斷。
         if is_page_out_of_range(page_count, page_index) {
             return Response::builder()
                 .status(StatusCode::RANGE_NOT_SATISFIABLE)
@@ -384,30 +395,31 @@ pub fn handle_comic_request(
                 .map_err(Into::into);
         }
 
-        // 🚀 檢查極致 RAM 快取池
         let cached_buf = {
             let pool = state.ram_cache_pool.lock().unwrap();
-            if let Some(book) = pool.get(id) {
-                book.get(&page_index).cloned()
-            } else {
-                None
-            }
+            pool.get(id)
+                .and_then(|book| book.get(&page_index).cloned())
         };
-
         if let Some(buf) = cached_buf {
             let mime = detect_mime(&buf, &comic_info.ext);
             return Response::builder()
                 .header("Content-Type", mime)
-                .header("Cache-Control", "public, max-age=86400")
+                .header("Cache-Control", cache_control)
+                .header("X-Content-Type-Options", "nosniff")
                 .header("Access-Control-Allow-Origin", "*")
                 .body(buf)
                 .map_err(Into::into);
         }
 
-        let relative_path_bytes = general_purpose::URL_SAFE_NO_PAD
-            .decode(id)
-            .unwrap_or_default();
-        let relative_path_str = String::from_utf8(relative_path_bytes).unwrap_or_default();
+        let relative_path_str = match decode_capability_path(id) {
+            Ok(path) => path,
+            Err(()) => {
+                return Response::builder()
+                    .status(StatusCode::BAD_REQUEST)
+                    .body(b"invalid capability".to_vec())
+                    .map_err(Into::into)
+            }
+        };
         if Path::new(&relative_path_str)
             .components()
             .any(|component| matches!(component, Component::ParentDir))
@@ -418,56 +430,53 @@ pub fn handle_comic_request(
                 .map_err(Into::into);
         }
 
-        let is_smb = comic_info.r#type == "smb-archive";
-        let is_external = comic_info.r#type.starts_with("external-");
-
-        let full_path;
-        if is_smb {
-            let temp_dir = app
-                .path()
+        let is_smb = comic_info.source_id == "smb" || comic_info.r#type == "smb-archive";
+        let is_external = comic_info.source_id.starts_with("external:")
+            || comic_info.r#type.starts_with("external-");
+        let full_path = if is_smb {
+            app.path()
                 .app_local_data_dir()
                 .unwrap_or_else(|_| std::env::temp_dir())
-                .join("ComicTemp");
-            full_path = temp_dir.join(&relative_path_str);
+                .join("ComicTemp")
+                .join(&relative_path_str)
         } else if is_external {
-            full_path = Path::new(&relative_path_str).to_path_buf();
+            let path = Path::new(&relative_path_str).to_path_buf();
             #[cfg(target_os = "ios")]
-            if !external_path_is_authorized(&comic_info, &full_path, &state) {
+            if !external_path_is_authorized(&comic_info, &path, &state) {
                 return Response::builder()
                     .status(StatusCode::FORBIDDEN)
                     .body(b"external bookmark is not active".to_vec())
                     .map_err(Into::into);
             }
+            path
         } else {
-            let scan_dir = { state.scan_dir.read().unwrap().clone() };
+            let scan_dir = state.scan_dir.read().unwrap().clone();
             if scan_dir.is_empty() {
                 return Response::builder()
                     .status(StatusCode::FORBIDDEN)
                     .body(b"scan directory is not configured".to_vec())
                     .map_err(Into::into);
             }
-            full_path = Path::new(&scan_dir).join(&relative_path_str);
-            if !scan_dir.is_empty() {
-                match (
-                    full_path.canonicalize(),
-                    Path::new(&scan_dir).canonicalize(),
-                ) {
-                    (Ok(canon_full), Ok(canon_scan)) if !canon_full.starts_with(&canon_scan) => {
-                        return Response::builder()
-                            .status(StatusCode::FORBIDDEN)
-                            .body(b"forbidden".to_vec())
-                            .map_err(Into::into);
-                    }
-                    (Err(_), _) => {
-                        return Response::builder()
-                            .status(StatusCode::FORBIDDEN)
-                            .body(b"forbidden".to_vec())
-                            .map_err(Into::into);
-                    }
-                    _ => {}
+            let path = Path::new(&scan_dir).join(&relative_path_str);
+            match (path.canonicalize(), Path::new(&scan_dir).canonicalize()) {
+                (Ok(canonical_path), Ok(canonical_scan))
+                    if !canonical_path.starts_with(&canonical_scan) =>
+                {
+                    return Response::builder()
+                        .status(StatusCode::FORBIDDEN)
+                        .body(b"forbidden".to_vec())
+                        .map_err(Into::into)
                 }
+                (Err(_), _) => {
+                    return Response::builder()
+                        .status(StatusCode::FORBIDDEN)
+                        .body(b"forbidden".to_vec())
+                        .map_err(Into::into)
+                }
+                _ => {}
             }
-        }
+            path
+        };
 
         if !full_path.exists() {
             return Response::builder()
@@ -483,17 +492,19 @@ pub fn handle_comic_request(
                 .unwrap_or_else(|_| std::env::temp_dir())
                 .join("ComicTemp");
             match (full_path.canonicalize(), temp_root.canonicalize()) {
-                (Ok(canon_full), Ok(canon_root)) if !canon_full.starts_with(&canon_root) => {
+                (Ok(canonical_path), Ok(canonical_root))
+                    if !canonical_path.starts_with(&canonical_root) =>
+                {
                     return Response::builder()
                         .status(StatusCode::FORBIDDEN)
                         .body(b"forbidden".to_vec())
-                        .map_err(Into::into);
+                        .map_err(Into::into)
                 }
                 (Err(_), _) | (_, Err(_)) => {
                     return Response::builder()
                         .status(StatusCode::FORBIDDEN)
                         .body(b"forbidden".to_vec())
-                        .map_err(Into::into);
+                        .map_err(Into::into)
                 }
                 _ => {}
             }
@@ -501,8 +512,8 @@ pub fn handle_comic_request(
 
         if full_path.is_dir() {
             let images = crate::utils::get_folder_images(&full_path);
-            if let Some(img_path) = images.get(page_index) {
-                if let Some(canonical_image) = canonical_image_within(img_path, &full_path) {
+            if let Some(image_path) = images.get(page_index) {
+                if let Some(canonical_image) = canonical_image_within(image_path, &full_path) {
                     let mut file = match File::open(&canonical_image) {
                         Ok(file) => file,
                         Err(_) => {
@@ -514,10 +525,16 @@ pub fn handle_comic_request(
                     };
                     let buf = match read_image_limited(&mut file) {
                         Ok(buf) => buf,
-                        Err(_) => {
+                        Err(error) if error.kind() == io::ErrorKind::InvalidData => {
                             return Response::builder()
                                 .status(StatusCode::PAYLOAD_TOO_LARGE)
                                 .body(b"image too large".to_vec())
+                                .map_err(Into::into)
+                        }
+                        Err(_) => {
+                            return Response::builder()
+                                .status(StatusCode::UNPROCESSABLE_ENTITY)
+                                .body(b"image read failed".to_vec())
                                 .map_err(Into::into)
                         }
                     };
@@ -525,11 +542,11 @@ pub fn handle_comic_request(
                         .extension()
                         .and_then(|value| value.to_str())
                         .unwrap_or("");
-                    let mime = detect_mime(&buf, &format!(".{}", ext));
-
+                    let mime = detect_mime(&buf, &format!(".{ext}"));
                     return Response::builder()
                         .header("Content-Type", mime)
-                        .header("Cache-Control", "public, max-age=86400")
+                        .header("Cache-Control", MUTABLE_IMAGE_CACHE_CONTROL)
+                        .header("X-Content-Type-Options", "nosniff")
                         .header("Access-Control-Allow-Origin", "*")
                         .body(buf)
                         .map_err(Into::into);
@@ -569,7 +586,8 @@ pub fn handle_comic_request(
                     let mime = detect_mime(&buf, &extension);
                     return Response::builder()
                         .header("Content-Type", mime)
-                        .header("Cache-Control", "public, max-age=86400")
+                        .header("Cache-Control", ARCHIVE_IMAGE_CACHE_CONTROL)
+                        .header("X-Content-Type-Options", "nosniff")
                         .header("Access-Control-Allow-Origin", "*")
                         .body(buf)
                         .map_err(Into::into);
@@ -595,8 +613,30 @@ pub fn handle_comic_request(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::state::{ComicItem, Progress};
+    use crate::state::Progress;
     use std::io::Write;
+
+    fn comic_item(runtime_type: &str, ext: &str) -> ComicItem {
+        ComicItem {
+            id: "id".into(),
+            r#type: runtime_type.into(),
+            relative_path: "book".into(),
+            ext: ext.into(),
+            title: "book".into(),
+            series: "test".into(),
+            updated_at: String::new(),
+            page_count: 0,
+            progress: Progress {
+                current_page: 0,
+                total_pages: 0,
+                percent: 0.0,
+                updated_at: None,
+            },
+            source_id: "local:test".into(),
+            source_path: None,
+            external_bookmark: None,
+        }
+    }
 
     #[test]
     fn test_detect_mime_avif() {
@@ -631,12 +671,54 @@ mod tests {
 
     #[test]
     fn test_detect_mime_unknown_is_not_jpeg() {
-        assert_eq!(detect_mime(b"not an image", ""), "application/octet-stream");
+        assert_eq!(
+            detect_mime(b"not an image", ""),
+            "application/octet-stream"
+        );
     }
 
     #[test]
     fn svg_is_served_as_inert_binary() {
         assert_eq!(get_mime(".svg"), "application/octet-stream");
+    }
+
+    #[test]
+    fn mutable_folder_indexes_and_archive_pages_use_distinct_cache_policies() {
+        assert_eq!(
+            cache_control_for_comic(&comic_item("folder", "")),
+            MUTABLE_IMAGE_CACHE_CONTROL
+        );
+        assert_eq!(
+            cache_control_for_comic(&comic_item("archive", ".cbz")),
+            ARCHIVE_IMAGE_CACHE_CONTROL
+        );
+        assert_eq!(
+            cache_control_for_comic(&comic_item("offline", "")),
+            MUTABLE_IMAGE_CACHE_CONTROL
+        );
+    }
+
+    #[test]
+    fn route_shapes_reject_ignored_suffixes_and_missing_indexes() {
+        assert!(route_shape_is_valid(&["cover", "id"]));
+        assert!(route_shape_is_valid(&["page", "id", "0"]));
+        assert!(route_shape_is_valid(&["folder", "id", "0"]));
+        assert!(!route_shape_is_valid(&["cover", "id", "ignored"]));
+        assert!(!route_shape_is_valid(&["page", "id"]));
+        assert!(!route_shape_is_valid(&[
+            "folder", "id", "0", "ignored"
+        ]));
+        assert!(!route_shape_is_valid(&["unknown", "id"]));
+    }
+
+    #[test]
+    fn capability_paths_fail_closed() {
+        assert!(decode_capability_path("not*base64").is_err());
+        let valid = general_purpose::URL_SAFE_NO_PAD.encode(b"./series/book.cbz");
+        assert_eq!(
+            decode_capability_path(&valid).unwrap(),
+            "./series/book.cbz"
+        );
     }
 
     #[test]
@@ -648,13 +730,6 @@ mod tests {
     fn known_page_count_still_rejects_out_of_range_page() {
         assert!(is_page_out_of_range(3, 3));
         assert!(!is_page_out_of_range(3, 2));
-    }
-
-    #[test]
-    fn unopened_comic_page_count_zero_allows_cover_request() {
-        // When comic has not been opened yet, page_count is 0 (unknown).
-        // Cover request (page_index = 0) must not be rejected with 416.
-        assert!(!is_page_out_of_range(0, 0));
     }
 
     #[test]
@@ -701,10 +776,12 @@ mod tests {
     }
 
     #[test]
-    fn archive_entry_name_validator_rejects_absolute_and_backslash_escape() {
-        assert!(!safe_archive_entry_name("/outside.jpg"));
-        assert!(!safe_archive_entry_name("chapter\\..\\outside.jpg"));
-        assert!(safe_archive_entry_name("chapter/001.jpg"));
+    fn archive_entry_name_validator_is_shared_with_indexing() {
+        assert!(!crate::utils::safe_archive_entry_name("/outside.jpg"));
+        assert!(!crate::utils::safe_archive_entry_name(
+            "chapter\\..\\outside.jpg"
+        ));
+        assert!(crate::utils::safe_archive_entry_name("chapter/001.jpg"));
     }
 
     #[test]
@@ -742,7 +819,7 @@ mod tests {
                 percent: 0.0,
                 updated_at: None,
             },
-            source_id: "local".into(),
+            source_id: "external:owner".into(),
             source_path: Some(archive.to_string_lossy().into_owned()),
             external_bookmark: Some("owner".into()),
         };

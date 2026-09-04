@@ -4,28 +4,219 @@
  * 當偵測到 Tauri 環境時，會自動覆寫 window.electronAPI。
  */
 
+const authoritativeProgressById = new Map();
+
+function progressPercent(currentPage, totalPages) {
+  return totalPages > 0 && currentPage > 0
+    ? Math.round(((Math.min(currentPage, totalPages - 1) + 1) / totalPages) * 10000) / 100
+    : 0;
+}
+
+function normalizeReaderData(data) {
+  if (!data || typeof data !== 'object') return data;
+  const pages = Array.isArray(data.pages) ? data.pages : [];
+  const progress = data.progress && typeof data.progress === 'object' ? { ...data.progress } : {};
+  const maxIndex = Math.max(0, pages.length - 1);
+  const rawPage = Number(progress.currentPage);
+  const currentPage = Number.isFinite(rawPage)
+    ? Math.min(maxIndex, Math.max(0, Math.trunc(rawPage)))
+    : 0;
+  progress.currentPage = currentPage;
+  progress.totalPages = pages.length;
+  progress.percent = progressPercent(currentPage, pages.length);
+  return { ...data, pages, progress };
+}
+
+function normalizeProgressPayload(data) {
+  if (!data || typeof data !== 'object' || typeof data.id !== 'string' || !data.id) {
+    throw new Error('閱讀進度資料格式不正確。');
+  }
+  const rawTotal = Number(data.totalPages);
+  const rawPage = Number(data.currentPage);
+  if (!Number.isFinite(rawTotal) || !Number.isFinite(rawPage)) {
+    throw new Error('閱讀進度頁碼必須是有限數字。');
+  }
+  const totalPages = Math.max(0, Math.trunc(rawTotal));
+  const maxIndex = Math.max(0, totalPages - 1);
+  const currentPage = totalPages > 0
+    ? Math.min(maxIndex, Math.max(0, Math.trunc(rawPage)))
+    : 0;
+  return { id: data.id, currentPage, totalPages };
+}
+
+function progressTimestamp(progress) {
+  const timestamp = Date.parse(progress?.updatedAt || progress?.updated_at || '');
+  return Number.isFinite(timestamp) ? timestamp : Number.NEGATIVE_INFINITY;
+}
+
+function rememberAuthoritativeLibraryProgress(items) {
+  if (!Array.isArray(items)) return items;
+  const present = new Set();
+  const mergedItems = items.map((item) => {
+    if (!item || typeof item.id !== 'string') return item;
+    present.add(item.id);
+    const incoming = item.progress && typeof item.progress === 'object'
+      ? { ...item.progress }
+      : null;
+    const remembered = authoritativeProgressById.get(item.id);
+    const chosen = remembered && (!incoming || progressTimestamp(remembered) > progressTimestamp(incoming))
+      ? remembered
+      : incoming;
+    if (chosen) authoritativeProgressById.set(item.id, { ...chosen });
+    return chosen && chosen !== incoming
+      ? { ...item, progress: { ...chosen } }
+      : item;
+  });
+
+  for (const id of authoritativeProgressById.keys()) {
+    if (!present.has(id)) authoritativeProgressById.delete(id);
+  }
+  return mergedItems;
+}
+
+function readerDataWithAuthoritativeProgress(id, data) {
+  if (!data || typeof data !== 'object') return data;
+  const authoritative = authoritativeProgressById.get(id);
+  if (!authoritative) return data;
+  return {
+    ...data,
+    progress: {
+      ...(data.progress && typeof data.progress === 'object' ? data.progress : {}),
+      ...authoritative,
+    },
+  };
+}
+
+function rememberSavedProgress(data) {
+  const normalized = normalizeProgressPayload(data);
+  authoritativeProgressById.set(normalized.id, {
+    currentPage: normalized.currentPage,
+    totalPages: normalized.totalPages,
+    percent: progressPercent(normalized.currentPage, normalized.totalPages),
+    updatedAt: new Date().toISOString(),
+  });
+  return normalized;
+}
+
+async function openComicWithAuthoritativeProgress(invoke, id) {
+  const nativeData = await invoke('open_comic', { id });
+  const nativeNormalized = normalizeReaderData(nativeData);
+  const normalized = normalizeReaderData(readerDataWithAuthoritativeProgress(id, nativeData));
+  const nativePage = nativeNormalized?.progress?.currentPage;
+  const resumePage = normalized?.progress?.currentPage;
+
+  if (
+    normalized?.pages?.length > 0
+    && Number.isSafeInteger(nativePage)
+    && Number.isSafeInteger(resumePage)
+    && resumePage !== nativePage
+  ) {
+    try {
+      const generation = await invoke('update_reader_cache_window', {
+        comicId: id,
+        pageIndex: resumePage,
+      });
+      if (Number.isSafeInteger(generation)) normalized.preloadGeneration = generation;
+    } catch (error) {
+      // Reader opening must still succeed when an optional background cache
+      // adjustment fails; on-demand page serving remains authoritative.
+      console.warn('[reader cache realign]', error);
+    }
+  }
+  return normalized;
+}
+
+function normalizeSmbConfig(data) {
+  if (data == null) return null;
+  if (typeof data !== 'object') throw new Error('NAS 設定格式不正確。');
+
+  const host = String(data.host ?? '').trim();
+  const share = String(data.share ?? '').trim();
+  const username = data.username == null ? '' : String(data.username).trim();
+  const password = data.password == null ? '' : String(data.password);
+
+  if (!host || host.length > 255 || /[\/\\\u0000-\u001f\u007f]/.test(host)) {
+    throw new Error('NAS 主機名稱／IP 格式不正確。');
+  }
+  if (!share || share.length > 255 || share === '.' || share === '..' || /[\/\\\u0000-\u001f\u007f]/.test(share)) {
+    throw new Error('NAS Share 名稱格式不正確。');
+  }
+  if (username.length > 256 || /[\u0000-\u001f\u007f]/.test(username)) {
+    throw new Error('NAS 使用者名稱格式不正確。');
+  }
+  if (password.length > 1024 || /[\u0000\u000a\u000d]/.test(password)) {
+    throw new Error('NAS 密碼格式不正確。');
+  }
+
+  return {
+    host,
+    share,
+    username: username || null,
+    password: password || null,
+  };
+}
+
+// Compatibility guard: the existing checkbox keeps its historical id so the
+// large frontend core does not need a risky rewrite, but its runtime meaning is
+// now provider-neutral. Both OpenAI and Google require explicit consent before
+// any AI session can be enabled, and switching provider revokes prior consent.
+function installThirdPartyAiConsentGuard() {
+  const disclosure = document.getElementById('ai-google-disclosure-wrap');
+  const checkbox = document.getElementById('ai-google-disclosure');
+  const provider = document.getElementById('ai-provider');
+  if (!disclosure || !checkbox || !provider) return;
+
+  disclosure.id = 'ai-third-party-disclosure-wrap';
+  const renderDisclosure = () => {
+    const providerName = provider.value === 'google' ? 'Google' : 'OpenAI';
+    const message = ` 我了解：只有在我主動使用 AI 功能時，目前頁面影像與提示文字才會傳送至 ${providerName}；我明確同意本次工作階段的第三方 AI 資料分享。`;
+    const textNode = Array.from(disclosure.childNodes).find(node => node.nodeType === 3);
+    if (textNode) textNode.textContent = message;
+    else disclosure.append(document.createTextNode(message));
+    disclosure.hidden = false;
+  };
+
+  renderDisclosure();
+  provider.addEventListener('change', () => {
+    checkbox.checked = false;
+    renderDisclosure();
+  });
+}
+
+installThirdPartyAiConsentGuard();
+
 if (window.__TAURI__) {
   const { invoke } = window.__TAURI__.core;
   const { listen } = window.__TAURI__.event;
 
   console.log("🚀 Tauri 環境偵測成功，初始化橋接層...");
 
-  // 定義與原本 preload.js 一模一樣的介面
   window.electronAPI = {
-    isElectron: true, // 騙前端說我們是 Electron，這樣它才會走 native 邏輯
-    getLibrary: () => invoke('get_library'),
+    isElectron: true,
+    getLibrary: async () => rememberAuthoritativeLibraryProgress(await invoke('get_library')),
     getScanStatus: () => invoke('get_scan_status'),
-    openComic: (id) => invoke('open_comic', { id }),
+    openComic: (id) => openComicWithAuthoritativeProgress(invoke, id),
     updateReaderCacheWindow: (comicId, pageIndex) => invoke('update_reader_cache_window', { comicId, pageIndex }),
     closeComic: (comicId) => invoke('close_comic', { comicId }),
-    saveProgress: (data) => invoke('save_progress', { data }),
+    saveProgress: async (data) => {
+      const normalized = normalizeProgressPayload(data);
+      const result = await invoke('save_progress', { data: normalized });
+      rememberSavedProgress(normalized);
+      return result;
+    },
     getConfig: () => invoke('get_config'),
     setConfig: (data) => invoke('set_config', { data }),
-    setSmbConfig: (data) => invoke('set_smb_config', { data }),
+    setSmbConfig: (data) => invoke('set_smb_config', { data: normalizeSmbConfig(data) }),
     getOnlineServicesConfig: () => invoke('get_online_services_config'),
     setOnlineServicesConfig: (data) => invoke('set_online_services_config', { data }),
     getAiSessionStatus: () => invoke('get_ai_session_status'),
-    setAiSessionConfig: (data) => invoke('set_ai_session_config', { data }),
+    setAiSessionConfig: (data) => {
+      const providerName = data?.provider === 'google' ? 'Google' : 'OpenAI';
+      if (!data?.googleContentDisclosure) {
+        return Promise.reject(new Error(`啟用 ${providerName} 前，請先明確同意將目前頁面影像與提示文字傳送至該第三方 AI 供應商。`));
+      }
+      return invoke('set_ai_session_config', { data });
+    },
     clearAiSessionConfig: () => invoke('clear_ai_session_config'),
     testAiSession: () => invoke('test_ai_session'),
     explainPage: (data) => invoke('explain_page', { data }),
@@ -48,25 +239,12 @@ if (window.__TAURI__) {
       return selected?.path || null;
     },
     browseFolders: (dirPath) => invoke('browse_folders', { dirPath }),
-    onLibraryChanged: (callback) => {
-      return listen('library-changed', (event) => {
-        callback(event.payload);
-      });
-    },
+    onLibraryChanged: (callback) => listen('library-changed', (event) => callback(event.payload)),
     onCatalogChanged: (callback) => listen('catalog-changed', (event) => callback(event.payload)),
-    onScanProgress: (callback) => {
-      return listen('scan-progress', (event) => callback(event.payload));
-    },
-    onRamCacheProgress: (callback) => {
-      return listen('ram-cache-progress', (event) => callback(event.payload));
-    },
-    onSmbDownloadStart: (callback) => {
-      return listen('smb-download-start', (event) => callback(event.payload));
-    },
-    onSmbDownloadEnd: (callback) => {
-      return listen('smb-download-end', (event) => callback(event.payload));
-    },
-    // Favorites 原本是存在 localStorage，這裡我們直接用原本前端的邏輯，或者未來移交後端
+    onScanProgress: (callback) => listen('scan-progress', (event) => callback(event.payload)),
+    onRamCacheProgress: (callback) => listen('ram-cache-progress', (event) => callback(event.payload)),
+    onSmbDownloadStart: (callback) => listen('smb-download-start', (event) => callback(event.payload)),
+    onSmbDownloadEnd: (callback) => listen('smb-download-end', (event) => callback(event.payload)),
     getFavorites: async () => {
       try {
         return JSON.parse(localStorage.getItem('gai:favorites') || '[]');

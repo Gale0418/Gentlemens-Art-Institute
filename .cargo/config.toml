@@ -1,4 +1,10 @@
 [build]
 # Keep build artefacts on a local filesystem with file locking. The checkout
-# may live on /Volumes/MyGame, which does not support Cargo incremental locks.
+# may live on an external/NAS-backed volume that does not support Cargo
+# incremental locking reliably.
 target-dir = "/tmp/gai-cargo-target"
+
+[env]
+# Use the same deterministic setting from every working directory; keeping it
+# here avoids a second src-tauri/.cargo/config.toml with overlapping values.
+CARGO_INCREMENTAL = "0"

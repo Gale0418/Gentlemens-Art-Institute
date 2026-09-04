@@ -93,9 +93,44 @@ const httpAPI = {
 };
 
 const eAPI = window.electronAPI || httpAPI;
+let libraryRefreshTimer = null;
+let activeLibraryFetch = null;
+let libraryFetchQueued = false;
+let lastGridRenderSignature = '';
+let lastContinueRenderSignature = '';
+let lastInspectorRenderSignature = '';
+
+function scheduleLibraryRefresh(delay = 80) {
+  clearTimeout(libraryRefreshTimer);
+  libraryRefreshTimer = window.setTimeout(() => {
+    libraryRefreshTimer = null;
+    fetchLibrary({ background: true });
+  }, delay);
+}
+
+function resetLibraryNavigationState() {
+  state.currentPath = '';
+  state.activeSeries = 'all';
+  state.selectedComicId = null;
+  state.organizeSelection.clear();
+  state.catalogSearchRequest += 1;
+  state.catalogSearchIds = null;
+  state.catalogSearchItems.clear();
+  state.catalogSearchTotal = 0;
+  state.renderLimit = 200;
+  lastGridRenderSignature = '';
+  lastContinueRenderSignature = '';
+  lastInspectorRenderSignature = '';
+  if (elements.searchInput) elements.searchInput.value = '';
+  if (elements.clearSearchBtn) elements.clearSearchBtn.style.display = 'none';
+  renderCatalogFacets([]);
+}
 
 function getCoverUrl(comicId) {
   if (!comicId) return '';
+  // Keep this helper self-contained because it is also exercised in a small
+  // isolated VM by the browser routing test.
+  if (String(comicId) === 'builtin:all-ages-demo-book') return 'assets/demo/moonlit-archive/cover.jpg';
   const encodedId = encodeURIComponent(String(comicId));
   if (eAPI && eAPI.isElectron) {
     return `gai://cover/${encodedId}`;
@@ -107,6 +142,47 @@ const READER_PRELOAD_RADIUS = 10;
 const MAX_PRELOADED_IMAGES = READER_PRELOAD_RADIUS * 2;
 const READER_CACHE_UPDATE_DELAY_MS = 120;
 const WEBTOON_EAGER_IMAGES = 3;
+const BUILT_IN_DEMO_SOURCE_ID = 'builtin:all-ages-demo';
+const BUILT_IN_DEMO_ID = 'builtin:all-ages-demo-book';
+const BUILT_IN_DEMO_COVER_PATH = 'assets/demo/moonlit-archive/cover.jpg';
+
+// 這些圖片是隨 app 打包的原創全年齡示範素材；使用純靜態相對 URL，
+// 不經正式 comic protocol，也不會成為 SQLite 的 library authority。
+const BUILT_IN_DEMO_PAGES = [
+  'assets/demo/moonlit-archive/cover.jpg',
+  'assets/demo/moonlit-archive/page-01.jpg',
+  'assets/demo/moonlit-archive/page-02.jpg'
+];
+
+function isBuiltInDemoComic(comic) {
+  return Boolean(comic?.isBuiltInDemo || comic?.sourceId === BUILT_IN_DEMO_SOURCE_ID);
+}
+
+function createBuiltInDemoComic() {
+  return {
+    id: BUILT_IN_DEMO_ID,
+    type: 'built-in-demo',
+    // 單層相對路徑讓目錄折疊器在書架根目錄直接渲染示範卡。
+    relativePath: 'all-ages-demo',
+    ext: '.demo',
+    title: '小小書房：閱讀器導覽',
+    series: '內建示範',
+    updatedAt: '2099-01-01T00:00:00.000Z',
+    pageCount: BUILT_IN_DEMO_PAGES.length,
+    progress: { currentPage: 0, totalPages: BUILT_IN_DEMO_PAGES.length, percent: 0, updatedAt: null },
+    sourceId: BUILT_IN_DEMO_SOURCE_ID,
+    isBuiltInDemo: true
+  };
+}
+
+function builtInDemoReaderData(comic) {
+  return {
+    ...comic,
+    pages: [...BUILT_IN_DEMO_PAGES],
+    isDir: false,
+    filenames: []
+  };
+}
 
 // 全域狀態管理
 let state = {
@@ -164,6 +240,11 @@ let state = {
 
 const THEME_STORAGE_KEY = 'gai:theme';
 const THEMES = new Set(['midnight', 'sakura', 'ink', 'aurora']);
+const LIBRARY_CARD_SIZE_STORAGE_KEY = 'gai:libraryCardSize';
+const SIDEBAR_COLLAPSED_STORAGE_KEY = 'gai:sidebarCollapsed';
+const LIBRARY_CARD_SIZE_DEFAULT = 150;
+const LIBRARY_CARD_SIZE_MIN = 120;
+const LIBRARY_CARD_SIZE_MAX = 240;
 const THEME_COLORS = {
   midnight: '#140508',
   sakura: '#050506',
@@ -173,6 +254,9 @@ const THEME_COLORS = {
 
 // 元素選取器
 const elements = {
+  mainLayout: document.querySelector('.main-layout'),
+  librarySidebar: document.getElementById('library-sidebar'),
+  sidebarCollapseBtn: document.getElementById('sidebar-collapse-btn'),
   comicGrid: document.getElementById('comic-grid'),
   emptyState: document.getElementById('empty-state'),
   searchInput: document.getElementById('search-input'),
@@ -181,6 +265,7 @@ const elements = {
   libraryPathLabel: document.getElementById('library-path-label'),
   continueStrip: document.getElementById('continue-strip'),
   comicInspector: document.getElementById('comic-inspector'),
+  libraryDemoNotice: document.getElementById('library-demo-notice'),
   organizeBar: document.getElementById('organize-bar'),
   organizeCount: document.getElementById('organize-count'),
   organizeSelectVisible: document.getElementById('organize-select-visible'),
@@ -265,8 +350,7 @@ const elements = {
   readerBackBtn: document.getElementById('reader-back-btn'),
   readerContextMenu: document.getElementById('reader-context-menu'),
   
-  // 姬米妮貼心快取與載入狀態面板元素
-  statusRam: document.getElementById('status-ram'),
+  // 目前頁面解碼狀態
   statusLoading: document.getElementById('status-loading'),
   
   // 載入遮罩
@@ -282,14 +366,18 @@ const elements = {
   closeSettingsBtn: document.getElementById('close-settings-btn'),
   scanDirInput: document.getElementById('scan-dir-input'),
   scanDirStatus: document.getElementById('scan-dir-status'),
+  scanPathRow: document.getElementById('scan-path-row'),
+  librarySourceLabel: document.getElementById('library-source-label'),
+  librarySourceBtn: document.getElementById('library-source-btn'),
   savePathBtn: document.getElementById('save-path-btn'),
-  nativeBrowseBtn: document.getElementById('native-browse-btn'),
   fallbackFolderBrowser: document.getElementById('fallback-folder-browser'),
   folderBreadcrumbs: document.getElementById('folder-breadcrumbs'),
   browserCurrentPath: document.getElementById('browser-current-path'),
   browserUpBtn: document.getElementById('browser-up-btn'),
   browserFoldersList: document.getElementById('browser-folders-list'),
   themePicker: document.getElementById('theme-picker'),
+  libraryCardSize: document.getElementById('library-card-size'),
+  libraryCardSizeValue: document.getElementById('library-card-size-value'),
   catalogExportBtn: document.getElementById('catalog-export-btn'),
   catalogImportInput: document.getElementById('catalog-import-input'),
   catalogImportPreview: document.getElementById('catalog-import-preview'),
@@ -307,7 +395,6 @@ const elements = {
   
   // SMB 設定元素
   smbSetupBtn: document.getElementById('smb-setup-btn'),
-  nativeExternalBtn: document.getElementById('native-external-btn'),
   smbModal: document.getElementById('smb-modal'),
   closeSmbBtn: document.getElementById('close-smb-btn'),
   smbHost: document.getElementById('smb-host'),
@@ -324,9 +411,32 @@ const elements = {
 
 document.addEventListener('DOMContentLoaded', () => {
   applyTheme(localStorage.getItem(THEME_STORAGE_KEY) || 'midnight', { persist: false });
+  applyLibraryCardSize(localStorage.getItem(LIBRARY_CARD_SIZE_STORAGE_KEY), { persist: false });
+  applySidebarCollapsed(localStorage.getItem(SIDEBAR_COLLAPSED_STORAGE_KEY) === 'true', { persist: false });
   initApp();
   bindEvents();
 });
+
+function applySidebarCollapsed(collapsed, { persist = true } = {}) {
+  const isCollapsed = Boolean(collapsed);
+  elements.mainLayout?.classList.toggle('sidebar-collapsed', isCollapsed);
+  if (elements.librarySidebar) {
+    const supportsNativeInert = 'inert' in elements.librarySidebar;
+    if (supportsNativeInert) elements.librarySidebar.inert = isCollapsed;
+    // iOS 14 的 WKWebView 尚無原生 inert；hidden fallback 同時移除焦點與可見內容。
+    elements.librarySidebar.hidden = !supportsNativeInert && isCollapsed;
+    elements.librarySidebar.setAttribute('aria-hidden', String(isCollapsed));
+  }
+  if (elements.sidebarCollapseBtn) {
+    elements.sidebarCollapseBtn.setAttribute('aria-expanded', String(!isCollapsed));
+    const label = isCollapsed ? '展開漫畫系列側欄' : '收合漫畫系列側欄';
+    elements.sidebarCollapseBtn.setAttribute('aria-label', label);
+    elements.sidebarCollapseBtn.title = label;
+    const icon = elements.sidebarCollapseBtn.querySelector('i');
+    if (icon) icon.className = `fa-solid fa-chevron-${isCollapsed ? 'right' : 'left'}`;
+  }
+  if (persist) localStorage.setItem(SIDEBAR_COLLAPSED_STORAGE_KEY, String(isCollapsed));
+}
 
 function applyTheme(theme, { persist = true } = {}) {
   const nextTheme = THEMES.has(theme) ? theme : 'midnight';
@@ -342,6 +452,35 @@ function applyTheme(theme, { persist = true } = {}) {
   if (persist) localStorage.setItem(THEME_STORAGE_KEY, nextTheme);
 }
 
+function normalizeLibraryCardSize(value) {
+  if (value === null || value === undefined || value === '') return LIBRARY_CARD_SIZE_DEFAULT;
+  const numericValue = Number(value);
+  if (!Number.isFinite(numericValue)) return LIBRARY_CARD_SIZE_DEFAULT;
+  const steppedValue = Math.round(numericValue / 10) * 10;
+  return Math.min(LIBRARY_CARD_SIZE_MAX, Math.max(LIBRARY_CARD_SIZE_MIN, steppedValue));
+}
+
+function libraryCardSizeLabel(size) {
+  if (size <= 130) return '緊湊';
+  if (size >= 210) return '特大';
+  if (size >= 180) return '放大';
+  return '標準';
+}
+
+function applyLibraryCardSize(value, { persist = true } = {}) {
+  const size = normalizeLibraryCardSize(value);
+  document.documentElement.style.setProperty('--library-card-min-width', `${size}px`);
+  if (elements.libraryCardSize) {
+    elements.libraryCardSize.value = String(size);
+    elements.libraryCardSize.setAttribute('aria-valuetext', `${libraryCardSizeLabel(size)}，${size} 像素`);
+  }
+  if (elements.libraryCardSizeValue) {
+    elements.libraryCardSizeValue.value = `${libraryCardSizeLabel(size)} · ${size} px`;
+    elements.libraryCardSizeValue.textContent = elements.libraryCardSizeValue.value;
+  }
+  if (persist) localStorage.setItem(LIBRARY_CARD_SIZE_STORAGE_KEY, String(size));
+}
+
 // 初始化載入
 async function initApp() {
   document.getElementById('zoom-value').textContent = '100%';
@@ -354,7 +493,7 @@ async function initApp() {
     if (importBtn) importBtn.style.display = 'inline-block';
     
     const tip = document.querySelector('.sidebar-footer p');
-    if (tip) tip.innerHTML = '小提示：妳可以使用上方的「匯入圖片」按鈕，將相簿裡的照片存入書庫中喔！✨';
+    if (tip) tip.innerHTML = '小提示：點一下查看詳情，再點同一本開始閱讀；也可以用上方「匯入圖片」加入內容。✨';
     const emptyTip = document.querySelector('#empty-state p');
     if (emptyTip) emptyTip.innerHTML = '請點擊上方的「匯入圖片」按鈕，或透過檔案 App 匯入漫畫！✨';
   }
@@ -401,7 +540,103 @@ function classifyBookmarkUpdateError(error) {
   };
 }
 
+function isIOSLibraryDevice() {
+  return /iPad|iPhone|iPod/.test(navigator.userAgent)
+    || (navigator.platform === 'MacIntel' && navigator.maxTouchPoints > 1);
+}
+
+async function addIOSLibrarySource() {
+  if (!window.electronAPI?.openExternalFolder) {
+    throw new Error('本環境不支援 iOS 外部資料夾授權');
+  }
+
+  let desiredBookmarks = null;
+  try {
+    const result = await window.electronAPI.openExternalFolder();
+    if (!result?.bookmark) return;
+
+    let bookmarks = [];
+    try {
+      bookmarks = JSON.parse(localStorage.getItem('gai:externalBookmarks') || '[]');
+    } catch (error) {
+      console.warn('外部資料夾清單格式無效，將重新建立：', error);
+    }
+
+    if (bookmarks.some(bookmark => bookmark.name === result.name && bookmark.bookmark === result.bookmark)) {
+      alert('這個資料夾已經加入了。');
+      return;
+    }
+
+    bookmarks.push({ bookmark: result.bookmark, name: result.name });
+    desiredBookmarks = bookmarks;
+    await window.electronAPI.setBookmarks(bookmarks);
+    localStorage.setItem('gai:externalBookmarks', JSON.stringify(bookmarks));
+    renderExternalBookmarks();
+    if (elements.scanDirStatus) elements.scanDirStatus.textContent = `已加入：${result.name}，正在重新掃描。`;
+    showLoader('正在掃描新加入的漫畫來源...', { progress: null, detail: '找到的漫畫會立即出現在書架' });
+    startScanStatusPolling();
+    scheduleLibraryRefresh(0);
+  } catch (error) {
+    console.error('加入 iOS 外部資料夾失敗：', error);
+    const { message, stateWasUpdated } = classifyBookmarkUpdateError(error);
+    if (stateWasUpdated && desiredBookmarks) {
+      localStorage.setItem('gai:externalBookmarks', JSON.stringify(desiredBookmarks));
+      renderExternalBookmarks();
+      if (elements.scanDirStatus) {
+        elements.scanDirStatus.textContent = `外部資料夾已更新，但舊資料夾權限釋放部分失敗：${message}`;
+      }
+      showLoader('正在掃描新加入的漫畫來源...', { progress: null, detail: '找到的漫畫會立即出現在書架' });
+      startScanStatusPolling();
+      scheduleLibraryRefresh(0);
+      return;
+    }
+    throw new Error(message);
+  }
+}
+
+async function chooseNativeLibrarySource() {
+  const selectedPath = await window.electronAPI.openFolderDialog(elements.scanDirInput.value.trim());
+  if (!selectedPath) {
+    if (elements.scanDirStatus) elements.scanDirStatus.textContent = '已取消選擇，漫畫來源沒有變更。';
+    return;
+  }
+
+  elements.scanDirInput.value = selectedPath;
+  if (elements.scanDirStatus) elements.scanDirStatus.textContent = `已選擇：${selectedPath}`;
+  await saveSettingsPath(selectedPath);
+}
+
+async function chooseLibrarySource() {
+  if (!elements.librarySourceBtn) return;
+  elements.librarySourceBtn.disabled = true;
+  elements.librarySourceBtn.setAttribute('aria-busy', 'true');
+  if (elements.scanDirStatus) elements.scanDirStatus.textContent = '正在開啟系統檔案選擇器…';
+
+  try {
+    if (isIOSLibraryDevice()) {
+      await addIOSLibrarySource();
+    } else if (window.electronAPI?.isElectron && window.electronAPI.openFolderDialog) {
+      await chooseNativeLibrarySource();
+    } else if (elements.fallbackFolderBrowser) {
+      elements.fallbackFolderBrowser.style.display = 'flex';
+      await fetchBrowserFolders(elements.scanDirInput.value.trim());
+    }
+  } catch (error) {
+    console.error('加入漫畫來源失敗：', error);
+    if (elements.scanDirStatus) {
+      elements.scanDirStatus.textContent = `無法加入漫畫來源：${error?.message || error}`;
+    }
+  } finally {
+    elements.librarySourceBtn.disabled = false;
+    elements.librarySourceBtn.removeAttribute('aria-busy');
+  }
+}
+
 function bindEvents() {
+  elements.sidebarCollapseBtn?.addEventListener('click', () => {
+    applySidebarCollapsed(!elements.mainLayout?.classList.contains('sidebar-collapsed'));
+  });
+
   // 搜尋功能
   elements.searchInput.addEventListener('input', handleSearch);
   elements.clearSearchBtn.addEventListener('click', () => {
@@ -421,7 +656,7 @@ function bindEvents() {
   bindOrganizerEvents();
   if (window.electronAPI?.onCatalogChanged) {
     window.electronAPI.onCatalogChanged(() => {
-      if (!state.currentComic) fetchLibrary();
+      if (!state.currentComic) scheduleLibraryRefresh();
     });
   }
   refreshAiSessionStatus();
@@ -431,9 +666,12 @@ function bindEvents() {
     showLoader('正在重新掃描資料夾，主人請稍候喔...', { progress: null, detail: '正在更新漫畫庫...' });
     if (eAPI.scanLibrary) {
       try { await eAPI.scanLibrary(); } catch(e) { console.error(e); }
+      startScanStatusPolling();
+      scheduleLibraryRefresh(0);
+    } else {
+      await fetchLibrary();
+      hideLoader();
     }
-    await fetchLibrary();
-    hideLoader();
   });
 
   // 相簿匯入
@@ -500,9 +738,6 @@ function bindEvents() {
     e.stopPropagation();
     goNextByReadingDirection();
   });
-  bindKeyboardActivation(elements.prevZone, goPreviousByReadingDirection);
-  bindKeyboardActivation(elements.nextZone, goNextByReadingDirection);
-
   // 閱讀模式切換
   elements.btnModeSingle.addEventListener('click', () => setReadingMode('single'));
   elements.btnModeDouble.addEventListener('click', () => setReadingMode('double'));
@@ -549,9 +784,16 @@ function bindEvents() {
 
   let touchStartX = 0;
   let touchStartY = 0;
+  let readerTouchMoved = false;
   elements.readerViewport.addEventListener('touchstart', (e) => {
     touchStartX = e.changedTouches[0].screenX;
     touchStartY = e.changedTouches[0].screenY;
+    readerTouchMoved = false;
+  }, { passive: true });
+  elements.readerViewport.addEventListener('touchmove', (e) => {
+    const dx = e.changedTouches[0].screenX - touchStartX;
+    const dy = e.changedTouches[0].screenY - touchStartY;
+    if (Math.hypot(dx, dy) > 12) readerTouchMoved = true;
   }, { passive: true });
   elements.readerViewport.addEventListener('touchend', (e) => {
     const dx = e.changedTouches[0].screenX - touchStartX;
@@ -560,9 +802,13 @@ function bindEvents() {
       if (dx < 0) goNextByReadingDirection(); // 左滑下一頁
       else goPreviousByReadingDirection(); // 右滑上一頁
     }
+    window.setTimeout(() => { readerTouchMoved = false; }, 0);
   }, { passive: true });
 
-  elements.readerViewport.addEventListener('pointerup', handleReaderPointerClick);
+  elements.readerViewport.addEventListener('pointerup', event => {
+    if (event.pointerType === 'touch' && readerTouchMoved) return;
+    handleReaderPointerClick(event);
+  });
   elements.readerOverlay.addEventListener('contextmenu', handleReaderContextMenu);
   elements.readerOverlay.addEventListener('auxclick', handleReaderAuxClick);
   document.addEventListener('click', (e) => {
@@ -600,6 +846,9 @@ function bindEvents() {
     const option = event.target.closest('[data-theme-option]');
     if (option) applyTheme(option.dataset.themeOption);
   });
+  elements.libraryCardSize?.addEventListener('input', event => {
+    applyLibraryCardSize(event.currentTarget.value);
+  });
   elements.catalogExportBtn?.addEventListener('click', exportCatalogMetadataFile);
   elements.catalogImportInput?.addEventListener('change', previewCatalogMetadataFile);
   document.querySelector('.catalog-import-label')?.addEventListener('keydown', event => {
@@ -629,6 +878,7 @@ function bindEvents() {
   updateAiProviderDisclosure();
   
   if (elements.smbSetupBtn) elements.smbSetupBtn.addEventListener('click', openSmbModal);
+  if (elements.librarySourceBtn) elements.librarySourceBtn.addEventListener('click', chooseLibrarySource);
   
   if (elements.closeSmbBtn) elements.closeSmbBtn.addEventListener('click', closeSmbModal);
   if (elements.smbConnectBtn) elements.smbConnectBtn.addEventListener('click', saveSmbConfig);
@@ -649,84 +899,14 @@ function bindEvents() {
 
   // Electron 特有邏輯 (純 Electron 模式 — 無 HTTP server)
   if (window.electronAPI && window.electronAPI.isElectron) {
-    const isIOSDevice = /iPad|iPhone|iPod/.test(navigator.userAgent)
-      || (navigator.platform === 'MacIntel' && navigator.maxTouchPoints > 1);
+    const isIOSDevice = isIOSLibraryDevice();
     if (elements.fallbackFolderBrowser) elements.fallbackFolderBrowser.style.display = 'none';
-    if (elements.nativeExternalBtn) {
-      elements.nativeExternalBtn.style.display = isIOSDevice ? 'inline-flex' : 'none';
-    }
-
-    // 顯示原生瀏覽按鈕
-    if (elements.nativeBrowseBtn) elements.nativeBrowseBtn.style.display = 'block';
-
-    // 綁定原生瀏覽按鈕事件（回傳路徑後直接套用）
-    if (elements.nativeBrowseBtn) {
-      elements.nativeBrowseBtn.addEventListener('click', async () => {
-        elements.nativeBrowseBtn.disabled = true;
-        elements.nativeBrowseBtn.setAttribute('aria-busy', 'true');
-        if (elements.scanDirStatus) elements.scanDirStatus.textContent = '正在開啟系統資料夾選擇器…';
-        try {
-          const selectedPath = await window.electronAPI.openFolderDialog(elements.scanDirInput.value.trim());
-          if (selectedPath) {
-            elements.scanDirInput.value = selectedPath;
-            if (elements.scanDirStatus) elements.scanDirStatus.textContent = `已選擇：${selectedPath}`;
-            await saveSettingsPath(selectedPath);
-          } else if (elements.scanDirStatus) {
-            elements.scanDirStatus.textContent = '已取消選擇，漫畫目錄沒有變更。';
-          }
-        } catch (e) {
-          console.error('開啟原生資料夾選擇器失敗：', e);
-          if (elements.scanDirStatus) {
-            elements.scanDirStatus.textContent = `無法開啟資料夾選擇器：${e?.message || e}`;
-          }
-        } finally {
-          elements.nativeBrowseBtn.disabled = false;
-          elements.nativeBrowseBtn.removeAttribute('aria-busy');
-        }
-      });
-    }
-
-    // 綁定原生外部資料夾按鈕 (iOS)
-    if (elements.nativeExternalBtn) {
-      elements.nativeExternalBtn.addEventListener('click', async () => {
-        if (!window.electronAPI.openExternalFolder) {
-          alert('本環境不支援加入外部資料夾');
-          return;
-        }
-        let desiredBookmarks = null;
-        try {
-          const result = await window.electronAPI.openExternalFolder();
-          if (result && result.bookmark) {
-            let bookmarks = [];
-            try {
-              bookmarks = JSON.parse(localStorage.getItem('gai:externalBookmarks') || '[]');
-            } catch (e) {}
-            // 如果已經有同一個資料夾就不重複加
-            if (!bookmarks.some(b => b.name === result.name && b.bookmark === result.bookmark)) {
-              bookmarks.push({ bookmark: result.bookmark, name: result.name });
-              desiredBookmarks = bookmarks;
-              await window.electronAPI.setBookmarks(bookmarks);
-              localStorage.setItem('gai:externalBookmarks', JSON.stringify(bookmarks));
-              renderExternalBookmarks();
-              alert('成功加入外部資料夾：' + result.name + '\n即將為您重新掃描...');
-              elements.refreshBtn.click();
-            } else {
-              alert('這個資料夾已經加過囉！');
-            }
-          }
-        } catch(e) {
-          console.error(e);
-          const { message, stateWasUpdated } = classifyBookmarkUpdateError(e);
-          if (stateWasUpdated && desiredBookmarks) {
-            localStorage.setItem('gai:externalBookmarks', JSON.stringify(desiredBookmarks));
-            renderExternalBookmarks();
-            alert('外部資料夾已更新，但舊資料夾權限釋放部分失敗：' + message + '\n目前設定已套用，掃描會在背景繼續。');
-            elements.refreshBtn.click();
-          } else {
-            alert('加入失敗：' + message);
-          }
-        }
-      });
+    if (isIOSDevice) {
+      if (elements.scanPathRow) elements.scanPathRow.hidden = true;
+      if (elements.librarySourceLabel) elements.librarySourceLabel.removeAttribute('for');
+      if (elements.scanDirStatus) {
+        elements.scanDirStatus.textContent = '可選擇「檔案」中的本機、iCloud 或已連線 NAS 資料夾。';
+      }
     }
 
     // 監聽漫畫庫目錄檔案異動並自動重新整理
@@ -737,7 +917,7 @@ function bindEvents() {
           return;
         }
         console.log('[Watcher] 偵測到漫畫庫檔案異動，正在幫主人自動重新整理書架...');
-        fetchLibrary();
+        scheduleLibraryRefresh();
       });
     }
 
@@ -754,7 +934,7 @@ function bindEvents() {
         if (state.currentComic && data.id === state.currentComic.id && matchesCurrentPage
           && data.generation >= state.currentComic.preloadGeneration) {
           state.currentComic.preloadGeneration = data.generation;
-          updateRamCacheProgress(data.loaded, data.total, data.finished, data.error);
+          if (data.error) console.warn('[RAM preload] 已改用逐頁讀取：', data.error);
           if (data.finished && !data.error) {
             state.readerCacheReadyPage = state.currentPageIndex;
             preloadNextPages();
@@ -1334,12 +1514,18 @@ function isComicOffline(comic) {
 
 function renderLibrarySourceStatus(config = {}) {
   if (!elements.librarySourceAlert) return;
-  const unavailable = config.available === false;
+  const hasOnlineLibrary = state.comics.some(comic => !isBuiltInDemoComic(comic) && !isComicOffline(comic));
+  const unavailable = config.available === false && !hasOnlineLibrary;
   elements.librarySourceAlert.hidden = !unavailable;
   if (unavailable && elements.librarySourceAlertMessage) {
     const path = config.scanDir || '原本的漫畫目錄';
     elements.librarySourceAlertMessage.textContent = `${path} 目前無法存取；收藏、標籤與閱讀進度都已安全保留。`;
   }
+}
+
+function renderBuiltInDemoStatus() {
+  if (!elements.libraryDemoNotice) return;
+  elements.libraryDemoNotice.hidden = !state.comics.some(isBuiltInDemoComic);
 }
 
 function showLibrarySourceRecovery(message) {
@@ -1360,32 +1546,71 @@ async function openSettingsForRecovery() {
 }
 
 // 獲取漫畫清單
-async function fetchLibrary() {
+async function fetchLibrary(options = {}) {
+  if (activeLibraryFetch) {
+    libraryFetchQueued = true;
+    return activeLibraryFetch;
+  }
+
+  activeLibraryFetch = performLibraryFetch(options);
+  try {
+    return await activeLibraryFetch;
+  } finally {
+    activeLibraryFetch = null;
+    if (libraryFetchQueued) {
+      libraryFetchQueued = false;
+      scheduleLibraryRefresh(0);
+    }
+  }
+}
+
+async function performLibraryFetch({ background = false } = {}) {
   let failed = false;
   let scanStillRunning = false;
   let latestScanStatus = null;
-  showLoader('正在背景整理漫畫庫...', { progress: null, detail: '仍可繼續使用目前畫面' });
-  startScanStatusPolling();
+  const silentRefresh = background && elements.comicGrid.childElementCount > 0;
+  if (!silentRefresh) {
+    showLoader('正在背景整理漫畫庫...', { progress: null, detail: '仍可繼續使用目前畫面' });
+    startScanStatusPolling();
+  }
+  let libraryConfig = null;
   try {
-    setLoaderProgress(null, '正在讀取漫畫庫索引...');
+    if (!silentRefresh) setLoaderProgress(null, '正在讀取漫畫庫索引...');
     state.comics = await eAPI.getLibrary();
-    setLoaderProgress(70, `已載入 ${state.comics.length} 本漫畫`);
+    if (eAPI && eAPI.getConfig) {
+      try {
+        libraryConfig = await eAPI.getConfig();
+      } catch (error) {
+        console.warn('無法讀取漫畫庫設定：', error);
+      }
+    }
+
+    // 示範卡只存在於前端衍生狀態：沒有掃描目錄且正式來源為空時才顯示。
+    // 絕不送入 Tauri catalog、收藏 API 或閱讀進度 API。
+    // iOS 首次啟動會把空的 Documents 目錄當作暫時預設值；只有前端曾明確
+    // 保存過掃描路徑，才把它視為使用者正式書庫，避免擋住首次示範。
+    const hasConfiguredSource = Boolean(libraryConfig?.scanDir)
+      && Boolean(localStorage.getItem('gai:scanDir'));
+    if (state.comics.length === 0 && !hasConfiguredSource) {
+      state.comics = [createBuiltInDemoComic()];
+    }
+    if (!silentRefresh) setLoaderProgress(70, `已載入 ${state.comics.filter(comic => !isBuiltInDemoComic(comic)).length} 本正式漫畫`);
     if (eAPI && eAPI.getFavorites) {
       try { state.favorites = await eAPI.getFavorites(); } catch(e) {}
     }
     if (eAPI && eAPI.getConfig && elements.libraryPathLabel) {
       try {
-        const config = await eAPI.getConfig();
+        const config = libraryConfig || await eAPI.getConfig();
         elements.libraryPathLabel.textContent = shortPathLabel(config.scanDir);
         elements.libraryPathLabel.title = config.scanDir;
         renderLibrarySourceStatus(config);
       } catch(e) {}
     }
-    filterAndRenderGrid();
+    renderBuiltInDemoStatus();
+    filterAndRenderGrid({ skipUnchanged: silentRefresh, background: silentRefresh });
     renderSidebar();
     renderContinueStrip();
     updateStats();
-    ensureInspectorSelection();
     if (eAPI?.getScanStatus) {
       try {
         latestScanStatus = await eAPI.getScanStatus();
@@ -1398,20 +1623,24 @@ async function fetchLibrary() {
         scanStillRunning = Boolean(latestScanStatus?.isScanning);
       } catch(e) {}
     }
-    if (scanStillRunning) {
+    if (scanStillRunning && !silentRefresh) {
       updateLoaderScanProgress(latestScanStatus);
-    } else {
+    } else if (!silentRefresh) {
       setLoaderProgress(100, '書架整理完成');
     }
   } catch (e) {
     failed = true;
     console.error('無法獲取書架清單：', e);
-    showLoader('漫畫庫讀取失敗', {
-      progress: null,
-      detail: e?.message || String(e)
-    });
+    if (!silentRefresh) {
+      showLoader('漫畫庫讀取失敗', {
+        progress: null,
+        detail: e?.message || String(e)
+      });
+    }
   } finally {
-    if (scanStillRunning && !failed) {
+    if (silentRefresh) {
+      // 背景同步保留目前畫面與任何前景 loader。
+    } else if (scanStillRunning && !failed) {
       updateLoaderScanProgress(latestScanStatus);
     } else if (failed) {
       stopScanStatusPolling();
@@ -1450,27 +1679,42 @@ function renderSidebar() {
   }
 
   if (elements.seriesFilterList) {
-    elements.seriesFilterList.replaceChildren();
-    const appendSeries = (seriesName, label, count) => {
-      const item = document.createElement('li');
+    const existingItems = new Map(
+      [...elements.seriesFilterList.querySelectorAll('li[data-series]')]
+        .map(item => [item.dataset.series, item])
+    );
+    const entries = [
+      ['all', '全部系列', state.comics.length],
+      ...seriesNames.map(seriesName => [seriesName, seriesName, seriesMap.get(seriesName)])
+    ];
+    const desiredItems = entries.map(([seriesName, label, count]) => {
+      let item = existingItems.get(seriesName);
+      if (!item) {
+        item = document.createElement('li');
+        const name = document.createElement('span');
+        name.className = 'series-name';
+        const badge = document.createElement('span');
+        badge.className = 'badge';
+        item.append(name, badge);
+      }
+      item.onclick = () => selectSeries(seriesName);
+      configureInteractiveItem(item, `顯示系列：${label}`, () => selectSeries(seriesName));
       item.dataset.series = seriesName;
       item.classList.toggle('active', state.activeSeries === seriesName);
       if (state.activeSeries === seriesName) item.setAttribute('aria-current', 'true');
-
-      const name = document.createElement('span');
-      name.className = 'series-name';
+      else item.removeAttribute('aria-current');
+      const name = item.querySelector('.series-name');
+      const badge = item.querySelector('.badge');
       name.textContent = label;
-      const badge = document.createElement('span');
-      badge.className = 'badge';
       badge.textContent = String(count);
-      item.append(name, badge);
-
-      item.onclick = () => selectSeries(seriesName);
-      configureInteractiveItem(item, `顯示系列：${label}`, () => selectSeries(seriesName));
-      elements.seriesFilterList.appendChild(item);
-    };
-    appendSeries('all', '全部系列', state.comics.length);
-    seriesNames.forEach(seriesName => appendSeries(seriesName, seriesName, seriesMap.get(seriesName)));
+      existingItems.delete(seriesName);
+      return item;
+    });
+    existingItems.forEach(item => item.remove());
+    desiredItems.forEach((item, index) => {
+      const current = elements.seriesFilterList.children[index];
+      if (current !== item) elements.seriesFilterList.insertBefore(item, current || null);
+    });
   }
 }
 
@@ -1484,18 +1728,19 @@ function selectSeries(seriesName) {
     if (selected) item.setAttribute('aria-current', 'true');
     else item.removeAttribute('aria-current');
   });
-  // 直接進入該資料夾內，免去主人的二次點擊 (姬米妮貼心優化 ✨)
-  state.currentPath = (seriesName === 'all' || seriesName === '未分類') ? "" : seriesName;
+  // 系列是 metadata 篩選，不保證與實體資料夾同名；切換時回到書庫根層。
+  state.currentPath = '';
   filterAndRenderGrid();
 }
 
 // 統計資訊更新
 function updateStats() {
-  const total = state.comics.length;
+  const formalComics = state.comics.filter(comic => !isBuiltInDemoComic(comic));
+  const total = formalComics.length;
   let reading = 0;
   let completed = 0;
 
-  state.comics.forEach(c => {
+  formalComics.forEach(c => {
     const prog = c.progress;
     if (prog && prog.currentPage > 0) {
       if (prog.percent >= 98 || prog.currentPage >= prog.totalPages - 1) {
@@ -1532,7 +1777,7 @@ function getProgressInfo(comic) {
 function renderContinueStrip() {
   if (!elements.continueStrip) return;
 
-  const readable = state.comics.filter(comic => comic && !comic.isDirectory);
+  const readable = state.comics.filter(comic => comic && !comic.isDirectory && !isBuiltInDemoComic(comic));
   const candidates = readable
     .filter(comic => getProgressInfo(comic).hasProgress || state.favorites.includes(comic.id))
     .sort((a, b) => {
@@ -1541,6 +1786,19 @@ function renderContinueStrip() {
       return tb - ta;
     })
     .slice(0, 5);
+
+  const renderSignature = candidates.map(comic => {
+    const progress = getProgressInfo(comic);
+    return [
+      comic.id,
+      comic.title,
+      progress.currentPage,
+      progress.totalPages,
+      state.favorites.includes(comic.id) ? 'favorite' : ''
+    ].join(':');
+  }).join('|') || 'empty';
+  if (renderSignature === lastContinueRenderSignature) return;
+  lastContinueRenderSignature = renderSignature;
 
   if (candidates.length === 0) {
     elements.continueStrip.innerHTML = `
@@ -1569,54 +1827,123 @@ function renderContinueStrip() {
   }).join('');
 
   elements.continueStrip.querySelectorAll('.continue-card').forEach(card => {
-    card.addEventListener('mouseenter', () => {
-      const comic = state.comics.find(c => c.id === card.dataset.comicId);
-      if (comic) renderComicInspector(comic);
-    });
     card.addEventListener('click', () => openReader(card.dataset.comicId));
   });
 }
 
-function ensureInspectorSelection() {
+function inspectorRenderSignature(comic) {
+  if (!comic) return '';
+  const progress = getProgressInfo(comic);
+  return [
+    comic.id,
+    comic.title,
+    comic.series || '',
+    comic.type || '',
+    comic.pageCount || comic.comicsCount || 0,
+    progress.currentPage,
+    progress.totalPages,
+    progress.percent,
+    isComicOffline(comic) ? 'offline' : 'online',
+    state.favorites.includes(comic.id) ? 'favorite' : '',
+    state.organizeMode ? 'organize' : 'browse',
+  ].join(':');
+}
+
+function renderInspectorEmpty() {
+  if (!elements.comicInspector) return;
+  lastInspectorRenderSignature = '';
+  elements.comicInspector.innerHTML = `
+    <div class="inspector-empty">
+      <span class="inspector-mark"><i class="fa-solid fa-book-open" aria-hidden="true"></i></span>
+      <h3>選一本漫畫</h3>
+      <p>封面、進度、標籤與快捷操作會顯示在這裡。</p>
+    </div>`;
+}
+
+function ensureInspectorSelection({ skipUnchanged = false } = {}) {
   if (!elements.comicInspector) return;
 
-  const selected = state.comics.find(c => c.id === state.selectedComicId);
+  const selected = state.filteredComics.find(c => c.id === state.selectedComicId);
   if (selected) {
-    renderComicInspector(selected, { keepSelection: true });
+    renderComicInspector(selected, { keepSelection: true, skipUnchanged });
     return;
   }
 
-  const firstReadable = state.comics.find(c => c && !c.isDirectory);
-  if (firstReadable) renderComicInspector(firstReadable);
+  state.selectedComicId = null;
+  renderInspectorEmpty();
+}
+
+function syncGridSelectionState() {
+  elements.comicGrid?.querySelectorAll('.comic-card[data-comic-id]').forEach(card => {
+    const selected = card.dataset.comicId === state.selectedComicId;
+    card.classList.toggle('selected', selected);
+    if (!state.organizeMode) card.setAttribute('aria-pressed', String(selected));
+  });
+}
+
+function activateGridComic(comic) {
+  if (!comic) return;
+  if (isBuiltInDemoComic(comic)) {
+    openReader(comic.id);
+    return;
+  }
+  if (state.organizeMode && !comic.isDirectory) {
+    toggleOrganizerSelection(comic.id);
+    return;
+  }
+
+  if (state.selectedComicId === comic.id) {
+    if (comic.isDirectory) {
+      state.currentPath = comic.relativePath;
+      filterAndRenderGrid();
+    } else {
+      openReader(comic.id);
+    }
+    return;
+  }
+
+  renderComicInspector(comic);
+  syncGridSelectionState();
 }
 
 function renderComicInspector(comic, options = {}) {
   if (!elements.comicInspector || !comic) return;
   if (!options.keepSelection) state.selectedComicId = comic.id;
+  const renderSignature = inspectorRenderSignature(comic);
+  if (options.skipUnchanged && renderSignature === lastInspectorRenderSignature) return;
+  lastInspectorRenderSignature = renderSignature;
 
   const isDirectory = Boolean(comic.isDirectory);
+  const builtInDemo = isBuiltInDemoComic(comic);
   const sourceOffline = isComicOffline(comic);
   const progress = getProgressInfo(comic);
-  const format = isDirectory ? '目錄' : (String(comic.type || '').includes('archive') ? 'CBZ/ZIP' : '圖片資料夾');
-  const favorite = !isDirectory && state.favorites.includes(comic.id);
+  const format = builtInDemo ? '內建示範 · 全年齡' : isDirectory ? '目錄' : (String(comic.type || '').includes('archive') ? 'CBZ/ZIP' : '圖片資料夾');
+  const favorite = !isDirectory && !builtInDemo && state.favorites.includes(comic.id);
   const coverId = comic.coverComicId || comic.id;
 
   elements.comicInspector.innerHTML = `
-    <div class="inspector-cover">
-      <img src="${escapeHtml(getCoverUrl(coverId))}" loading="lazy" decoding="async" fetchpriority="low" alt="${escapeHtml(comic.title)}" onerror="this.style.display='none';">
-      <div class="inspector-shine"></div>
-    </div>
+    ${builtInDemo ? `
+      <div class="inspector-cover builtin-demo-cover">
+        <img src="${BUILT_IN_DEMO_COVER_PATH}" loading="lazy" decoding="async" fetchpriority="low" alt="${escapeHtml(comic.title)}">
+        <div class="inspector-shine"></div>
+      </div>
+    ` : `
+      <div class="inspector-cover">
+        <img src="${escapeHtml(getCoverUrl(coverId))}" loading="lazy" decoding="async" fetchpriority="low" alt="${escapeHtml(comic.title)}" onerror="this.style.display='none';">
+        <div class="inspector-shine"></div>
+      </div>
+    `}
     <div class="inspector-body">
-      <button class="organize-toggle inspector-organize-action ${state.organizeMode ? 'active' : ''}" type="button" data-inspector-action="organize" aria-pressed="${state.organizeMode}" title="批次整理 TAG 與書籍資料">
+      ${builtInDemo ? '' : `<button class="organize-toggle inspector-organize-action ${state.organizeMode ? 'active' : ''}" type="button" data-inspector-action="organize" aria-pressed="${state.organizeMode}" title="批次整理 TAG 與書籍資料">
         <i class="fa-solid fa-tags" aria-hidden="true"></i>
         TAG 整理
-      </button>
+      </button>`}
       <span class="section-kicker">${format}</span>
       <h3 title="${escapeHtml(comic.title)}">${escapeHtml(comic.title)}</h3>
       <div class="inspector-tags">
         <span>${escapeHtml(comic.series || '未分類')}</span>
         <span>${progress.totalPages || comic.comicsCount || '---'} 頁</span>
-        <span>${sourceOffline ? '來源離線' : progress.isFinished ? '已看完' : progress.hasProgress ? '閱讀中' : '未讀'}</span>
+        <span>${builtInDemo ? '不寫入收藏' : sourceOffline ? '來源離線' : progress.isFinished ? '已看完' : progress.hasProgress ? '閱讀中' : '未讀'}</span>
       </div>
       <div class="inspector-progress">
         <div>
@@ -1628,15 +1955,15 @@ function renderComicInspector(comic, options = {}) {
       <div class="inspector-actions">
         <button class="inspector-primary" data-inspector-action="open">
           <i class="fa-solid ${sourceOffline || isDirectory ? 'fa-folder-open' : 'fa-book-open-reader'}"></i>
-          ${sourceOffline ? '檢查漫畫目錄' : isDirectory ? '打開目錄' : '開始閱讀'}
+          ${builtInDemo ? '開啟全年齡示範' : sourceOffline ? '檢查漫畫目錄' : isDirectory ? '打開目錄' : '開始閱讀'}
         </button>
-        ${isDirectory ? '' : `
+        ${isDirectory || builtInDemo ? '' : `
           <button class="inspector-icon ${favorite ? 'active' : ''}" data-inspector-action="favorite" title="${favorite ? '取消收藏' : '加入收藏'}" aria-label="${favorite ? '取消收藏' : '加入收藏'}">
             <i class="${favorite ? 'fa-solid' : 'fa-regular'} fa-heart"></i>
           </button>
         `}
       </div>
-      ${isDirectory ? '' : `
+      ${isDirectory || builtInDemo ? '' : `
         <button class="inspector-file-toggle" type="button" data-inspector-action="files" aria-expanded="false">
           <i class="fa-solid fa-folder-tree" aria-hidden="true"></i>
           <span><strong>檔案管理</strong><small>開啟位置、改名、移動或可復原移除</small></span>
@@ -1652,21 +1979,23 @@ function renderComicInspector(comic, options = {}) {
           <p class="inspector-file-status" role="status" aria-live="polite">正在檢查來源能力…</p>
         </section>
       `}
-      ${isDirectory ? '' : `
+      ${isDirectory || builtInDemo ? '' : `
         <button class="inspector-ai-action" type="button" data-inspector-action="ai-suggest" aria-expanded="false">
           <i class="fa-solid fa-tags" aria-hidden="true"></i>
           <span><strong>AI 建議摘要與標籤</strong><small>讀取封面／第一頁，只產生待確認建議</small></span>
         </button>
         <div class="inspector-ai-results" role="status" aria-live="polite" hidden></div>
       `}
-      ${isDirectory ? '' : `<section class="metadata-section" id="inspector-metadata"><p class="metadata-loading">正在讀取 SQLite metadata…</p></section>`}
+      ${isDirectory || builtInDemo ? '' : `<section class="metadata-section" id="inspector-metadata"><p class="metadata-loading">正在讀取 SQLite metadata…</p></section>`}
     </div>
   `;
 
   const openBtn = elements.comicInspector.querySelector('[data-inspector-action="open"]');
   if (openBtn) {
     openBtn.onclick = () => {
-      if (sourceOffline) {
+      if (builtInDemo) {
+        openReader(comic.id);
+      } else if (sourceOffline) {
         openSettingsForRecovery();
       } else if (isDirectory) {
         state.currentPath = comic.relativePath;
@@ -1708,7 +2037,7 @@ function renderComicInspector(comic, options = {}) {
       }
     };
   }
-  if (!isDirectory) loadInspectorMetadata(comic);
+  if (!isDirectory && !builtInDemo) loadInspectorMetadata(comic);
 }
 
 async function prepareInspectorFilePanel(comic, panel) {
@@ -1728,6 +2057,7 @@ async function prepareInspectorFilePanel(comic, panel) {
     buttons.move.disabled = !capability.canMove;
     buttons.trash.disabled = !capability.canTrash;
     buttons.undo.disabled = !state.lastFileUndoToken;
+    panel.dataset.expectedFingerprint = capability.expectedFingerprint || '';
     status.textContent = capability.reason || `${capability.sourceKind === 'smb' ? 'NAS' : '本機'}來源可安全修改；移除會先進隔離區。`;
     for (const [action, button] of Object.entries(buttons)) {
       button.onclick = () => runInspectorFileAction(comic, panel, action);
@@ -1770,13 +2100,28 @@ async function runInspectorFileAction(comic, panel, action) {
     }
     buttons.forEach(button => { button.disabled = true; });
     status.textContent = action === 'trash' ? '正在移到隔離區…' : '正在安全更新檔案位置…';
-    const result = await eAPI.mutateComicFile({ comicId: comic.id, action, destinationRelativePath, expectedFingerprint: null });
+    const result = await eAPI.mutateComicFile({
+      comicId: comic.id,
+      action,
+      destinationRelativePath,
+      expectedFingerprint: panel.dataset.expectedFingerprint || null,
+    });
     state.lastFileUndoToken = result.undoToken;
     status.textContent = `${action === 'trash' ? '已移到隔離區' : action === 'rename' ? '已改名' : '已移動'}；可在此撤銷。`;
     await fetchLibrary();
   } catch (error) {
     status.textContent = `檔案操作失敗：${error?.message || error}`;
   }
+}
+
+function formatReadingDirection(direction) {
+  const labels = {
+    ltr: '由左至右',
+    rtl: '由右至左',
+    vertical: '條漫直向',
+  };
+  const normalized = String(direction || '').trim().toLowerCase();
+  return labels[normalized] || (normalized ? direction : '—');
 }
 
 async function loadInspectorMetadata(comic) {
@@ -1803,7 +2148,7 @@ async function loadInspectorMetadata(comic) {
       ['系列', metadata.series || '—', 'series'],
       ['作者', creators.join('、') || '—', 'creators'],
       ['語言', metadata.language || '—', 'language'],
-      ['方向', metadata.readingDirection || '—', 'reading_direction'],
+      ['閱讀方向', formatReadingDirection(metadata.readingDirection), 'reading_direction'],
       ['來源', sourceNames.join('、') || '檔名推測', 'sources'],
       ['狀態', metadata.offline ? 'NAS／來源離線，資料已保留' : '來源在線', 'offline'],
     ];
@@ -1870,6 +2215,7 @@ function getDirectoryItems() {
 
   // 1. 先進行基礎的系列與狀態過濾
   const baseFiltered = state.comics.filter(comic => {
+    if (isBuiltInDemoComic(comic) && state.activeFilter === 'favorite') return false;
     // 側邊欄系列過濾
     if (state.activeSeries !== 'all') {
       if (comic.series !== state.activeSeries) return false;
@@ -1959,7 +2305,7 @@ function getDirectoryItems() {
 }
 
 // 核心過濾與渲染漫畫書架
-function filterAndRenderGrid() {
+function filterAndRenderGrid(options = {}) {
   // 1. 取得目前路徑下的項目
   state.filteredComics = getDirectoryItems();
 
@@ -2015,16 +2361,17 @@ function filterAndRenderGrid() {
     });
   }
 
-  renderGrid();
+  renderGrid(options);
+  ensureInspectorSelection({ skipUnchanged: Boolean(options.skipUnchanged) });
 }
 
 // 繪製漫畫卡片網格
-function renderGrid() {
-  coverObserver?.disconnect();
-  coverObserver = null;
-  elements.comicGrid.innerHTML = '';
-  
+function renderGrid({ skipUnchanged = false, background = false } = {}) {
   if (state.filteredComics.length === 0) {
+    lastGridRenderSignature = 'empty';
+    coverObserver?.disconnect();
+    coverObserver = null;
+    elements.comicGrid.innerHTML = '';
     elements.emptyState.style.display = 'flex';
     if (elements.catalogLoadMore) elements.catalogLoadMore.hidden = true;
     return;
@@ -2039,6 +2386,34 @@ function renderGrid() {
     elements.catalogLoadMore.textContent = `顯示更多漫畫（${visibleComics.length} / ${totalAvailable}）`;
   }
 
+  const renderSignature = [
+    state.currentPath,
+    state.activeSeries,
+    state.activeFilter,
+    state.organizeMode ? 'organize' : 'browse',
+    visibleComics.map(comic => comic.isDirectory
+      ? `dir:${comic.id}:${comic.coverComicId || ''}:${comic.comicsCount || 0}`
+      : [
+          comic.id,
+          comic.title,
+          comic.series,
+          comic.type,
+          comic.pageCount,
+          comic.progress?.currentPage || 0,
+          comic.progress?.totalPages || 0,
+          isComicOffline(comic) ? 'offline' : 'online',
+          state.favorites.includes(comic.id) ? 'favorite' : ''
+        ].join(':')
+    ).join('|')
+  ].join('::');
+
+  if (skipUnchanged && renderSignature === lastGridRenderSignature) return;
+  lastGridRenderSignature = renderSignature;
+  coverObserver?.disconnect();
+  coverObserver = null;
+  elements.comicGrid.classList.toggle('background-refresh', background);
+  elements.comicGrid.innerHTML = '';
+
   visibleComics.forEach(comic => {
     const sourceOffline = isComicOffline(comic);
     const card = document.createElement(state.organizeMode && !comic.isDirectory ? 'button' : 'div');
@@ -2049,8 +2424,25 @@ function renderGrid() {
     if (state.selectedComicId === comic.id) card.classList.add('selected');
     if (state.organizeMode && !comic.isDirectory) card.classList.add('organize-selectable');
     if (state.organizeSelection.has(comic.id)) card.classList.add('organize-selected');
-    
-    if (comic.isDirectory) {
+
+    if (isBuiltInDemoComic(comic)) {
+      card.innerHTML = `
+        <div class="comic-cover-wrapper builtin-demo-cover-wrapper">
+          <img class="comic-cover builtin-demo-cover-image" src="${BUILT_IN_DEMO_COVER_PATH}" loading="lazy" decoding="async" fetchpriority="low" alt="${escapeHtml(comic.title)}">
+          <span class="comic-format-tag builtin-demo-format-tag"><i class="fa-solid fa-shield-heart" aria-hidden="true"></i> 內建示範</span>
+        </div>
+        <div class="comic-info">
+          <div class="comic-title" title="${escapeHtml(comic.title)}">${escapeHtml(comic.title)}</div>
+          <div class="comic-meta">
+            <span><i class="fa-solid fa-child-reaching" aria-hidden="true"></i> 全年齡</span>
+            <span>${comic.pageCount} 頁</span>
+          </div>
+        </div>
+      `;
+      card.onclick = () => openReader(comic.id);
+      configureInteractiveItem(card, `開啟內建全年齡示範：${comic.title}`, card.onclick);
+      card.setAttribute('aria-pressed', 'false');
+    } else if (comic.isDirectory) {
       // ==========================================
       // 📁 【虛擬資料夾卡片】 YACReader 級層級折疊！
       // ==========================================
@@ -2083,7 +2475,6 @@ function renderGrid() {
         filterAndRenderGrid();
       };
       configureInteractiveItem(card, `開啟資料夾：${comic.title}`, card.onclick);
-      card.onmouseenter = () => renderComicInspector(comic);
       card.oncontextmenu = (e) => showGridContextMenu(e, comic);
     } else {
       // ==========================================
@@ -2142,10 +2533,9 @@ function renderGrid() {
         </div>
       `;
 
-      card.onclick = () => state.organizeMode ? toggleOrganizerSelection(comic.id) : openReader(comic.id);
-      configureInteractiveItem(card, state.organizeMode ? `選取漫畫：${comic.title}` : `閱讀漫畫：${comic.title}`, card.onclick);
-      card.setAttribute('aria-pressed', state.organizeMode ? String(state.organizeSelection.has(comic.id)) : 'false');
-      card.onmouseenter = () => renderComicInspector(comic);
+      card.onclick = () => activateGridComic(comic);
+      configureInteractiveItem(card, state.organizeMode ? `選取漫畫：${comic.title}` : `選取漫畫：${comic.title}；再次操作即可開始閱讀`, card.onclick);
+      card.setAttribute('aria-pressed', String(state.organizeMode ? state.organizeSelection.has(comic.id) : state.selectedComicId === comic.id));
       card.oncontextmenu = (e) => showGridContextMenu(e, comic);
 
       // 綁定收藏點擊事件
@@ -2168,10 +2558,10 @@ function renderGrid() {
               favBtn.querySelector('i').className = isFav ? 'fa-solid fa-heart' : 'fa-regular fa-heart';
               
               // 如果當前在「已收藏」篩選器下，點擊取消收藏應將卡片在書架上剔除
-              if (state.activeFilter === 'favorite') {
-                filterAndRenderGrid();
+              if (state.activeFilter === 'favorite') filterAndRenderGrid();
+              if (state.filteredComics.some(item => item.id === comic.id)) {
+                renderComicInspector(comic, { keepSelection: true });
               }
-              renderComicInspector(comic, { keepSelection: true });
               renderContinueStrip();
             } catch (err) {
               console.error('切換收藏失敗：', err);
@@ -2203,6 +2593,9 @@ function renderGrid() {
   document.querySelectorAll('.lazy-cover').forEach(img => {
     coverObserver.observe(img);
   });
+  if (background) {
+    requestAnimationFrame(() => elements.comicGrid.classList.remove('background-refresh'));
+  }
 }
 
 // ==========================================================================
@@ -2224,7 +2617,9 @@ async function openReader(comicId) {
   state.pendingComicId = comicId;
   showLoader('主人請稍候，天才少女正在載入漫畫分頁...', { progress: null, detail: '正在準備頁面清單...' });
   try {
-    const data = await eAPI.openComic(comicId);
+    const data = isBuiltInDemoComic(shelfComic)
+      ? builtInDemoReaderData(shelfComic)
+      : await eAPI.openComic(comicId);
     if (operation !== state.readerOperation) return;
 
     if (!data.pages || data.pages.length === 0) {
@@ -2255,11 +2650,10 @@ async function openReader(comicId) {
     if (state.rotationAngle === undefined) state.rotationAngle = 0;
     releasePreloadedImages();
 
-    if (elements.statusRam) {
-      elements.statusRam.style.display = window.electronAPI && window.electronAPI.isElectron ? 'inline-flex' : 'none';
-      elements.statusRam.innerHTML = '<i class="fa-solid fa-memory"></i> RAM 快取準備中...';
-      elements.statusRam.style.color = '';
-    }
+    const demoReader = isBuiltInDemoComic(data);
+    if (elements.btnAiExplain) elements.btnAiExplain.hidden = demoReader;
+    if (elements.btnAiAutoExplain) elements.btnAiAutoExplain.hidden = demoReader;
+    if (demoReader) setAutoPageExplanation(false);
 
     elements.readerComicTitle.textContent = data.title;
     updateReaderUiControls();
@@ -2296,7 +2690,8 @@ async function openReader(comicId) {
 async function closeReader() {
   ++state.readerOperation;
   state.renderGeneration += 1;
-  const closingId = state.currentComic ? state.currentComic.id : state.pendingComicId;
+  const closingComic = state.currentComic;
+  const closingId = closingComic ? closingComic.id : state.pendingComicId;
   state.currentComic = null;
   state.currentComicPages = [];
   state.pendingComicId = null;
@@ -2306,7 +2701,6 @@ async function closeReader() {
   state.aiExplainPendingPage = null;
   setAiPagePanelVisible(false);
 
-  if (elements.statusRam) elements.statusRam.style.display = 'none';
   if (elements.statusLoading) elements.statusLoading.style.display = 'none';
   releasePreloadedImages();
   elements.pagesContainer.replaceChildren();
@@ -2323,7 +2717,7 @@ async function closeReader() {
     state.webtoonScrollFrame = null;
   }
   
-  if (closingId && window.electronAPI && window.electronAPI.closeComic) {
+  if (closingId && !isBuiltInDemoComic(closingComic) && window.electronAPI && window.electronAPI.closeComic) {
     state.readerClosePromise = state.readerClosePromise
       .catch(() => {})
       .then(() => window.electronAPI.closeComic(closingId));
@@ -2333,6 +2727,9 @@ async function closeReader() {
       console.error('關閉漫畫清理失敗:', err);
     }
   }
+
+  if (elements.btnAiExplain) elements.btnAiExplain.hidden = false;
+  if (elements.btnAiAutoExplain) elements.btnAiAutoExplain.hidden = false;
 
   // 重新整理書架（更新最近閱讀與進度條）
   fetchLibrary();
@@ -2589,6 +2986,9 @@ function renderCatalogGrid() {
   const totalPages = state.currentComicPages.length;
   const isDir = state.currentComicIsDir;
 
+  // 每次目錄重繪都先移除上一個 grid，避免切書或刪頁後舊縮圖疊在新內容上。
+  elements.pagesContainer.replaceChildren();
+
   const grid = document.createElement('div');
   grid.className = 'reader-catalog-grid';
 
@@ -2635,6 +3035,7 @@ function renderCatalogGrid() {
             // 從 state 移除該頁
             state.currentComicPages.splice(idx, 1);
             state.currentComicFilenames.splice(idx, 1);
+            if (idx < state.currentPageIndex) state.currentPageIndex -= 1;
             if (state.currentPageIndex >= state.currentComicPages.length) {
               state.currentPageIndex = Math.max(0, state.currentComicPages.length - 1);
             }
@@ -2956,7 +3357,7 @@ function preloadNextPages() {
 
 function scheduleReaderCacheWindowUpdate() {
   clearTimeout(state.readerCacheWindowTimer);
-  if (!state.currentComic || typeof eAPI.updateReaderCacheWindow !== 'function') return;
+  if (!state.currentComic || isBuiltInDemoComic(state.currentComic) || typeof eAPI.updateReaderCacheWindow !== 'function') return;
 
   const comicId = state.currentComic.id;
   const pageIndex = state.currentPageIndex;
@@ -3062,7 +3463,7 @@ function loadWebtoonImagesAround(index) {
 
 // 儲存進度至主程序
 async function saveReadingProgress() {
-  if (!state.currentComic) return;
+  if (!state.currentComic || isBuiltInDemoComic(state.currentComic)) return;
   try {
     await eAPI.saveProgress({
       id: state.currentComic.id,
@@ -3467,35 +3868,6 @@ function forceHideLoader() {
   state.loaderRefCount = 0;
   elements.loaderMask.style.display = 'none';
   hideLoaderProgress();
-}
-
-// 🚀 姬米妮貼心設計：更新記憶體快取進度條，載入完成後自動隱藏保持介面清爽！
-function updateRamCacheProgress(loaded, total, finished = false, error = null) {
-  if (!elements.statusRam) return;
-
-  if (error) {
-    console.error('[RAM preload]', error);
-    elements.statusRam.innerHTML = '<i class="fa-solid fa-triangle-exclamation"></i> RAM 預載略過，將改為逐頁讀取';
-    elements.statusRam.style.color = 'var(--accent-red)';
-    return;
-  }
-  
-  if (finished || loaded >= total) {
-    elements.statusRam.innerHTML = `<i class="fa-solid fa-memory" style="color: var(--accent);"></i> ⚡ 已預載 ${loaded} 頁`;
-    elements.statusRam.style.color = 'var(--accent)';
-    
-    // 貼心隱藏：滿載顯示 2 秒讓主人安心，隨後優雅隱藏，還給主人 100% 乾淨的閱讀畫面！
-    setTimeout(() => {
-      if (state.currentComic && (state.readingMode === 'single' || state.readingMode === 'double' || state.readingMode === 'double-rtl')) {
-        elements.statusRam.style.display = 'none';
-      }
-    }, 2000);
-  } else {
-    const percent = total > 0 ? Math.round((loaded / total) * 100) : 0;
-    elements.statusRam.style.display = 'inline-flex'; // 確保載入時顯示
-    elements.statusRam.innerHTML = `<i class="fa-solid fa-memory"></i> RAM 載入中: ${loaded}/${total} 頁 (${percent}%)`;
-    elements.statusRam.style.color = '';
-  }
 }
 
 // 🚀 姬米妮貼心設計：顯示/隱藏背景圖片解碼狀態小菊花
@@ -3980,6 +4352,7 @@ async function pageDataUrl(source) {
 }
 
 async function currentPageDataUrl() {
+  if (isBuiltInDemoComic(state.currentComic)) throw new Error('內建示範沒有可送出的漫畫圖像');
   if (!state.currentComicPages.length) throw new Error('請先開啟一頁漫畫');
   return pageDataUrl(state.currentComicPages[state.currentPageIndex]);
 }
@@ -4010,6 +4383,10 @@ function setAutoPageExplanation(enabled) {
 }
 
 function toggleAutoPageExplanation() {
+  if (isBuiltInDemoComic(state.currentComic)) {
+    showReaderToast('內建全年齡示範不會送出頁面內容給 AI。');
+    return;
+  }
   const enabled = !state.aiAutoExplain;
   setAutoPageExplanation(enabled);
   if (!enabled) {
@@ -4030,6 +4407,10 @@ function scheduleAutoPageExplanation() {
 }
 
 async function requestPageExplanation(pageIndex, automatic = false) {
+  if (isBuiltInDemoComic(state.currentComic)) {
+    if (!automatic) showReaderToast('內建全年齡示範不會送出頁面內容給 AI。');
+    return;
+  }
   if (!eAPI?.explainPage || !state.currentComic?.id || !state.currentComicPages[pageIndex]) {
     if (!automatic) showReaderToast('請先開啟一頁漫畫');
     return;
@@ -4174,23 +4555,16 @@ async function saveSettingsPath(pathStr) {
 
     // 馬上清空目前的書架，避免使用者看到舊的漫畫
     state.comics = [];
-    state.activeSeries = 'all';
+    resetLibraryNavigationState();
     filterAndRenderGrid();
+    renderBuiltInDemoStatus();
     renderSidebar();
     renderContinueStrip();
     updateStats();
     
     closeSettingsModal();
-    // 注意：這裡不呼叫 fetchLibrary() 也不 hideLoader()！
-    // 因為 setConfig 已經叫後端去掃描了，後端掃完會自己廣播 library-changed，
-    // 屆時自動觸發的 fetchLibrary() 才會拿到最新資料，並在最後正確 hideLoader()。
-    
-    // Fallback: 避免收不到事件永遠卡死
-    setTimeout(() => {
-      if (elements.loaderMask && elements.loaderMask.style.display !== 'none') {
-        fetchLibrary();
-      }
-    }, 5000);
+    startScanStatusPolling();
+    scheduleLibraryRefresh(0);
   } catch (e) {
     console.error('套用漫畫目錄失敗：', e);
     if (elements.scanDirStatus) {

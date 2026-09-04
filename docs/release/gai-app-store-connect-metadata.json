@@ -1,0 +1,161 @@
+{
+  "schemaVersion": 1,
+  "status": "draft-blocked",
+  "lastReviewed": "2026-09-04",
+  "sourceOfTruth": "docs/release/gai-app-store-connect-metadata.json",
+  "release": {
+    "platform": "IOS",
+    "lane": "TestFlight-first; App Store submission requires action-time owner confirmation",
+    "appStoreConnectAppId": "TODO: obtain the numeric App Store Connect app ID",
+    "bundleId": "com.windsheep.gai",
+    "version": "TODO: confirm App Store Connect marketing version",
+    "build": "TODO: confirm processed build number",
+    "minimumOS": "14.0",
+    "rustToolchain": "1.98.1",
+    "supportedDevices": [
+      "iPhone: TODO: verify from the processed build",
+      "iPad: TODO: verify from the processed build"
+    ],
+    "signingAndArtifactEvidence": "TODO: attach the signed IPA/archive evidence and SHA-256 after the release build exists"
+  },
+  "storeListing": {
+    "appName": "紳士藝術研究所",
+    "subtitle": "本機與 NAS 漫畫書架閱讀器",
+    "promotionalText": "整理自己的漫畫收藏，離線也能安心閱讀。",
+    "keywords": [
+      "漫畫",
+      "閱讀器",
+      "書架",
+      "本機",
+      "NAS",
+      "SMB",
+      "收藏"
+    ],
+    "description": "紳士藝術研究所 Gentlemen's Art Institute 是以本機為主的漫畫書架與閱讀器，協助你整理、搜尋並閱讀自己選擇的漫畫檔案。\n\n你可以從本機資料夾、外接儲存裝置或已掛載的 NAS 資料夾建立書架；需要時，也能在設定中明確輸入 SMB 連線資料掃描 NAS。原始檔案不會因離線而從書架消失，閱讀進度、收藏與人工整理資料保存在 App 的本機資料中。\n\n主要功能：\n- 掃描圖片資料夾、ZIP／CBZ 與目前支援的漫畫檔案，建立可搜尋書架。\n- 單頁、雙頁、由右至左、Webtoon 與目錄等閱讀模式。\n- 搜尋、收藏、閱讀進度、標籤與人工 metadata 整理。\n- 可選的 AI 功能：只有在使用者啟用、明確同意所選第三方供應商的資料傳輸並主動選擇頁面後，才向使用者選定的 OpenAI 或 Google 服務提出說明／metadata 建議；建議必須由使用者審核，不會自動覆寫。\n\n本 App 不內建漫畫內容、不提供來源爬取或下載站、不提供醫療／診斷／緊急服務，也不要求第三方帳號才能使用。使用者必須對自己匯入或連線讀取的檔案擁有適當權利；App 可顯示使用者選擇的內容，發行與測試時只使用經確認可供審查的素材。",
+    "locales": {
+      "primary": "zh-Hant-TW",
+      "additional": "TODO: confirm whether any additional storefront localizations will be submitted"
+    }
+  },
+  "reviewInformation": {
+    "sevenRequiredCategories": {
+      "physicalRecording": {
+        "status": "TODO",
+        "value": "TODO: attach a playable screen recording from a physical iPhone or iPad; record the actual submitted build and keep the filename here",
+        "evidence": "TODO: recording filename, capture date, and device ownership"
+      },
+      "deviceAndOperatingSystem": {
+        "status": "partially-known",
+        "value": "Minimum deployment target is iOS 14.0. Physical review device model, OS version, and processed build are TODO.",
+        "evidence": "src-tauri/gen/apple/project.yml and processed-build readback TODO"
+      },
+      "purposeAndTargetAudience": {
+        "status": "drafted",
+        "value": "A general-purpose local-first comic library and reader for people who manage personal files on iPhone or iPad, including local folders, removable storage, and NAS. It is not a medical, professional, emergency, or social service.",
+        "evidence": "PRODUCT.md; store description above"
+      },
+      "setupAndAccess": {
+        "status": "drafted",
+        "value": "No account, login, purchase, subscription, demo credential, NAS, or external sample download is required. On a clean install, open the clearly labeled built-in all-ages demo library and read the bundled original three-page sample. The sample stays outside the user's SQLite catalog, favorites, and reading history. Direct SMB and user-selected folders are optional advanced paths and are not required for review.",
+        "evidence": "public/app.js; public/assets/demo/moonlit-archive; TODO: final physical-device recording and processed-build verification"
+      },
+      "externalServices": {
+        "status": "drafted-with-release-build-confirmation-needed",
+        "value": "Core library indexing, reading, catalog metadata, and progress are local. Direct SMB uses the server selected by the user to scan or read selected files. AI is optional and disabled until the user supplies an API key: OpenAI uses https://api.openai.com/v1/responses with GPT-5.6 Luna; Google uses https://generativelanguage.googleapis.com/v1beta/models/{model}:generateContent with Gemma 4. Before either provider can be enabled, the app identifies the selected provider, states that the current page image and prompt may be sent to that provider, and requires explicit in-app consent for that session. Changing providers revokes the previous consent and requires a new confirmation. API keys are session-only; AI responses and candidates may be stored in local App Data for review. No app-owned analytics, advertising, login, or content-hosting service is claimed here; confirm the processed build before submission.",
+        "evidence": "public/tauri-api.js; src-tauri/src/lib.rs; public/index.html; tests/ai-consent.mjs; TODO: release-build network/privacy verification"
+      },
+      "regionalDifferences": {
+        "status": "drafted-with-release-build-confirmation-needed",
+        "value": "The app has no planned region-specific catalogue or feature branch. The primary interface is Traditional Chinese (Taiwan). SMB availability depends on the user's network, and optional OpenAI/Google AI availability, terms, and data handling depend on the user's account, region, and provider; those services are not required for the core reader.",
+        "evidence": "TODO: verify storefront availability, localization, and provider access for intended regions"
+      },
+      "regulatedOrProtectedContent": {
+        "status": "drafted-with-owner-decision-needed",
+        "value": "The app is a general file reader and does not provide regulated professional advice. It does not bundle third-party comics or operate a content source. It can render files selected by the user, which may contain copyrighted or age-restricted material; the user is responsible for lawful access and use. The review recording and reviewer sample must contain only safe, reviewable, authorized content. Age rating, copyright/rights posture, and App Store content declarations must be completed by the owner from the actual distribution library.",
+        "evidence": "TODO: owner approval of reviewer library, age rating, and rights checklist"
+      }
+    },
+    "appReviewNotesEnglish": "REVIEW VIDEO\nA screen recording from a physical [TODO: device model] running iOS [TODO: OS version] is attached as [TODO: exact filename]. It starts from TestFlight build [TODO: version (build)], opens the built-in all-ages demo on a clean install, demonstrates the library and image reader, and returns to Settings. The recording contains no real personal data, passwords, private NAS paths, or unlicensed review material.\n\nTEST DEVICES AND OPERATING SYSTEMS\n- Physical device: [TODO: iPhone/iPad model], iOS [TODO: version], app [TODO: version (build)].\n- The minimum supported operating system is iOS 14.0; confirm this against the processed build.\n- Additional simulator or desktop checks, if mentioned, are supplementary and do not replace the physical-device recording.\n\nAPP PURPOSE AND TARGET AUDIENCE\nGentlemen's Art Institute (紳士藝術研究所) is a general-purpose local-first comic library and reader for people managing their own files on iPhone or iPad. It indexes and reads user-selected image folders and ZIP/CBZ archives, keeps reading progress and catalog data locally, and can read from a user-selected mounted folder or optional SMB/NAS connection. It is not a medical, diagnostic, emergency, professional-advice, social, or content-hosting service.\n\nACCESS AND SETUP\nNo account, registration, login, purchase, subscription, demo credential, NAS, or external sample download is required. On a clean install, open the clearly labeled built-in all-ages demo card to read the bundled original three-page sample. The sample is isolated from the user's SQLite catalog, favorites, and reading history. Direct SMB and user-selected folders are optional advanced paths and are not required for review.\n\nEXTERNAL SERVICES AND TOOLS\nCore indexing, reading, catalog data, and progress run locally. A user-selected SMB/NAS server is contacted only when the user configures it and requests a scan or read. Optional AI is disabled by default and requires a user-supplied API key. OpenAI requests use https://api.openai.com/v1/responses; Google requests use https://generativelanguage.googleapis.com/v1beta/models/{model}:generateContent. Before either provider can be enabled, the app identifies the selected provider, states that the current page image and prompt may be sent to that provider, and requires explicit in-app consent for that session. Changing the provider revokes the previous consent and requires a new confirmation. API keys are held for the app session and are not included in review material; AI responses/candidates may remain in local App Data. The core reader does not require AI, analytics, advertising, third-party login, or an app-owned content server.\n\nREGIONAL AVAILABILITY\nThere is no planned region-specific catalogue or core feature difference. The primary interface is Traditional Chinese (Taiwan). SMB and optional AI availability can depend on the user's network, region, account, and provider terms; neither is required for the core reader.\n\nREGULATED INDUSTRY / PROTECTED CONTENT\nNot applicable as a regulated service: the app provides no medical, diagnostic, emergency, financial, or other professional advice. The app does not bundle third-party comics or provide a source crawler/downloader, but it can display files selected by the user, including material for which the user must have appropriate rights. The attached recording uses only the bundled original all-ages demo. Age rating, rights declarations, and App Privacy answers are based on the actual release build and distribution library and are [TODO: complete before submission].",
+    "reviewReplyEnglish": "Hello App Review Team,\n\nThank you for your guidance. We have added the requested information to App Review Information Notes for version [TODO: version (build)], including the physical test device and OS, app purpose and audience, setup and access instructions, external services, regional availability, and regulated/protected-content clarification.\n\nWe have attached [TODO: exact recording filename], a screen recording of the submitted build running on a physical [TODO: device model] with iOS [TODO: OS version]. It uses a safe, authorized reviewer sample and contains no account credentials, private NAS paths, or personal data.\n\nNo account, login, purchase, subscription, or demo credential is required to review the core reader. Optional SMB/NAS and AI flows are disclosed above and are not required for the core reader.\n\nPlease let us know if any additional information is needed.",
+    "physicalRecordingScript": [
+      "Start the recording on the physical device and show the app launch; do not replace the submitted build with a simulator or desktop build.",
+      "Show the empty or safe reviewer library and the main navigation without exposing private file paths, notifications, account names, or real NAS credentials.",
+      "Open the clearly labeled built-in all-ages demo; no NAS, credentials, or external sample download is required for the core review path.",
+      "Read the bundled original three-page image sample and demonstrate page navigation and only the reading controls that exist in the submitted build.",
+      "Show search, favorite, reading progress, and catalog/settings screens with synthetic titles; do not claim a feature that is not visible in this build.",
+      "If demonstrating AI, first show that it is optional, show the selected provider and the page-image/prompt disclosure, then explicitly consent. Switch providers once to demonstrate that the previous consent is revoked. Use only a synthetic or authorized page. Do not demonstrate AI if the release build or reviewer notes do not declare the provider path.",
+      "If demonstrating direct SMB, state that the server is user-selected and show only a disposable review share; confirm the core reader also works with a local or mounted folder.",
+      "End in the app and inspect the exported movie for readable text, continuous physical-device evidence, no secrets, no private metadata, and no unlicensed or age-restricted review material."
+    ]
+  },
+  "privacyAndCompliance": {
+    "privacyPolicyURL": "TODO: publish and verify the public privacy policy URL",
+    "supportURL": "TODO: publish and verify the public support URL",
+    "supportContact": "TODO: provide the support email or contact channel",
+    "appPrivacyQuestionnaire": "TODO: complete from the processed release build. Explicitly assess local catalog data, selected page images/prompts sent to optional AI providers, SMB connection data, diagnostics, and whether any data is linked to the user or used for tracking.",
+    "ageRating": "TODO: owner must complete Apple's questionnaire using the actual reviewer/distribution content; do not infer from the reader label alone",
+    "copyrightAndContentReview": "TODO: owner approval required for the authorized reviewer sample, rights posture, age rating, and any content that can be downloaded or bundled into the distribution artifact",
+    "exportCompliance": "TODO: confirm encryption/export answers from the final archive and App Store Connect questions",
+    "openSourceNotices": "TODO: verify all bundled Rust/Tauri/vendor notices are shipped or linked from a public notices page"
+  },
+  "testFlightGate": [
+    {
+      "id": "artifact",
+      "check": "Signed IPA is built from the intended commit with Rust 1.98.1 and processed by Apple",
+      "status": "TODO",
+      "evidence": "TODO: archive, IPA SHA-256, processing result, version/build readback"
+    },
+    {
+      "id": "physical-device",
+      "check": "Install the same processed build on a physical iPhone/iPad and run the recording script",
+      "status": "TODO",
+      "evidence": "TODO: device model/UDID kept outside repository, OS, install log, movie filename"
+    },
+    {
+      "id": "local-import",
+      "check": "Open the bundled all-ages demo on a clean install, then separately import and read a safe authorized local sample; verify offline catalog retention",
+      "status": "partially-ready",
+      "evidence": "public/assets/demo/moonlit-archive; TODO: physical-device test log and screenshots"
+    },
+    {
+      "id": "smb",
+      "check": "If direct SMB is advertised, test a disposable share, timeout, disconnect, and credential clearing without exposing secrets",
+      "status": "TODO",
+      "evidence": "TODO: redacted test log"
+    },
+    {
+      "id": "optional-ai",
+      "check": "If optional AI is advertised, test disabled-by-default state, explicit invocation, selected-provider disclosure, explicit consent for OpenAI and Google, provider-change consent reset, session-only key handling, and candidate review before apply",
+      "status": "TODO",
+      "evidence": "tests/ai-consent.mjs; TODO: physical release-build test log; never commit API keys or page images"
+    },
+    {
+      "id": "privacy-and-store",
+      "check": "Complete privacy URL, support URL/contact, App Privacy, age rating, export compliance, screenshots, and localized listing fields",
+      "status": "TODO",
+      "evidence": "TODO: App Store Connect readback"
+    },
+    {
+      "id": "readiness",
+      "check": "Run npm run verify and the local metadata dry-run; owner separately runs asc validate/review dry-run after authenticating and reviewing the plan",
+      "status": "local-only-ready",
+      "evidence": "package.json; scripts/release/asc-dry-run.sh; .github/workflows/rust-quality.yml"
+    }
+  ],
+  "unknowns": [
+    "TODO: numeric App Store Connect App ID",
+    "TODO: marketing version, processed build number, and version/build IDs",
+    "TODO: physical recording filename, device model, OS, and capture evidence",
+    "TODO: public privacy policy URL, support URL, and support contact",
+    "TODO: final App Privacy answers, age rating, export compliance, and rights/content approval",
+    "TODO: final screenshots, app icon/store asset readback, and localization selection",
+    "TODO: release-build confirmation of network entitlements, external service behavior, and provider availability"
+  ],
+  "ascCommandTemplates": {
+    "note": "Templates only. This repository script never invokes ASC or makes network requests.",
+    "validate": "asc validate --app TODO_APP_ID --version TODO_VERSION --platform IOS --output table",
+    "stageDryRun": "asc release stage --app TODO_APP_ID --version TODO_VERSION --build-id TODO_BUILD_ID --metadata-dir ./metadata/version/TODO_VERSION --dry-run --output table",
+    "reviewDryRun": "asc review submit --app TODO_APP_ID --version TODO_VERSION --build-id TODO_BUILD_ID --dry-run --output table",
+    "confirmationRule": "Do not add --confirm until the owner has reviewed the local evidence, the remote dry-run output, and all TODOs are resolved."
+  }
+}

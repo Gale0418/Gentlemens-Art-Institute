@@ -1,6 +1,8 @@
 const fs = require('fs');
 const path = require('path');
 const assert = require('assert');
+const os = require('os');
+const { spawn } = require('child_process');
 
 const root = path.resolve(__dirname, '..');
 const serverText = fs.readFileSync(path.join(root, 'server.js'), 'utf8');
@@ -20,6 +22,17 @@ assert.match(serverText, /coverBufferCache\.clear\(\)/);
 assert.match(serverText, /zipHandleCache\.clear\(\)/);
 assert.match(serverText, /app\.get\('\/api\/cover',[\s\S]*serveComicPage/);
 assert.match(serverText, /path\.resolve\(fullPath\) === path\.resolve\(SERVER_CACHE_DIR\)/);
+assert.match(serverText, /app\.listen\(PORT, ['"]127\.0\.0\.1['"]/);
+assert.doesNotMatch(serverText, /import cors from/);
+assert.doesNotMatch(serverText, /app\.use\(cors\(\)\)/);
+assert.match(serverText, /originUrl\.host\.toLowerCase\(\) !== requestHost/);
+assert.doesNotMatch(serverText, /readdirSync\(COVER_CACHE_DIR\).*filter/);
+assert.match(serverText, /function getCachedCoverPath/);
+assert.match(
+  serverText,
+  /fs\.promises\.writeFile\(cacheFilePath, buffer\)[\s\S]{0,120}\.then\(\(\) => coverDiskCache\.set\(`\$\{id\}:0`, cacheFilePath\)\)/,
+  'disk cover cache must only publish completed writes'
+);
 assert.match(serverText, /const MAX_IMAGE_BYTES = 64 \* 1024 \* 1024/);
 assert.match(serverText, /entry\.uncompressedSize > MAX_IMAGE_BYTES/);
 assert.match(serverText, /imageStat\.size > MAX_IMAGE_BYTES/);
@@ -41,9 +54,13 @@ assert.match(mainText, /zipHandleCache\.clear\(\)/);
 assert.match(mainText, /coverMemCache\.clear\(\)/);
 assert.match(mainText, /ramCachePool\.clear\(\)/);
 assert.match(mainText, /preloadFailuresPool\.clear\(\)/);
+assert.match(mainText, /bookCache = updatedCache/, 'preloader should follow the cache map recreated after eviction');
 assert.match(mainText, /if \(ext === '\.svg'\) return 'application\/octet-stream'/);
 assert.match(mainText, /isWithinDirectory\(resolvedFolder, resolvedScanDir\)/);
 assert.match(mainText, /function isStrictPageIndex/);
+assert.match(mainText, /totalPages > 0 && currentPage >= totalPages/, 'Electron progress should enforce zero-based page bounds');
+assert.match(mainText, /\['ENOENT', 'ENOTDIR', 'ESTALE', 'EIO'\]\.includes\(e\.code\)[\s\S]{0,100}找不到漫畫！/);
+assert.match(mainText, /e\.message === 'forbidden: path traversal detected'/);
 assert.match(mainText, /ipcMain\.handle\('set-config',[\s\S]*clearReaderCaches\(\)/);
 assert.doesNotMatch(mainText, /depth > 3/);
 
@@ -96,3 +113,66 @@ sandbox.eAPI = { isElectron: true };
 assert.strictEqual(sandbox.getCoverUrl('test/id'), 'gai://cover/test%2Fid');
 
 console.log('PASS: G.A.I cache and routing hardening checks look correct');
+
+// Exercise the HTTP boundary with a disposable library. This catches the
+// regressions that source-only assertions cannot: malformed tokens, page
+// coercion, same-origin policy, and progress bounds.
+(async () => {
+  const fixture = fs.mkdtempSync(path.join(os.tmpdir(), 'gai-server-hardening-'));
+  const testPort = 41000 + (process.pid % 1000);
+  const library = path.join(fixture, 'library', 'series');
+  fs.mkdirSync(library, { recursive: true });
+  fs.writeFileSync(path.join(library, 'page.jpg'), Buffer.from('fixture-image'));
+  const server = spawn(process.execPath, [path.join(root, 'server.js')], {
+    cwd: root,
+    env: { ...process.env, GAI_BASE_DIR: fixture, GAI_PORT: String(testPort), ELECTRON_MODE: '1', GAI_SCAN_MAX_DEPTH: 'NaN' },
+    stdio: 'ignore'
+  });
+
+  const request = async (url, options) => {
+    const response = await fetch(`http://127.0.0.1:${testPort}${url}`, options);
+    let body = null;
+    try { body = await response.json(); } catch (e) {}
+    return { status: response.status, body };
+  };
+  try {
+    let ready = false;
+    for (let attempt = 0; attempt < 150 && !ready; attempt += 1) {
+      try {
+        const probe = await request('/api/scan-status');
+        ready = probe.status === 200;
+      } catch (e) {}
+      if (!ready) await new Promise(resolve => setTimeout(resolve, 100));
+    }
+    assert.equal(ready, true, 'server should start on loopback');
+
+    assert.equal((await request('/api/comic/not-valid!')).status, 400);
+    assert.equal((await request('/api/comic/ Li4vdG1w')).status, 400);
+    assert.equal((await request('/api/comic/Li4vdG1zaG91bGRub3RleGlzdA')).status, 403);
+    assert.equal((await request('/api/page?id=Li4vdG1w&page=NaN')).status, 400);
+    assert.equal((await request('/api/page?id=Li4vdG1w&page=1.0')).status, 400);
+    assert.equal((await request('/api/scan-status', { headers: { Origin: 'http://evil.example' } })).status, 403);
+
+    const comicId = Buffer.from('library/series').toString('base64url');
+    assert.equal((await request(`/api/comic/${comicId}`)).status, 200);
+    assert.equal((await request('/api/progress', {
+      method: 'POST', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ id: comicId, currentPage: '1abc', totalPages: 1 })
+    })).status, 400);
+    assert.equal((await request('/api/progress', {
+      method: 'POST', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ id: comicId, currentPage: 1, totalPages: 1 })
+    })).status, 400);
+    assert.equal((await request('/api/progress', {
+      method: 'POST', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ id: comicId, currentPage: 0, totalPages: 1 })
+    })).status, 200);
+  } finally {
+    server.kill('SIGTERM');
+    fs.rmSync(fixture, { recursive: true, force: true });
+  }
+  console.log('PASS: HTTP runtime input and same-origin hardening checks look correct');
+})().catch(error => {
+  console.error(error);
+  process.exitCode = 1;
+});

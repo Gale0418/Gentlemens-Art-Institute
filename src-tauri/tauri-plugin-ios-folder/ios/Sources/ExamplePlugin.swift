@@ -3,8 +3,6 @@ import Tauri
 import UIKit
 import UniformTypeIdentifiers
 
-// Kept as a tiny C ABI so the native pressure notifications can invalidate
-// the Rust preload generation without routing through the JavaScript runtime.
 @_silgen_name("gai_memory_pressure")
 private func gaiMemoryPressure(_ level: UInt8)
 
@@ -37,6 +35,15 @@ class ExamplePlugin: Plugin, UIDocumentPickerDelegate {
   deinit {
     memoryWarningObserver.map(NotificationCenter.default.removeObserver)
     memoryPressureSource?.cancel()
+    let urls = accessQueue.sync { () -> [URL] in
+      let values = Array(activeAccesses.values)
+      activeAccesses.removeAll()
+      return values
+    }
+    for url in urls {
+      url.stopAccessingSecurityScopedResource()
+    }
+    activePickers.removeAll()
   }
 
   private func startMemoryPressureMonitoring() {
@@ -44,9 +51,9 @@ class ExamplePlugin: Plugin, UIDocumentPickerDelegate {
       eventMask: [.normal, .warning, .critical],
       queue: DispatchQueue.global(qos: .utility)
     )
+    memoryPressureSource = source
     source.setEventHandler { [weak self] in
-      guard let self else { return }
-      let events = source.data
+      guard let events = self?.memoryPressureSource?.data else { return }
       if events.contains(.critical) {
         gaiMemoryPressure(2)
       } else if events.contains(.warning) {
@@ -55,7 +62,6 @@ class ExamplePlugin: Plugin, UIDocumentPickerDelegate {
         gaiMemoryPressure(0)
       }
     }
-    memoryPressureSource = source
     source.resume()
 
     memoryWarningObserver = NotificationCenter.default.addObserver(
@@ -68,28 +74,34 @@ class ExamplePlugin: Plugin, UIDocumentPickerDelegate {
   }
   #endif
 
+  private func presentationController() -> UIViewController? {
+    var root: UIViewController?
+    if let scene = UIApplication.shared.connectedScenes.first(where: { $0.activationState == .foregroundActive }) as? UIWindowScene,
+       let window = scene.windows.first(where: { $0.isKeyWindow }) {
+      root = window.rootViewController
+    } else {
+      root = UIApplication.shared.windows.first?.rootViewController
+    }
+    while let presented = root?.presentedViewController {
+      root = presented
+    }
+    return root
+  }
+
   @objc public func pickFolder(_ invoke: Invoke) throws {
     DispatchQueue.main.async {
       if #available(iOS 14.0, *) {
         let picker = UIDocumentPickerViewController(forOpeningContentTypes: [.folder], asCopy: false)
         picker.delegate = self
         picker.allowsMultipleSelection = false
-        
         self.activePickers[picker] = invoke
-        
-        var root: UIViewController? = nil
-        if let scene = UIApplication.shared.connectedScenes.first(where: { $0.activationState == .foregroundActive }) as? UIWindowScene,
-           let window = scene.windows.first(where: { $0.isKeyWindow }) {
-           root = window.rootViewController
-        } else {
-           root = UIApplication.shared.windows.first?.rootViewController
-        }
 
-        if let root = root {
-          root.present(picker, animated: true)
-        } else {
+        guard let root = self.presentationController() else {
+          self.activePickers.removeValue(forKey: picker)
           invoke.reject("Cannot find root view controller")
+          return
         }
+        root.present(picker, animated: true)
       } else {
         invoke.reject("Requires iOS 14.0 or newer")
       }
@@ -102,25 +114,21 @@ class ExamplePlugin: Plugin, UIDocumentPickerDelegate {
       invoke.reject("No URL selected")
       return
     }
-    
+
     let accessed = url.startAccessingSecurityScopedResource()
     if !accessed {
       invoke.reject("Cannot access security scoped resource")
       return
     }
-    
+
+    defer { url.stopAccessingSecurityScopedResource() }
     do {
       let bookmarkData = try url.bookmarkData(options: .minimalBookmark, includingResourceValuesForKeys: nil, relativeTo: nil)
-      let base64 = bookmarkData.base64EncodedString()
-      let folderName = url.lastPathComponent
-      url.stopAccessingSecurityScopedResource()
-      
       invoke.resolve([
-        "bookmark": base64,
-        "name": folderName
+        "bookmark": bookmarkData.base64EncodedString(),
+        "name": url.lastPathComponent
       ])
     } catch {
-      url.stopAccessingSecurityScopedResource()
       invoke.reject("Failed to create bookmark: \(error)")
     }
   }
@@ -134,44 +142,45 @@ class ExamplePlugin: Plugin, UIDocumentPickerDelegate {
   @objc public func startAccessing(_ invoke: Invoke) throws {
     let args = try invoke.parseArgs(StartAccessingArgs.self)
     let bookmark = args.bookmark
-    
-    if let existingUrl = accessQueue.sync(execute: { activeAccesses[bookmark] }) {
-      invoke.resolve(["path": existingUrl.path])
-      return
-    }
-    
-    guard let data = Data(base64Encoded: bookmark) else {
-      invoke.reject("Invalid bookmark base64")
-      return
-    }
-    
-    do {
-      var isStale = false
-      let url = try URL(resolvingBookmarkData: data, bookmarkDataIsStale: &isStale)
-      
-      let accessed = url.startAccessingSecurityScopedResource()
-      if !accessed {
-        invoke.reject("Failed to start accessing")
-        return
+
+    // The check, scope acquisition and registration must be one serialized
+    // operation. Two concurrent callers otherwise both acquire a scope, then
+    // overwrite the same dictionary entry, leaving one acquisition impossible
+    // to balance with stopAccessingSecurityScopedResource().
+    let resolution: (url: URL?, stale: Bool, error: String?) = accessQueue.sync {
+      if let existingURL = activeAccesses[bookmark] {
+        return (existingURL, false, nil)
       }
-      
-      accessQueue.sync {
+      guard let data = Data(base64Encoded: bookmark) else {
+        return (nil, false, "Invalid bookmark base64")
+      }
+
+      do {
+        var isStale = false
+        let url = try URL(resolvingBookmarkData: data, bookmarkDataIsStale: &isStale)
+        guard url.startAccessingSecurityScopedResource() else {
+          return (nil, false, "Failed to start accessing")
+        }
         activeAccesses[bookmark] = url
+        return (url, isStale, nil)
+      } catch {
+        return (nil, false, "Failed to resolve bookmark: \(error)")
       }
-      invoke.resolve(["path": url.path])
-    } catch {
-      invoke.reject("Failed to resolve bookmark: \(error)")
+    }
+
+    if let url = resolution.url {
+      invoke.resolve(["path": url.path, "stale": resolution.stale])
+    } else {
+      invoke.reject(resolution.error ?? "Failed to start accessing")
     }
   }
 
   @objc public func stopAccessing(_ invoke: Invoke) throws {
     let args = try invoke.parseArgs(StopAccessingArgs.self)
     let bookmark = args.bookmark
-    
     if let url = accessQueue.sync(execute: { activeAccesses.removeValue(forKey: bookmark) }) {
       url.stopAccessingSecurityScopedResource()
     }
-    
     invoke.resolve([:])
   }
 
@@ -182,8 +191,8 @@ class ExamplePlugin: Plugin, UIDocumentPickerDelegate {
       return
     }
 
-    let root = rootURL.standardizedFileURL
-    let candidate = URL(fileURLWithPath: args.path).standardizedFileURL
+    let root = rootURL.standardizedFileURL.resolvingSymlinksInPath()
+    let candidate = URL(fileURLWithPath: args.path).standardizedFileURL.resolvingSymlinksInPath()
     let rootPath = root.path.hasSuffix("/") ? root.path : root.path + "/"
     guard candidate.path == root.path || candidate.path.hasPrefix(rootPath) else {
       invoke.reject("Requested path is outside the selected folder")

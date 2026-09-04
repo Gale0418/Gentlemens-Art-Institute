@@ -22,6 +22,8 @@
 	<true/>
 	<key>LSSupportsOpeningDocumentsInPlace</key>
 	<true/>
+	<key>NSLocalNetworkUsageDescription</key>
+	<string>需要存取您授權的本機網路資料夾，以掃描與閱讀 SMB 漫畫。</string>
 	<key>UIFileSharingEnabled</key>
 	<true/>
 	<key>UILaunchStoryboardName</key>

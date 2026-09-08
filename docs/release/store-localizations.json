@@ -1,0 +1,19 @@
+{
+  "status": "draft-not-uploaded",
+  "locales": {
+    "en-US": {
+      "appName": "Gentlemen's Art Institute",
+      "subtitle": "Read image comics in a scroll",
+      "promotionalText": "Open image folders or ZIP/CBZ comics in reading order. No image merging needed. Read vertically, one page at a time, or two pages together for free, with saved progress.",
+      "description": "Turn image folders and ZIP/CBZ archives into a continuous comic read.\n\nG.A.I puts pages in reading order, so you can open a comic and read down the full sequence. No image merging is required, and the original files stay unchanged.\n\nThree reading modes are free.\n\nRead as a continuous vertical strip, one page at a time, or two pages together. Reading progress is saved for the next session. Favorites, search, basic tags, export, undo, and basic recovery are also free. A NAS folder already mounted through the system file picker remains part of the free reading path.\n\nFor larger collections, v1 Pro is a one-time purchase, not a subscription.\n\nPro unlocks direct SMB/NAS, batch tagging, advanced organization, duplicate candidates, and AI explanation/organization tools. Pro includes no API credits. AI uses BYOK: bring your own OpenAI or Google API key, choose a page, and consent before anything is sent. Provider API fees are separate.\n\nPurchased v1 Pro stays available in supported later releases. Features added in future major versions may be sold separately.\n\nG.A.I does not host, crawl, or download comics, and does not sell content subscriptions. Use files you are authorized to use.",
+      "keywords": "comics,manga,reader,vertical,CBZ,ZIP,NAS,SMB,offline,library"
+    },
+    "ja": {
+      "appName": "G.A.I 漫画リーダー",
+      "subtitle": "画像漫画を縦スクロールで読む",
+      "promotionalText": "画像フォルダーやZIP／CBZを読む順番に並べて、そのまま連続読書。画像の結合は不要。縦スクロール・単ページ・見開きを無料で使えます。",
+      "description": "画像漫画を、縦スクロールで続けて読めます。\n\nG.A.Iは画像フォルダーやZIP／CBZを読む順番に並べ、開くだけで最後まで読み進められるようにします。画像の結合は不要で、元のファイルも変更しません。\n\n3つの読書モードを無料で利用できます。\n\n縦スクロール、単ページ、見開きを作品に合わせて切り替えられます。読書進度は保存され、次回は続きから。お気に入り、検索、基本のタグ、書き出し、取り消し、基本の復旧も無料です。システムのファイル選択画面で開いたマウント済みNASフォルダーも無料で読めます。\n\nコレクションの整理を進めたい場合は、v1 Proの買い切り。\n\nProではSMB／NASへの直接接続、タグの一括編集、高度な整理、重複候補、AIによる解説／整理ツールを利用できます。サブスクリプションではなく、API利用枠も含まれません。AIはBYOK方式です。ご自身のOpenAIまたはGoogle APIキーを用意し、ページを選んで送信に同意した後に限り送信します。API料金は別途かかります。\n\n購入済みのv1 Proは、対応する後続バージョンでも利用できます。将来のメジャーバージョンで追加される機能は、別売りになる場合があります。\n\nG.A.Iは漫画のホスティング、クロール、ダウンロード、コンテンツの定期購読を提供しません。利用するファイルの権利はご自身で確認してください。",
+      "keywords": "漫画,マンガ,リーダー,縦スクロール,見開き,CBZ,ZIP,NAS,SMB,オフライン,本棚"
+    }
+  }
+}

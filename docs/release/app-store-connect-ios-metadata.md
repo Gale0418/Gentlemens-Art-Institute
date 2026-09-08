@@ -30,15 +30,15 @@ StoreKit 2 原生程式、後端權益檢查與 Pro 介面已整合；本機／�
 
 App Name（zh-Hant-TW）：`紳士藝術研究所`
 
-英文名稱候選：`Gentlemen's Art Institute`；只有真的建立英文 localization 後才填入。
+首發已核准繁體中文、英文（en-US）與日文（ja）；英文名稱為 `Gentlemen's Art Institute`。三語文案已備妥，尚未上傳 App Store Connect。
 
-Subtitle：`圖片轉條漫，三種模式自由閱讀`
+Subtitle：`圖片轉條漫，往下滑就能看`
 
-Promotional Text：`圖片資料夾、ZIP／CBZ，開啟即可用條漫連續閱讀。無須合併原圖，免費切換單頁與雙頁，保存進度、搜尋作品、整理收藏。`
+Promotional Text：`圖片資料夾、ZIP／CBZ，依閱讀順序直接連續閱讀。原圖不需合併，免費使用條漫、單頁與雙頁模式，並保存進度、搜尋作品與整理收藏。`
 
-Keywords：`漫畫,閱讀器,書架,本機,NAS,SMB,收藏`
+Keywords：`漫畫,閱讀器,條漫,書架,本機,NAS,SMB,收藏`
 
-Description 草案以 canonical JSON 為準，定位是本機／NAS 漫畫書架與閱讀器。必須如實保留以下邊界：App 不內建漫畫、不提供來源爬取或下載站；可讀取使用者選擇的本機／掛載資料夾與 ZIP／CBZ；SMB 是使用者明確設定的進階路徑；AI 是選用功能，不得描述成核心必需或完全本機。使用者對匯入內容的權利與合法使用負責。
+Description 草案以 canonical JSON 為準，定位是圖片資料夾／ZIP／CBZ 的連續條漫與本機／NAS 漫畫書架閱讀器。必須如實保留以下邊界：App 不內建漫畫、不提供來源爬取或下載站；可讀取使用者選擇的本機／掛載資料夾與 ZIP／CBZ；SMB 是使用者明確設定的進階路徑；AI 是選用功能，不得描述成核心必需或完全本機。使用者對匯入內容的權利與合法使用負責。
 
 ## Guideline 2.1 App Review Notes 草案
 

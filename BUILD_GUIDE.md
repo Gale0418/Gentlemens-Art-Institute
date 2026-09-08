@@ -132,6 +132,22 @@ validate_build_paths
 
 ### 4.3 建立乾淨本機工作副本
 
+也可從 repo 根目錄執行 `bash scripts/release/stage-ios-build.sh`：它會檢查本機暫存空間至少 6 GiB，再建立唯一的新副本並輸出路徑；只複製建置必要的原始碼與 lockfile，不帶正式設定、進度、漫畫快取、`.cargo` 或舊 Xcode 產物。6 GiB 是最低門檻，完整 archive 可能需要更多。空間不足以 exit 3 結束，不會刪除其他檔案。進入輸出的目錄後先執行 `npm ci --ignore-scripts`，再執行 4.4 的建構步驟；不要從 SMB 複製可能失去 symlink 的 node_modules。
+
+若 staging 複本的 Cargo identity 是 `package = "gai"` / `[lib] name = "gai_lib"`，但複製進來的 Tauri Apple project 仍是舊的 `app` identity，script 只在 staging 目錄執行一次可逆的遷移：先備份整份 `src-tauri/gen/apple` 到 `.gai-stage-backup/gen-apple-before-package-name-migration`，再將 `app.xcodeproj`、`app_iOS`、`Sources/app` 與 entitlements 改成 `gai` 對應名稱，最後以現有 `project.yml` 重新執行 `xcodegen`。這會保留既有 PrivacyInfo、權限、orientations、native plugin dependency 與 Rust build script；canonical checkout 的 `src-tauri/gen/apple` 不會被改寫。遷移需要本機 `xcodegen`，失敗會以 exit 4 停止。
+
+這個遷移是必要的，因為 `tauri ios init --ci --skip-targets-install` 產生的是乾淨 `gai` project，但不會帶回 repository 內手工保留的 Apple project 設定；staging script 因此採備份後改名並重生 project 的最小路徑。不要為了繞過檢查修改 Cargo package 或 lib name。
+
+完成 staging 後，可先確認生成的 Apple project 與 scheme：
+
+```bash
+cd "${GAI_IOS_STAGE_DIR}"
+npm ci --ignore-scripts
+xcodebuild -list -json -project src-tauri/gen/apple/gai.xcodeproj
+```
+
+確認 scheme 包含 `gai_iOS` 後即可進入 4.4。這不是 archive 或 Release build 驗證。
+
 Repository root 的 `.cargo/config.toml` 把一般 Cargo output 導到 `/tmp/gai-cargo-target`。iOS/Xcode 產物必須跟 Tauri generated Apple project 的預期位置一致，因此同步 iOS 工作副本時**排除 `.cargo`**，不要去刪 repository 的正式設定。
 
 ```bash
@@ -154,10 +170,12 @@ npm ci
 
 ```bash
 cd "${GAI_IOS_WORK_DIR}"
-npm run tauri ios build
+npm run tauri -- ios build --ci --target aarch64 --export-method debugging
 ```
 
 Tauri 會編譯 Rust static library、呼叫 Xcode project，再產生 signed app / IPA。實際輸出位置以當次 Tauri CLI 輸出為準，不要依賴歷史 blocker 文件記錄的舊絕對路徑。
+
+上面的 `debugging` 是實機開發驗收匯出，不是 App Store 發行包。簽章 team 可透過 `APPLE_DEVELOPMENT_TEAM` 指定已驗證的團隊。iOS build 版本使用 `tauri.conf.json` 的 `bundle.iOS.bundleVersion`（例如 `2`，每次交付需遞增），行銷版本仍為 `1.0.0`；不要再加 `--build-number`，本輪實測它會把 build 拼成四段的 `1.0.0.2`。每次匯出都需從 IPA 的 Info.plist 回讀版本。
 
 ### 4.5 安裝到實機
 
@@ -233,3 +251,10 @@ browser HTTP fallback
 ```
 
 如果 Tauri 缺少某項能力，請修 `src-tauri/` 或 `public/tauri-api.js`，不要再建立第二套 runtime。
+
+
+## 首發語系資源
+
+前端語系由 `public/i18n.js` 與 `public/locales/*.js` 提供，支援繁中、英文、日文。新增 UI 時使用明確翻譯鍵，不處理使用者的書名或標籤。`npm test` 包含語系選取、持久化與插值驗證。
+
+iOS 權限提示以 `src-tauri/ios-localizations/*.lproj/InfoPlist.strings` 為來源。`npm run build:ios` 會同步資源；若直接執行 `tauri ios build`，先執行 `npm run sync:ios-localizations`。既有 APFS staging 可從根工作區執行 `node scripts/sync-ios-localizations.mjs <stage>/src-tauri/gen/apple`，保留其 app/gai 專案識別並加入 Resources。發布前須從 IPA 回讀三份語系檔案。

@@ -1,3 +1,7 @@
+const bridgeText = (source, vars = {}) => window.GAIL10n
+  ? window.GAIL10n.t(source, vars)
+  : source.replace(/\{(\w+)\}/g, (token, key) => Object.prototype.hasOwnProperty.call(vars, key) ? String(vars[key]) : token);
+
 /**
  * Tauri API 橋接層 (Phase 2)
  * 把原本 Electron 的 IPC 呼叫無縫轉換成 Tauri 的 invoke 呼叫。
@@ -29,12 +33,12 @@ function normalizeReaderData(data) {
 
 function normalizeProgressPayload(data) {
   if (!data || typeof data !== 'object' || typeof data.id !== 'string' || !data.id) {
-    throw new Error('閱讀進度資料格式不正確。');
+    throw new Error(bridgeText("閱讀進度資料格式不正確。"));
   }
   const rawTotal = Number(data.totalPages);
   const rawPage = Number(data.currentPage);
   if (!Number.isFinite(rawTotal) || !Number.isFinite(rawPage)) {
-    throw new Error('閱讀進度頁碼必須是有限數字。');
+    throw new Error(bridgeText("閱讀進度頁碼必須是有限數字。"));
   }
   const totalPages = Math.max(0, Math.trunc(rawTotal));
   const maxIndex = Math.max(0, totalPages - 1);
@@ -128,7 +132,7 @@ async function openComicWithAuthoritativeProgress(invoke, id) {
 
 function normalizeSmbConfig(data) {
   if (data == null) return null;
-  if (typeof data !== 'object') throw new Error('NAS 設定格式不正確。');
+  if (typeof data !== 'object') throw new Error(bridgeText("NAS 設定格式不正確。"));
 
   const host = String(data.host ?? '').trim();
   const share = String(data.share ?? '').trim();
@@ -136,16 +140,16 @@ function normalizeSmbConfig(data) {
   const password = data.password == null ? '' : String(data.password);
 
   if (!host || host.length > 255 || /[\/\\\u0000-\u001f\u007f]/.test(host)) {
-    throw new Error('NAS 主機名稱／IP 格式不正確。');
+    throw new Error(bridgeText("NAS 主機名稱／IP 格式不正確。"));
   }
   if (!share || share.length > 255 || share === '.' || share === '..' || /[\/\\\u0000-\u001f\u007f]/.test(share)) {
-    throw new Error('NAS Share 名稱格式不正確。');
+    throw new Error(bridgeText("NAS Share 名稱格式不正確。"));
   }
   if (username.length > 256 || /[\u0000-\u001f\u007f]/.test(username)) {
-    throw new Error('NAS 使用者名稱格式不正確。');
+    throw new Error(bridgeText("NAS 使用者名稱格式不正確。"));
   }
   if (password.length > 1024 || /[\u0000\u000a\u000d]/.test(password)) {
-    throw new Error('NAS 密碼格式不正確。');
+    throw new Error(bridgeText("NAS 密碼格式不正確。"));
   }
 
   return {
@@ -169,10 +173,12 @@ function installThirdPartyAiConsentGuard() {
   disclosure.id = 'ai-third-party-disclosure-wrap';
   const renderDisclosure = () => {
     const providerName = provider.value === 'google' ? 'Google' : 'OpenAI';
-    const message = ` 我了解：只有在我主動使用 AI 功能時，目前頁面影像與提示文字才會傳送至 ${providerName}；我明確同意本次工作階段的第三方 AI 資料分享。`;
-    const textNode = Array.from(disclosure.childNodes).find(node => node.nodeType === 3);
-    if (textNode) textNode.textContent = message;
-    else disclosure.append(document.createTextNode(message));
+    const message = bridgeText(" 我了解：只有在我主動使用 AI 功能時，目前頁面影像與提示文字才會傳送至 {provider}；我明確同意本次工作階段的第三方 AI 資料分享。", { provider: providerName });
+    const policyNote = provider.value === 'google' ? bridgeText(" 若使用 Google 免費層，提交內容可能用於改善產品；請確認自己的雲端 BYOK 方案。") : '';
+    const textNodes = Array.from(disclosure.childNodes).filter(node => node.nodeType === 3);
+    for (const node of textNodes) node.textContent = '';
+    if (textNodes.length) textNodes[0].textContent = message + policyNote;
+    else disclosure.append(document.createTextNode(message + policyNote));
     disclosure.hidden = false;
   };
 
@@ -186,13 +192,29 @@ function installThirdPartyAiConsentGuard() {
 installThirdPartyAiConsentGuard();
 
 if (window.__TAURI__) {
-  const { invoke } = window.__TAURI__.core;
+  const nativeInvoke = window.__TAURI__.core.invoke;
+  const invoke = async (...args) => {
+    try {
+      return await nativeInvoke(...args);
+    } catch (error) {
+      if (args[0] !== 'explain_page' && String(error).startsWith('PRO_REQUIRED:')) {
+        window.GaiCommerce?.handleError(error);
+      }
+      throw error;
+    }
+  };
   const { listen } = window.__TAURI__.event;
 
   console.log("🚀 Tauri 環境偵測成功，初始化橋接層...");
 
   window.electronAPI = {
     isElectron: true,
+    getCommerce: () => invoke('get_commerce'),
+    getPhotoLibraryStatus: (requestAuthorization = false) => invoke('get_photo_library_status', { requestAuthorization }),
+    setLinkedPhotoAlbums: (albumIds) => invoke('set_linked_photo_albums', { albumIds }),
+    setPhotoNetworkAllowed: (allowed) => invoke('set_photo_network_allowed', { allowed }),
+    purchasePro: () => invoke('purchase_pro'),
+    restorePro: () => invoke('restore_pro'),
     getLibrary: async () => rememberAuthoritativeLibraryProgress(await invoke('get_library')),
     getScanStatus: () => invoke('get_scan_status'),
     openComic: (id) => openComicWithAuthoritativeProgress(invoke, id),
@@ -213,7 +235,7 @@ if (window.__TAURI__) {
     setAiSessionConfig: (data) => {
       const providerName = data?.provider === 'google' ? 'Google' : 'OpenAI';
       if (!data?.googleContentDisclosure) {
-        return Promise.reject(new Error(`啟用 ${providerName} 前，請先明確同意將目前頁面影像與提示文字傳送至該第三方 AI 供應商。`));
+        return Promise.reject(new Error(bridgeText("啟用 {provider} 前，請先明確同意將目前頁面影像與提示文字傳送至該第三方 AI 供應商。", { provider: providerName })));
       }
       return invoke('set_ai_session_config', { data });
     },
@@ -231,7 +253,7 @@ if (window.__TAURI__) {
           directory: true,
           multiple: false,
           defaultPath: defaultPath || undefined,
-          title: '選擇漫畫資料夾',
+          title: bridgeText("選擇漫畫資料夾"),
           canCreateDirectories: true,
         },
       });
@@ -295,7 +317,7 @@ if (window.__TAURI__) {
       });
       if (!selected) return null;
       const path = typeof selected === 'string' ? selected : selected.path;
-      if (!path) throw new Error('未取得匯出檔案路徑');
+      if (!path) throw new Error(bridgeText("未取得匯出檔案路徑"));
       return invoke('save_catalog_metadata', { path, payload });
     },
     previewCatalogImport: (payload) => invoke('preview_catalog_import', { payload }),

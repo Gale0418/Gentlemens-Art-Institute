@@ -2,10 +2,6 @@
 
 No plugin commands are granted implicitly; the app must opt in explicitly.
 
-#### This default permission set includes the following:
-
-- No commands.
-
 ## Permission Table
 
 <table>
@@ -13,6 +9,7 @@ No plugin commands are granted implicitly; the app must opt in explicitly.
 <th>Identifier</th>
 <th>Description</th>
 </tr>
+
 
 <tr>
 <td>

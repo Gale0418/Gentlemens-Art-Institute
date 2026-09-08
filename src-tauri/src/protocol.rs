@@ -367,7 +367,9 @@ pub fn handle_comic_request(
             }
         };
 
-        let comic_info = {
+        let comic_info = if crate::photo_library::is_photo_album_id(id) {
+            crate::photo_library::item_for_id(&state, id)
+        } else {
             let comics = state.comics.blocking_lock();
             comics.iter().find(|comic| comic.id == id).cloned()
         };
@@ -377,9 +379,106 @@ pub fn handle_comic_request(
                 return Response::builder()
                     .status(StatusCode::NOT_FOUND)
                     .body(b"unknown comic".to_vec())
-                    .map_err(Into::into)
+                .map_err(Into::into)
             }
         };
+
+        if comic_info.source_id == "photos" || comic_info.r#type == "photo-album" {
+            let (album_id, asset_id) = match crate::photo_library::page_asset(&state, id, page_index)
+            {
+                Some(value) => value,
+                None => {
+                    return Response::builder()
+                        .status(StatusCode::FORBIDDEN)
+                        .body(b"photo album is unavailable".to_vec())
+                        .map_err(Into::into)
+                }
+            };
+            let allow_network = state
+                .photo_network_allowed
+                .load(std::sync::atomic::Ordering::Acquire);
+            let (path, mime_type) = match tauri::async_runtime::block_on(
+                crate::photo_library::request_image(
+                    app,
+                    album_id,
+                    asset_id,
+                    host == "cover",
+                    allow_network,
+                ),
+            ) {
+                Ok(value) => value,
+                Err(error) => {
+                    return Response::builder()
+                        .status(crate::photo_library::native_image_error_status(&error))
+                        .body(b"photo image unavailable".to_vec())
+                        .map_err(Into::into)
+                }
+            };
+            if mime_type != "image/jpeg" {
+                return Response::builder()
+                    .status(StatusCode::UNPROCESSABLE_ENTITY)
+                    .body(b"photo image format is unsupported".to_vec())
+                    .map_err(Into::into);
+            }
+            let cache_root = match photo_cache_root(app) {
+                Ok(root) => root,
+                Err(_) => {
+                    return Response::builder()
+                        .status(StatusCode::FORBIDDEN)
+                        .body(b"photo cache is unavailable".to_vec())
+                        .map_err(Into::into)
+                }
+            };
+            let canonical_root = match cache_root.canonicalize() {
+                Ok(root) => root,
+                Err(_) => {
+                    return Response::builder()
+                        .status(StatusCode::FORBIDDEN)
+                        .body(b"photo cache is unavailable".to_vec())
+                        .map_err(Into::into)
+                }
+            };
+            let canonical_path = match Path::new(&path).canonicalize() {
+                Ok(path) if path.is_file() && path.starts_with(&canonical_root) => path,
+                _ => {
+                    return Response::builder()
+                        .status(StatusCode::FORBIDDEN)
+                        .body(b"photo cache path rejected".to_vec())
+                        .map_err(Into::into)
+                }
+            };
+            let mut file = match File::open(canonical_path) {
+                Ok(file) => file,
+                Err(_) => {
+                    return Response::builder()
+                        .status(StatusCode::NOT_FOUND)
+                        .body(b"photo image not found".to_vec())
+                        .map_err(Into::into)
+                }
+            };
+            let buf = match read_image_limited(&mut file) {
+                Ok(buf) => buf,
+                Err(error) if error.kind() == io::ErrorKind::InvalidData => {
+                    return Response::builder()
+                        .status(StatusCode::PAYLOAD_TOO_LARGE)
+                        .body(b"photo image too large".to_vec())
+                        .map_err(Into::into)
+                }
+                Err(_) => {
+                    return Response::builder()
+                        .status(StatusCode::UNPROCESSABLE_ENTITY)
+                        .body(b"photo image read failed".to_vec())
+                        .map_err(Into::into)
+                }
+            };
+            return Response::builder()
+                .header("Content-Type", "image/jpeg")
+                .header("Cache-Control", MUTABLE_IMAGE_CACHE_CONTROL)
+                .header("X-Content-Type-Options", "nosniff")
+                .header("Access-Control-Allow-Origin", "*")
+                .body(buf)
+                .map_err(Into::into);
+        }
         let cache_control = cache_control_for_comic(&comic_info);
         let page_count = {
             let opened = state.opened_comic_files.read().unwrap();
@@ -608,6 +707,27 @@ pub fn handle_comic_request(
         .header("Access-Control-Allow-Origin", "*")
         .body(b"not found".to_vec())
         .map_err(Into::into)
+}
+
+fn photo_cache_root(app: &tauri::AppHandle) -> Result<std::path::PathBuf, ()> {
+    #[cfg(target_os = "ios")]
+    {
+        let documents = app.path().document_dir().map_err(|_| ())?;
+        return Ok(documents
+            .parent()
+            .ok_or(())?
+            .join("Library")
+            .join("Caches")
+            .join("GAIPhotoLibrary"));
+    }
+    #[cfg(not(target_os = "ios"))]
+    {
+        Ok(app
+            .path()
+            .app_cache_dir()
+            .map_err(|_| ())?
+            .join("GAIPhotoLibrary"))
+    }
 }
 
 #[cfg(test)]

@@ -1,0 +1,53 @@
+name: GAIStoreKitHost
+
+options:
+  deploymentTarget:
+    iOS: "15.0"
+  createIntermediateGroups: true
+
+packages:
+  tauri-plugin-ios-folder:
+    path: ../../
+
+targets:
+  GAIStoreKitHost:
+    type: application
+    platform: iOS
+    deploymentTarget: "15.0"
+    sources:
+      - path: App
+      - path: ../StoreKitTestSupport/MemoryPressureStub.c
+    settings:
+      PRODUCT_BUNDLE_IDENTIFIER: com.windsheep.gai.storekittest
+      GENERATE_INFOPLIST_FILE: YES
+      ENABLE_TESTABILITY: YES
+    scheme:
+      testTargets:
+        - GAIStoreKitHostTests
+      storeKitConfiguration: ../StoreKitCommerceTests/GAI.storekit
+
+  GAIStoreKitHostTests:
+    type: bundle.unit-test
+    platform: iOS
+    deploymentTarget: "15.0"
+    sources:
+      - path: ../StoreKitCommerceTests/CommerceStoreKitTests.swift
+      - path: ../StoreKitCommerceTests/GAI.storekit
+        buildPhase: resources
+    dependencies:
+      - target: GAIStoreKitHost
+      - package: tauri-plugin-ios-folder
+        product: tauri-plugin-ios-folder
+    settings:
+      PRODUCT_BUNDLE_IDENTIFIER: com.windsheep.gai.storekittest.tests
+      GENERATE_INFOPLIST_FILE: YES
+      ENABLE_TESTABILITY: YES
+      TEST_HOST: $(BUILT_PRODUCTS_DIR)/GAIStoreKitHost.app/GAIStoreKitHost
+      BUNDLE_LOADER: $(TEST_HOST)
+      FRAMEWORK_SEARCH_PATHS:
+        - $(inherited)
+        - $(PLATFORM_DEVELOPER_LIBRARY_DIR)/Frameworks
+      OTHER_LDFLAGS:
+        - $(inherited)
+        - -framework
+        - StoreKitTest

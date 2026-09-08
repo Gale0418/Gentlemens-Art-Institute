@@ -37,3 +37,17 @@ output/
 .impeccable/live/deferred-svelte-component-accepts.json
 .impeccable/live/*.png
 # impeccable-ignore-end
+
+# Credentials and local signing material must never be published.
+.env
+.env.*
+!.env.example
+*.p8
+*.p12
+*.pfx
+*.key
+*.mobileprovision
+*.provisionprofile
+
+# Private historical device and library reports.
+docs/history/

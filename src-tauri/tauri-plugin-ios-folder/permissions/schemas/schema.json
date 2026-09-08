@@ -307,18 +307,6 @@
           "markdownDescription": "Denies the pick_folder command without any pre-configured scope."
         },
         {
-          "description": "Enables the ping command without any pre-configured scope.",
-          "type": "string",
-          "const": "allow-ping",
-          "markdownDescription": "Enables the ping command without any pre-configured scope."
-        },
-        {
-          "description": "Denies the ping command without any pre-configured scope.",
-          "type": "string",
-          "const": "deny-ping",
-          "markdownDescription": "Denies the ping command without any pre-configured scope."
-        },
-        {
           "description": "Enables the start_accessing command without any pre-configured scope.",
           "type": "string",
           "const": "allow-start-accessing",
@@ -343,10 +331,10 @@
           "markdownDescription": "Denies the stop_accessing command without any pre-configured scope."
         },
         {
-          "description": "Default permissions for the plugin\n#### This default permission set includes:\n\n- `allow-ping`",
+          "description": "No plugin commands are granted implicitly; the app must opt in explicitly.",
           "type": "string",
           "const": "default",
-          "markdownDescription": "Default permissions for the plugin\n#### This default permission set includes:\n\n- `allow-ping`"
+          "markdownDescription": "No plugin commands are granted implicitly; the app must opt in explicitly."
         }
       ]
     }

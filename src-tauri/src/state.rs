@@ -1,6 +1,6 @@
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
-use std::sync::atomic::{AtomicU8, AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU8, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex as StdMutex, OnceLock, Weak};
 use tokio::sync::Mutex;
 
@@ -337,6 +337,13 @@ pub struct AppState {
     pub catalog_sync: tokio::sync::Mutex<()>,
     pub online_services: std::sync::RwLock<OnlineServicesConfig>,
     pub ai_session: std::sync::RwLock<Option<AiSessionConfig>>,
+    /// Photo albums are a separate native-backed source. Scanner refreshes
+    /// must never replace or remove this snapshot.
+    pub photo_albums: Mutex<Vec<crate::photo_library::PhotoAlbumSnapshot>>,
+    pub photo_progress: Mutex<HashMap<String, Progress>>,
+    pub photo_authorization: std::sync::RwLock<String>,
+    pub photo_linked_album_ids: std::sync::RwLock<Vec<String>>,
+    pub photo_network_allowed: AtomicBool,
 }
 
 impl AppState {
@@ -371,6 +378,11 @@ impl AppState {
             catalog_sync: tokio::sync::Mutex::new(()),
             online_services: std::sync::RwLock::new(OnlineServicesConfig::default()),
             ai_session: std::sync::RwLock::new(None),
+            photo_albums: Mutex::new(Vec::new()),
+            photo_progress: Mutex::new(HashMap::new()),
+            photo_authorization: std::sync::RwLock::new("notDetermined".into()),
+            photo_linked_album_ids: std::sync::RwLock::new(Vec::new()),
+            photo_network_allowed: AtomicBool::new(false),
         }
     }
 

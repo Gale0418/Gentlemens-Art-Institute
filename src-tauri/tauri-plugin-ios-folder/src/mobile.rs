@@ -25,6 +25,11 @@ pub fn init<R: Runtime, C: DeserializeOwned>(
 pub struct TauriPluginIosFolder<R: Runtime>(PluginHandle<R>);
 
 impl<R: Runtime> TauriPluginIosFolder<R> {
+    // 僅供 Rust 後端使用，不將任意 native method 暴露給 WebView。
+    pub fn commerce(&self, method: &str) -> crate::Result<serde_json::Value> {
+        self.0.run_mobile_plugin(method, ()).map_err(Into::into)
+    }
+
     pub fn pick_folder(&self) -> crate::Result<PickFolderResponse> {
         self.0
             .run_mobile_plugin("pickFolder", ())
@@ -52,6 +57,41 @@ impl<R: Runtime> TauriPluginIosFolder<R> {
     ) -> crate::Result<EnsureAvailableResponse> {
         self.0
             .run_mobile_plugin("ensureAvailable", payload)
+            .map_err(Into::into)
+    }
+
+    pub fn photo_library_status(
+        &self,
+        payload: PhotoLibraryStatusRequest,
+    ) -> crate::Result<PhotoLibraryStatusResponse> {
+        self.0
+            .run_mobile_plugin("photoLibraryStatus", payload)
+            .map_err(Into::into)
+    }
+
+    pub fn set_linked_photo_albums(
+        &self,
+        payload: SetLinkedPhotoAlbumsRequest,
+    ) -> crate::Result<SetLinkedPhotoAlbumsResponse> {
+        self.0
+            .run_mobile_plugin("setLinkedPhotoAlbums", payload)
+            .map_err(Into::into)
+    }
+
+    pub fn linked_photo_album_snapshots(
+        &self,
+    ) -> crate::Result<LinkedPhotoAlbumSnapshotsResponse> {
+        self.0
+            .run_mobile_plugin("linkedPhotoAlbumSnapshots", ())
+            .map_err(Into::into)
+    }
+
+    pub fn photo_asset_image(
+        &self,
+        payload: PhotoAssetImageRequest,
+    ) -> crate::Result<PhotoAssetImageResponse> {
+        self.0
+            .run_mobile_plugin("photoAssetImage", payload)
             .map_err(Into::into)
     }
 }

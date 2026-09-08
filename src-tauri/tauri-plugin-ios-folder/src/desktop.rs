@@ -47,4 +47,43 @@ impl<R: Runtime> TauriPluginIosFolder<R> {
             "Not supported on desktop",
         )))
     }
+
+    pub fn photo_library_status(
+        &self,
+        _payload: PhotoLibraryStatusRequest,
+    ) -> crate::Result<PhotoLibraryStatusResponse> {
+        Err(crate::Error::Io(std::io::Error::new(
+            std::io::ErrorKind::Unsupported,
+            "Not supported on desktop",
+        )))
+    }
+
+    pub fn set_linked_photo_albums(
+        &self,
+        _payload: SetLinkedPhotoAlbumsRequest,
+    ) -> crate::Result<SetLinkedPhotoAlbumsResponse> {
+        Err(crate::Error::Io(std::io::Error::new(
+            std::io::ErrorKind::Unsupported,
+            "Not supported on desktop",
+        )))
+    }
+
+    pub fn linked_photo_album_snapshots(
+        &self,
+    ) -> crate::Result<LinkedPhotoAlbumSnapshotsResponse> {
+        Err(crate::Error::Io(std::io::Error::new(
+            std::io::ErrorKind::Unsupported,
+            "Not supported on desktop",
+        )))
+    }
+
+    pub fn photo_asset_image(
+        &self,
+        _payload: PhotoAssetImageRequest,
+    ) -> crate::Result<PhotoAssetImageResponse> {
+        Err(crate::Error::Io(std::io::Error::new(
+            std::io::ErrorKind::Unsupported,
+            "Not supported on desktop",
+        )))
+    }
 }

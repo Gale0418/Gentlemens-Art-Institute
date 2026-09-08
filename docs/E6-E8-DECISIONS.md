@@ -2,7 +2,7 @@
 
 更新日期：2026-09-04
 
-本文件只保留仍適用的 durable architecture / release decisions。特定日期的匯入數字、裝置狀態、磁碟空間與一次性 blocker 已移至 `docs/history/`，不應在這裡形成第二套現況來源。
+本文件只保留仍適用的 durable architecture / release decisions。特定日期的匯入數字、裝置狀態、磁碟空間與一次性 blocker 僅保留於本機私人紀錄，不應在這裡形成第二套現況來源。
 
 ## RAR／CBR 解碼邊界（COMIC-F6）
 
@@ -46,7 +46,7 @@ OPDS 2.0 只作唯讀目錄交換：標題、作者、語言、修改時間、�
 ## iPad／TestFlight／App Store 清單（COMIC-P8）
 
 - 建置：正式發行必須使用 repo 鎖定的 Rust toolchain 與 release gate；目前為 Rust 1.98.1。
-- 發行：TestFlight-first。signed install、processed build、實體裝置錄影與 App Store Connect 欄位以 `docs/release/` 的 canonical metadata / gate 為準；舊裝置或磁碟 blocker 只保存在 `docs/history/`。
+- 發行：TestFlight-first。signed install、processed build、實體裝置錄影與 App Store Connect 欄位以 `docs/release/` 的 canonical metadata / gate 為準；舊裝置或磁碟 blocker 僅保存在本機私人紀錄。
 - 隱私：App Store Connect 與 App 內都要有隱私政策；明列線上服務／AI 傳送的資料、第三方、保存、刪除與撤回方式。
 - 內容：App 只讀使用者自行匯入／連結的漫畫；不內建第三方來源爬取、商店、帳號或下載站。內建 reviewer demo 必須維持原創全年齡內容。
 - 付費：首選一次性付費的 App 本體；任何數位功能解鎖都要重新核對當時有效的 3.1 規則。Reader App entitlement 只有真的提供外部帳號／購買連結時才評估，不能為了繞過 IAP 先加。

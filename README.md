@@ -1,6 +1,12 @@
 # 紳士藝術研究所 Gentlemen's Art Institute
 
-**G.A.I** 是一套 **local-first / NAS-first** 的私人漫畫書架、整理器與閱讀器，目標是在 macOS 與 iPhone/iPad 上管理大型本機或 NAS 收藏，同時讓原始漫畫檔維持預設只讀。
+**漫畫圖片，直接用條漫讀。**
+
+**G.A.I** 將圖片資料夾或 ZIP／CBZ 裡的漫畫排成連續長條，開啟即可往下捲動閱讀，無須合併原圖。支援條漫、單頁與雙頁模式，保存閱讀進度，並提供搜尋、收藏與標籤整理。
+
+適用於 macOS、iPhone 與 iPad，可讀取本機或 NAS 收藏；原始漫畫檔維持預設只讀。
+
+[隱私政策](#隱私政策) · [支援與使用說明](SUPPORT.md)
 
 專案現在是 **Tauri 2 + Rust + SQLite + Vanilla HTML/CSS/JavaScript** 的單一路線產品。2026-09-04 起，舊 Electron / Express / browser fallback runtime、對應套件、scripts、測試與包裝資產已正式移除；不再維護第二套後端。
 
@@ -17,6 +23,37 @@
 - 內建全年齡原創 demo 可在乾淨安裝、沒有 NAS／帳號／第三方下載的情況下直接驗證核心 reader。
 - App Store / TestFlight 資料目前仍是 **`draft-blocked`**；未完成真實 processed build、實機錄影、Privacy Policy / Support URL、App Privacy、Age Rating、export compliance 等證據前，不應送審。
 - `src-tauri/vendor/wry/` 是**刻意保留的 iOS WebKit startup patch**，目前仍由 Cargo `[patch.crates-io]` 使用；不要因為它看起來像 vendor 目錄就清掉。
+
+## 隱私政策
+
+更新日期：2026-09-09。適用於 G.A.I（紳士藝術研究所）的 macOS、iPhone 與 iPad 版本。開發與隱私問題請聯絡 [coderb0418@gmail.com](mailto:coderb0418@gmail.com)。
+
+### 本機書庫與照片
+
+G.A.I 不要求建立自有帳號，也未整合廣告或第三方行為分析服務。書籍索引、檔名與來源路徑、標籤、收藏、閱讀進度、整理結果及復原紀錄保存在裝置上的 App 資料中。閱讀時會產生縮圖與頁面快取；這些資料不會因一般閱讀操作而上傳給開發者。
+
+透過「匯入圖片」加入的內容會建立書庫副本；直接連結的外部資料夾、NAS 與照片相簿則依原有來源讀取，不代表整份內容已複製或可離線使用。只有主動連結相簿才要求照片讀取權限：有限權限只讀取你允許的照片，完整權限可列出相簿及其中可讀取的照片。解除相簿連結會移除 App 的連結及相關快取，不會刪除照片圖庫的原圖。
+
+### 網路、AI 與購買
+
+- **SMB／NAS：** App 使用你提供的主機、共享資料夾與登入資訊，直接連到指定伺服器讀取內容。伺服器由你或其管理者控制；「清除連線」可移除 App 保存的連線設定。
+- **選用 AI：** 你提供自己的 OpenAI 或 Google API Key，並同意傳送後，主動選擇的頁面影像與提示文字才會送到該供應商。API Key 僅供目前工作階段使用；切換供應商須重新同意。回應與整理候選可保存在本機。API 費用由供應商另計，Pro 不包含額度。資料送出後的處理由所選供應商的條款及隱私政策管理。
+- **Pro 購買：** 付款由 Apple 的 App Store 處理，App 使用 StoreKit 驗證購買權益。開發者不透過 App 取得你的信用卡或銀行付款資料。
+- **主動聯絡：** 若你寄信求助，郵件地址、描述及自行附上的內容會用於回覆與處理問題。請勿寄送 API Key、NAS 密碼或不希望分享的私人圖片。
+
+### 保留、刪除與控制
+
+本機資料保留至你刪除相關內容、清除 App 資料或解除安裝；系統備份與自行匯出的副本須依各自儲存位置另行管理。移除書庫來源或相簿連結不等於刪除原始檔案。你可在系統設定撤回照片及檔案存取權限，停止 AI 使用並清除工作階段金鑰；已送到供應商的資料須依其資料控制方式處理。
+
+開發者無法代你讀取或刪除裝置上的私人書庫。若要處理曾寄給支援的資料，請來信說明；涉及必要的問題處理紀錄或依法須保留的資料，會於回覆中說明。政策變更會更新本段日期；新增資料用途仍須依實際功能提供相應告知與選擇。
+
+## 原始碼授權與內容聲明
+
+本 repository 公開供檢視，**不採開源授權**。G.A.I 原創程式碼、文件與專案資產保留所有權利；除適用法律或託管平台條款允許的範圍外，未經書面許可，不授權使用、修改、再散布或販售。完整條款見 [LICENSE](LICENSE)。第三方元件仍依各自授權提供，包含 `src-tauri/vendor/wry/` 中保留的授權文件。
+
+G.A.I 是讀取使用者自行提供內容的漫畫閱讀工具，不提供漫畫下載、來源站或任何第三方漫畫的使用權。請僅匯入你有權使用的內容。公開原始碼不代表 App 已上架；目前版本與商店驗收狀態請見上方 Current status。
+
+請勿將 API Key、NAS 密碼、Apple 簽章私鑰或私人書庫提交至 repository。開發時使用自己的帳號與簽章設定；安全問題請以電子郵件聯絡，勿在公開 issue 貼出憑證。
 
 ## Architecture
 
@@ -123,7 +160,6 @@ Impeccable 的共享專案檔案可以進 Git：
 ├── .cargo/                  # shared Cargo build policy
 ├── .impeccable/             # shared Impeccable config + design artifact
 ├── docs/
-│   ├── history/             # dated evidence / old blockers; not current truth
 │   ├── release/             # canonical App Store / TestFlight preparation
 │   ├── E6-E8-DECISIONS.md   # durable architecture / release decisions
 │   └── RUST-QUALITY.md      # local Rust / release quality contract
@@ -152,7 +188,7 @@ Impeccable 的共享專案檔案可以進 Git：
 
 ### Historical evidence
 
-[`docs/history/`](docs/history/) 保留特定日期的匯入結果、舊 blocker 與舊診斷。它們用來回答「當時發生了什麼」，**不能優先於目前程式碼或 current-source-of-truth 文件**。
+私人書庫與裝置的歷史驗收紀錄僅留在本機，不隨公開 repository 提供。公開文件以目前程式碼與可重複的驗證方式為準。
 
 ## Tauri-only policy
 
@@ -177,5 +213,5 @@ Impeccable 的共享專案檔案可以進 Git：
 - 不建立 feature / release branch 作為長期狀態。
 - 直接進 `main` 的變更必須保持 `npm run quality` 可重跑。
 - GitHub Actions 在額度不可用期間不作為 release gate；恢復 CI 前先確認額度與 runner 可實際執行，再重新建立 workflow。
-- dated one-off reports 放 `docs/history/`，避免它們污染現況推理。
+- 私人驗收紀錄留在 Git 忽略的本機目錄，不提交到公開 repository。
 - 不提交 build artifacts、runtime cache、Impeccable local/session state 或 secrets。

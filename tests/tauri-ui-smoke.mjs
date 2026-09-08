@@ -48,20 +48,34 @@ assert.equal(pkg.scripts?.['build:electron'], undefined, 'Electron build script 
 assert.equal(pkg.dependencies, undefined, 'Node runtime dependencies are not needed by the Tauri app');
 assert.deepEqual(Object.keys(pkg.devDependencies || {}), ['@tauri-apps/cli']);
 
-for (const asset of ['cover.jpg', 'page-01.jpg', 'page-02.jpg']) {
-  const path = `public/assets/demo/moonlit-archive/${asset}`;
-  const stat = fs.statSync(path, { throwIfNoEntry: false });
-  assert.ok(stat?.isFile() && stat.size > 0, `built-in demo asset should exist: ${path}`);
+const demoAssetCounts = {
+  mountains: 2,
+  rivers: 1,
+  coasts: 2,
+  forests: 1,
+  lakes: 2,
+  deserts: 1,
+  snow: 1,
+  cosmos: 3,
+};
+for (const [slug, pageCount] of Object.entries(demoAssetCounts)) {
+  mustContain(app, `'${slug}'`, `built-in demo catalog slug ${slug}`);
+  for (let page = 1; page <= pageCount; page += 1) {
+    const path = `public/assets/demo/landscapes/${slug}/page-${String(page).padStart(2, '0')}.png`;
+    const stat = fs.statSync(path, { throwIfNoEntry: false });
+    assert.ok(stat?.isFile() && stat.size > 0, `built-in landscape asset should exist: ${path}`);
+  }
 }
 
 // Product UI and accessibility invariants.
 for (const id of [
   'continue-strip', 'organize-bar', 'tag-library-list', 'catalog-load-more',
   'organize-inbox', 'organize-duplicates', 'btn-ai-explain', 'btn-ai-auto-explain',
-  'ai-api-key', 'scan-dir-status', 'library-source-btn', 'library-source-alert',
-  'library-source-settings-btn', 'comic-inspector', 'reader-context-menu',
+  'ai-api-key', 'scan-dir-status', 'library-source-btn',
+  'comic-inspector', 'reader-context-menu',
   'theme-picker', 'library-card-size', 'series-filter-list', 'sidebar-collapse-btn',
   'series-filter-select', 'loader-progress', 'catalog-import-input',
+  'inspector-collapse-btn', 'library-up-btn',
 ]) {
   mustContain(html, `id="${id}"`, `UI control ${id}`);
 }
@@ -71,6 +85,8 @@ mustContain(html, 'role="dialog" aria-modal="true" aria-labelledby="settings-tit
 assert.equal((html.match(/id="progress-slider"/g) || []).length, 1, 'progress slider id must be unique');
 assert.doesNotMatch(html, /class="nav-arrow"/, 'reader arrows must not cover comic pages');
 assert.doesNotMatch(html, /data-filter-shortcut=/, 'duplicate smart collection controls must stay removed');
+assert.match(css, /\.main-layout\.library-panels-narrow \.sidebar:not\(\[hidden\]\)\s*\{\s*display: flex;/, 'narrow sidebar must override legacy display:none without overriding hidden fallback');
+assert.match(css, /\.main-layout\.library-panels-narrow \.comic-inspector:not\(\[hidden\]\)\s*\{\s*display: block;/, 'narrow inspector must override legacy display:none without overriding hidden fallback');
 
 // Shared frontend remains the Tauri UI, with the historical electronAPI name
 // acting only as an internal compatibility facade installed by tauri-api.js.
@@ -91,7 +107,8 @@ mustContain(app, 'function showLoaderProgress', 'background loader progress');
 mustContain(app, 'function setOrganizeMode', 'catalog organizer');
 mustContain(app, 'function refreshCatalogSearch', 'SQLite catalog search UI');
 mustContain(app, 'function previewCatalogMetadataFile', 'catalog exchange preview');
-mustContain(app, "'assets/demo/moonlit-archive/cover.jpg'", 'built-in demo cover');
+mustContain(app, "assets/demo/landscapes/${demoMatch[1]}/page-01.png", 'self-contained built-in demo cover routing');
+assert.doesNotMatch(app, /moonlit-archive/, 'old demo cover path must stay out of actual rendering');
 assert.doesNotMatch(app, /localStorage\.setItem\([^\n]*api[-_ ]?key/i, 'AI keys must never enter localStorage');
 
 // Formal native authority and security boundaries.

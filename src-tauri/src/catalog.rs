@@ -1308,6 +1308,41 @@ impl CatalogStore {
         })
     }
 
+    pub fn forget_source_locations(&self, source_id: &str) -> Result<usize, String> {
+        self.with_connection(|connection| {
+            let tx = connection.transaction().map_err(|error| error.to_string())?;
+            let comic_ids = {
+                let mut statement = tx
+                    .prepare("SELECT DISTINCT comic_id FROM comic_locations WHERE source_id=?1")
+                    .map_err(|error| error.to_string())?;
+                let rows = statement
+                    .query_map([source_id], |row| row.get::<_, String>(0))
+                    .map_err(|error| error.to_string())?
+                    .collect::<Result<BTreeSet<_>, _>>()
+                    .map_err(|error| error.to_string())?;
+                rows
+            };
+            let removed = tx
+                .execute(
+                    "DELETE FROM comic_locations WHERE source_id=?1",
+                    [source_id],
+                )
+                .map_err(|error| error.to_string())?;
+            for comic_id in &comic_ids {
+                tx.execute(
+                    "UPDATE comics SET offline = CASE WHEN EXISTS (
+                       SELECT 1 FROM comic_locations l WHERE l.comic_id = comics.id AND l.online = 1
+                     ) THEN 0 ELSE 1 END WHERE id=?1",
+                    [comic_id],
+                )
+                .map_err(|error| error.to_string())?;
+            }
+            refresh_fts_batch(&tx, &comic_ids)?;
+            tx.commit().map_err(|error| error.to_string())?;
+            Ok(removed)
+        })
+    }
+
     pub fn upsert_tag_alias(&self, alias: TagAlias) -> Result<TagAlias, String> {
         let alias = normalize_tag_alias(alias)?;
         self.with_connection(|connection| {
@@ -3506,6 +3541,118 @@ mod tests {
         assert_eq!(moved.progress.current_page, 12);
         assert_eq!(moved.progress.total_pages, 20);
         assert_eq!(moved.progress.percent, 60.0);
+    }
+
+    #[test]
+    fn forgetting_source_locations_preserves_metadata_progress_and_other_online_locations() {
+        let store = store("forget_source_keeps_location");
+        let mut item = comic("removed-runtime", "舊來源/a.zip");
+        item.source_id = "external:removed".into();
+        item.source_path = Some("/private/var/old/a.zip".into());
+        store.sync_library(&[item]).unwrap();
+        let location = store.get_location("removed-runtime").unwrap();
+        let comic_id = location.comic_id.clone();
+        let progress = crate::state::Progress {
+            current_page: 8,
+            total_pages: 20,
+            percent: 40.0,
+            updated_at: Some("2026-09-01T00:00:00Z".into()),
+        };
+        store.save_progress("removed-runtime", &progress).unwrap();
+        store
+            .with_connection(|connection| {
+                connection
+                    .execute(
+                        "UPDATE comics SET title='保留標題' WHERE id=?1",
+                        [&comic_id],
+                    )
+                    .map_err(|error| error.to_string())?;
+                connection
+                    .execute(
+                        "INSERT INTO comic_locations(comic_id,runtime_id,source_id,relative_path,actual_path,kind,online) VALUES(?1,'kept-runtime','external:kept','保留來源/a.zip','/private/var/kept/a.zip','archive',1)",
+                        [&comic_id],
+                    )
+                    .map_err(|error| error.to_string())?;
+                Ok(())
+            })
+            .unwrap();
+
+        assert_eq!(store.forget_source_locations("external:removed").unwrap(), 1);
+        store
+            .with_connection(|connection| {
+                let removed_count: i64 = connection
+                    .query_row(
+                        "SELECT COUNT(*) FROM comic_locations WHERE source_id='external:removed'",
+                        [],
+                        |row| row.get(0),
+                    )
+                    .map_err(|error| error.to_string())?;
+                assert_eq!(removed_count, 0);
+                let remaining: (String, i64) = connection
+                    .query_row(
+                        "SELECT source_id,online FROM comic_locations WHERE comic_id=?1",
+                        [&comic_id],
+                        |row| Ok((row.get(0)?, row.get(1)?)),
+                    )
+                    .map_err(|error| error.to_string())?;
+                assert_eq!(remaining, ("external:kept".into(), 1));
+                let saved: (i64, i64, f64) = connection
+                    .query_row(
+                        "SELECT current_page,total_pages,percent FROM reading_progress WHERE comic_id=?1",
+                        [&comic_id],
+                        |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+                    )
+                    .map_err(|error| error.to_string())?;
+                assert_eq!(saved, (8, 20, 40.0));
+                Ok(())
+            })
+            .unwrap();
+        let metadata = store.get_metadata(&comic_id).unwrap();
+        assert_eq!(metadata.title, "保留標題");
+        assert!(!metadata.offline);
+        assert_eq!(metadata.source_id.as_deref(), Some("external:kept"));
+        assert!(store.get_runtime_item("removed-runtime").unwrap().is_none());
+    }
+
+    #[test]
+    fn forgetting_last_source_location_preserves_metadata_and_marks_comic_offline() {
+        let store = store("forget_last_source");
+        let mut item = comic("last-runtime", "唯一來源/a.zip");
+        item.source_id = "external:removed".into();
+        store.sync_library(&[item]).unwrap();
+        let location = store.get_location("last-runtime").unwrap();
+        let comic_id = location.comic_id.clone();
+        store
+            .save_progress(
+                "last-runtime",
+                &crate::state::Progress {
+                    current_page: 3,
+                    total_pages: 10,
+                    percent: 30.0,
+                    updated_at: Some("2026-09-01T00:00:00Z".into()),
+                },
+            )
+            .unwrap();
+
+        assert_eq!(store.forget_source_locations("external:removed").unwrap(), 1);
+        let metadata = store.get_metadata(&comic_id).unwrap();
+        assert!(metadata.offline);
+        assert!(metadata.source_id.is_none());
+        assert!(metadata.relative_path.is_none());
+        assert_eq!(metadata.title, "a");
+        store
+            .with_connection(|connection| {
+                let saved: (i64, i64, f64) = connection
+                    .query_row(
+                        "SELECT current_page,total_pages,percent FROM reading_progress WHERE comic_id=?1",
+                        [&comic_id],
+                        |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+                    )
+                    .map_err(|error| error.to_string())?;
+                assert_eq!(saved, (3, 10, 30.0));
+                Ok(())
+            })
+            .unwrap();
     }
 
     #[test]

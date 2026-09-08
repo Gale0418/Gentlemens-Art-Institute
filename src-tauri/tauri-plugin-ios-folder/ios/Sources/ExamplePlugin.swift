@@ -30,6 +30,9 @@ class ExamplePlugin: Plugin, UIDocumentPickerDelegate {
   override init() {
     super.init()
     startMemoryPressureMonitoring()
+    if #available(iOS 15.0, *) {
+      Task { await CommerceManager.shared.startTransactionListener() }
+    }
   }
 
   deinit {

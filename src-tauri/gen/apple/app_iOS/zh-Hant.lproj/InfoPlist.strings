@@ -1,0 +1,2 @@
+"NSPhotoLibraryUsageDescription" = "連結您選擇的相簿，以瀏覽照片並更新相簿內容；不會修改或刪除照片。";
+"NSLocalNetworkUsageDescription" = "需要存取您授權的本機網路資料夾，以掃描與閱讀 SMB 漫畫。";

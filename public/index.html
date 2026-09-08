@@ -5,7 +5,7 @@
   <meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover">
   <meta name="description" content="紳士藝術研究所 Gentlemen's Art Institute，專為本機漫畫收藏打造的沉浸式閱讀器。">
   <meta name="theme-color" content="#140508">
-  <title>紳士藝術研究所 Gentlemen's Art Institute | 本機漫畫閱讀器</title>
+  <title data-i18n="紳士藝術研究所 Gentlemen's Art Institute | 本機漫畫閱讀器">紳士藝術研究所 Gentlemen's Art Institute | 本機漫畫閱讀器</title>
   <script>
     try {
       document.documentElement.dataset.theme = localStorage.getItem('gai:theme') || 'midnight';
@@ -26,7 +26,7 @@
   FINISH: unreviewed and undocumented is unfinished; this build ends with the finish review, the verdict, and DESIGN.md
   -->
 
-  <a class="skip-link" href="#comic-grid">跳到漫畫書架</a>
+  <a class="skip-link" href="#comic-grid" data-i18n="跳到漫畫書架">跳到漫畫書架</a>
 
   <!-- 隱藏式 SVG 銀利化濃鎮定義 -->
   <svg xmlns="http://www.w3.org/2000/svg" style="position:absolute;width:0;height:0;overflow:hidden;">
@@ -61,29 +61,32 @@
       <div class="logo">
         <span class="logo-emoji">✦</span>
         <div class="logo-text">
-          <h1>紳士藝術研究所 Gentlemen's Art Institute</h1>
-          <p>Private manga archive</p>
+          <h1 data-i18n="紳士藝術研究所 Gentlemen's Art Institute">紳士藝術研究所 Gentlemen's Art Institute</h1>
+          <p data-i18n="Private manga archive">Private manga archive</p>
         </div>
       </div>
       <div class="header-actions">
-        <div class="library-path-pill" title="本機漫畫庫">
+        <div class="library-path-pill" title="本機漫畫庫" data-i18n-title="本機漫畫庫">
           <i class="fa-solid fa-hard-drive"></i>
-          <span id="library-path-label">本機書庫</span>
+          <span id="library-path-label" data-i18n="本機書庫">本機書庫</span>
         </div>
         <div class="search-box">
           <i class="fa-solid fa-magnifying-glass search-icon"></i>
-          <label for="search-input" class="visually-hidden">搜尋漫畫、作者、標籤</label>
-          <input type="text" id="search-input" placeholder="搜尋漫畫、作者、標籤">
-          <button id="clear-search-btn" class="clear-btn" aria-label="清除搜尋" title="清除搜尋" style="display: none;"><i class="fa-solid fa-xmark" aria-hidden="true"></i></button>
+          <label for="search-input" class="visually-hidden" data-i18n="搜尋漫畫、作者、標籤">搜尋漫畫、作者、標籤</label>
+          <input type="text" id="search-input" placeholder="搜尋漫畫、作者、標籤" data-i18n-placeholder="搜尋漫畫、作者、標籤">
+          <button id="clear-search-btn" class="clear-btn" aria-label="清除搜尋" data-i18n-aria-label="清除搜尋" title="清除搜尋" data-i18n-title="清除搜尋" style="display: none;"><i class="fa-solid fa-xmark" aria-hidden="true"></i></button>
         </div>
-        <button id="refresh-btn" class="action-btn" title="重新整理書架">
-          <i class="fa-solid fa-rotate-right"></i> 重新整理
+        <button id="refresh-btn" class="action-btn" title="重新整理書架" data-i18n-title="重新整理書架">
+          <i class="fa-solid fa-rotate-right"></i><span data-i18n="重新整理">重新整理</span>
         </button>
-        <button id="import-photo-btn" class="action-btn" title="從相簿匯入圖片" style="display: none; background: rgba(255, 255, 255, 0.05); border-color: var(--card-border); color: var(--text-muted);">
-          <i class="fa-regular fa-images"></i> 匯入圖片
+        <button id="import-photo-btn" class="action-btn" title="從相簿匯入圖片" data-i18n-title="從相簿匯入圖片" style="display: none; background: rgba(255, 255, 255, 0.05); border-color: var(--card-border); color: var(--text-muted);">
+          <i class="fa-regular fa-images"></i><span data-i18n="匯入圖片">匯入圖片</span>
         </button>
-        <button id="settings-btn" class="action-btn" title="設定" style="background: rgba(255, 255, 255, 0.05); border-color: var(--card-border); color: var(--text-muted);">
-          <i class="fa-solid fa-gear"></i> 設定
+        <button id="photo-library-link-btn" class="action-btn photo-library-link-btn" type="button" title="連結 iOS 相簿" data-i18n-title="連結 iOS 相簿" hidden>
+          <i class="fa-regular fa-images" aria-hidden="true"></i><span data-i18n="連結相簿">連結相簿</span>
+        </button>
+        <button id="settings-btn" class="action-btn" title="設定" data-i18n-title="設定" style="background: rgba(255, 255, 255, 0.05); border-color: var(--card-border); color: var(--text-muted);">
+          <i class="fa-solid fa-gear"></i><span data-i18n="設定">設定</span>
         </button>
       </div>
     </header>
@@ -91,75 +94,53 @@
     <!-- 主要內容區 -->
     <div class="main-layout">
       <!-- 側邊欄 -->
-      <aside class="sidebar" id="library-sidebar">
+      <aside class="sidebar" id="library-sidebar" aria-label="漫畫系列與閱讀統計" data-i18n-aria-label="漫畫系列與閱讀統計">
         <div class="sidebar-section">
-          <h3><i class="fa-solid fa-folder-tree" aria-hidden="true"></i> 漫畫系列</h3>
-          <ul class="series-list" id="series-filter-list" aria-label="漫畫系列">
+          <h3><i class="fa-solid fa-folder-tree" aria-hidden="true"></i><span data-i18n="漫畫系列">漫畫系列</span></h3>
+          <ul class="series-list" id="series-filter-list" aria-label="漫畫系列" data-i18n-aria-label="漫畫系列">
             <li class="active" data-series="all" aria-current="true">
-              <span class="series-name">全部系列</span>
+              <span class="series-name" data-i18n="全部系列">全部系列</span>
               <span class="badge" id="total-count-badge">0</span>
             </li>
           </ul>
         </div>
 
         <div class="sidebar-section progress-summary-box">
-          <h3><i class="fa-solid fa-chart-pie"></i> 閱讀統計</h3>
+          <h3><i class="fa-solid fa-chart-pie"></i><span data-i18n="閱讀統計">閱讀統計</span></h3>
           <div class="stats-grid">
             <div class="stat-card">
               <span class="stat-value" id="stats-total">0</span>
-              <span class="stat-label">總藏書</span>
+              <span class="stat-label" data-i18n="總藏書">總藏書</span>
             </div>
             <div class="stat-card">
               <span class="stat-value" id="stats-reading">0</span>
-              <span class="stat-label">閱讀中</span>
+              <span class="stat-label" data-i18n="閱讀中">閱讀中</span>
             </div>
             <div class="stat-card">
               <span class="stat-value" id="stats-completed">0</span>
-              <span class="stat-label">已讀完</span>
+              <span class="stat-label" data-i18n="已讀完">已讀完</span>
             </div>
           </div>
         </div>
 
         <div class="sidebar-footer">
-          <p>小提示：點一下查看詳情，再點同一本開始閱讀。支援 `.cbz` 與圖片資料夾喔！✨</p>
+          <p data-i18n="小提示：點一下查看詳情，再點同一本開始閱讀。支援 `.cbz` 與圖片資料夾喔！✨">小提示：點一下查看詳情，再點同一本開始閱讀。支援 `.cbz` 與圖片資料夾喔！✨</p>
         </div>
       </aside>
 
-      <button type="button" class="sidebar-collapse-btn" id="sidebar-collapse-btn" aria-controls="library-sidebar" aria-expanded="true" aria-label="收合漫畫系列側欄" title="收合漫畫系列側欄">
+      <button type="button" class="sidebar-collapse-btn" id="sidebar-collapse-btn" aria-controls="library-sidebar" aria-expanded="true" aria-label="收合漫畫系列側欄" data-i18n-aria-label="收合漫畫系列側欄" title="收合漫畫系列側欄" data-i18n-title="收合漫畫系列側欄">
         <i class="fa-solid fa-chevron-left" aria-hidden="true"></i>
       </button>
 
       <section class="library-workspace">
         <!-- 漫畫書架網格 -->
         <main class="content-area">
-          <section class="library-source-alert" id="library-source-alert" role="status" aria-live="polite" hidden>
-            <div class="library-source-alert-copy">
-              <span class="library-source-alert-icon" aria-hidden="true"><i class="fa-solid fa-hard-drive"></i></span>
-              <div>
-                <strong>漫畫來源目前離線</strong>
-                <p id="library-source-alert-message">原本的漫畫目錄目前無法存取；收藏、標籤與閱讀進度都已安全保留。</p>
-              </div>
-            </div>
-            <button type="button" id="library-source-settings-btn">
-              <i class="fa-solid fa-folder-open" aria-hidden="true"></i>
-              選擇新的漫畫目錄
-            </button>
-          </section>
-
-          <section class="library-demo-notice" id="library-demo-notice" role="status" aria-live="polite" hidden>
-            <div class="library-demo-notice-icon" aria-hidden="true"><i class="fa-solid fa-shield-heart"></i></div>
-            <div>
-              <strong>內建全年齡示範</strong>
-              <p>這是只供體驗閱讀器的內建內容，不屬於你的收藏，也不會寫入 SQLite、收藏或閱讀進度。加入自己的漫畫目錄後會自動隱藏。</p>
-            </div>
-          </section>
-
           <section class="continue-panel" aria-labelledby="continue-title">
             <div class="section-title-row">
               <div>
-                <h2 id="continue-title">繼續閱讀</h2>
+                <h2 id="continue-title" data-i18n="繼續閱讀">繼續閱讀</h2>
               </div>
-              <span class="section-hint">最近進度與收藏會優先出現在這裡</span>
+              <span class="section-hint" data-i18n="最近進度與收藏會優先出現在這裡">最近進度與收藏會優先出現在這裡</span>
             </div>
             <div class="continue-strip" id="continue-strip">
               <!-- 動態插入繼續閱讀卡片 -->
@@ -168,21 +149,25 @@
 
           <div class="library-header">
             <div>
-              <h2 id="library-title" aria-live="polite">全部漫畫</h2>
+              <h2 id="library-title" aria-live="polite" data-i18n="全部漫畫">全部漫畫</h2>
+              <button type="button" class="library-up-btn" id="library-up-btn" aria-label="回到上一層資料夾" data-i18n-aria-label="回到上一層資料夾" title="回到上一層資料夾" data-i18n-title="回到上一層資料夾" disabled>
+                <i class="fa-solid fa-chevron-left" aria-hidden="true"></i>
+                <span data-i18n="回上層">回上層</span>
+              </button>
             </div>
             <div class="filter-options">
               <label class="series-filter-field" for="series-filter-select">
                 <i class="fa-solid fa-folder-tree" aria-hidden="true"></i>
-                <span class="visually-hidden">篩選漫畫系列</span>
-                <select id="series-filter-select" aria-label="篩選漫畫系列">
-                  <option value="all">全部系列</option>
+                <span class="visually-hidden" data-i18n="篩選漫畫系列">篩選漫畫系列</span>
+                <select id="series-filter-select" aria-label="篩選漫畫系列" data-i18n-aria-label="篩選漫畫系列">
+                  <option value="all" data-i18n="全部系列">全部系列</option>
                 </select>
               </label>
-              <button class="filter-btn active" data-filter="all" aria-pressed="true">全部</button>
-              <button class="filter-btn" data-filter="reading" aria-pressed="false">閱讀中</button>
-              <button class="filter-btn" data-filter="unread" aria-pressed="false">未讀取</button>
-              <button class="filter-btn" data-filter="finished" aria-pressed="false">已看完</button>
-              <button class="filter-btn" data-filter="favorite" aria-pressed="false"><i class="fa-solid fa-heart" style="color: #ff6b8b; margin-right: 4px;"></i> 已收藏</button>
+              <button class="filter-btn active" data-filter="all" aria-pressed="true" data-i18n="全部">全部</button>
+              <button class="filter-btn" data-filter="reading" aria-pressed="false" data-i18n="閱讀中">閱讀中</button>
+              <button class="filter-btn" data-filter="unread" aria-pressed="false" data-i18n="未讀取">未讀取</button>
+              <button class="filter-btn" data-filter="finished" aria-pressed="false" data-i18n="已看完">已看完</button>
+              <button class="filter-btn" data-filter="favorite" aria-pressed="false"><i class="fa-solid fa-heart" style="color: #ff6b8b; margin-right: 4px;"></i><span data-i18n="已收藏">已收藏</span></button>
             </div>
           </div>
 
@@ -197,73 +182,73 @@
             <!-- 漫畫卡片動態載入 -->
           </div>
 
-          <button class="catalog-load-more" id="catalog-load-more" type="button" hidden>顯示更多漫畫</button>
+          <button class="catalog-load-more" id="catalog-load-more" type="button" data-i18n="顯示更多漫畫" hidden>顯示更多漫畫</button>
 
-          <section class="organize-bar" id="organize-bar" aria-label="批次整理工具" hidden>
+          <section class="organize-bar" id="organize-bar" aria-label="批次整理工具" data-i18n-aria-label="批次整理工具" hidden>
             <header class="organize-header">
-              <strong id="organize-count">已選 0 本</strong>
-              <div class="organize-tabs" role="tablist" aria-label="整理功能">
-                <button type="button" role="tab" aria-selected="true" data-organize-panel="tags"><i class="fa-solid fa-tags"></i> 標籤庫</button>
-                <button type="button" role="tab" aria-selected="false" data-organize-panel="batch"><i class="fa-solid fa-layer-group"></i> 批次編輯</button>
-                <button type="button" role="tab" aria-selected="false" data-organize-panel="review"><i class="fa-solid fa-inbox"></i> 待確認</button>
+              <strong id="organize-count" data-i18n="已選 0 本">已選 0 本</strong>
+              <div class="organize-tabs" role="tablist" aria-label="整理功能" data-i18n-aria-label="整理功能">
+                <button type="button" role="tab" aria-selected="true" data-organize-panel="tags"><i class="fa-solid fa-tags"></i><span data-i18n="標籤庫">標籤庫</span></button>
+                <button type="button" role="tab" aria-selected="false" data-organize-panel="batch"><i class="fa-solid fa-layer-group"></i><span data-i18n="批次編輯">批次編輯</span></button>
+                <button type="button" role="tab" aria-selected="false" data-organize-panel="review"><i class="fa-solid fa-inbox"></i><span data-i18n="待確認">待確認</span></button>
               </div>
             </header>
 
             <div class="organize-panel tag-library-panel" data-organize-panel-content="tags" role="tabpanel">
               <div class="tag-library-toolbar">
-                <label class="visually-hidden" for="tag-library-search">搜尋標籤庫</label>
-                <input id="tag-library-search" type="search" placeholder="搜尋作者、類型、原作或自訂標籤">
-                <button type="button" id="tag-library-refresh" title="重新整理標籤庫"><i class="fa-solid fa-rotate"></i><span>重新整理</span></button>
+                <label class="visually-hidden" for="tag-library-search" data-i18n="搜尋標籤庫">搜尋標籤庫</label>
+                <input id="tag-library-search" type="search" placeholder="搜尋作者、類型、原作或自訂標籤" data-i18n-placeholder="搜尋作者、類型、原作或自訂標籤">
+                <button type="button" id="tag-library-refresh" title="重新整理標籤庫" data-i18n-title="重新整理標籤庫"><i class="fa-solid fa-rotate"></i><span data-i18n="重新整理">重新整理</span></button>
               </div>
-              <div class="tag-library-list" id="tag-library-list" role="listbox" aria-label="標籤庫" aria-live="polite"></div>
+              <div class="tag-library-list" id="tag-library-list" role="listbox" aria-label="標籤庫" data-i18n-aria-label="標籤庫" aria-live="polite"></div>
               <form class="tag-library-editor" id="tag-library-editor" hidden>
-                <div class="tag-editor-heading"><strong id="tag-editor-name">選擇一個標籤</strong><span id="tag-editor-count"></span></div>
-                <label>顯示名稱<input id="tag-editor-display" type="text"></label>
-                <label>合併到<select id="tag-editor-target"><option value="">選擇目標標籤</option></select></label>
-                <label>顏色
+                <div class="tag-editor-heading"><strong id="tag-editor-name" data-i18n="選擇一個標籤">選擇一個標籤</strong><span id="tag-editor-count"></span></div>
+                <label><span data-i18n="顯示名稱">顯示名稱</span><input id="tag-editor-display" type="text"></label>
+                <label><span data-i18n="合併到">合併到</span><select id="tag-editor-target"><option value="" data-i18n="選擇目標標籤">選擇目標標籤</option></select></label>
+                <label><span data-i18n="顏色">顏色</span>
                   <select id="tag-editor-color">
-                    <option value="">自動</option><option value="none">無色</option><option value="rose">玫瑰</option>
-                    <option value="amber">琥珀</option><option value="lime">青檸</option><option value="cyan">青藍</option>
-                    <option value="blue">寶藍</option><option value="violet">紫晶</option><option value="fuchsia">桃紫</option><option value="slate">石板</option>
+                    <option value="" data-i18n="自動">自動</option><option value="none" data-i18n="無色">無色</option><option value="rose" data-i18n="玫瑰">玫瑰</option>
+                    <option value="amber" data-i18n="琥珀">琥珀</option><option value="lime" data-i18n="青檸">青檸</option><option value="cyan" data-i18n="青藍">青藍</option>
+                    <option value="blue" data-i18n="寶藍">寶藍</option><option value="violet" data-i18n="紫晶">紫晶</option><option value="fuchsia" data-i18n="桃紫">桃紫</option><option value="slate" data-i18n="石板">石板</option>
                   </select>
                 </label>
-                <label class="tag-editor-pin"><input id="tag-editor-pinned" type="checkbox"> 置頂常用</label>
+                <label class="tag-editor-pin"><input id="tag-editor-pinned" type="checkbox"><span data-i18n="置頂常用">置頂常用</span></label>
                 <div class="tag-editor-actions">
-                  <button type="submit" class="organize-primary">儲存名稱與外觀</button>
-                  <button type="button" id="tag-editor-merge">合併</button>
-                  <button type="button" id="tag-editor-disable">停用</button>
-                  <button type="button" id="tag-editor-undo" disabled>撤銷標籤操作</button>
+                  <button type="submit" class="organize-primary" data-i18n="儲存名稱與外觀">儲存名稱與外觀</button>
+                  <button type="button" id="tag-editor-merge" data-i18n="合併">合併</button>
+                  <button type="button" id="tag-editor-disable" data-i18n="停用">停用</button>
+                  <button type="button" id="tag-editor-undo" disabled data-i18n="撤銷標籤操作">撤銷標籤操作</button>
                 </div>
               </form>
             </div>
 
             <div class="organize-panel" data-organize-panel-content="batch" role="tabpanel" hidden>
               <div class="organize-selection">
-                <button type="button" id="organize-select-visible">選取目前結果</button>
-                <button type="button" id="organize-clear">清除選取</button>
+                <button type="button" id="organize-select-visible" data-i18n="選取目前結果">選取目前結果</button>
+                <button type="button" id="organize-clear" data-i18n="清除選取">清除選取</button>
               </div>
               <div class="organize-fields">
-                <label>標籤<input id="organize-tag" type="text" placeholder="namespace:標籤，例如 artist:Akamaru"></label>
-                <label>作者<input id="organize-author" type="text" placeholder="留空不修改"></label>
-                <label>系列<input id="organize-series" type="text" placeholder="留空不修改"></label>
-                <label>語言<input id="organize-language" type="text" placeholder="例如 ja、zh-TW"></label>
-                <label>閱讀方向
-                  <select id="organize-direction"><option value="">不修改</option><option value="ltr">由左至右</option><option value="rtl">由右至左</option><option value="vertical">條漫直向</option></select>
+                <label><span data-i18n="標籤">標籤</span><input id="organize-tag" type="text" placeholder="namespace:標籤，例如 artist:Akamaru" data-i18n-placeholder="namespace:標籤，例如 artist:Akamaru"></label>
+                <label><span data-i18n="作者">作者</span><input id="organize-author" type="text" placeholder="留空不修改" data-i18n-placeholder="留空不修改"></label>
+                <label><span data-i18n="系列">系列</span><input id="organize-series" type="text" placeholder="留空不修改" data-i18n-placeholder="留空不修改"></label>
+                <label><span data-i18n="語言">語言</span><input id="organize-language" type="text" placeholder="例如 ja、zh-TW" data-i18n-placeholder="例如 ja、zh-TW"></label>
+                <label><span data-i18n="閱讀方向">閱讀方向</span>
+                  <select id="organize-direction"><option value="" data-i18n="不修改">不修改</option><option value="ltr" data-i18n="由左至右">由左至右</option><option value="rtl" data-i18n="由右至左">由右至左</option><option value="vertical" data-i18n="條漫直向">條漫直向</option></select>
                 </label>
               </div>
               <div class="organize-actions">
-                <button type="button" class="organize-primary" id="organize-apply">套用修改</button>
-                <button type="button" id="organize-exclude-tag">排除標籤</button>
-                <button type="button" id="organize-folder-rule">設為資料夾規則</button>
-                <button type="button" id="organize-reimport">重新匯入 metadata</button>
-                <button type="button" id="organize-undo" disabled>撤銷批次操作</button>
+                <button type="button" class="organize-primary" id="organize-apply" data-i18n="套用修改">套用修改</button>
+                <button type="button" id="organize-exclude-tag" data-i18n="排除標籤">排除標籤</button>
+                <button type="button" id="organize-folder-rule" data-i18n="設為資料夾規則">設為資料夾規則</button>
+                <button type="button" id="organize-reimport" data-i18n="重新匯入 metadata">重新匯入 metadata</button>
+                <button type="button" id="organize-undo" disabled data-i18n="撤銷批次操作">撤銷批次操作</button>
               </div>
             </div>
 
             <div class="organize-panel organize-insights" data-organize-panel-content="review" role="tabpanel" hidden>
-              <div class="organize-insight-actions"><button type="button" id="organize-inbox">低信心 Inbox</button><button type="button" id="organize-duplicates">重複候選</button></div>
-              <div class="organize-alias-form" aria-label="新增搜尋別名"><input id="organize-alias" type="text" placeholder="別名，例如：甜文"><input id="organize-canonical" type="text" placeholder="標準標籤，例如：甜寵"><button type="button" id="organize-save-alias">儲存搜尋別名</button></div>
-              <div id="organize-insight-results" class="organize-insight-results" aria-live="polite"><p>選擇 Inbox 或重複候選開始整理；系統不會自動覆寫或刪檔。</p></div>
+              <div class="organize-insight-actions"><button type="button" id="organize-inbox" data-i18n="低信心 Inbox">低信心 Inbox</button><button type="button" id="organize-duplicates" data-i18n="重複候選">重複候選</button></div>
+              <div class="organize-alias-form" aria-label="新增搜尋別名" data-i18n-aria-label="新增搜尋別名"><input id="organize-alias" type="text" placeholder="別名，例如：甜文" data-i18n-placeholder="別名，例如：甜文"><input id="organize-canonical" type="text" placeholder="標準標籤，例如：甜寵" data-i18n-placeholder="標準標籤，例如：甜寵"><button type="button" id="organize-save-alias" data-i18n="儲存搜尋別名">儲存搜尋別名</button></div>
+              <div id="organize-insight-results" class="organize-insight-results" aria-live="polite"><p data-i18n="選擇 Inbox 或重複候選開始整理；系統不會自動覆寫或刪檔。">選擇 Inbox 或重複候選開始整理；系統不會自動覆寫或刪檔。</p></div>
             </div>
             <p class="organize-status" id="organize-status" role="status"></p>
           </section>
@@ -271,19 +256,23 @@
           <!-- 漫畫庫為空時的顯示狀態 -->
           <div class="empty-state" id="empty-state" style="display: none;">
             <div class="empty-icon">📂</div>
-            <h3>書架空空如也呢，主人...</h3>
-            <p>請把漫畫圖片資料夾或 <code>.cbz</code>/<code>.zip</code> 壓縮檔放入掃描目錄，然後點擊右上角的「重新整理」按鈕吧！<br><small>您可在設定中查看或變更掃描路徑。</small></p>
+            <h3 data-i18n="書架尚無漫畫">書架尚無漫畫</h3>
+            <p><span data-i18n="請把漫畫圖片資料夾或">請把漫畫圖片資料夾或</span> <code>.cbz</code>/<code>.zip</code> <span data-i18n="壓縮檔放入掃描目錄，然後點擊右上角的「重新整理」按鈕吧！">壓縮檔放入掃描目錄，然後點擊右上角的「重新整理」按鈕吧！</span><br><small data-i18n="您可在設定中查看或變更掃描路徑。">您可在設定中查看或變更掃描路徑。</small></p>
           </div>
         </main>
 
         <aside class="comic-inspector" id="comic-inspector">
           <div class="inspector-empty">
             <span class="inspector-mark"><i class="fa-solid fa-book-open"></i></span>
-            <h3>選一本漫畫</h3>
-            <p>封面、進度、標籤與快捷操作會顯示在這裡。</p>
+            <h3 data-i18n="選一本漫畫">選一本漫畫</h3>
+            <p data-i18n="封面、進度、標籤與快捷操作會顯示在這裡。">封面、進度、標籤與快捷操作會顯示在這裡。</p>
           </div>
         </aside>
       </section>
+
+      <button type="button" class="inspector-collapse-btn" id="inspector-collapse-btn" aria-controls="comic-inspector" aria-expanded="true" aria-label="收合漫畫詳情側欄" data-i18n-aria-label="收合漫畫詳情側欄" title="收合漫畫詳情側欄" data-i18n-title="收合漫畫詳情側欄">
+        <i class="fa-solid fa-chevron-right" aria-hidden="true"></i>
+      </button>
     </div>
   </div>
 
@@ -291,11 +280,11 @@
   <div class="reader-overlay" id="reader-overlay" role="dialog" aria-modal="true" aria-labelledby="reader-comic-title" style="display: none;">
     <!-- 頂部浮動標題列 (滑鼠靠近時顯示) -->
     <div class="reader-top-bar" id="reader-top-bar">
-      <button class="back-btn" id="reader-back-btn" aria-label="返回漫畫書架">
-        <i class="fa-solid fa-arrow-left"></i> 返回書架
+      <button class="back-btn" id="reader-back-btn" aria-label="返回漫畫書架" data-i18n-aria-label="返回漫畫書架">
+        <i class="fa-solid fa-arrow-left"></i><span data-i18n="返回書架">返回書架</span>
       </button>
       <div class="reader-title" id="reader-comic-title">漫畫標題名稱</div>
-      <div class="reader-mode-indicator" id="reader-mode-indicator">單頁模式</div>
+      <div class="reader-mode-indicator" id="reader-mode-indicator" data-i18n="單頁模式">單頁模式</div>
     </div>
 
     <!-- 隱形左右翻頁熱區；觸控可滑動，鍵盤可使用方向鍵。 -->
@@ -311,79 +300,79 @@
 
     <!-- 僅顯示會影響目前頁面的解碼狀態；RAM 預載保持背景運作。 -->
     <div class="reader-status-panel" id="reader-status-panel">
-      <span class="status-loading" id="status-loading" style="display: none;"><i class="fa-solid fa-circle-notch fa-spin"></i> 正在解碼...</span>
+      <span class="status-loading" id="status-loading" style="display: none;"><i class="fa-solid fa-circle-notch fa-spin"></i><span data-i18n="正在解碼...">正在解碼...</span></span>
     </div>
 
     <!-- 底部懸浮控制面版 -->
     <div class="reader-bottom-bar" id="reader-bottom-bar">
       <div class="bottom-bar-left">
-        <span class="page-counter" id="page-counter">第 0 / 0 頁</span>
+        <span class="page-counter" id="page-counter" data-i18n="第 0 / 0 頁">第 0 / 0 頁</span>
       </div>
 
       <!-- 進度拉條 -->
       <div class="bottom-bar-center">
-        <input type="range" class="progress-slider" id="progress-slider" min="1" max="100" value="1" aria-label="目前頁面">
+        <input type="range" class="progress-slider" id="progress-slider" min="1" max="100" value="1" aria-label="目前頁面" data-i18n-aria-label="目前頁面">
       </div>
 
       <div class="bottom-bar-right">
         <!-- 閱讀模式切換 -->
         <div class="btn-group">
-          <button class="mode-btn active" id="btn-mode-single" aria-pressed="true" title="單頁模式 (寬高自適應)"><i class="fa-solid fa-file"></i> 單頁</button>
-          <button class="mode-btn" id="btn-mode-double" aria-pressed="false" title="雙頁模式 (第一頁封面單顯示)"><i class="fa-solid fa-book-open"></i> 雙頁</button>
-          <button class="mode-btn" id="btn-mode-double-rtl" aria-pressed="false" title="雙頁日式 (右至左)"><i class="fa-solid fa-book-open"></i> 雙頁 (日)</button>
-          <button class="mode-btn" id="btn-mode-webtoon" aria-pressed="false" title="直捲條漫模式"><i class="fa-solid fa-arrows-up-down"></i> 條漫</button>
-          <button class="mode-btn" id="btn-mode-catalog" aria-pressed="false" title="目錄縮圖模式"><i class="fa-solid fa-grip"></i> 目錄</button>
+          <button class="mode-btn active" id="btn-mode-single" aria-pressed="true" title="單頁模式 (寬高自適應)" data-i18n-title="單頁模式 (寬高自適應)"><i class="fa-solid fa-file"></i><span data-i18n="單頁">單頁</span></button>
+          <button class="mode-btn" id="btn-mode-double" aria-pressed="false" title="雙頁模式 (第一頁封面單顯示)" data-i18n-title="雙頁模式 (第一頁封面單顯示)"><i class="fa-solid fa-book-open"></i><span data-i18n="雙頁">雙頁</span></button>
+          <button class="mode-btn" id="btn-mode-double-rtl" aria-pressed="false" title="雙頁日式 (右至左)" data-i18n-title="雙頁日式 (右至左)"><i class="fa-solid fa-book-open"></i><span data-i18n="雙頁 (日)">雙頁 (日)</span></button>
+          <button class="mode-btn" id="btn-mode-webtoon" aria-pressed="false" title="直捲條漫模式" data-i18n-title="直捲條漫模式"><i class="fa-solid fa-arrows-up-down"></i><span data-i18n="條漫">條漫</span></button>
+          <button class="mode-btn" id="btn-mode-catalog" aria-pressed="false" title="目錄縮圖模式" data-i18n-title="目錄縮圖模式"><i class="fa-solid fa-grip"></i><span data-i18n="目錄">目錄</span></button>
         </div>
 
         <!-- 縮放工具 -->
         <div class="zoom-controls" id="zoom-controls-container">
-          <button class="zoom-btn" id="btn-zoom-out" title="縮小"><i class="fa-solid fa-magnifying-glass-minus"></i></button>
+          <button class="zoom-btn" id="btn-zoom-out" title="縮小" data-i18n-title="縮小"><i class="fa-solid fa-magnifying-glass-minus"></i></button>
           <span class="zoom-value" id="zoom-value">100%</span>
-          <button class="zoom-btn" id="btn-zoom-in" title="放大"><i class="fa-solid fa-magnifying-glass-plus"></i></button>
+          <button class="zoom-btn" id="btn-zoom-in" title="放大" data-i18n-title="放大"><i class="fa-solid fa-magnifying-glass-plus"></i></button>
         </div>
 
-        <button class="control-action-btn" id="btn-fit-mode" title="螢幕適應模式 (M 鍵)">
+        <button class="control-action-btn" id="btn-fit-mode" title="螢幕適應模式 (M 鍵)" data-i18n-title="螢幕適應模式 (M 鍵)">
           <i class="fa-solid fa-compress"></i>
         </button>
 
-        <button class="control-action-btn" id="btn-rotate-left" type="button" aria-label="向左旋轉 90 度" title="向左旋轉 90° (L 鍵)">
+        <button class="control-action-btn" id="btn-rotate-left" type="button" aria-label="向左旋轉 90 度" data-i18n-aria-label="向左旋轉 90 度" title="向左旋轉 90° (L 鍵)" data-i18n-title="向左旋轉 90° (L 鍵)">
           <svg class="reader-rotate-icon" viewBox="0 0 24 24" aria-hidden="true">
             <path d="M3 12a9 9 0 1 0 3-6.7M3 3v5h5"></path>
           </svg>
         </button>
 
-        <button class="control-action-btn" id="btn-rotate-right" type="button" aria-label="向右旋轉 90 度" title="向右旋轉 90° (R 鍵)">
+        <button class="control-action-btn" id="btn-rotate-right" type="button" aria-label="向右旋轉 90 度" data-i18n-aria-label="向右旋轉 90 度" title="向右旋轉 90° (R 鍵)" data-i18n-title="向右旋轉 90° (R 鍵)">
           <svg class="reader-rotate-icon" viewBox="0 0 24 24" aria-hidden="true">
             <path d="M21 12a9 9 0 1 1-3-6.7M21 3v5h-5"></path>
           </svg>
         </button>
 
-        <button class="control-action-btn" id="btn-sharpen" title="銀利化模式 (S 鍵) - 進階清晰">
+        <button class="control-action-btn" id="btn-sharpen" title="銀利化模式 (S 鍵) - 進階清晰" data-i18n-title="銀利化模式 (S 鍵) - 進階清晰">
           <i class="fa-solid fa-wand-magic-sparkles"></i>
         </button>
 
-        <button class="control-action-btn" id="btn-crop" aria-pressed="false" title="裁切頁面邊緣 (C 鍵)">
+        <button class="control-action-btn" id="btn-crop" aria-pressed="false" title="裁切頁面邊緣 (C 鍵)" data-i18n-title="裁切頁面邊緣 (C 鍵)">
           <i class="fa-solid fa-crop-simple"></i>
         </button>
 
-        <button class="control-action-btn" id="btn-brightness" title="循環調整亮度 (B 鍵)">
+        <button class="control-action-btn" id="btn-brightness" title="循環調整亮度 (B 鍵)" data-i18n-title="循環調整亮度 (B 鍵)">
           <i class="fa-solid fa-sun"></i>
         </button>
 
-        <button class="control-action-btn ai-page-btn" id="btn-ai-explain" title="請艦載 AI 說明目前頁面">
+        <button class="control-action-btn ai-page-btn" id="btn-ai-explain" title="請艦載 AI 說明目前頁面" data-i18n-title="請艦載 AI 說明目前頁面">
           <i class="fa-solid fa-wand-sparkles"></i>
-          <span>這頁在說什麼？</span>
+          <span data-i18n="這頁在說什麼？">這頁在說什麼？</span>
         </button>
 
-        <button class="control-action-btn ai-page-btn" id="btn-ai-auto-explain" type="button" aria-pressed="false" title="開啟全書隨讀翻譯；只分析實際翻到的頁面">
+        <button class="control-action-btn ai-page-btn" id="btn-ai-auto-explain" type="button" aria-pressed="false" title="開啟全書隨讀翻譯；只分析實際翻到的頁面" data-i18n-title="開啟全書隨讀翻譯；只分析實際翻到的頁面">
           <svg class="ai-auto-icon" viewBox="0 0 24 24" aria-hidden="true">
             <path d="M4 5h9M8.5 3v2M6 5c.6 3 2.2 5.2 5 6.5M11 5c-.7 3.4-3 6.2-6.5 8"></path>
             <path d="M14 19l3.5-8 3.5 8M15.2 16h4.6"></path>
           </svg>
-          <span>全書隨讀</span>
+          <span data-i18n="全書隨讀">全書隨讀</span>
         </button>
 
-        <button class="control-action-btn" id="btn-fullscreen" title="切換全螢幕 (F 鍵)">
+        <button class="control-action-btn" id="btn-fullscreen" title="切換全螢幕 (F 鍵)" data-i18n-title="切換全螢幕 (F 鍵)">
           <i class="fa-solid fa-expand"></i>
         </button>
       </div>
@@ -391,26 +380,26 @@
 
     <aside class="ai-page-panel" id="ai-page-panel" aria-live="polite" aria-labelledby="ai-page-title" hidden>
       <div class="ai-page-panel-header">
-        <h3 id="ai-page-title"><i class="fa-solid fa-wand-sparkles"></i> 艦載 AI</h3>
-        <button id="ai-page-close" aria-label="關閉艦載 AI 面板"><i class="fa-solid fa-xmark"></i></button>
+        <h3 id="ai-page-title"><i class="fa-solid fa-wand-sparkles"></i><span data-i18n="艦載 AI">艦載 AI</span></h3>
+        <button id="ai-page-close" aria-label="關閉艦載 AI 面板" data-i18n-aria-label="關閉艦載 AI 面板"><i class="fa-solid fa-xmark"></i></button>
       </div>
-      <p id="ai-page-result">按下 AI 按鈕後，只會送出目前這一頁；整理候選必須由你逐筆套用。</p>
+      <p id="ai-page-result" data-i18n="按下 AI 按鈕後，只會送出目前這一頁；整理候選必須由你逐筆套用。">按下 AI 按鈕後，只會送出目前這一頁；整理候選必須由你逐筆套用。</p>
     </aside>
 
     <div class="reader-context-menu" id="reader-context-menu" style="display: none;">
-      <button data-reader-action="single"><i class="fa-solid fa-file"></i> 單頁</button>
-      <button data-reader-action="double"><i class="fa-solid fa-book-open"></i> 雙頁</button>
-      <button data-reader-action="double-rtl"><i class="fa-solid fa-book-open-reader"></i> 日式雙頁</button>
-      <button data-reader-action="webtoon"><i class="fa-solid fa-arrows-up-down"></i> 條漫</button>
+      <button data-reader-action="single"><i class="fa-solid fa-file"></i><span data-i18n="單頁">單頁</span></button>
+      <button data-reader-action="double"><i class="fa-solid fa-book-open"></i><span data-i18n="雙頁">雙頁</span></button>
+      <button data-reader-action="double-rtl"><i class="fa-solid fa-book-open-reader"></i><span data-i18n="日式雙頁">日式雙頁</span></button>
+      <button data-reader-action="webtoon"><i class="fa-solid fa-arrows-up-down"></i><span data-i18n="條漫">條漫</span></button>
       <span class="context-separator"></span>
-      <button data-reader-action="first"><i class="fa-solid fa-backward-step"></i> 跳到首頁</button>
-      <button data-reader-action="last"><i class="fa-solid fa-forward-step"></i> 跳到尾頁</button>
-      <button data-reader-action="fit"><i class="fa-solid fa-compress"></i> 螢幕適應</button>
-      <button data-reader-action="crop"><i class="fa-solid fa-crop-simple"></i> 裁切白邊</button>
-      <button data-reader-action="brightness"><i class="fa-solid fa-sun"></i> 亮度</button>
+      <button data-reader-action="first"><i class="fa-solid fa-backward-step"></i><span data-i18n="跳到首頁">跳到首頁</span></button>
+      <button data-reader-action="last"><i class="fa-solid fa-forward-step"></i><span data-i18n="跳到尾頁">跳到尾頁</span></button>
+      <button data-reader-action="fit"><i class="fa-solid fa-compress"></i><span data-i18n="螢幕適應">螢幕適應</span></button>
+      <button data-reader-action="crop"><i class="fa-solid fa-crop-simple"></i><span data-i18n="裁切白邊">裁切白邊</span></button>
+      <button data-reader-action="brightness"><i class="fa-solid fa-sun"></i><span data-i18n="亮度">亮度</span></button>
       <span class="context-separator"></span>
-      <button data-reader-action="fullscreen"><i class="fa-solid fa-expand"></i> 全螢幕</button>
-      <button data-reader-action="close"><i class="fa-solid fa-arrow-left"></i> 返回書架</button>
+      <button data-reader-action="fullscreen"><i class="fa-solid fa-expand"></i><span data-i18n="全螢幕">全螢幕</span></button>
+      <button data-reader-action="close"><i class="fa-solid fa-arrow-left"></i><span data-i18n="返回書架">返回書架</span></button>
     </div>
   </div>
 
@@ -418,37 +407,50 @@
   <div class="modal-overlay" id="settings-modal" role="dialog" aria-modal="true" aria-labelledby="settings-title" style="display: none;">
     <div class="modal-content">
       <div class="modal-header">
-        <h2 id="settings-title"><i class="fa-solid fa-gear"></i> 外觀與漫畫庫設定</h2>
-        <button class="close-modal-btn" id="close-settings-btn" aria-label="關閉設定"><i class="fa-solid fa-xmark"></i></button>
+        <h2 id="settings-title"><i class="fa-solid fa-gear"></i><span data-i18n="外觀與漫畫庫設定">外觀與漫畫庫設定</span></h2>
+        <button class="close-modal-btn" id="close-settings-btn" aria-label="關閉設定" data-i18n-aria-label="關閉設定"><i class="fa-solid fa-xmark"></i></button>
       </div>
       <div class="modal-body">
+        <section class="language-settings" aria-labelledby="language-settings-title">
+          <div>
+            <h3 id="language-settings-title" data-i18n="介面語言">介面語言</h3>
+            <p data-i18n="切換語言會重新載入介面；系統權限提示依裝置語言顯示。">切換語言會重新載入介面；系統權限提示依裝置語言顯示。</p>
+          </div>
+          <label for="app-language-select" data-i18n="語言">語言</label>
+          <select id="app-language-select" aria-label="介面語言" data-i18n-aria-label="介面語言">
+            <option value="auto" data-i18n="自動">自動</option>
+            <option value="zh-Hant">繁體中文</option>
+            <option value="en">English</option>
+            <option value="ja">日本語</option>
+          </select>
+        </section>
         <section class="theme-settings" aria-labelledby="theme-settings-title">
           <div class="theme-settings-heading">
             <div>
-              <h3 id="theme-settings-title">書庫畫風</h3>
+              <h3 id="theme-settings-title" data-i18n="書庫畫風">書庫畫風</h3>
             </div>
-            <p>即時套用，重新開啟後仍會保留。</p>
+            <p data-i18n="即時套用，重新開啟後仍會保留。">即時套用，重新開啟後仍會保留。</p>
           </div>
-          <div class="theme-picker" id="theme-picker" role="radiogroup" aria-label="選擇書庫畫風">
+          <div class="theme-picker" id="theme-picker" role="radiogroup" aria-label="選擇書庫畫風" data-i18n-aria-label="選擇書庫畫風">
             <button class="theme-option" type="button" data-theme-option="midnight" role="radio" aria-checked="false">
               <span class="theme-preview theme-preview-midnight" aria-hidden="true"><i></i><i></i><i></i></span>
-              <strong>赤晶戰殿</strong>
-              <small>熔岩紅、桃焰、鏡面橙</small>
+              <strong data-i18n="赤晶戰殿">赤晶戰殿</strong>
+              <small data-i18n="熔岩紅、桃焰、鏡面橙">熔岩紅、桃焰、鏡面橙</small>
             </button>
             <button class="theme-option" type="button" data-theme-option="sakura" role="radio" aria-checked="false">
               <span class="theme-preview theme-preview-sakura" aria-hidden="true"><i></i><i></i><i></i></span>
-              <strong>黑鉻指揮艙</strong>
-              <small>曜黑、液態銀、冰鉻</small>
+              <strong data-i18n="黑鉻指揮艙">黑鉻指揮艙</strong>
+              <small data-i18n="曜黑、液態銀、冰鉻">曜黑、液態銀、冰鉻</small>
             </button>
             <button class="theme-option" type="button" data-theme-option="ink" role="radio" aria-checked="false">
               <span class="theme-preview theme-preview-ink" aria-hidden="true"><i></i><i></i><i></i></span>
-              <strong>翡翠反應爐</strong>
-              <small>電光綠、螢光黃、離子青</small>
+              <strong data-i18n="翡翠反應爐">翡翠反應爐</strong>
+              <small data-i18n="電光綠、螢光黃、離子青">電光綠、螢光黃、離子青</small>
             </button>
             <button class="theme-option" type="button" data-theme-option="aurora" role="radio" aria-checked="false">
               <span class="theme-preview theme-preview-aurora" aria-hidden="true"><i></i><i></i><i></i></span>
-              <strong>鎏金王座</strong>
-              <small>熔金、琥珀、鈦金高光</small>
+              <strong data-i18n="鎏金王座">鎏金王座</strong>
+              <small data-i18n="熔金、琥珀、鈦金高光">熔金、琥珀、鈦金高光</small>
             </button>
           </div>
         </section>
@@ -456,36 +458,63 @@
         <section class="library-display-settings" aria-labelledby="library-card-size-title">
           <div class="library-display-heading">
             <div>
-              <h3 id="library-card-size-title">書架封面尺寸</h3>
-              <p>調整目錄一次能看到的漫畫數量；窄螢幕會保留可操作的兩欄版面。</p>
+              <h3 id="library-card-size-title" data-i18n="書架封面尺寸">書架封面尺寸</h3>
+              <p data-i18n="調整目錄一次能看到的漫畫數量；窄螢幕會保留可操作的兩欄版面。">調整目錄一次能看到的漫畫數量；窄螢幕會保留可操作的兩欄版面。</p>
             </div>
-            <output id="library-card-size-value" for="library-card-size" aria-live="polite">標準 · 150 px</output>
+            <output id="library-card-size-value" for="library-card-size" aria-live="polite" data-i18n="標準 · 150 px">標準 · 150 px</output>
           </div>
           <div class="library-size-control">
-            <span aria-hidden="true">緊湊</span>
-            <input id="library-card-size" type="range" min="120" max="240" step="10" value="150" aria-label="書架封面尺寸" aria-describedby="library-card-size-help">
-            <span aria-hidden="true">放大</span>
+            <span aria-hidden="true" data-i18n="緊湊">緊湊</span>
+            <input id="library-card-size" type="range" min="120" max="240" step="10" value="150" aria-label="書架封面尺寸" data-i18n-aria-label="書架封面尺寸" aria-describedby="library-card-size-help">
+            <span aria-hidden="true" data-i18n="放大">放大</span>
           </div>
-          <p id="library-card-size-help" class="input-tip">拖曳時立即預覽，重新開啟 App 後仍會保留。</p>
+          <p id="library-card-size-help" class="input-tip" data-i18n="拖曳時立即預覽，重新開啟 App 後仍會保留。">拖曳時立即預覽，重新開啟 App 後仍會保留。</p>
+        </section>
+
+        <section class="commerce-settings" id="commerce-settings" aria-labelledby="commerce-settings-title">
+          <div class="commerce-settings-heading">
+            <div>
+              <h3 id="commerce-settings-title"><i class="fa-solid fa-star" aria-hidden="true"></i><span data-i18n="G.A.I Pro">G.A.I Pro</span></h3>
+              <p data-i18n="基本閱讀免費；Pro 以一次買斷解鎖進階整理、直接 NAS 與 AI 工具。">基本閱讀免費；Pro 以一次買斷解鎖進階整理、直接 NAS 與 AI 工具。</p>
+            </div>
+            <span class="commerce-status-badge" id="commerce-status-badge" role="status" aria-live="polite" data-i18n="檢查中…">檢查中…</span>
+          </div>
+          <div class="commerce-settings-grid">
+            <div class="commerce-plan commerce-plan-free">
+              <strong data-i18n="免費基本版">免費基本版</strong>
+              <p data-i18n="本機圖片、ZIP／CBZ、正常閱讀、進度、收藏、搜尋、基本標籤、匯出與復原，以及透過系統檔案選擇器使用已掛載 NAS。">本機圖片、ZIP／CBZ、正常閱讀、進度、收藏、搜尋、基本標籤、匯出與復原，以及透過系統檔案選擇器使用已掛載 NAS。</p>
+            </div>
+            <div class="commerce-plan commerce-plan-pro">
+              <strong data-i18n="v1 Pro · 一次買斷">v1 Pro · 一次買斷</strong>
+              <p data-i18n="直接 SMB／NAS 連線、批次標籤與進階整理、重複候選、AI 解說與整理工具。">直接 SMB／NAS 連線、批次標籤與進階整理、重複候選、AI 解說與整理工具。</p>
+            </div>
+          </div>
+          <p class="commerce-settings-note" id="commerce-status-message" aria-live="polite" data-i18n="正在向 App 查詢權益狀態…">正在向 App 查詢權益狀態…</p>
+          <div class="commerce-settings-actions">
+            <button class="modal-action-btn primary commerce-purchase-btn" id="commerce-purchase-btn" type="button" disabled data-i18n="一次買斷 Pro">一次買斷 Pro</button>
+            <button class="modal-action-btn commerce-restore-btn" id="commerce-restore-btn" type="button" data-i18n="恢復購買">恢復購買</button>
+            <button class="commerce-more-btn" id="commerce-more-btn" type="button" data-i18n="查看完整範圍">查看完整範圍</button>
+          </div>
+          <p class="commerce-price" id="commerce-price" aria-live="polite" data-i18n="價格載入中…">價格載入中…</p>
         </section>
 
         <div class="input-group library-source-settings">
-          <label id="library-source-label" for="scan-dir-input">漫畫來源：</label>
+          <label id="library-source-label" for="scan-dir-input" data-i18n="漫畫來源：">漫畫來源：</label>
           <div class="path-input-row" id="scan-path-row">
-            <input type="text" id="scan-dir-input" placeholder="請輸入絕對路徑">
-            <button id="save-path-btn" class="modal-action-btn primary">儲存套用</button>
+            <input type="text" id="scan-dir-input" placeholder="請輸入絕對路徑" data-i18n-placeholder="請輸入絕對路徑">
+            <button id="save-path-btn" class="modal-action-btn primary" data-i18n="儲存套用">儲存套用</button>
           </div>
           <button id="library-source-btn" class="modal-action-btn primary library-source-btn" type="button" aria-describedby="scan-dir-status">
             <i class="fa-solid fa-folder-open" aria-hidden="true"></i>
-            <span>加入漫畫來源…</span>
+            <span data-i18n="加入漫畫來源…">加入漫畫來源…</span>
           </button>
-          <p class="input-tip" id="scan-dir-status" aria-live="polite">從系統檔案選擇器加入本機、外接磁碟或已連線的 NAS 資料夾。</p>
+          <p class="input-tip" id="scan-dir-status" aria-live="polite" data-i18n="從系統檔案選擇器加入本機、外接磁碟或已連線的 NAS 資料夾。">從系統檔案選擇器加入本機、外接磁碟或已連線的 NAS 資料夾。</p>
 
           <details class="library-source-advanced">
-            <summary>進階 NAS 連線</summary>
+            <summary data-i18n="進階 NAS 連線">進階 NAS 連線</summary>
             <div class="library-source-advanced-body">
-              <p>只有無法先在系統掛載 NAS 時，才需要直接輸入 SMB 連線資料。</p>
-              <button id="smb-setup-btn" class="modal-action-btn" type="button"><i class="fa-solid fa-globe" aria-hidden="true"></i> 設定 SMB 連線</button>
+              <p data-i18n="只有無法先在系統掛載 NAS 時，才需要直接輸入 SMB 連線資料。">只有無法先在系統掛載 NAS 時，才需要直接輸入 SMB 連線資料。</p>
+              <button id="smb-setup-btn" class="modal-action-btn" type="button"><i class="fa-solid fa-globe" aria-hidden="true"></i><span data-i18n="設定 SMB 連線">設定 SMB 連線</span></button>
             </div>
           </details>
         </div>
@@ -496,12 +525,12 @@
 
         <section class="catalog-exchange" aria-labelledby="catalog-exchange-title">
           <div>
-            <h3 id="catalog-exchange-title"><i class="fa-solid fa-arrow-right-arrow-left"></i> 整理資料交換</h3>
-            <p>只交換手動 metadata 與 tag，不搬漫畫檔；匯入前一定先預覽衝突。</p>
+            <h3 id="catalog-exchange-title"><i class="fa-solid fa-arrow-right-arrow-left"></i><span data-i18n="整理資料交換">整理資料交換</span></h3>
+            <p data-i18n="只交換手動 metadata 與 tag，不搬漫畫檔；匯入前一定先預覽衝突。">只交換手動 metadata 與 tag，不搬漫畫檔；匯入前一定先預覽衝突。</p>
           </div>
           <div class="catalog-exchange-actions">
-            <button id="catalog-export-btn" class="modal-action-btn" type="button">匯出 JSON</button>
-            <label class="modal-action-btn catalog-import-label" for="catalog-import-input" role="button" tabindex="0">選擇匯入檔</label>
+            <button id="catalog-export-btn" class="modal-action-btn" type="button" data-i18n="匯出 JSON">匯出 JSON</button>
+            <label class="modal-action-btn catalog-import-label" for="catalog-import-input" role="button" tabindex="0" data-i18n="選擇匯入檔">選擇匯入檔</label>
             <input id="catalog-import-input" type="file" accept="application/json,.json" hidden>
           </div>
           <div id="catalog-import-preview" class="catalog-import-preview" aria-live="polite"></div>
@@ -509,33 +538,33 @@
 
         <section class="ai-settings" aria-labelledby="ai-settings-title">
           <div>
-            <h3 id="ai-settings-title"><i class="fa-solid fa-wand-sparkles"></i> 艦載 AI</h3>
-            <p>Key 只保留到 App 關閉，不寫入硬碟。模型固定為省錢的 Luna 或免費 Gemma 4。</p>
+            <h3 id="ai-settings-title"><i class="fa-solid fa-wand-sparkles"></i><span data-i18n="艦載 AI">艦載 AI</span></h3>
+            <p data-i18n="Key 只保留到 App 關閉，不寫入硬碟。AI 透過雲端供應商處理，費用與免費額度依供應商方案為準；需要自備 API Key。">Key 只保留到 App 關閉，不寫入硬碟。AI 透過雲端供應商處理，費用與免費額度依供應商方案為準；需要自備 API Key。</p>
           </div>
-          <label for="ai-provider">供應商</label>
+          <label for="ai-provider" data-i18n="供應商">供應商</label>
           <select id="ai-provider">
             <option value="openai">OpenAI · GPT-5.6 Luna</option>
-            <option value="google">Google · Gemma 4 26B（免費層）</option>
+            <option value="google">Google · Gemma 4 26B（雲端 BYOK）</option>
           </select>
-          <label for="ai-api-key">API Key</label>
-          <input id="ai-api-key" type="password" autocomplete="off" spellcheck="false" placeholder="手動貼上，只保留本次執行階段">
+          <label for="ai-api-key" data-i18n="API Key">API Key</label>
+          <input id="ai-api-key" type="password" autocomplete="off" spellcheck="false" placeholder="手動貼上，只保留本次執行階段" data-i18n-placeholder="手動貼上，只保留本次執行階段">
           <label class="ai-disclosure" id="ai-google-disclosure-wrap" hidden>
             <input id="ai-google-disclosure" type="checkbox">
-            我了解 Google 免費層提交內容可能用於改善產品，並允許送出我主動選擇的目前頁面。
+            <span data-i18n="我了解雲端 BYOK 會將我選擇的頁面與提示傳送至供應商；啟用前請確認上方所選供應商與資料使用說明。">我了解雲端 BYOK 會將我選擇的頁面與提示傳送至供應商；啟用前請確認上方所選供應商與資料使用說明。</span>
           </label>
           <div class="ai-settings-actions">
-            <button id="ai-save-btn" class="modal-action-btn primary" type="button">啟用本次工作階段</button>
-            <button id="ai-test-btn" class="modal-action-btn" type="button">用合成文字測試</button>
-            <button id="ai-clear-btn" class="modal-action-btn" type="button">清除 Key</button>
+            <button id="ai-save-btn" class="modal-action-btn primary" type="button" data-i18n="啟用本次工作階段">啟用本次工作階段</button>
+            <button id="ai-test-btn" class="modal-action-btn" type="button" data-i18n="用合成文字測試">用合成文字測試</button>
+            <button id="ai-clear-btn" class="modal-action-btn" type="button" data-i18n="清除 Key">清除 Key</button>
           </div>
-          <p id="ai-session-status" class="input-tip" aria-live="polite">尚未設定艦載 AI。</p>
+          <p id="ai-session-status" class="input-tip" aria-live="polite" data-i18n="尚未設定艦載 AI。">尚未設定艦載 AI。</p>
         </section>
 
         <div class="folder-browser-section" id="fallback-folder-browser">
-          <h3><i class="fa-solid fa-folder-open"></i> 後端路徑瀏覽器</h3>
+          <h3><i class="fa-solid fa-folder-open"></i><span data-i18n="後端路徑瀏覽器">後端路徑瀏覽器</span></h3>
           <div class="browser-path-display">
             <span id="browser-current-path">/</span>
-            <button id="browser-up-btn" class="browser-btn" title="回上一層"><i class="fa-solid fa-arrow-up"></i> 回上一層</button>
+            <button id="browser-up-btn" class="browser-btn" title="回上一層" data-i18n-title="回上一層"><i class="fa-solid fa-arrow-up"></i><span data-i18n="回上一層">回上一層</span></button>
           </div>
           <div class="folders-list-container" id="browser-folders-list">
             <!-- 動態資料夾清單 -->
@@ -545,33 +574,101 @@
     </div>
   </div>
 
+  <div class="commerce-modal-overlay" id="commerce-pro-modal" role="dialog" aria-modal="true" aria-labelledby="commerce-pro-title" aria-describedby="commerce-pro-description" hidden>
+    <div class="commerce-modal-content" role="document">
+      <div class="commerce-modal-header">
+        <div>
+          <span class="commerce-modal-mark" aria-hidden="true"><i class="fa-solid fa-star"></i></span>
+          <h2 id="commerce-pro-title">G.A.I Pro</h2>
+        </div>
+        <button class="close-modal-btn" id="commerce-pro-close" type="button" aria-label="關閉 G.A.I Pro 說明" data-i18n-aria-label="關閉 G.A.I Pro 說明"><i class="fa-solid fa-xmark" aria-hidden="true"></i></button>
+      </div>
+      <div class="commerce-modal-body">
+        <p id="commerce-pro-description" data-i18n="基本閱讀免費；Pro 以一次買斷解鎖需要付費的進階工具。">基本閱讀免費；Pro 以一次買斷解鎖需要付費的進階工具。</p>
+        <div class="commerce-modal-list">
+          <div><strong data-i18n="免費基本版">免費基本版</strong><span data-i18n="閱讀、進度、收藏、搜尋、基本標籤、匯出／復原與已掛載 NAS。">閱讀、進度、收藏、搜尋、基本標籤、匯出／復原與已掛載 NAS。</span></div>
+          <div><strong data-i18n="一次買斷 Pro">一次買斷 Pro</strong><span data-i18n="直接 SMB／NAS、批次整理、重複候選與 AI 解說／整理。">直接 SMB／NAS、批次整理、重複候選與 AI 解說／整理。</span></div>
+          <div><strong data-i18n="AI 費用另計">AI 費用另計</strong><span data-i18n="AI 需要自備供應商 API Key；API 費用依供應商方案為準，Pro 不包含額度。">AI 需要自備供應商 API Key；API 費用依供應商方案為準，Pro 不包含額度。</span></div>
+        </div>
+        <p class="commerce-modal-status" id="commerce-modal-status" aria-live="polite"></p>
+        <div class="commerce-modal-actions">
+          <button class="modal-action-btn primary commerce-purchase-btn" id="commerce-modal-purchase-btn" type="button" disabled data-i18n="一次買斷 Pro">一次買斷 Pro</button>
+          <button class="modal-action-btn commerce-restore-btn" id="commerce-modal-restore-btn" type="button" data-i18n="恢復購買">恢復購買</button>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <!-- iOS 相簿持續來源設定；只有 native bridge 回報支援時才會顯示入口。 -->
+  <div class="photo-library-overlay" id="photo-library-modal" role="dialog" aria-modal="true" aria-labelledby="photo-library-title" aria-describedby="photo-library-description" hidden>
+    <div class="photo-library-dialog" role="document">
+      <div class="photo-library-header">
+        <div>
+          <span class="photo-library-mark" aria-hidden="true"><i class="fa-regular fa-images"></i></span>
+          <h2 id="photo-library-title" data-i18n="連結相簿">連結相簿</h2>
+        </div>
+        <button class="close-modal-btn" id="photo-library-close-btn" type="button" aria-label="關閉相簿連結設定" data-i18n-aria-label="關閉相簿連結設定">
+          <i class="fa-solid fa-xmark" aria-hidden="true"></i>
+        </button>
+      </div>
+      <div class="photo-library-body">
+        <p id="photo-library-description" class="photo-library-description" data-i18n="選擇要加入書庫的相簿。回到 App 並返回書庫時，會更新相簿內容。解除連結不會刪除照片。">選擇要加入書庫的相簿。回到 App 並返回書庫時，會更新相簿內容。解除連結不會刪除照片。</p>
+        <p id="photo-library-status" class="photo-library-status" role="status" aria-live="polite"></p>
+        <div id="photo-library-limited-note" class="photo-library-limited-note" hidden>
+          <p data-i18n="目前只能讀取你允許的照片；新照片不會自動取得存取權。若要連結完整相簿，請到系統設定調整照片權限。">目前只能讀取你允許的照片；新照片不會自動取得存取權。若要連結完整相簿，請到系統設定調整照片權限。</p>
+        </div>
+        <fieldset class="photo-library-album-fieldset">
+          <legend data-i18n="可連結的相簿">可連結的相簿</legend>
+          <div id="photo-library-albums" class="photo-library-albums" aria-live="polite"></div>
+        </fieldset>
+        <section id="photo-library-unavailable" class="photo-library-unavailable" aria-labelledby="photo-library-unavailable-title" hidden>
+          <h3 id="photo-library-unavailable-title" data-i18n="目前無法存取的相簿">目前無法存取的相簿</h3>
+          <p data-i18n="這些相簿仍保持連結狀態；取消勾選後儲存即可解除，App 不會刪除原始照片。">這些相簿仍保持連結狀態；取消勾選後儲存即可解除，App 不會刪除原始照片。</p>
+          <div id="photo-library-unavailable-list" class="photo-library-albums"></div>
+        </section>
+        <label class="photo-library-network-option" for="photo-library-network">
+          <input id="photo-library-network" type="checkbox">
+          <span>
+            <strong data-i18n="允許下載 iCloud 照片">允許下載 iCloud 照片</strong>
+            <small data-i18n="只套用到已連結的相簿；需要網路，可能會使用行動數據或 Wi‑Fi。">只套用到已連結的相簿；需要網路，可能會使用行動數據或 Wi‑Fi。</small>
+          </span>
+        </label>
+        <p id="photo-library-feedback" class="photo-library-feedback" role="status" aria-live="polite"></p>
+      </div>
+      <div class="photo-library-actions">
+        <button id="photo-library-cancel-btn" class="modal-action-btn" type="button" data-i18n="取消">取消</button>
+        <button id="photo-library-save-btn" class="modal-action-btn primary" type="button" data-i18n="儲存連結">儲存連結</button>
+      </div>
+    </div>
+  </div>
+
   <!-- NAS (SMB) 設定彈出視窗 -->
   <div class="modal-overlay" id="smb-modal" role="dialog" aria-modal="true" aria-labelledby="smb-title" style="display: none;">
     <div class="modal-content" style="max-width: 400px;">
       <div class="modal-header">
-        <h2 id="smb-title"><i class="fa-solid fa-globe"></i> 網路硬碟 (NAS) 設定</h2>
-        <button class="close-modal-btn" id="close-smb-btn" aria-label="關閉 NAS 設定"><i class="fa-solid fa-xmark"></i></button>
+        <h2 id="smb-title"><i class="fa-solid fa-globe"></i><span data-i18n="網路硬碟 (NAS) 設定">網路硬碟 (NAS) 設定</span></h2>
+        <button class="close-modal-btn" id="close-smb-btn" aria-label="關閉 NAS 設定" data-i18n-aria-label="關閉 NAS 設定"><i class="fa-solid fa-xmark"></i></button>
       </div>
       <div class="modal-body">
         <div class="input-group">
-          <label for="smb-host">NAS 伺服器 IP 或主機名稱：</label>
-          <input type="text" id="smb-host" placeholder="例如：192.168.1.100 或 MyNAS.local">
+          <label for="smb-host" data-i18n="NAS 伺服器 IP 或主機名稱：">NAS 伺服器 IP 或主機名稱：</label>
+          <input type="text" id="smb-host" placeholder="例如：192.168.1.100 或 MyNAS.local" data-i18n-placeholder="例如：192.168.1.100 或 MyNAS.local">
         </div>
         <div class="input-group">
-          <label for="smb-share">共用資料夾名稱 (Share)：</label>
-          <input type="text" id="smb-share" placeholder="例如：comic">
+          <label for="smb-share" data-i18n="共用資料夾名稱 (Share)：">共用資料夾名稱 (Share)：</label>
+          <input type="text" id="smb-share" placeholder="例如：comic" data-i18n-placeholder="例如：comic">
         </div>
         <div class="input-group">
-          <label for="smb-user">使用者帳號：</label>
-          <input type="text" id="smb-user" placeholder="留白表示訪客 (Guest) 登入">
+          <label for="smb-user" data-i18n="使用者帳號：">使用者帳號：</label>
+          <input type="text" id="smb-user" placeholder="留白表示訪客 (Guest) 登入" data-i18n-placeholder="留白表示訪客 (Guest) 登入">
         </div>
         <div class="input-group">
-          <label for="smb-pass">密碼：</label>
-          <input type="password" id="smb-pass" placeholder="留白表示無密碼">
+          <label for="smb-pass" data-i18n="密碼：">密碼：</label>
+          <input type="password" id="smb-pass" placeholder="留白表示無密碼" data-i18n-placeholder="留白表示無密碼">
         </div>
         <div class="advanced-settings-group" style="margin-top: 20px; display: flex; justify-content: flex-end; gap: 10px;">
-          <button id="smb-clear-btn" class="modal-action-btn" style="background: rgba(255,107,139,0.1); color: var(--accent);">清除連線</button>
-          <button id="smb-connect-btn" class="modal-action-btn primary"><i class="fa-solid fa-plug"></i> 測試並儲存</button>
+          <button id="smb-clear-btn" class="modal-action-btn" style="background: rgba(255,107,139,0.1); color: var(--accent);" data-i18n="清除連線">清除連線</button>
+          <button id="smb-connect-btn" class="modal-action-btn primary"><i class="fa-solid fa-plug"></i><span data-i18n="測試並儲存">測試並儲存</span></button>
         </div>
       </div>
     </div>
@@ -581,7 +678,7 @@
   <div class="loader-mask" id="loader-mask" role="status" aria-live="polite" style="display: none;">
     <div class="loader-content">
       <div class="spinner" aria-hidden="true"></div>
-      <p id="loader-text">天才少女正在為主人召喚漫畫中...</p>
+      <p id="loader-text" data-i18n="正在載入漫畫…">正在載入漫畫…</p>
       <div class="loader-progress" id="loader-progress" style="display: none;">
         <span id="loader-progress-bar"></span>
       </div>
@@ -593,7 +690,13 @@
   <input type="file" id="photo-import-input" multiple accept="image/*" style="display: none;" />
 
   <!-- Preload API -->
+  <script src="i18n.js"></script>
+  <script src="locales/static-messages.js"></script>
+  <script src="locales/reader-messages.js"></script>
+  <script src="locales/feature-messages.js"></script>
   <script src="tauri-api.js"></script>
+  <script src="commerce.js"></script>
   <script src="app.js"></script>
+  <script src="photo-library.js"></script>
 </body>
 </html>

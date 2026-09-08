@@ -1,5 +1,6 @@
 import fs from 'node:fs';
 import assert from 'node:assert/strict';
+import vm from 'node:vm';
 
 const bridge = fs.readFileSync('public/tauri-api.js', 'utf8');
 const html = fs.readFileSync('public/index.html', 'utf8');
@@ -21,7 +22,7 @@ assert.match(
 );
 assert.match(
   bridge,
-  /目前頁面影像與提示文字才會傳送至 \$\{providerName\}/,
+  /目前頁面影像與提示文字才會傳送至 \{provider\}/,
   'disclosure must identify what data leaves the device and the selected provider'
 );
 assert.match(
@@ -57,3 +58,28 @@ assert.match(
 );
 
 console.log('PASS: Rust 1.98.1, local release gate, and third-party AI consent guards are enforced');
+
+// Label whitespace and legacy text are separate DOM nodes in the real HTML.
+{
+  const checkbox = { nodeType: 1, checked: true };
+  const disclosure = {
+    childNodes: [{ nodeType: 3, textContent: '\n' }, checkbox, { nodeType: 3, textContent: '舊 Google 說明' }],
+    append(node) { this.childNodes.push(node); },
+  };
+  let change;
+  const provider = { value: 'openai', addEventListener(type, handler) { if (type === 'change') change = handler; } };
+  const nodes = { 'ai-google-disclosure-wrap': disclosure, 'ai-google-disclosure': checkbox, 'ai-provider': provider };
+  const document = { getElementById: id => nodes[id], createTextNode: textContent => ({ nodeType: 3, textContent }) };
+  const start = bridge.indexOf('function installThirdPartyAiConsentGuard()');
+  const end = bridge.indexOf('\ninstallThirdPartyAiConsentGuard();', start);
+  vm.runInNewContext(bridge.slice(0, bridge.indexOf('/**')) + bridge.slice(start, end) + '\ninstallThirdPartyAiConsentGuard();', { document, window: {} });
+  const label = () => disclosure.childNodes.filter(node => node.nodeType === 3).map(node => node.textContent).join('');
+  assert.match(label(), /OpenAI/);
+  assert.doesNotMatch(label(), /Google/, 'OpenAI must not retain stale Google consent text');
+  provider.value = 'google';
+  change();
+  assert.equal(checkbox.checked, false, 'provider change must revoke prior consent');
+  assert.match(label(), /Google/);
+  assert.doesNotMatch(label(), /OpenAI/);
+}
+console.log('PASS: provider consent replaces all legacy label text and resets permission');

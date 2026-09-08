@@ -1,0 +1,2 @@
+"NSPhotoLibraryUsageDescription" = "選択したアルバムをリンクして写真を閲覧し、内容の更新を反映します。写真を変更・削除することはありません。";
+"NSLocalNetworkUsageDescription" = "許可されたローカルネットワークのフォルダーにアクセスし、SMB経由で漫画をスキャン・閲覧します。";

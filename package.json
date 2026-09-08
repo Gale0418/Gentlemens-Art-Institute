@@ -4,16 +4,20 @@
   "description": "A beautiful local-first comic reader — 紳士藝術研究所 Gentlemen's Art Institute",
   "type": "module",
   "scripts": {
-    "test": "node tests/tauri-ui-smoke.mjs && node tests/ai-consent.mjs && node tests/release-hardening.mjs",
+    "sync:ios-icons": "node scripts/sync-ios-icons.mjs",
+    "build:ios": "npm run sync:ios-icons && npm run sync:ios-localizations && tauri ios build",
+    "test": "node tests/tauri-ui-smoke.mjs && node tests/ai-consent.mjs && node tests/release-hardening.mjs && node tests/catalog-scheduling.mjs && node tests/commerce-ui.mjs && node tests/photo-library-ui.mjs && node tests/webtoon-navigation.mjs && node tests/localization.mjs",
     "test:rust": "cargo test --manifest-path src-tauri/Cargo.toml --locked --lib",
     "check:rustfmt": "cargo fmt --manifest-path src-tauri/Cargo.toml --package gai -- --check",
     "check:clippy": "cargo clippy --manifest-path src-tauri/Cargo.toml --locked --lib --bins --no-deps -- -D warnings",
     "verify": "npm test && npm run test:rust",
     "quality": "npm test && npm run check:rustfmt && npm run test:rust && npm run check:clippy",
     "build": "tauri build --bundles app,dmg",
-    "tauri": "tauri"
+    "tauri": "tauri",
+    "sync:ios-localizations": "node scripts/sync-ios-localizations.mjs"
   },
   "devDependencies": {
     "@tauri-apps/cli": "^2.11.3"
-  }
+  },
+  "license": "UNLICENSED"
 }

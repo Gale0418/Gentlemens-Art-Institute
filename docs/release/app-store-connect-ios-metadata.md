@@ -4,6 +4,14 @@
 
 本輪只準備資料與證據清單，不呼叫遠端 ASC、不提交版本。`scripts/release/asc-dry-run.sh` 只做本地 JSON／欄位／秘密掃描與命令模板輸出。
 
+## 首發商業模型（已整合，待完整交易驗收）
+
+首發規格為免費基本閱讀＋v1 Pro 單次買斷，不做訂閱，也不含 API 額度。免費範圍包括本機圖片／ZIP／CBZ、正常閱讀模式、閱讀進度、收藏、搜尋、基本標籤、資料匯出與基本復原；透過系統檔案選擇器存取已掛載 NAS 也屬免費，不能因為路徑位於 NAS 而鎖定。v1 Pro 預定解鎖直接 SMB／NAS 連線、批次標籤與進階整理、重複候選，以及 AI 解說／整理工具。
+
+undo／復原、資料安全保護、已產生的 AI 結果與匯出不以付費封鎖。AI 僅走使用者自備金鑰（BYOK）的雲端路徑，不提供裝置端模型或內含 API 額度。v1 Pro 是首發版本的買斷範圍，不承諾所有未來新增功能永久免費；已購得的 v1 Pro 權益必須在後續支援版本中保留，不因 v2 發布或日後新增訂閱方案而收回。
+
+StoreKit 2 原生程式、後端權益檢查與 Pro 介面已整合；本機／沙盒交易與實機證據尚未完成，不代表已具備送審資格。價格、Product ID 與實際 StoreKit 證據維持 `TODO`。正式包送審前，必須能驗證購買、恢復、離線權益判定與 revocation／退款後收回；TestFlight 應驗證完整功能與沙盒購買流程，且沙盒權益不得流入正式環境。
+
 ## 已知發行身分
 
 | 欄位 | 值 | 證據／備註 |
@@ -11,12 +19,12 @@
 | 產品名稱 | 紳士藝術研究所 Gentlemen's Art Institute | `PRODUCT.md`、Tauri 設定 |
 | Bundle ID | `com.windsheep.gai` | `package.json`、`src-tauri/gen/apple/project.yml` |
 | 平台 | iOS／iPadOS | Tauri 產生的 iOS target |
-| 最低 OS | iOS 14.0 | `src-tauri/gen/apple/project.yml`；仍須以 processed build 回讀確認 |
+| 最低 OS | iOS 15.0 | `src-tauri/gen/apple/project.yml`；仍須以 processed build 回讀確認 |
 | Rust release toolchain | `1.98.1` | `rust-toolchain.toml`、`src-tauri/Cargo.toml`、GitHub Actions |
 | App Store Connect App ID | `TODO: 從 ASC 取得數字 App ID` | 不捏造 |
 | Marketing version／Build | `TODO` | 以實際上傳並 processed 的 artifact 回讀 |
-| 隱私政策 URL | `TODO` | 不捏造 URL |
-| 支援 URL／聯絡方式 | `TODO` | 不捏造聯絡資訊 |
+| 隱私政策 URL | README 隱私政策段落；公開回讀 `TODO` | 使用者指定 README，不另架站；推送後驗證 GitHub main 公開連結 |
+| 支援 URL／聯絡方式 | URL 待發布；公開支援信箱 `coderb0418@gmail.com` | 依使用者指定參考 MediBuddy 上架文件第 57 行；尚未寄信 |
 
 ## Store Listing 草案
 
@@ -24,9 +32,9 @@ App Name（zh-Hant-TW）：`紳士藝術研究所`
 
 英文名稱候選：`Gentlemen's Art Institute`；只有真的建立英文 localization 後才填入。
 
-Subtitle：`本機與 NAS 漫畫書架閱讀器`
+Subtitle：`圖片轉條漫，三種模式自由閱讀`
 
-Promotional Text：`整理自己的漫畫收藏，離線也能安心閱讀。`
+Promotional Text：`圖片資料夾、ZIP／CBZ，開啟即可用條漫連續閱讀。無須合併原圖，免費切換單頁與雙頁，保存進度、搜尋作品、整理收藏。`
 
 Keywords：`漫畫,閱讀器,書架,本機,NAS,SMB,收藏`
 
@@ -42,17 +50,17 @@ A screen recording from a physical [TODO: device model] running iOS [TODO: OS ve
 
 TEST DEVICES AND OPERATING SYSTEMS
 - Physical device: [TODO: iPhone/iPad model], iOS [TODO: version], app [TODO: version (build)].
-- The minimum supported operating system is iOS 14.0; confirm this against the processed build.
+- The minimum supported operating system is iOS 15.0; confirm this against the processed build.
 - Additional simulator or desktop checks, if mentioned, are supplementary and do not replace the physical-device recording.
 
 APP PURPOSE AND TARGET AUDIENCE
 Gentlemen's Art Institute (紳士藝術研究所) is a general-purpose local-first comic library and reader for people managing their own files on iPhone or iPad. It indexes and reads user-selected image folders and ZIP/CBZ archives, keeps reading progress and catalog data locally, and can read from a user-selected mounted folder or optional SMB/NAS connection. It is not a medical, diagnostic, emergency, professional-advice, social, or content-hosting service.
 
 ACCESS AND SETUP
-No account, registration, login, purchase, subscription, demo credential, NAS, or external sample download is required. On a clean install, open the clearly labeled built-in all-ages demo card to read the bundled original three-page sample. The sample is isolated from the user's SQLite catalog, favorites, and reading history. Direct SMB and user-selected folders are optional advanced paths and are not required for review.
+The core reader is available for free without a purchase. The intended launch also includes a one-time v1 Pro purchase (no subscription and no bundled API quota) for direct SMB/NAS connections, batch tagging and advanced organization, duplicate candidates, and AI explanation/organization tools. On a clean install, open the clearly labeled built-in all-ages landscape demo with eight groups and 13 images; use the final submitted package to verify the exact demo contents. No purchase, subscription, demo credential, NAS, or external sample download is required to review the free core reader. Accessing a NAS folder that the user has already mounted through the system file picker remains part of the free core path and is not blocked by the Pro entitlement. The final package must provide reviewable StoreKit purchase, restore, offline-entitlement, and revocation behavior before submission. Direct SMB and optional AI are disclosed rather than hidden, but are not required for the free core review path.
 
 EXTERNAL SERVICES AND TOOLS
-Core indexing, reading, catalog data, and progress run locally. A user-selected SMB/NAS server is contacted only when the user configures it and requests a scan or read. Optional AI is disabled by default and requires a user-supplied API key. OpenAI requests use https://api.openai.com/v1/responses; Google requests use https://generativelanguage.googleapis.com/v1beta/models/{model}:generateContent. Before either provider can be enabled, the app identifies the selected provider, states that the current page image and prompt may be sent to that provider, and requires explicit in-app consent for that session. Changing the provider revokes the previous consent and requires a new confirmation. API keys are held for the app session and are not included in review material; AI responses/candidates may remain in local App Data. The core reader does not require AI, analytics, advertising, third-party login, or an app-owned content server.
+Core indexing, reading, catalog data, and progress run locally. A user-selected SMB/NAS server is contacted only when the user configures it and requests a scan or read. Optional AI is disabled by default, cloud-only, and requires a user-supplied API key; the launch specification includes no on-device model and no bundled API quota. OpenAI requests use https://api.openai.com/v1/responses; Google requests use https://generativelanguage.googleapis.com/v1beta/models/{model}:generateContent. Before either provider can be enabled, the app identifies the selected provider, states that the current page image and prompt may be sent to that provider, and requires explicit in-app consent for that session. Changing the provider revokes the previous consent and requires a new confirmation. API keys are held for the app session and are not included in review material; AI responses/candidates may remain in local App Data. The core reader does not require AI, analytics, advertising, third-party login, or an app-owned content server.
 
 REGIONAL AVAILABILITY
 There is no planned region-specific catalogue or core feature difference. The primary interface is Traditional Chinese (Taiwan). SMB and optional AI availability can depend on the user's network, region, account, and provider terms; neither is required for the core reader.
@@ -66,21 +74,23 @@ Not applicable as a regulated service: the app provides no medical, diagnostic, 
 1. 在實體 iPhone／iPad 開始錄影，顯示實際提交 build 啟動；不要用模擬器或桌面版代替。
 2. 顯示安全的 reviewer library 與主要導覽，不要露出私人檔案路徑、通知、帳號、NAS 密碼或真實識別資料。
 3. 直接開啟清楚標示的內建全年齡示範；核心審查路徑不需要 NAS、密碼或額外下載。
-4. 閱讀內建原創三頁短篇，展示實際 build 中存在的翻頁與閱讀控制。
+4. 開啟內建八組、13 張風景示範，展示實際最終包中存在的翻頁與閱讀控制；不要沿用先前的舊示範作為版本證據。
 5. 展示搜尋、收藏、閱讀進度與設定。只展示已在此 build 驗證的功能。
 6. 若要展示 AI，先拍到它是選用功能，再展示所選 provider、頁面影像／prompt 傳輸揭露與 explicit consent；頁面與 prompt 必須是合成或已授權內容。切換 provider 後要拍到 consent 被撤銷並重新確認。若 release notes 尚未宣告 provider path，就不要臨時展示 AI。
 7. 若示範 direct SMB，必須說明伺服器由使用者選擇，只顯示 disposable review share，並確認核心閱讀器也能使用本機或已掛載資料夾；否則本輪略過此選用流程。
-8. 結束後檢查影片可播放、文字可讀、實體裝置證據連續，且沒有 secrets、私人 metadata、未授權或不適合審查的素材。
+8. 若最終包已完成 StoreKit，另驗證 Pro 購買、恢復、離線權益與 revocation／退款後收回；TestFlight 沙盒權益不得流入正式環境。
+9. 結束後檢查影片可播放、文字可讀、實體裝置證據連續，且沒有 secrets、私人 metadata、未授權或不適合審查的素材。
 
 ## 七類資訊核對表
 
 | 類別 | 目前狀態 | 送審前證據 |
 | --- | --- | --- |
 | 實機錄影 | `TODO` | 實體裝置、實際 build、可播放檔名 |
-| 裝置／OS | 部分已知 | 最低 iOS 14.0；實機型號／OS／processed build `TODO` |
+| 裝置／OS | 部分已知 | 最低 iOS 15.0；實機型號／OS／processed build `TODO` |
 | 目的與對象 | 草案完成 | `PRODUCT.md` 與最終 listing |
 | 設定與操作 | 草案完成 | 本機／掛載 NAS 流程，SMB credentials 另行安全提供 |
 | 外部服務 | 草案完成，待 release build 確認 | SMB 使用者端點；可選 OpenAI／Google AI 的資料路徑、provider 揭露與 explicit consent |
+| 商業模型／IAP | StoreKit 已整合；Xcode 本機購買與權益查詢成功，交易列舉失敗、撤銷未驗證，待完整驗收 | 最終包可驗證購買、恢復、離線權益與 revocation；正式價格／ASC 商品建立仍待完成 |
 | 區域差異 | 草案完成，待確認 | 主要語系、商店區域與 provider availability |
 | 受管制／受保護內容 | 需主人決策 | reviewer sample 權利、年齡分級、App Privacy、export compliance |
 

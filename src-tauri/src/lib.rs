@@ -1,8 +1,10 @@
 pub mod cache;
 pub mod cache_policy;
 pub mod catalog;
+pub mod commerce;
 pub mod file_ops;
 pub mod metadata;
+pub mod photo_library;
 pub mod protocol;
 pub mod scanner;
 pub mod smb_scanner;
@@ -10,6 +12,7 @@ pub mod state;
 pub mod utils;
 
 use state::{AppState, ComicItem, Progress};
+use std::collections::BTreeSet;
 use std::io::Write;
 use std::path::Path;
 use std::sync::Arc;
@@ -188,6 +191,22 @@ fn load_persisted_scan_directory(settings_dir: &Path) -> Option<String> {
     validate_scan_directory(&saved).ok()
 }
 
+// iOS 更新 App 後容器 UUID 可能改變；只重定位內建 Documents，不改外部來源。
+#[cfg(any(target_os = "ios", test))]
+fn relocate_ios_documents(saved: &str, documents: &Path) -> String {
+    let stripped = saved.strip_prefix("/private").unwrap_or(saved);
+    let Some(rest) = stripped.strip_prefix("/var/mobile/Containers/Data/Application/") else {
+        return saved.to_string();
+    };
+    let Some((container, suffix)) = rest.split_once('/') else {
+        return saved.to_string();
+    };
+    if uuid::Uuid::parse_str(container).is_err() || suffix != "Documents" {
+        return saved.to_string();
+    }
+    documents.to_string_lossy().into_owned()
+}
+
 fn catalog_store(state: &State<'_, Arc<AppState>>) -> Result<catalog::CatalogStore, String> {
     state
         .catalog
@@ -195,6 +214,21 @@ fn catalog_store(state: &State<'_, Arc<AppState>>) -> Result<catalog::CatalogSto
         .map_err(|_| "漫畫目錄鎖定失敗".to_string())?
         .clone()
         .ok_or_else(|| "漫畫目錄尚未初始化".to_string())
+}
+
+#[tauri::command]
+async fn get_commerce(app_handle: AppHandle) -> Result<commerce::CommerceStatus, String> {
+    commerce::status(&app_handle, commerce::CommerceAction::Status).await
+}
+
+#[tauri::command]
+async fn purchase_pro(app_handle: AppHandle) -> Result<commerce::CommerceStatus, String> {
+    commerce::status(&app_handle, commerce::CommerceAction::Purchase).await
+}
+
+#[tauri::command]
+async fn restore_pro(app_handle: AppHandle) -> Result<commerce::CommerceStatus, String> {
+    commerce::status(&app_handle, commerce::CommerceAction::Restore).await
 }
 
 #[tauri::command]
@@ -213,6 +247,38 @@ async fn get_comic_metadata(
     id: String,
     state: State<'_, Arc<AppState>>,
 ) -> Result<catalog::ComicMetadataView, String> {
+    if let Some(item) = photo_library::find_item(state.inner(), &id).await {
+        let album_available = if let Some(album_id) = photo_library::album_id_from_photo_id(&id) {
+            state
+                .photo_albums
+                .lock()
+                .await
+                .iter()
+                .any(|album| album.id == album_id && album.available)
+        } else {
+            false
+        };
+        return Ok(catalog::ComicMetadataView {
+            comic_id: item.id.clone(),
+            runtime_id: Some(item.id),
+            title: item.title,
+            series: Some(item.series),
+            volume: None,
+            number: None,
+            summary: None,
+            language: None,
+            reading_direction: None,
+            published_at: None,
+            relative_path: Some(item.relative_path),
+            source_id: Some(item.source_id),
+            offline: !album_available,
+            creators: std::collections::BTreeMap::new(),
+            tags: Vec::new(),
+            candidates: Vec::new(),
+            locked_fields: Vec::new(),
+            diagnostics: Vec::new(),
+        });
+    }
     let store = catalog_store(&state)?;
     tokio::task::spawn_blocking(move || store.get_metadata(&id))
         .await
@@ -221,9 +287,13 @@ async fn get_comic_metadata(
 
 #[tauri::command]
 async fn apply_batch_metadata(
+    app_handle: AppHandle,
     request: catalog::BatchEditRequest,
     state: State<'_, Arc<AppState>>,
 ) -> Result<catalog::BatchEditResult, String> {
+    if commerce::is_batch(&request.comic_ids) {
+        commerce::require_pro(&app_handle).await?;
+    }
     let store = catalog_store(&state)?;
     tokio::task::spawn_blocking(move || store.apply_batch(request))
         .await
@@ -243,9 +313,11 @@ async fn undo_batch_metadata(
 
 #[tauri::command]
 async fn upsert_folder_tag_rule(
+    app_handle: AppHandle,
     rule: catalog::FolderTagRule,
     state: State<'_, Arc<AppState>>,
 ) -> Result<catalog::FolderTagRule, String> {
+    commerce::require_pro(&app_handle).await?;
     let store = catalog_store(&state)?;
     tokio::task::spawn_blocking(move || store.upsert_folder_rule(rule))
         .await
@@ -254,9 +326,13 @@ async fn upsert_folder_tag_rule(
 
 #[tauri::command]
 async fn reimport_metadata(
+    app_handle: AppHandle,
     request: catalog::ReimportRequest,
     state: State<'_, Arc<AppState>>,
 ) -> Result<catalog::ReimportResult, String> {
+    if request.comic_ids.is_empty() || commerce::is_batch(&request.comic_ids) {
+        commerce::require_pro(&app_handle).await?;
+    }
     let store = catalog_store(&state)?;
     tokio::task::spawn_blocking(move || store.reimport(request))
         .await
@@ -276,9 +352,11 @@ async fn list_import_diagnostics(
 
 #[tauri::command]
 async fn upsert_tag_alias(
+    app_handle: AppHandle,
     alias: catalog::TagAlias,
     state: State<'_, Arc<AppState>>,
 ) -> Result<catalog::TagAlias, String> {
+    commerce::require_pro(&app_handle).await?;
     let store = catalog_store(&state)?;
     tokio::task::spawn_blocking(move || store.upsert_tag_alias(alias))
         .await
@@ -319,10 +397,12 @@ async fn update_tag_state(
 
 #[tauri::command]
 async fn rename_tag(
+    app_handle: AppHandle,
     tag_id: i64,
     display_value: String,
     state: State<'_, Arc<AppState>>,
 ) -> Result<catalog::TagMutationResult, String> {
+    commerce::require_pro(&app_handle).await?;
     let store = catalog_store(&state)?;
     tokio::task::spawn_blocking(move || store.rename_tag(tag_id, &display_value))
         .await
@@ -331,10 +411,12 @@ async fn rename_tag(
 
 #[tauri::command]
 async fn merge_tags(
+    app_handle: AppHandle,
     source_tag_id: i64,
     target_tag_id: i64,
     state: State<'_, Arc<AppState>>,
 ) -> Result<catalog::TagMutationResult, String> {
+    commerce::require_pro(&app_handle).await?;
     let store = catalog_store(&state)?;
     tokio::task::spawn_blocking(move || store.merge_tags(source_tag_id, target_tag_id))
         .await
@@ -343,11 +425,15 @@ async fn merge_tags(
 
 #[tauri::command]
 async fn set_tag_disabled(
+    app_handle: AppHandle,
     tag_id: i64,
     disabled: bool,
     state: State<'_, Arc<AppState>>,
 ) -> Result<catalog::TagMutationResult, String> {
     let store = catalog_store(&state)?;
+    if disabled {
+        commerce::require_pro(&app_handle).await?;
+    }
     tokio::task::spawn_blocking(move || store.set_tag_disabled(tag_id, disabled))
         .await
         .map_err(|error| error.to_string())?
@@ -366,9 +452,11 @@ async fn undo_tag_operation(
 
 #[tauri::command]
 async fn list_organizer_inbox(
+    app_handle: AppHandle,
     limit: Option<usize>,
     state: State<'_, Arc<AppState>>,
 ) -> Result<Vec<catalog::OrganizerInboxItem>, String> {
+    commerce::require_pro(&app_handle).await?;
     let store = catalog_store(&state)?;
     tokio::task::spawn_blocking(move || store.organizer_inbox(limit.unwrap_or(200)))
         .await
@@ -377,9 +465,11 @@ async fn list_organizer_inbox(
 
 #[tauri::command]
 async fn list_duplicate_candidates(
+    app_handle: AppHandle,
     limit: Option<usize>,
     state: State<'_, Arc<AppState>>,
 ) -> Result<Vec<catalog::DuplicateCandidate>, String> {
+    commerce::require_pro(&app_handle).await?;
     let store = catalog_store(&state)?;
     tokio::task::spawn_blocking(move || store.duplicate_candidates(limit.unwrap_or(200)))
         .await
@@ -412,7 +502,10 @@ fn validate_export_filename(filename: &str) -> Result<&str, String> {
         || filename.len() > 255
         || filename.chars().any(char::is_control)
         || path.components().count() != 1
-        || !matches!(path.components().next(), Some(std::path::Component::Normal(_)))
+        || !matches!(
+            path.components().next(),
+            Some(std::path::Component::Normal(_))
+        )
         || path.extension().and_then(|value| value.to_str()) != Some("json")
     {
         return Err("metadata 匯出檔名必須是單一 .json 檔名".into());
@@ -470,9 +563,7 @@ async fn save_catalog_metadata(
         let mut file = directory
             .open_with(
                 &filename,
-                cap_std::fs::OpenOptions::new()
-                    .write(true)
-                    .create_new(true),
+                cap_std::fs::OpenOptions::new().write(true).create_new(true),
             )
             .map_err(|error| format!("寫入 metadata 匯出檔失敗：{error}"))?;
         file.write_all(payload.as_bytes())
@@ -508,22 +599,61 @@ async fn apply_catalog_import(
 }
 
 #[tauri::command]
-async fn get_library(state: State<'_, Arc<AppState>>) -> Result<Vec<ComicItem>, String> {
+async fn get_photo_library_status(
+    app_handle: AppHandle,
+    request_authorization: bool,
+    state: State<'_, Arc<AppState>>,
+) -> Result<photo_library::PhotoLibraryStatusView, String> {
+    photo_library::status(&app_handle, state.inner(), request_authorization).await
+}
+
+#[tauri::command]
+async fn set_linked_photo_albums(
+    app_handle: AppHandle,
+    album_ids: Vec<String>,
+    state: State<'_, Arc<AppState>>,
+) -> Result<photo_library::PhotoMutationResult, String> {
+    let result = photo_library::set_linked_albums(&app_handle, state.inner(), album_ids).await?;
+    use tauri::Emitter;
+    let _ = app_handle.emit("library-changed", ());
+    Ok(result)
+}
+
+#[tauri::command]
+fn set_photo_network_allowed(
+    allowed: bool,
+    state: State<'_, Arc<AppState>>,
+) -> photo_library::PhotoNetworkPolicy {
+    photo_library::set_network_allowed(state.inner(), allowed)
+}
+
+#[tauri::command]
+async fn get_library(
+    app_handle: AppHandle,
+    state: State<'_, Arc<AppState>>,
+) -> Result<Vec<ComicItem>, String> {
+    if let Err(error) = photo_library::refresh(&app_handle, state.inner()).await {
+        // A transient PhotoKit failure must not hide local/NAS books. Keep
+        // the virtual albums visible but unreadable until the next refresh.
+        eprintln!("⚠️ 照片圖庫刷新失敗：{error}");
+        photo_library::mark_unavailable(state.inner()).await;
+    }
     let comics = state.comics.lock().await;
     let mut items = comics.clone();
     drop(comics);
     if let Ok(store) = catalog_store(&state) {
-        let mut catalog_only_sources = BTreeSet::new();
         let scan_dir = state.scan_dir.read().unwrap().clone();
-        if !scan_dir.is_empty() && !Path::new(&scan_dir).exists() {
-            catalog_only_sources.insert(scanner::local_source_id(Path::new(&scan_dir)));
-        }
         items = tokio::task::spawn_blocking(move || {
+            let mut catalog_only_sources = BTreeSet::new();
+            if !scan_dir.is_empty() && !Path::new(&scan_dir).exists() {
+                catalog_only_sources.insert(scanner::local_source_id(Path::new(&scan_dir)));
+            }
             store.overlay_library(items, &catalog_only_sources)
         })
         .await
         .map_err(|error| error.to_string())??;
     }
+    items.extend(photo_library::items(state.inner()).await);
     Ok(items.into_iter().map(normalize_runtime_item).collect())
 }
 
@@ -539,6 +669,60 @@ async fn open_comic(
     state: State<'_, Arc<AppState>>,
     app_handle: tauri::AppHandle,
 ) -> Result<serde_json::Value, String> {
+    if photo_library::is_photo_album_id(&id) {
+        let item = photo_library::find_item(state.inner(), &id)
+            .await
+            .ok_or_else(|| "找不到照片相簿，請重新整理照片圖庫".to_string())?;
+        let album_id = photo_library::album_id_from_photo_id(&id)
+            .ok_or_else(|| "照片相簿識別碼無效".to_string())?;
+        let assets = state
+            .photo_albums
+            .lock()
+            .await
+            .iter()
+            .find(|album| album.id == album_id && album.available)
+            .map(|album| album.asset_ids.clone())
+            .ok_or_else(|| "照片相簿目前不可用".to_string())?;
+        let reader_generation = {
+            let _lifecycle = state.comic_lifecycle.lock().unwrap();
+            let generation = state
+                .reader_generation
+                .fetch_add(1, std::sync::atomic::Ordering::SeqCst)
+                + 1;
+            *state.pending_open_id.lock().unwrap() = Some(id.clone());
+            generation
+        };
+        let preload_generation = {
+            let _lifecycle = state.comic_lifecycle.lock().unwrap();
+            if !reader_generation_is_current(state.inner(), reader_generation) {
+                return Err("開啟照片相簿已取消".into());
+            }
+            state
+                .opened_comic_files
+                .write()
+                .unwrap()
+                .insert(id.clone(), assets.clone());
+            state.ram_cache_pool.lock().unwrap().clear();
+            *state.active_comic_id.lock().unwrap() = Some(id.clone());
+            *state.pending_open_id.lock().unwrap() = None;
+            state
+                .preload_generation
+                .fetch_add(1, std::sync::atomic::Ordering::SeqCst)
+                + 1
+        };
+        let pages = (0..assets.len())
+            .map(|index| format!("gai://page/{id}/{index}"))
+            .collect::<Vec<_>>();
+        return Ok(serde_json::json!({
+            "id": id,
+            "type": item.r#type,
+            "title": item.title,
+            "isDir": false,
+            "pages": pages,
+            "progress": item.progress,
+            "preloadGeneration": preload_generation
+        }));
+    }
     let comic_info = if let Some(item) = {
         let comics = state.comics.lock().await;
         comics.iter().find(|comic| comic.id == id).cloned()
@@ -553,6 +737,9 @@ async fn open_comic(
             .ok_or_else(|| "找不到漫畫資料，請重新掃描書庫".to_string())?
     };
     let comic_info = normalize_runtime_item(comic_info);
+    if commerce::is_direct_smb(&comic_info.source_id, &comic_info.r#type) {
+        commerce::require_pro(&app_handle).await?;
+    }
     {
         let mut comics = state.comics.lock().await;
         register_comic_capability(&mut comics, &comic_info);
@@ -569,8 +756,8 @@ async fn open_comic(
     };
 
     let is_smb = comic_info.source_id == "smb" || comic_info.r#type == "smb-archive";
-    let is_external = comic_info.source_id.starts_with("external:")
-        || comic_info.r#type.starts_with("external-");
+    let is_external =
+        comic_info.source_id.starts_with("external:") || comic_info.r#type.starts_with("external-");
 
     let full_path;
     let is_dir;
@@ -1011,10 +1198,15 @@ async fn update_reader_cache_window(
 }
 
 #[tauri::command]
-async fn get_config(state: State<'_, Arc<AppState>>) -> Result<serde_json::Value, String> {
+async fn get_config(state: State<'_, Arc<AppState>>, app_handle: AppHandle) -> Result<serde_json::Value, String> {
     let dir = state.scan_dir.read().unwrap();
     let available = dir.is_empty() || Path::new(dir.as_str()).exists();
-    Ok(serde_json::json!({ "scanDir": dir.clone(), "available": available }))
+    #[cfg(target_os = "ios")]
+    let is_local_library = app_handle.path().document_dir().ok()
+        .is_some_and(|documents| Path::new(dir.as_str()) == documents);
+    #[cfg(not(target_os = "ios"))]
+    let is_local_library = { let _ = app_handle; false };
+    Ok(serde_json::json!({ "scanDir": dir.clone(), "available": available, "isLocalLibrary": is_local_library }))
 }
 
 #[tauri::command]
@@ -1038,9 +1230,11 @@ async fn set_config(
         .and_then(serde_json::Value::as_str)
         .ok_or_else(|| "設定缺少 scanDir 字串".to_string())?;
     let scan_dir = validate_scan_directory(scan_dir)?;
+    #[cfg(target_os = "ios")]
+    let scan_dir = relocate_ios_documents(&scan_dir, &app_handle.path().document_dir().map_err(|error| error.to_string())?);
     let current_scan_dir = state.scan_dir.read().unwrap().clone();
     if current_scan_dir == scan_dir {
-        return Ok(serde_json::json!({ "success": true, "changed": false }));
+        return Ok(serde_json::json!({ "success": true, "changed": false, "scanDir": scan_dir }));
     }
 
     let settings_handle = app_handle.clone();
@@ -1050,7 +1244,7 @@ async fn set_config(
         .map_err(|error| format!("漫畫目錄設定工作失敗：{error}"))??;
 
     let _scan_lifecycle = state.scan_lifecycle.lock().await;
-    *state.scan_dir.write().unwrap() = scan_dir;
+    *state.scan_dir.write().unwrap() = scan_dir.clone();
     state.comics.lock().await.clear();
     state
         .scan_generation
@@ -1060,7 +1254,7 @@ async fn set_config(
     tauri::async_runtime::spawn(async move {
         crate::scanner::start_background_scan(state_clone, app_handle).await;
     });
-    Ok(serde_json::json!({ "success": true, "changed": true }))
+    Ok(serde_json::json!({ "success": true, "changed": true, "scanDir": scan_dir }))
 }
 
 #[tauri::command]
@@ -1069,6 +1263,9 @@ async fn set_smb_config(
     state: State<'_, Arc<AppState>>,
     data: Option<crate::state::SmbConfig>,
 ) -> Result<serde_json::Value, String> {
+    if data.is_some() {
+        commerce::require_pro(&app_handle).await?;
+    }
     let data = validate_smb_config(data)?;
     let _scan_lifecycle = state.scan_lifecycle.lock().await;
     *state.smb_config.write().unwrap() = data;
@@ -1184,9 +1381,11 @@ async fn get_ai_session_status(state: State<'_, Arc<AppState>>) -> Result<AiSess
 
 #[tauri::command]
 async fn set_ai_session_config(
+    app_handle: AppHandle,
     data: AiSessionRequest,
     state: State<'_, Arc<AppState>>,
 ) -> Result<AiSessionStatus, String> {
+    commerce::require_pro(&app_handle).await?;
     let config = validate_ai_session(data)?;
     let status = ai_status(Some(&config));
     *state.ai_session.write().unwrap() = Some(config);
@@ -1321,7 +1520,11 @@ async fn call_ai(
 }
 
 #[tauri::command]
-async fn test_ai_session(state: State<'_, Arc<AppState>>) -> Result<String, String> {
+async fn test_ai_session(
+    app_handle: AppHandle,
+    state: State<'_, Arc<AppState>>,
+) -> Result<String, String> {
+    commerce::require_pro(&app_handle).await?;
     let config = state
         .ai_session
         .read()
@@ -1338,9 +1541,11 @@ async fn test_ai_session(state: State<'_, Arc<AppState>>) -> Result<String, Stri
 
 #[tauri::command]
 async fn explain_page(
+    app_handle: AppHandle,
     data: ExplainPageRequest,
     state: State<'_, Arc<AppState>>,
 ) -> Result<String, String> {
+    commerce::require_pro(&app_handle).await?;
     let config = state
         .ai_session
         .read()
@@ -1438,9 +1643,11 @@ fn parse_ai_metadata_suggestions(text: &str) -> Result<Vec<AiMetadataSuggestion>
 
 #[tauri::command]
 async fn suggest_comic_metadata(
+    app_handle: AppHandle,
     data: SuggestMetadataRequest,
     state: State<'_, Arc<AppState>>,
 ) -> Result<Vec<AiMetadataSuggestion>, String> {
+    commerce::require_pro(&app_handle).await?;
     let config = state
         .ai_session
         .read()
@@ -1481,8 +1688,16 @@ async fn set_bookmarks(
     let old_bookmarks = state.external_bookmarks.read().unwrap().clone();
     let removed_bookmarks: Vec<_> = old_bookmarks
         .into_iter()
-        .filter(|old| !data.iter().any(|new_bookmark| new_bookmark.bookmark == old.bookmark))
+        .filter(|old| {
+            !data
+                .iter()
+                .any(|new_bookmark| new_bookmark.bookmark == old.bookmark)
+        })
         .collect();
+    let removed_source_ids = removed_bookmarks
+        .iter()
+        .map(|bookmark| scanner::external_source_id(&bookmark.bookmark))
+        .collect::<BTreeSet<_>>();
     #[cfg(target_os = "ios")]
     let mut stop_accessing_errors: Vec<String> = Vec::new();
     #[cfg(not(target_os = "ios"))]
@@ -1503,11 +1718,29 @@ async fn set_bookmarks(
     }
 
     {
+        let _catalog_sync = state.catalog_sync.lock().await;
         let _scan_lifecycle = state.scan_lifecycle.lock().await;
-        let mut active = state.active_bookmarks.lock().unwrap();
-        for removed in &removed_bookmarks {
-            active.remove(&removed.bookmark);
+        if !removed_source_ids.is_empty() {
+            let store = catalog_store(&state)?;
+            let source_ids = removed_source_ids.iter().cloned().collect::<Vec<_>>();
+            tokio::task::spawn_blocking(move || {
+                source_ids.into_iter().try_fold(0usize, |removed, source_id| {
+                    store
+                        .forget_source_locations(&source_id)
+                        .map(|count| removed + count)
+                })
+            })
+            .await
+            .map_err(|error| error.to_string())??;
         }
+        {
+            let mut active = state.active_bookmarks.lock().unwrap();
+            for removed in &removed_bookmarks {
+                active.remove(&removed.bookmark);
+            }
+        }
+        let mut comics = state.comics.lock().await;
+        comics.retain(|comic| !removed_source_ids.contains(&comic.source_id));
         *state.external_bookmarks.write().unwrap() = data;
         state
             .scan_generation
@@ -1544,6 +1777,14 @@ async fn show_item_in_folder(
     comic_id: String,
     state: State<'_, Arc<AppState>>,
 ) -> Result<(), String> {
+    if photo_library::is_photo_album_id(&comic_id) {
+        return Err("照片相簿沒有可在檔案管理器顯示的檔案位置".into());
+    }
+    #[cfg(not(any(target_os = "macos", target_os = "windows")))]
+    {
+        let _ = state;
+        return Err("目前平台不支援在檔案管理器顯示漫畫".into());
+    }
     let store = catalog_store(&state)?;
     let item = tokio::task::spawn_blocking(move || store.get_runtime_item(&comic_id))
         .await
@@ -1577,6 +1818,7 @@ async fn show_item_in_folder(
 
 #[tauri::command]
 async fn get_file_capability(
+    app_handle: AppHandle,
     comic_id: String,
     state: State<'_, Arc<AppState>>,
 ) -> Result<file_ops::FileCapability, String> {
@@ -1589,6 +1831,22 @@ async fn get_file_capability(
         .read()
         .map_err(|_| "NAS 設定鎖定失敗")?
         .clone();
+    if location.source_id == "smb" {
+        if let Err(reason) = commerce::require_pro(&app_handle).await {
+            // Inspecting the library must not trigger a purchase sheet or a NAS probe.
+            // Recovery remains available through its separate, ungated command.
+            return Ok(file_ops::FileCapability {
+                source_kind: "smb".into(),
+                online: location.online,
+                expected_fingerprint: None,
+                can_reveal: false,
+                can_rename: false,
+                can_move: false,
+                can_trash: false,
+                reason: Some(reason),
+            });
+        }
+    }
     Ok(file_ops::capability_with_smb_config(&location, smb_config).await)
 }
 
@@ -1599,6 +1857,7 @@ async fn mutate_comic_file(
     app_handle: AppHandle,
 ) -> Result<file_ops::FileMutationResult, String> {
     let _guard = state.file_lifecycle.lock().await;
+    let _catalog_sync = state.catalog_sync.lock().await;
     let store = catalog_store(&state)?;
     let requested_id = request.comic_id.clone();
     let smb = state
@@ -1606,6 +1865,14 @@ async fn mutate_comic_file(
         .read()
         .map_err(|_| "NAS 設定鎖定失敗")?
         .clone();
+    let location_store = store.clone();
+    let location_id = requested_id.clone();
+    let location = tokio::task::spawn_blocking(move || location_store.get_location(&location_id))
+        .await
+        .map_err(|error| error.to_string())??;
+    if location.source_id == "smb" {
+        commerce::require_pro(&app_handle).await?;
+    }
     let result = file_ops::mutate(&store, smb, request).await?;
     let lookup_store = store.clone();
     let lookup_id = result.comic_id.clone();
@@ -1613,17 +1880,24 @@ async fn mutate_comic_file(
         .await
         .map_err(|error| format!("漫畫位置刷新工作失敗：{error}"))??
         .map(normalize_runtime_item);
-    {
+    let scan_status = {
+        let _scan_lifecycle = state.scan_lifecycle.lock().await;
+        state
+            .scan_generation
+            .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
         let mut comics = state.comics.lock().await;
         comics.retain(|item| item.id != requested_id && item.id != result.comic_id);
         if let Some(item) = refreshed {
             comics.push(item);
         }
-    }
-    state
-        .scan_generation
-        .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        let mut progress = state.scan_progress.lock().await;
+        progress.is_scanning = false;
+        progress.found = comics.len();
+        progress.completed_at = Some(chrono::Utc::now().to_rfc3339());
+        progress.clone()
+    };
     use tauri::Emitter;
+    let _ = app_handle.emit("scan-progress", scan_status);
     let _ = app_handle.emit("library-changed", 0usize);
     let _ = app_handle.emit("catalog-changed", 0usize);
     Ok(result)
@@ -1636,6 +1910,7 @@ async fn undo_comic_file_operation(
     app_handle: AppHandle,
 ) -> Result<file_ops::FileMutationResult, String> {
     let _guard = state.file_lifecycle.lock().await;
+    let _catalog_sync = state.catalog_sync.lock().await;
     let store = catalog_store(&state)?;
     let operation_store = store.clone();
     let operation_token = token.clone();
@@ -1656,7 +1931,11 @@ async fn undo_comic_file_operation(
         .await
         .map_err(|error| format!("漫畫位置刷新工作失敗：{error}"))??
         .map(normalize_runtime_item);
-    {
+    let scan_status = {
+        let _scan_lifecycle = state.scan_lifecycle.lock().await;
+        state
+            .scan_generation
+            .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
         let mut comics = state.comics.lock().await;
         comics.retain(|current| {
             refreshed.as_ref().is_none_or(|item| {
@@ -1669,11 +1948,14 @@ async fn undo_comic_file_operation(
         if let Some(item) = refreshed {
             comics.push(item);
         }
-    }
+        let mut progress = state.scan_progress.lock().await;
+        progress.is_scanning = false;
+        progress.found = comics.len();
+        progress.completed_at = Some(chrono::Utc::now().to_rfc3339());
+        progress.clone()
+    };
     use tauri::Emitter;
-    state
-        .scan_generation
-        .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+    let _ = app_handle.emit("scan-progress", scan_status);
     let _ = app_handle.emit("library-changed", 0usize);
     let _ = app_handle.emit("catalog-changed", 0usize);
     Ok(result)
@@ -1793,8 +2075,7 @@ fn save_imported_photo_to_root(
         .map_err(|error| format!("掃描目錄無效: {error}"))?;
     let root = cap_std::fs::Dir::open_ambient_dir(&scan_root, cap_std::ambient_authority())
         .map_err(|error| format!("無法開啟掃描目錄: {error}"))?;
-    let import_dir = Path::new("相簿匯入")
-        .join(format!("匯入_{}", timestamp_millis / 100000));
+    let import_dir = Path::new("相簿匯入").join(format!("匯入_{}", timestamp_millis / 100000));
     root.create_dir_all(&import_dir)
         .map_err(|error| format!("無法建立匯入目錄: {error}"))?;
     let import_handle = root
@@ -1860,9 +2141,7 @@ fn write_import_file(
         };
         let mut file = match import_dir.open_with(
             &unique_filename,
-            cap_std::fs::OpenOptions::new()
-                .write(true)
-                .create_new(true),
+            cap_std::fs::OpenOptions::new().write(true).create_new(true),
         ) {
             Ok(file) => file,
             Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => continue,
@@ -1881,11 +2160,7 @@ fn write_import_file(
     Err("匯入檔案名稱碰撞，請稍後再試".into())
 }
 
-fn write_progress_file(
-    scan_dir: &Path,
-    id: &str,
-    progress: Progress,
-) -> Result<(), String> {
+fn write_progress_file(scan_dir: &Path, id: &str, progress: Progress) -> Result<(), String> {
     let progress_file = scan_dir.join(".comic_progress.json");
     let mut all_progress: std::collections::HashMap<String, Progress> =
         match std::fs::read_to_string(&progress_file) {
@@ -1927,6 +2202,7 @@ fn write_progress_file(
 
 #[tauri::command]
 async fn save_progress(
+    app_handle: AppHandle,
     data: SaveProgressRequest,
     state: State<'_, Arc<AppState>>,
 ) -> Result<(), String> {
@@ -1943,6 +2219,33 @@ async fn save_progress(
     let total_pages = authoritative_total_pages(opened_total_pages, data.total_pages)?;
     let (current_page, total_pages, percent) =
         normalize_progress_values(data.current_page, total_pages)?;
+    if photo_library::is_photo_album_id(&id) {
+        let progress = Progress {
+            current_page,
+            total_pages,
+            percent,
+            updated_at: Some(chrono::Utc::now().to_rfc3339()),
+        };
+        let _file_guard = state.progress_file_lock.lock().await;
+        let photo_progress = {
+            let stored = state.photo_progress.lock().await;
+            let mut next = stored.clone();
+            next.insert(id, progress);
+            next
+        };
+        let directory = app_handle
+            .path()
+            .app_local_data_dir()
+            .map_err(|error| format!("無法取得照片進度目錄：{error}"))?;
+        let persisted_progress = photo_progress.clone();
+        tokio::task::spawn_blocking(move || {
+            photo_library::persist_progress(&directory, &persisted_progress)
+        })
+        .await
+        .map_err(|error| format!("照片進度背景工作失敗：{error}"))??;
+        *state.photo_progress.lock().await = photo_progress;
+        return Ok(());
+    }
     let scan_dir = state.scan_dir.read().unwrap().clone();
     let now = chrono::Utc::now().to_rfc3339();
     let (progress, is_local_source) = {
@@ -1956,7 +2259,10 @@ async fn save_progress(
         comic.progress.percent = percent;
         comic.progress.updated_at = Some(now);
         comic.page_count = total_pages;
-        (comic.progress.clone(), comic.source_id.starts_with("local:"))
+        (
+            comic.progress.clone(),
+            comic.source_id.starts_with("local:"),
+        )
     };
 
     let store = catalog_store(&state)?;
@@ -1969,11 +2275,10 @@ async fn save_progress(
     if is_local_source && !scan_dir.is_empty() {
         let _file_guard = state.progress_file_lock.lock().await;
         let scan_dir = std::path::PathBuf::from(scan_dir);
-        if let Err(error) = tokio::task::spawn_blocking(move || {
-            write_progress_file(&scan_dir, &id, progress)
-        })
-        .await
-        .map_err(|error| format!("進度相容檔背景工作失敗: {error}"))?
+        if let Err(error) =
+            tokio::task::spawn_blocking(move || write_progress_file(&scan_dir, &id, progress))
+                .await
+                .map_err(|error| format!("進度相容檔背景工作失敗: {error}"))?
         {
             eprintln!("⚠️ SQLite 進度已儲存，但相容 sidecar 寫入失敗：{error}");
         }
@@ -1996,18 +2301,42 @@ async fn scan_library(
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     let app_state = Arc::new(AppState::new());
+    // 封面與閱讀頁各自限流，NAS 讀取／ZIP 解壓不可占住 WebView 回呼。
+    let cover_workers = Arc::new(tokio::sync::Semaphore::new(2));
+    let page_workers = Arc::new(tokio::sync::Semaphore::new(4));
 
     tauri::Builder::default()
         .plugin(tauri_plugin_dialog::init())
         .plugin(tauri_plugin_ios_folder::init())
         .manage(app_state.clone())
-        .register_uri_scheme_protocol("gai", |app, request| {
-            protocol::handle_comic_request(app.app_handle(), request).unwrap_or_else(|error| {
-                tauri::http::Response::builder()
-                    .status(500)
-                    .body(error.to_string().into_bytes())
-                    .unwrap()
-            })
+        .register_asynchronous_uri_scheme_protocol("gai", move |app, request, responder| {
+            let handle = app.app_handle().clone();
+            let workers = if request.uri().host() == Some("cover")
+                || request.uri().path().starts_with("/cover/")
+            {
+                cover_workers.clone()
+            } else {
+                page_workers.clone()
+            };
+            tauri::async_runtime::spawn(async move {
+                let result = match workers.acquire_owned().await {
+                    Ok(permit) => tauri::async_runtime::spawn_blocking(move || {
+                        let _permit = permit;
+                        protocol::handle_comic_request(&handle, request)
+                            .map_err(|error| error.to_string())
+                    })
+                    .await
+                    .map_err(|error| error.to_string())
+                    .and_then(|result| result),
+                    Err(error) => Err(error.to_string()),
+                };
+                responder.respond(result.unwrap_or_else(|error| {
+                    tauri::http::Response::builder()
+                        .status(500)
+                        .body(error.into_bytes())
+                        .unwrap()
+                }));
+            });
         })
         .setup(move |app| {
             state::register_process_state(&app_state);
@@ -2024,6 +2353,9 @@ pub fn run() {
                 .catalog
                 .write()
                 .map_err(|_| std::io::Error::other("無法初始化漫畫目錄"))? = Some(catalog);
+            if let Ok(photo_progress) = photo_library::load_progress(&catalog_dir) {
+                *app_state.photo_progress.blocking_lock() = photo_progress;
+            }
             if let Some(scan_dir) = load_persisted_scan_directory(&catalog_dir) {
                 *app_state
                     .scan_dir
@@ -2036,6 +2368,14 @@ pub fn run() {
                     let mut scan_dir = app_state.scan_dir.write().unwrap();
                     if scan_dir.is_empty() {
                         *scan_dir = document_dir.to_string_lossy().to_string();
+                    } else {
+                        let relocated = relocate_ios_documents(&scan_dir, &document_dir);
+                        if relocated != *scan_dir {
+                            *scan_dir = relocated;
+                            if let Err(error) = persist_scan_directory(app.handle(), &scan_dir) {
+                                log::warn!("本機書庫位置已更新，但設定暫時無法保存：{error}");
+                            }
+                        }
                     }
                 }
             }
@@ -2048,6 +2388,9 @@ pub fn run() {
             Ok(())
         })
         .invoke_handler(tauri::generate_handler![
+            get_commerce,
+            purchase_pro,
+            restore_pro,
             get_library,
             get_scan_status,
             open_comic,
@@ -2066,6 +2409,9 @@ pub fn run() {
             test_ai_session,
             explain_page,
             suggest_comic_metadata,
+            get_photo_library_status,
+            set_linked_photo_albums,
+            set_photo_network_allowed,
             set_bookmarks,
             get_bookmarks,
             open_folder_dialog,
@@ -2155,14 +2501,8 @@ mod tests {
     fn catalog_only_comic_registers_protocol_capability_without_replacing_existing_item() {
         let existing = capability_comic("existing", "目前書架資料");
         let mut comics = vec![existing.clone()];
-        register_comic_capability(
-            &mut comics,
-            &capability_comic("existing", "較舊的目錄資料"),
-        );
-        register_comic_capability(
-            &mut comics,
-            &capability_comic("catalog-only", "目錄找回"),
-        );
+        register_comic_capability(&mut comics, &capability_comic("existing", "較舊的目錄資料"));
+        register_comic_capability(&mut comics, &capability_comic("catalog-only", "目錄找回"));
 
         assert_eq!(comics.len(), 2);
         assert_eq!(comics[0].title, existing.title);
@@ -2216,14 +2556,14 @@ mod tests {
         let validated = validate_smb_config(Some(state::SmbConfig {
             host: " nas.local ".into(),
             share: " Comics ".into(),
-            username: Some(" gale ".into()),
+            username: Some(" test-user ".into()),
             password: Some("secret".into()),
         }))
         .unwrap()
         .unwrap();
         assert_eq!(validated.host, "nas.local");
         assert_eq!(validated.share, "Comics");
-        assert_eq!(validated.username.as_deref(), Some("gale"));
+        assert_eq!(validated.username.as_deref(), Some("test-user"));
         assert!(validate_smb_config(Some(state::SmbConfig {
             host: "nas/local".into(),
             share: "Comics".into(),
@@ -2235,7 +2575,10 @@ mod tests {
 
     #[test]
     fn export_filename_is_a_single_json_component() {
-        assert_eq!(validate_export_filename("catalog.json").unwrap(), "catalog.json");
+        assert_eq!(
+            validate_export_filename("catalog.json").unwrap(),
+            "catalog.json"
+        );
         assert!(validate_export_filename("../catalog.json").is_err());
         assert!(validate_export_filename("catalog.txt").is_err());
     }
@@ -2248,6 +2591,26 @@ mod tests {
             assert!(validate_scan_directory(&home.to_string_lossy()).is_err());
         }
         assert!(validate_scan_directory("/Volumes/ExampleNAS/Comics").is_ok());
+    }
+
+    #[test]
+    fn ios_documents_relocates_old_container_without_changing_external_sources() {
+        let current = Path::new("/private/var/mobile/Containers/Data/Application/22222222-2222-4222-8222-222222222222/Documents");
+        for old in [
+            "/private/var/mobile/Containers/Data/Application/11111111-1111-4111-8111-111111111111/Documents",
+            "/var/mobile/Containers/Data/Application/11111111-1111-4111-8111-111111111111/Documents",
+        ] {
+            assert_eq!(relocate_ios_documents(old, current), current.to_string_lossy());
+        }
+        for external in [
+            "/private/var/mobile/Containers/Shared/AppGroup/provider/Documents",
+            "/Volumes/NAS/Comics",
+            "/private/var/mobile/Containers/Data/Application/not-a-container/Documents",
+            "/private/var/mobile/Containers/Data/Application/11111111-1111-4111-8111-111111111111/Documents/../Library",
+        ] {
+            assert_eq!(relocate_ios_documents(external, current), external);
+        }
+        assert_eq!(relocate_ios_documents(&current.to_string_lossy(), current), current.to_string_lossy());
     }
 
     #[test]
@@ -2339,10 +2702,8 @@ mod tests {
 
     #[test]
     fn imported_photo_uses_a_capability_beneath_the_scan_root() {
-        let temp_dir = std::env::temp_dir().join(format!(
-            "comic_test_import_root_{}",
-            std::process::id()
-        ));
+        let temp_dir =
+            std::env::temp_dir().join(format!("comic_test_import_root_{}", std::process::id()));
         let _ = fs::remove_dir_all(&temp_dir);
         fs::create_dir_all(&temp_dir).unwrap();
         save_imported_photo_to_root(&temp_dir, "photo.jpg", b"image", 100_000, 123).unwrap();

@@ -1,0 +1,41 @@
+{
+  "identifier" : "47414901",
+  "nonRenewingSubscriptions" : [
+
+  ],
+  "products" : [
+    {
+      "displayPrice" : "1.00",
+      "familyShareable" : false,
+      "internalID" : "900000001",
+      "localizations" : [
+        {
+          "description" : "本機 StoreKit 測試用 Pro 權益",
+          "displayName" : "G.A.I Pro（測試）",
+          "locale" : "zh_TW"
+        },
+        {
+          "description" : "Local StoreKit test entitlement",
+          "displayName" : "G.A.I Pro (Test)",
+          "locale" : "en_US"
+        }
+      ],
+      "productID" : "com.windsheep.gai.pro.v1",
+      "referenceName" : "G.A.I Pro Local Test",
+      "type" : "NonConsumable"
+    }
+  ],
+  "settings" : {
+    "_billingGracePeriodEnabled" : false,
+    "_renewalBillingIssuesEnabled" : false,
+    "_storefront" : "USA",
+    "_timeRate" : 0
+  },
+  "subscriptionGroups" : [
+
+  ],
+  "version" : {
+    "major" : 2,
+    "minor" : 0
+  }
+}

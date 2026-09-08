@@ -1,12 +1,15 @@
 use crate::state::{AppState, ComicItem, Progress, SmbConfig};
 use base64::{engine::general_purpose, Engine as _};
+use std::path::Path;
 use std::sync::Arc;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 const SMB_CONNECT_TIMEOUT: Duration = Duration::from_secs(10);
 const SMB_IO_TIMEOUT: Duration = Duration::from_secs(30);
 const MAX_SMB_SCAN_DEPTH: usize = 32;
 const UNKNOWN_SMB_TIME: &str = "1970-01-01T00:00:00+00:00";
+const SMB_PROGRESS_BATCH: usize = 64;
+const SMB_PROGRESS_INTERVAL: Duration = Duration::from_millis(400);
 
 fn smb_runtime_id(relative_path: &str) -> String {
     // Prefix the decoded capability path with "./" so an SMB item cannot
@@ -33,6 +36,13 @@ fn smb_scan_depth_exceeded(depth: usize) -> bool {
     depth > MAX_SMB_SCAN_DEPTH
 }
 
+fn should_publish_smb_progress(discovered: usize, published: usize, elapsed: Duration) -> bool {
+    discovered > published
+        && (published == 0
+            || discovered.saturating_sub(published) >= SMB_PROGRESS_BATCH
+            || elapsed >= SMB_PROGRESS_INTERVAL)
+}
+
 fn smb_filetime_rfc3339(file_time: smb2::pack::FileTime) -> String {
     file_time
         .to_system_time()
@@ -45,7 +55,9 @@ pub async fn scan_smb(
     config: SmbConfig,
     state: Arc<AppState>,
     scan_generation: u64,
+    app_handle: tauri::AppHandle,
 ) -> Result<(), String> {
+    crate::commerce::require_pro(&app_handle).await?;
     let addr = format!("{}:445", config.host);
     let username = config.username.unwrap_or_else(|| "guest".to_string());
     let password = config.password.unwrap_or_default();
@@ -57,11 +69,22 @@ pub async fn scan_smb(
         .map_err(|_| "漫畫目錄鎖定失敗")?
         .clone();
     let progress_map: std::collections::HashMap<String, Progress> = if !scan_dir.is_empty() {
-        let progress_file = std::path::Path::new(&scan_dir).join(".comic_progress.json");
-        std::fs::read_to_string(&progress_file)
-            .ok()
-            .and_then(|content| serde_json::from_str(&content).ok())
-            .unwrap_or_default()
+        let progress_file = Path::new(&scan_dir).join(".comic_progress.json");
+        match tokio::task::spawn_blocking(move || {
+            crate::scanner::load_progress_file(&progress_file)
+        })
+        .await
+        {
+            Ok(Ok(progress)) => progress,
+            Ok(Err(error)) => {
+                eprintln!("⚠️ 忽略漫畫進度檔：{error}");
+                std::collections::HashMap::new()
+            }
+            Err(error) => {
+                eprintln!("⚠️ 進度檔背景工作失敗：{error}");
+                std::collections::HashMap::new()
+            }
+        }
     } else {
         std::collections::HashMap::new()
     };
@@ -79,7 +102,16 @@ pub async fn scan_smb(
         .map_err(|_| "SMB 共用資料夾連線逾時（10 秒）".to_string())?
         .map_err(|error| format!("SMB 共用資料夾連線失敗：{error}"))?;
 
+    let base_count = {
+        let comics = state.comics.lock().await;
+        comics
+            .iter()
+            .filter(|comic| comic.source_id != "smb")
+            .count()
+    };
     let mut new_comics = Vec::new();
+    let mut published = 0usize;
+    let mut published_at = Instant::now();
     scan_smb_dir(
         &mut client,
         &mut tree,
@@ -89,9 +121,14 @@ pub async fn scan_smb(
         scan_generation,
         &state,
         0,
+        &app_handle,
+        base_count,
+        &mut published,
+        &mut published_at,
     )
     .await?;
 
+    let _scan_lifecycle = state.scan_lifecycle.lock().await;
     let mut comics = state.comics.lock().await;
     if scan_generation
         != state
@@ -100,8 +137,10 @@ pub async fn scan_smb(
     {
         return Ok(());
     }
+    let mut known_ids: std::collections::HashSet<String> =
+        comics.iter().map(|comic| comic.id.clone()).collect();
     for comic in new_comics {
-        if !comics.iter().any(|existing| existing.id == comic.id) {
+        if known_ids.insert(comic.id.clone()) {
             comics.push(comic);
         }
     }
@@ -118,6 +157,10 @@ async fn scan_smb_dir(
     scan_generation: u64,
     state: &Arc<AppState>,
     depth: usize,
+    app_handle: &tauri::AppHandle,
+    base_count: usize,
+    published: &mut usize,
+    published_at: &mut Instant,
 ) -> Result<(), String> {
     if smb_scan_depth_exceeded(depth) {
         return Err(format!(
@@ -160,6 +203,10 @@ async fn scan_smb_dir(
                 scan_generation,
                 state,
                 depth + 1,
+                app_handle,
+                base_count,
+                published,
+                published_at,
             ))
             .await?;
             continue;
@@ -200,7 +247,7 @@ async fn scan_smb_dir(
         results.push(ComicItem {
             id,
             r#type: "smb-archive".to_string(),
-            relative_path: full_rel_path,
+            relative_path: full_rel_path.clone(),
             ext: format!(".{ext}"),
             title,
             series,
@@ -211,9 +258,61 @@ async fn scan_smb_dir(
             source_path: None,
             external_bookmark: None,
         });
+        publish_smb_progress(
+            state,
+            app_handle,
+            scan_generation,
+            base_count,
+            results.len(),
+            &full_rel_path,
+            published,
+            published_at,
+        )
+        .await;
     }
 
     Ok(())
+}
+
+#[allow(clippy::too_many_arguments)]
+async fn publish_smb_progress(
+    state: &Arc<AppState>,
+    app_handle: &tauri::AppHandle,
+    generation: u64,
+    base_count: usize,
+    discovered: usize,
+    current_path: &str,
+    published: &mut usize,
+    published_at: &mut Instant,
+) {
+    if !should_publish_smb_progress(discovered, *published, published_at.elapsed()) {
+        return;
+    }
+    let status = {
+        let _scan_lifecycle = state.scan_lifecycle.lock().await;
+        if state
+            .scan_generation
+            .load(std::sync::atomic::Ordering::Acquire)
+            != generation
+        {
+            return;
+        }
+        let mut progress = state.scan_progress.lock().await;
+        progress.found = base_count.saturating_add(discovered);
+        progress.current_path = format!("SMB: {current_path}");
+        *published = discovered;
+        *published_at = Instant::now();
+        progress.clone()
+    };
+    if state
+        .scan_generation
+        .load(std::sync::atomic::Ordering::Acquire)
+        != generation
+    {
+        return;
+    }
+    use tauri::Emitter;
+    let _ = app_handle.emit("scan-progress", status);
 }
 
 #[cfg(test)]
@@ -247,10 +346,25 @@ mod tests {
     }
 
     #[test]
+    fn smb_progress_is_batched_or_time_bounded() {
+        assert!(should_publish_smb_progress(1, 0, Duration::ZERO));
+        assert!(!should_publish_smb_progress(
+            SMB_PROGRESS_BATCH,
+            1,
+            SMB_PROGRESS_INTERVAL - Duration::from_millis(1)
+        ));
+        assert!(should_publish_smb_progress(
+            SMB_PROGRESS_BATCH + 1,
+            1,
+            Duration::ZERO
+        ));
+        assert!(should_publish_smb_progress(2, 1, SMB_PROGRESS_INTERVAL));
+    }
+
+    #[test]
     fn smb_modified_time_is_stable_and_not_scan_time() {
-        let file_time = smb2::pack::FileTime::from_system_time(
-            UNIX_EPOCH + Duration::from_secs(1_704_067_200),
-        );
+        let file_time =
+            smb2::pack::FileTime::from_system_time(UNIX_EPOCH + Duration::from_secs(1_704_067_200));
         assert_eq!(smb_filetime_rfc3339(file_time), "2024-01-01T00:00:00+00:00");
         assert_eq!(
             smb_filetime_rfc3339(smb2::pack::FileTime::ZERO),

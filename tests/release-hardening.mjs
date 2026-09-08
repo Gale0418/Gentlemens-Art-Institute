@@ -27,7 +27,7 @@ assert.match(smbScanner, /format!\("\.\/\{relative_path\}"\)/);
 assert.match(smbScanner, /!name\.contains\('\\\\'\)/);
 
 assert.match(fileOps, /error\.kind\(\) == smb2::ErrorKind::NotFound/);
-assert.match(fileOps, /SMB 檔案自動還原也失敗/);
+assert.match(fileOps, /NAS 檔案自動還原也失敗/);
 assert.match(fileOps, /trimmed\.contains\('\\\\'\)/);
 assert.match(fileOps, /fail_smb_journal/);
 
@@ -141,8 +141,8 @@ await sandbox.openComicWithAuthoritativeProgress(async (command, args) => {
 }, 'already-aligned');
 assert.equal(noRealignCalls.length, 1, 'already aligned readers must not restart preload work');
 
-const smb = sandbox.normalizeSmbConfig({ host: '  nas.local ', share: ' Comics ', username: ' gale ', password: 'secret' });
-assert.deepEqual(JSON.parse(JSON.stringify(smb)), { host: 'nas.local', share: 'Comics', username: 'gale', password: 'secret' });
+const smb = sandbox.normalizeSmbConfig({ host: '  nas.local ', share: ' Comics ', username: ' test-user ', password: 'secret' });
+assert.deepEqual(JSON.parse(JSON.stringify(smb)), { host: 'nas.local', share: 'Comics', username: 'test-user', password: 'secret' });
 assert.equal(sandbox.normalizeSmbConfig(null), null);
 assert.throws(() => sandbox.normalizeSmbConfig({ host: '', share: 'Comics' }));
 assert.throws(() => sandbox.normalizeSmbConfig({ host: 'nas.local', share: '../Comics' }));

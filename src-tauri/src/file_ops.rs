@@ -865,9 +865,11 @@ async fn undo_smb(
     if current != expected {
         return Err("NAS 還原來源位置已變更，已停止還原".into());
     }
-    match smb_stat_optional(&mut client, &mut tree, &before).await? {
-        Some(_) => return Err("NAS 原位置已有其他項目，已停止還原".into()),
-        None => {}
+    if smb_stat_optional(&mut client, &mut tree, &before)
+        .await?
+        .is_some()
+    {
+        return Err("NAS 原位置已有其他項目，已停止還原".into());
     }
     smb_rename(&mut client, &mut tree, &after, &before).await?;
     let runtime_id = smb_runtime_id(&record.before_relative_path);

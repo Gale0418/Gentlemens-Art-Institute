@@ -106,6 +106,7 @@ let lastGridRenderSignature = '';
 let lastContinueRenderSignature = '';
 let lastInspectorRenderSignature = '';
 let libraryRefreshRunner = null;
+let incrementalLibraryRenderFrame = null;
 
 function isLibraryRefreshBlocked() {
   return Boolean(
@@ -114,6 +115,73 @@ function isLibraryRefreshBlocked() {
     || state.currentComic
     || state.pendingComicId
   );
+}
+
+function isIncrementalLibraryRenderBlocked() {
+  return Boolean(coverScrollActive || state.currentComic || state.pendingComicId);
+}
+
+function queueIncrementalLibraryRender() {
+  if (incrementalLibraryRenderFrame !== null) return;
+  const render = () => {
+    incrementalLibraryRenderFrame = null;
+    if (isIncrementalLibraryRenderBlocked()) return;
+    // A scan batch already contains the native snapshot needed by the cards.
+    // Render once per coalesced batch instead of starting a full library fetch
+    // for every discovered book; the final scan event still reconciles all data.
+    filterAndRenderGrid({ skipUnchanged: true, background: true });
+    renderSidebar();
+    renderContinueStrip();
+    updateStats();
+  };
+  if (typeof requestAnimationFrame === 'function') {
+    incrementalLibraryRenderFrame = requestAnimationFrame(render);
+  } else {
+    incrementalLibraryRenderFrame = window.setTimeout(render, 0);
+  }
+}
+
+function applyIncrementalLibraryBatch(payload) {
+  if (!payload || !Array.isArray(payload.items)) return false;
+  const generation = Number(payload.generation);
+  if (!Number.isSafeInteger(generation) || generation <= 0) return false;
+  const currentGeneration = Number(state.scanStatus?.generation);
+  if (Number.isSafeInteger(currentGeneration)
+    && currentGeneration > 0
+    && generation < currentGeneration) {
+    // A cancelled source can finish emitting an already queued batch. Its
+    // generation must never leak books into the newly selected source.
+    return true;
+  }
+  if (Number.isSafeInteger(currentGeneration)
+    && currentGeneration === generation
+    && state.scanStatus?.isScanning === false
+    && state.scanStatus?.completedAt) {
+    // A completed scan may still have a queued progress event behind it.
+    return true;
+  }
+
+  const positions = new Map(state.comics.map((comic, index) => [comic.id, index]));
+  payload.items
+    .filter(comic => comic && comic.id && !isBuiltInDemoComic(comic))
+    .forEach(comic => {
+      const index = positions.get(comic.id);
+      if (index === undefined) {
+        positions.set(comic.id, state.comics.length);
+        state.comics.push(comic);
+      } else {
+        state.comics[index] = comic;
+      }
+    });
+  state.scanStatus = {
+    ...(state.scanStatus || {}),
+    generation,
+    isScanning: true,
+    found: Math.max(Number(state.scanStatus?.found) || 0, Number(payload.found) || 0),
+  };
+  state.libraryRefreshPending = true;
+  queueIncrementalLibraryRender();
+  return true;
 }
 
 function requestDeferredLibraryRefresh() {
@@ -1142,7 +1210,8 @@ function bindEvents() {
 
     // 監聽漫畫庫目錄檔案異動並自動重新整理
     if (window.electronAPI.onLibraryChanged) {
-      window.electronAPI.onLibraryChanged(() => {
+      window.electronAPI.onLibraryChanged((payload) => {
+        if (applyIncrementalLibraryBatch(payload)) return;
         if (state.currentComic) {
           console.log('[Watcher] 偵測到漫畫庫檔案異動，但因為主人正在看書，所以貼心地不打擾主人看書喔！');
           return;
@@ -4491,6 +4560,22 @@ function hideLoaderProgress() {
 
 function updateLoaderScanProgress(status) {
   if (!status) return;
+  const nextGeneration = Number(status.generation);
+  const currentGeneration = Number(state.scanStatus?.generation);
+  if (Number.isSafeInteger(nextGeneration)
+    && nextGeneration > 0
+    && Number.isSafeInteger(currentGeneration)
+    && currentGeneration > nextGeneration) {
+    return;
+  }
+  if (Number.isSafeInteger(nextGeneration)
+    && nextGeneration > 0
+    && currentGeneration === nextGeneration
+    && state.scanStatus?.isScanning === false
+    && state.scanStatus?.completedAt
+    && status.isScanning) {
+    return;
+  }
   state.scanStatus = status;
   if (status.isScanning) {
     state.libraryRefreshPending = true;
@@ -5309,6 +5394,8 @@ if (typeof window !== 'undefined' && window.__GIA_TEST_HOOKS__) {
     scheduleLibraryRefresh,
     runScheduledLibraryRefresh,
     performLibraryFetch,
+    applyIncrementalLibraryBatch,
+    queueIncrementalLibraryRender,
     setLibraryRefreshRunner(runner) { libraryRefreshRunner = runner; },
     setCoverObserver(observer) { coverObserver = observer; },
     setCoverVisibility(img, visible) {

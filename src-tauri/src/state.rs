@@ -240,6 +240,7 @@ fn default_source_id() -> String {
 #[serde(rename_all = "camelCase")]
 pub struct ScanProgress {
     pub is_scanning: bool,
+    pub generation: u64,
     pub found: usize,
     pub current_path: String,
     pub started_at: Option<String>,
@@ -353,6 +354,7 @@ impl AppState {
             comics: Mutex::new(Vec::new()),
             scan_progress: Mutex::new(ScanProgress {
                 is_scanning: false,
+                generation: 0,
                 found: 0,
                 current_path: String::new(),
                 started_at: None,

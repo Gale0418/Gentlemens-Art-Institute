@@ -23,6 +23,14 @@ struct ScanOutcome {
     external_complete: bool,
 }
 
+#[derive(Debug, serde::Serialize, Clone)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct LibraryBatch {
+    pub(crate) generation: u64,
+    pub(crate) items: Vec<ComicItem>,
+    pub(crate) found: usize,
+}
+
 fn should_publish_partial(discovered: usize, published: usize, elapsed: Duration) -> bool {
     discovered > published
         && (published == 0
@@ -55,7 +63,7 @@ pub(crate) fn load_progress_file(
     serde_json::from_str(&content).map_err(|error| format!("進度檔格式無效：{error}"))
 }
 
-fn merge_discovered_comics(library: &mut Vec<ComicItem>, discovered: &[ComicItem]) {
+pub(crate) fn merge_discovered_comics(library: &mut Vec<ComicItem>, discovered: &[ComicItem]) {
     let mut positions = library
         .iter()
         .enumerate()
@@ -129,16 +137,22 @@ fn publish_partial_library(
         if let Some(path) = results.last().and_then(|comic| comic.source_path.as_ref()) {
             progress.current_path = path.clone();
         }
+        let batch = LibraryBatch {
+            generation,
+            items: newly_discovered.to_vec(),
+            found: results.len(),
+        };
         *published = results.len();
         *published_at = Instant::now();
-        progress.clone()
+        (progress.clone(), batch)
     };
     if state.scan_generation.load(Ordering::Acquire) != generation {
         return;
     }
     use tauri::Emitter;
+    let (status, batch) = status;
     let _ = app_handle.emit("scan-progress", status);
-    let _ = app_handle.emit("library-changed", results.len());
+    let _ = app_handle.emit("library-changed", batch);
 }
 
 async fn finish_scan_if_current(
@@ -396,6 +410,7 @@ pub async fn start_background_scan(state: Arc<AppState>, app_handle: tauri::AppH
             state.comics.lock().await.clear();
             {
                 let mut progress = state.scan_progress.lock().await;
+                progress.generation = generation;
                 progress.is_scanning = false;
                 progress.found = 0;
                 progress.current_path = configured_dir.clone();
@@ -434,6 +449,7 @@ pub async fn start_background_scan(state: Arc<AppState>, app_handle: tauri::AppH
         }
         let my_gen = state.scan_generation.fetch_add(1, Ordering::SeqCst) + 1;
         let mut progress = state.scan_progress.lock().await;
+        progress.generation = my_gen;
         progress.is_scanning = true;
         progress.found = 0;
         progress.current_path = if local_source_available {
@@ -447,6 +463,14 @@ pub async fn start_background_scan(state: Arc<AppState>, app_handle: tauri::AppH
         progress.completed_at = None;
         (scan_dir, my_gen, local_source_available)
     };
+
+    // Publish the new scan generation before the first batch. This lets the
+    // renderer reject late events from a cancelled/previous source scan.
+    if state.scan_generation.load(Ordering::Acquire) == my_gen {
+        let progress = state.scan_progress.lock().await.clone();
+        use tauri::Emitter;
+        let _ = app_handle.emit("scan-progress", progress);
+    }
 
     let configured_local_source =
         (!scan_dir.is_empty()).then(|| local_source_id(Path::new(&scan_dir)));

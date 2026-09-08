@@ -1,3 +1,4 @@
+use crate::scanner::{merge_discovered_comics, LibraryBatch};
 use crate::state::{AppState, ComicItem, Progress, SmbConfig};
 use base64::{engine::general_purpose, Engine as _};
 use std::path::Path;
@@ -263,6 +264,7 @@ async fn scan_smb_dir(
             app_handle,
             scan_generation,
             base_count,
+            results,
             results.len(),
             &full_rel_path,
             published,
@@ -280,6 +282,7 @@ async fn publish_smb_progress(
     app_handle: &tauri::AppHandle,
     generation: u64,
     base_count: usize,
+    results: &[ComicItem],
     discovered: usize,
     current_path: &str,
     published: &mut usize,
@@ -297,12 +300,22 @@ async fn publish_smb_progress(
         {
             return;
         }
+        let newly_discovered = results[*published..].to_vec();
+        let mut comics = state.comics.lock().await;
+        merge_discovered_comics(&mut comics, &newly_discovered);
         let mut progress = state.scan_progress.lock().await;
         progress.found = base_count.saturating_add(discovered);
         progress.current_path = format!("SMB: {current_path}");
         *published = discovered;
         *published_at = Instant::now();
-        progress.clone()
+        (
+            progress.clone(),
+            LibraryBatch {
+                generation,
+                items: newly_discovered,
+                found: base_count.saturating_add(discovered),
+            },
+        )
     };
     if state
         .scan_generation
@@ -312,7 +325,9 @@ async fn publish_smb_progress(
         return;
     }
     use tauri::Emitter;
+    let (status, batch) = status;
     let _ = app_handle.emit("scan-progress", status);
+    let _ = app_handle.emit("library-changed", batch);
 }
 
 #[cfg(test)]

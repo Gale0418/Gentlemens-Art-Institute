@@ -291,6 +291,71 @@ const makeCover = id => {
   hooks.setLibraryRefreshRunner(null);
 }
 
+// 掃描批次直接合併到目前書架；舊世代事件不得污染新來源，且不觸發整庫重抓。
+{
+  const incremental = createHarness();
+  incremental.hooks.state.comics = [];
+  incremental.hooks.state.scanStatus = { isScanning: true, generation: 12, found: 0 };
+  incremental.hooks.state.currentComic = { id: 'reader-open' };
+  assert.equal(incremental.hooks.applyIncrementalLibraryBatch({
+    generation: 12,
+    found: 2,
+    items: [
+      { id: 'book-a', title: 'A', relativePath: 'a.cbz', sourceId: 'local:test' },
+      { id: 'book-b', title: 'B', relativePath: 'b.cbz', sourceId: 'local:test' },
+    ],
+  }), true);
+  assert.deepEqual(incremental.hooks.state.comics.map(item => item.id), ['book-a', 'book-b']);
+  assert.equal(incremental.hooks.state.scanStatus.found, 2);
+  incremental.hooks.state.currentComic = null;
+  vm.runInContext(`
+    filterAndRenderGrid = () => { incrementalRenders += 1; };
+    renderSidebar = () => {};
+    renderContinueStrip = () => {};
+    updateStats = () => {};
+  `, incremental.context);
+  incremental.context.incrementalRenders = 0;
+  assert.equal(incremental.hooks.applyIncrementalLibraryBatch({
+    generation: 12,
+    found: 3,
+    items: [{ id: 'book-c', title: 'C', relativePath: 'c.cbz', sourceId: 'local:test' }],
+  }), true);
+  assert.equal(incremental.hooks.applyIncrementalLibraryBatch({
+    generation: 12,
+    found: 4,
+    items: [{ id: 'book-d', title: 'D', relativePath: 'd.cbz', sourceId: 'local:test' }],
+  }), true);
+  incremental.context.incrementalRenders = 0;
+  incremental.clock.tick(0);
+  // The frame callback is coalesced; the real library renderer is invoked once
+  // for the two discoveries that arrived in the same frame.
+  assert.equal(incremental.context.incrementalRenders, 1);
+  incremental.hooks.updateLoaderScanProgress({ generation: 13, isScanning: true, found: 4 });
+  incremental.hooks.updateLoaderScanProgress({ generation: 12, isScanning: true, found: 99 });
+  assert.equal(incremental.hooks.state.scanStatus.generation, 13);
+  incremental.hooks.updateLoaderScanProgress({
+    generation: 13,
+    isScanning: false,
+    found: 4,
+    completedAt: '2026-09-09T00:00:00Z',
+  });
+  incremental.hooks.updateLoaderScanProgress({ generation: 13, isScanning: true, found: 99 });
+  assert.equal(incremental.hooks.state.scanStatus.isScanning, false);
+  assert.equal(incremental.hooks.applyIncrementalLibraryBatch({
+    generation: 13,
+    found: 99,
+    items: [{ id: 'late-book', title: 'Late', relativePath: 'late.cbz', sourceId: 'local:test' }],
+  }), true);
+  assert.equal(incremental.hooks.state.scanStatus.isScanning, false);
+  assert.equal(incremental.hooks.state.comics.some(item => item.id === 'late-book'), false);
+  assert.equal(incremental.hooks.applyIncrementalLibraryBatch({
+    generation: 11,
+    found: 99,
+    items: [{ id: 'stale-book', title: 'Stale', relativePath: 'stale.cbz', sourceId: 'local:old' }],
+  }), true);
+  assert.deepEqual(incremental.hooks.state.comics.map(item => item.id), ['book-a', 'book-b', 'book-c', 'book-d']);
+}
+
 // Poll 不重疊，舊世代回覆也不能覆蓋新一輪 scan 狀態；故障會解除 isScanning。
 {
   let calls = 0;

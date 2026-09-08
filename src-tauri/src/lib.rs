@@ -1246,9 +1246,11 @@ async fn set_config(
     let _scan_lifecycle = state.scan_lifecycle.lock().await;
     *state.scan_dir.write().unwrap() = scan_dir.clone();
     state.comics.lock().await.clear();
-    state
+    let generation = state
         .scan_generation
-        .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        .fetch_add(1, std::sync::atomic::Ordering::SeqCst)
+        + 1;
+    state.scan_progress.lock().await.generation = generation;
 
     let state_clone = state.inner().clone();
     tauri::async_runtime::spawn(async move {
@@ -1270,9 +1272,11 @@ async fn set_smb_config(
     let _scan_lifecycle = state.scan_lifecycle.lock().await;
     *state.smb_config.write().unwrap() = data;
     state.comics.lock().await.clear();
-    state
+    let generation = state
         .scan_generation
-        .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        .fetch_add(1, std::sync::atomic::Ordering::SeqCst)
+        + 1;
+    state.scan_progress.lock().await.generation = generation;
 
     let state_clone = state.inner().clone();
     tauri::async_runtime::spawn(async move {
@@ -1882,15 +1886,17 @@ async fn mutate_comic_file(
         .map(normalize_runtime_item);
     let scan_status = {
         let _scan_lifecycle = state.scan_lifecycle.lock().await;
-        state
+        let generation = state
             .scan_generation
-            .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            .fetch_add(1, std::sync::atomic::Ordering::SeqCst)
+            + 1;
         let mut comics = state.comics.lock().await;
         comics.retain(|item| item.id != requested_id && item.id != result.comic_id);
         if let Some(item) = refreshed {
             comics.push(item);
         }
         let mut progress = state.scan_progress.lock().await;
+        progress.generation = generation;
         progress.is_scanning = false;
         progress.found = comics.len();
         progress.completed_at = Some(chrono::Utc::now().to_rfc3339());
@@ -1933,9 +1939,10 @@ async fn undo_comic_file_operation(
         .map(normalize_runtime_item);
     let scan_status = {
         let _scan_lifecycle = state.scan_lifecycle.lock().await;
-        state
+        let generation = state
             .scan_generation
-            .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            .fetch_add(1, std::sync::atomic::Ordering::SeqCst)
+            + 1;
         let mut comics = state.comics.lock().await;
         comics.retain(|current| {
             refreshed.as_ref().is_none_or(|item| {
@@ -1949,6 +1956,7 @@ async fn undo_comic_file_operation(
             comics.push(item);
         }
         let mut progress = state.scan_progress.lock().await;
+        progress.generation = generation;
         progress.is_scanning = false;
         progress.found = comics.len();
         progress.completed_at = Some(chrono::Utc::now().to_rfc3339());

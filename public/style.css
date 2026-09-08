@@ -882,6 +882,8 @@ body {
 .reader-overlay.mode-webtoon .reader-viewport {
   overflow-y: auto;
   align-items: flex-start;
+  scroll-padding-top: max(64px, calc(56px + env(safe-area-inset-top)));
+  scroll-padding-bottom: max(108px, calc(100px + env(safe-area-inset-bottom)));
 }
 
 .reader-overlay.mode-webtoon .pages-container {
@@ -889,7 +891,9 @@ body {
   flex-direction: column;
   height: auto;
   align-items: center;
-  padding-bottom: 120px; /* 留底給控制條 */
+  /* 上下按鈕位於絕對定位的 reader chrome 內側，保留安全距離避免被工具列蓋住。 */
+  padding-top: max(64px, calc(56px + env(safe-area-inset-top)));
+  padding-bottom: max(108px, calc(100px + env(safe-area-inset-bottom)));
 }
 
 .reader-overlay.mode-webtoon .pages-container img {
@@ -3419,17 +3423,24 @@ input:focus-visible,
   }
 
   .header-actions {
-    display: grid;
-    grid-template-columns: minmax(0, 1fr) repeat(3, 44px);
+    display: flex;
+    flex-wrap: nowrap;
     width: 100%;
   }
 
   .search-box,
   .search-box:focus-within {
-    width: 100%;
+    flex: 1 1 0;
+    min-width: 0;
+    width: 0;
+  }
+
+  .search-box input {
+    min-width: 0;
   }
 
   .action-btn {
+    flex: 0 0 44px;
     width: 44px;
     padding: 0;
     justify-content: center;
@@ -4877,6 +4888,17 @@ select:focus-visible,
 }
 
 @media (max-width: 820px) {
+  .reader-overlay.mode-webtoon .reader-viewport {
+    scroll-padding-top: max(64px, calc(56px + env(safe-area-inset-top)));
+    scroll-padding-bottom: max(140px, calc(120px + env(safe-area-inset-bottom)));
+  }
+
+  .reader-overlay.mode-webtoon .pages-container {
+    /* 窄版控制列會換成兩列，底部需要額外空間；safe-area 由 env() 補上。 */
+    padding-top: max(64px, calc(56px + env(safe-area-inset-top)));
+    padding-bottom: max(140px, calc(120px + env(safe-area-inset-bottom)));
+  }
+
   .reader-bottom-bar {
     display: grid;
     grid-template-columns: auto minmax(0, 1fr);

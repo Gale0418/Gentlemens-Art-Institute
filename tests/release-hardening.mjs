@@ -57,7 +57,7 @@ assert.match(scanner, /has_smb_source/);
 assert.match(scanner, /offline_smb_snapshot/);
 assert.match(scanner, /let id = smb_runtime_id\(&relative_path\)/, 'offline SMB migration must rebuild current source-scoped IDs');
 assert.doesNotMatch(scanner, /runtime_id\.unwrap_or_else/, 'offline SMB must not trust legacy unscoped runtime IDs');
-assert.match(scanner, /UPDATE comic_locations SET online = 0 WHERE source_id LIKE 'external:%'/, 'legacy external locations must be invalidated before current scan reactivates them');
+assert.match(scanner, /!active.contains\(source\)/, 'external cleanup must retain sources still being scanned');
 assert.match(scanner, /file_type\.is_symlink\(\)/);
 
 assert.match(swift, /activePickers\.removeValue\(forKey: picker\)/);

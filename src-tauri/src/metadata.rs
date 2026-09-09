@@ -639,7 +639,12 @@ fn parse_key_value_text(text: &str, gallery: bool) -> Result<NormalizedMetadata,
 }
 
 fn filename_source(path: &Path) -> ParsedMetadataSource {
-    let title = if path.is_dir() {
+    filename_metadata_for_discovered_path(path, path.is_dir())
+}
+
+/// 由掃描器提供已知類型，避免僅解析檔名卻再次存取外部 Files provider。
+pub(crate) fn filename_metadata_for_discovered_path(path: &Path, is_directory: bool) -> ParsedMetadataSource {
+    let title = if is_directory {
         path.file_name()
     } else {
         path.file_stem()

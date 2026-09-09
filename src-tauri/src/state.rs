@@ -239,6 +239,16 @@ fn default_source_id() -> String {
 #[derive(Debug, Serialize, Deserialize, Clone)]
 #[serde(rename_all = "camelCase")]
 pub struct ScanProgress {
+    #[serde(default)]
+    pub phase: String,
+    #[serde(default)]
+    pub processed: usize,
+    #[serde(default)]
+    pub total: usize,
+    #[serde(default)]
+    pub detail_deferred: bool,
+    #[serde(default)]
+    pub error: Option<String>,
     pub is_scanning: bool,
     pub generation: u64,
     pub found: usize,
@@ -353,6 +363,11 @@ impl AppState {
             scan_dir: std::sync::RwLock::new(String::new()),
             comics: Mutex::new(Vec::new()),
             scan_progress: Mutex::new(ScanProgress {
+                phase: "complete".into(),
+                processed: 0,
+                total: 0,
+                detail_deferred: false,
+                error: None,
                 is_scanning: false,
                 generation: 0,
                 found: 0,

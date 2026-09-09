@@ -356,7 +356,7 @@ const makeCover = id => {
   assert.deepEqual(incremental.hooks.state.comics.map(item => item.id), ['book-a', 'book-b', 'book-c', 'book-d']);
 }
 
-// Poll 不重疊，舊世代回覆也不能覆蓋新一輪 scan 狀態；故障會解除 isScanning。
+// Poll 不重疊，舊世代回覆也不能覆蓋新一輪 scan 狀態；暫時故障不能假報完成。
 {
   let calls = 0;
   let resolveOld;
@@ -373,7 +373,7 @@ const makeCover = id => {
   await Promise.resolve();
   assert.equal(hooks.state.scanStatus.isScanning, true);
 
-  // 連續故障六次應明確結束狀態，而不是只隱藏 loader。
+  // 暫時故障要顯示無法取得狀態，但保留真正的掃描中狀態。
   let failures = 0;
   context.window.electronAPI.getScanStatus = async () => { failures += 1; throw new Error('offline'); };
   hooks.startScanStatusPolling();
@@ -381,9 +381,91 @@ const makeCover = id => {
     clock.tick(700);
     for (let turn = 0; turn < 4; turn += 1) await Promise.resolve();
   }
-  assert.equal(failures, 6);
-  assert.equal(hooks.state.scanStatus.isScanning, false);
+  assert.ok(failures >= 1);
+  assert.equal(hooks.state.scanStatus.isScanning, true);
   assert.equal(hooks.state.scanStatus.pollError, true);
+}
+
+// 永不 resolve 的 native 查詢必須有單次 5 秒 deadline，且不因 700ms
+// interval 產生無限未決呼叫；晚回覆仍可把同一輪狀態收斂為完成。
+{
+  const pending = createHarness();
+  let calls = 0;
+  let resolvePending;
+  pending.context.window.electronAPI.getScanStatus = () => {
+    calls += 1;
+    return new Promise(resolve => { resolvePending = resolve; });
+  };
+  pending.hooks.startScanStatusPolling();
+  pending.clock.tick(700);
+  assert.equal(calls, 1);
+  pending.clock.tick(5000);
+  assert.equal(calls, 1);
+  assert.equal(pending.hooks.state.scanStatus.isScanning, true);
+  assert.equal(pending.hooks.state.scanStatus.pollError, true);
+  assert.match(pending.hooks.elements.loaderProgressLabel.textContent, /暫時無法取得掃描狀態/);
+  resolvePending({ generation: 1, isScanning: false, phase: 'complete', completedAt: '2026-09-09T00:00:00Z' });
+  for (let turn = 0; turn < 5; turn += 1) await Promise.resolve();
+  assert.equal(pending.hooks.state.scanStatus.isScanning, false);
+  assert.equal(pending.hooks.state.scanStatus.phase, 'complete');
+}
+
+// stop/start 不能遺忘上一輪未決請求，也不能為同一個 native Promise 再開新呼叫。
+{
+  const restart = createHarness();
+  let calls = 0;
+  let resolvePending;
+  restart.context.window.electronAPI.getScanStatus = () => {
+    calls += 1;
+    return new Promise(resolve => { resolvePending = resolve; });
+  };
+  restart.hooks.startScanStatusPolling();
+  restart.clock.tick(700);
+  restart.hooks.stopScanStatusPolling();
+  restart.hooks.startScanStatusPolling();
+  restart.clock.tick(700);
+  assert.equal(calls, 1);
+  resolvePending({ generation: 1, isScanning: false, phase: 'complete' });
+  for (let turn = 0; turn < 5; turn += 1) await Promise.resolve();
+  assert.equal(restart.hooks.state.scanStatus.isScanning, false);
+}
+
+// catalog 進度使用 backend 的 processed/total；total=0 時不能假設總數，
+// complete 的 detailDeferred 與 error 也各自有明確文案。
+{
+  const phase = createHarness();
+  phase.hooks.updateLoaderScanProgress({ generation: 1, isScanning: true, phase: 'catalog', processed: 64, total: 100 });
+  assert.equal(phase.hooks.elements.loaderProgressBar.style.width, '64%');
+  assert.match(phase.hooks.elements.loaderProgressLabel.textContent, /正在整理書架 64 \/ 100 本/);
+  phase.hooks.updateLoaderScanProgress({ generation: 1, isScanning: true, phase: 'catalog', processed: 5, total: 0 });
+  assert.equal(phase.hooks.elements.loaderProgress.classList.contains('indeterminate'), true);
+  phase.hooks.updateLoaderScanProgress({ generation: 1, isScanning: false, phase: 'complete', detailDeferred: true });
+  assert.match(phase.hooks.elements.loaderProgressLabel.textContent, /書架已更新；詳細資料可按需重新匯入/);
+  assert.equal(phase.hooks.state.scanStatus.pollError, false);
+
+  const error = createHarness();
+  error.hooks.updateLoaderScanProgress({ generation: 1, isScanning: false, phase: 'error', error: '/private/source/catalog failed' });
+  assert.match(error.hooks.elements.loaderProgressLabel.textContent, /書架整理失敗，請稍後再試/);
+  assert.doesNotMatch(error.hooks.elements.loaderProgressLabel.textContent, /private|catalog failed/);
+  error.clock.tick(3500);
+  assert.equal(error.hooks.elements.loaderMask.style.display, 'none');
+  assert.doesNotMatch(error.hooks.elements.loaderProgressLabel.textContent, /整理完成/);
+}
+
+// wallclock 上限停止輪詢後，沒有終態的晚回覆不能把 UI 推回無人接手的
+// discovering 狀態；後端事件或終態回覆仍可另外收斂畫面。
+{
+  const wallclock = createHarness();
+  let resolvePending;
+  wallclock.context.window.electronAPI.getScanStatus = () => new Promise(resolve => { resolvePending = resolve; });
+  wallclock.hooks.startScanStatusPolling();
+  wallclock.clock.tick(700);
+  wallclock.clock.tick(42 * 60 * 1000);
+  assert.equal(wallclock.hooks.state.scanStatusPollTimer, null);
+  resolvePending({ generation: 1, isScanning: true, phase: 'discovering', found: 4 });
+  for (let turn = 0; turn < 5; turn += 1) await Promise.resolve();
+  assert.equal(wallclock.hooks.state.scanStatus.phase, undefined);
+  assert.equal(wallclock.hooks.state.scanStatus.isScanning, true);
 }
 
 // 關閱讀器後，延遲的前／後一本操作不可跨 readerOperation 重新開書。
@@ -440,7 +522,7 @@ const makeCover = id => {
     updateStats = () => {};
   `, initial.context);
   await initial.hooks.performLibraryFetch();
-  assert.equal(initial.hooks.state.scanStatus.isScanning, false);
+  assert.equal(initial.hooks.state.scanStatus.isScanning, true);
   assert.equal(initial.hooks.state.scanStatus.pollError, true);
   assert.equal(initial.hooks.state.scanStatusPollTimer, null);
 }

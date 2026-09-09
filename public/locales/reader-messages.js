@@ -807,6 +807,30 @@ window.GAIL10n.register({
     "en": "Shelf organization complete",
     "ja": "本棚の整理が完了しました"
   },
+  "書架已更新；詳細資料可按需重新匯入": {
+    "en": "Shelf updated; detailed metadata can be re-imported on demand",
+    "ja": "本棚を更新しました。詳細情報は必要に応じて再インポートできます"
+  },
+  "正在整理書架 {processed} / {total} 本": {
+    "en": "Organizing shelf: {processed} / {total} books",
+    "ja": "本棚を整理中：{processed} / {total}冊"
+  },
+  "暫時無法取得掃描狀態；仍在等待結果…": {
+    "en": "Scan status is temporarily unavailable; still waiting for a result…",
+    "ja": "スキャン状態を一時的に取得できません。結果を待っています…"
+  },
+  "書架整理失敗，請稍後再試。": {
+    "en": "Shelf organization failed. Try again later.",
+    "ja": "本棚の整理に失敗しました。後でもう一度お試しください。"
+  },
+  "掃描狀態查詢逾時": {
+    "en": "The scan status request timed out",
+    "ja": "スキャン状態の取得がタイムアウトしました"
+  },
+  "掃描狀態等待已逾時": {
+    "en": "Waiting for scan status timed out",
+    "ja": "スキャン状態の待機がタイムアウトしました"
+  },
   "正在掃描漫畫庫，已發現 {count} 本": {
     "en": "Scanning the library; {count} comics found",
     "ja": "ライブラリをスキャン中。{count}冊見つかりました"

@@ -1917,6 +1917,8 @@ async fn mutate_comic_file(
         let mut progress = state.scan_progress.lock().await;
         progress.generation = generation;
         progress.is_scanning = false;
+        progress.phase = "complete".into();
+        progress.error = None;
         progress.found = comics.len();
         progress.completed_at = Some(chrono::Utc::now().to_rfc3339());
         progress.clone()
@@ -1977,6 +1979,8 @@ async fn undo_comic_file_operation(
         let mut progress = state.scan_progress.lock().await;
         progress.generation = generation;
         progress.is_scanning = false;
+        progress.phase = "complete".into();
+        progress.error = None;
         progress.found = comics.len();
         progress.completed_at = Some(chrono::Utc::now().to_rfc3339());
         progress.clone()

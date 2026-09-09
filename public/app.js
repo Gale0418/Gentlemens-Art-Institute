@@ -102,6 +102,13 @@ let libraryRefreshTimer = null;
 let activeLibraryFetch = null;
 let libraryFetchQueued = false;
 let scanPollGeneration = 0;
+// A native status call can outlive the interval that created it. Keep the
+// single unresolved call across stop/start so repeated rescans cannot create
+// an unbounded pile of pending promises.
+let scanStatusPendingRequest = null;
+const SCAN_STATUS_POLL_INTERVAL_MS = 700;
+const SCAN_STATUS_REQUEST_TIMEOUT_MS = 5000;
+const SCAN_STATUS_POLL_WALLCLOCK_MS = 42 * 60 * 1000;
 let lastGridRenderSignature = '';
 let lastContinueRenderSignature = '';
 let lastInspectorRenderSignature = '';
@@ -333,6 +340,7 @@ let state = {
   webtoonScrollFrame: null,
   webtoonAnchor: null,
   scanStatusPollTimer: null,
+  scanStatusPollWallclockTimer: null,
   scanStatus: null,
   libraryRefreshPending: false,
   renderGeneration: 0,
@@ -2079,10 +2087,15 @@ async function performLibraryFetch({ background = false } = {}) {
           if (!state.scanStatusPollTimer) startScanStatusPolling();
         }
       } catch(e) {
-        // 首次載入會在 finally 停止輪詢，不可留下無人解除的掃描 gate。
-        // 背景載入則讓既有 poll 的連續失敗門檻負責復原。
+        // 暫時讀不到狀態時保留已知的 isScanning；完全未知時也不能假裝
+        // 已完成，否則慢啟動的 native scanner 會被 UI 誤報成成功。
         if (!silentRefresh) {
-          state.scanStatus = { ...(state.scanStatus || {}), isScanning: false, pollError: true };
+          const knownScanning = state.scanStatus?.isScanning;
+          state.scanStatus = {
+            ...(state.scanStatus || {}),
+            isScanning: typeof knownScanning === 'boolean' ? knownScanning : true,
+            pollError: true,
+          };
         }
       }
     }
@@ -2111,8 +2124,10 @@ async function performLibraryFetch({ background = false } = {}) {
     updateStats();
     if (scanStillRunning && !silentRefresh) {
       updateLoaderScanProgress(latestScanStatus);
-    } else if (!silentRefresh) {
+    } else if (!silentRefresh && !state.scanStatus?.pollError && state.scanStatus?.phase !== 'error') {
       setLoaderProgress(100, readerText('書架整理完成'));
+    } else if (!silentRefresh) {
+      updateLoaderScanProgress(state.scanStatus);
     }
   } catch (e) {
     failed = true;
@@ -2139,13 +2154,18 @@ async function performLibraryFetch({ background = false } = {}) {
     } else if (scanStillRunning && !failed) {
       updateLoaderScanProgress(latestScanStatus);
     } else if (failed) {
-      if (state.scanStatus?.isScanning) {
+      if (state.scanStatus?.isScanning !== false) {
         state.scanStatus = {
-          ...state.scanStatus,
-          isScanning: false,
+          ...(state.scanStatus || {}),
+          isScanning: true,
           pollError: true,
         };
       }
+      if (state.scanStatus?.isScanning !== false) updateLoaderScanProgress(state.scanStatus);
+      stopScanStatusPolling();
+      state.loaderHideTimer = window.setTimeout(hideLoader, 6000);
+    } else if (state.scanStatus?.pollError || state.scanStatus?.phase === 'error') {
+      updateLoaderScanProgress(state.scanStatus);
       stopScanStatusPolling();
       state.loaderHideTimer = window.setTimeout(hideLoader, 6000);
     } else {
@@ -4788,22 +4808,66 @@ function updateLoaderScanProgress(status) {
     && status.isScanning) {
     return;
   }
-  state.scanStatus = status;
-  if (status.isScanning) {
+  state.scanStatus = { ...(state.scanStatus || {}), ...status };
+  if (!status.pollError && !status.error) {
+    state.scanStatus.pollError = false;
+  }
+  // Old API responses omit phase. Use only fields present in this response for
+  // the decision, so a previously observed catalog phase cannot mask an old
+  // style `{ isScanning: false }` completion.
+  const hasPhase = Object.prototype.hasOwnProperty.call(status, 'phase');
+  const phase = hasPhase ? String(status.phase || '').toLowerCase() : '';
+  // A source may report a recoverable error while the overall scan is still
+  // running. Only terminal phase=error (or an old-style stopped response with
+  // an error) should end the progress UI.
+  const isError = phase === 'error' || (status.isScanning === false && Boolean(status.error));
+  const isComplete = phase === 'complete' || (!phase && status.isScanning === false);
+  if (status.isScanning || phase === 'discovering' || phase === 'catalog') {
+    clearTimeout(state.loaderHideTimer);
+    state.loaderHideTimer = null;
+  }
+  if (isError) {
+    stopScanStatusPolling();
+    if (elements.loaderMask.style.display === 'none') return;
+    // Backend errors can contain source paths; keep private paths out of UI.
+    showLoaderProgress(null, readerText('書架整理失敗，請稍後再試。'));
+    // An error must remain visible long enough to read, then close without
+    // ever passing through the success/completed state.
+    state.loaderHideTimer = window.setTimeout(hideLoader, 3500);
+    return;
+  }
+  if (status.isScanning || phase === 'discovering' || phase === 'catalog') {
     state.libraryRefreshPending = true;
   }
-  if (!status.isScanning) {
+  if (isComplete || (!phase && status.isScanning === false)) {
     stopScanStatusPolling();
     if (state.libraryRefreshPending) {
       state.libraryRefreshPending = false;
       scheduleLibraryRefresh(0);
     }
     if (elements.loaderMask.style.display === 'none') return;
-    setLoaderProgress(100, readerText('書架整理完成'));
-    state.loaderHideTimer = window.setTimeout(hideLoader, 250);
+    const completeText = status.detailDeferred
+      ? readerText('書架已更新；詳細資料可按需重新匯入')
+      : readerText('書架整理完成');
+    setLoaderProgress(100, completeText);
+    // Keep the result readable long enough for a person to notice the final
+    // state, especially when detailDeferred explains why metadata is partial.
+    state.loaderHideTimer = window.setTimeout(hideLoader, 1200);
     return;
   }
   if (elements.loaderMask.style.display === 'none') return;
+  if (status.pollError) {
+    showLoaderProgress(null, readerText('暫時無法取得掃描狀態；仍在等待結果…'));
+    return;
+  }
+  if (phase === 'catalog') {
+    const processed = Math.max(0, Number(status.processed) || 0);
+    const total = Math.max(0, Number(status.total) || 0);
+    const detail = readerText('正在整理書架 {processed} / {total} 本', { processed, total });
+    const percentage = total > 0 ? Math.min(100, (processed / total) * 100) : null;
+    showLoaderProgress(percentage, detail);
+    return;
+  }
   const found = Number(status.found || 0);
   showLoaderProgress(null, readerText('正在掃描漫畫庫，已發現 {count} 本', { count: found }));
 }
@@ -4818,41 +4882,131 @@ function startScanStatusPolling() {
   let consecutiveFailures = 0;
   let pollInFlight = false;
   let timerId = null;
-  const stopAfterFailure = () => {
+  let request = null;
+  const markTemporaryFailure = () => {
     if (generation !== scanPollGeneration || state.scanStatusPollTimer !== timerId) return;
     state.scanStatus = {
       ...(state.scanStatus || {}),
-      isScanning: false,
+      // A timeout or transient error says nothing about the scanner itself.
+      // Keep the last real value instead of turning an unknown state into done.
+      isScanning: state.scanStatus?.isScanning !== false,
       pollError: true,
     };
-    updateLoaderScanProgress(state.scanStatus);
+    if (elements.loaderMask.style.display !== 'none') {
+      showLoaderProgress(null, readerText('暫時無法取得掃描狀態；仍在等待結果…'));
+    }
   };
-  timerId = setInterval(async () => {
+  const stopAfterWallclock = () => {
+    if (generation !== scanPollGeneration || state.scanStatusPollTimer !== timerId) return;
+    // Stop scheduling after the independent wallclock cap, while leaving the
+    // real scanner state intact. A later event or late response may still
+    // reconcile the status through updateLoaderScanProgress().
+    markTemporaryFailure();
+    clearInterval(timerId);
+    clearTimeout(state.scanStatusPollWallclockTimer);
+    state.scanStatusPollWallclockTimer = null;
+    state.scanStatusPollTimer = null;
+    scanPollGeneration += 1;
+  };
+  timerId = setInterval(() => {
     if (generation !== scanPollGeneration || state.scanStatusPollTimer !== timerId || pollInFlight) return;
     pollInFlight = true;
     attempts += 1;
-    try {
-      const status = await eAPI.getScanStatus();
-      consecutiveFailures = 0;
-      if (generation === scanPollGeneration && state.scanStatusPollTimer === timerId) {
-        updateLoaderScanProgress(status);
+    const existingRequest = scanStatusPendingRequest;
+    if (existingRequest && !existingRequest.settled) {
+      // Reattach this poll generation to the one unresolved native request;
+      // never issue another call merely because the old interval was stopped.
+      if (existingRequest.timedOut) {
+        markTemporaryFailure();
       }
-    } catch(e) {
-      consecutiveFailures += 1;
+      existingRequest.promise
+        .then(status => {
+          const statusGeneration = Number(status?.generation);
+          const currentStatusGeneration = Number(state.scanStatus?.generation);
+          const lateGenerationIsSafe = Number.isSafeInteger(statusGeneration)
+            && statusGeneration > 0
+            && (!Number.isSafeInteger(currentStatusGeneration) || statusGeneration >= currentStatusGeneration);
+          if (generation === scanPollGeneration
+            && state.scanStatusPollTimer === timerId
+            && lateGenerationIsSafe) {
+            updateLoaderScanProgress(status);
+          }
+        })
+        .catch(() => markTemporaryFailure())
+        .finally(() => {
+          if (generation === scanPollGeneration && state.scanStatusPollTimer === timerId) {
+            pollInFlight = false;
+          }
+        });
+      return;
     }
-    // 約 42 分鐘的總上限，或連續六次狀態查詢失敗後停止等待；
-    // 掃描本身仍在後端繼續，不讓狀態列永久卡住。
-    if (attempts >= 3600 || consecutiveFailures >= 6) {
-      stopAfterFailure();
+    const requestGeneration = generation;
+    const requestTimerId = timerId;
+    const requestState = { timedOut: false, settled: false, timeoutId: null };
+    request = requestState;
+    requestState.timeoutId = setTimeout(() => {
+      if (requestState.settled) return;
+      requestState.timedOut = true;
+      markTemporaryFailure();
+      // Keep pollInFlight true until the native Promise settles. This leaves
+      // at most one unresolved native call and prevents a 700ms call storm.
+    }, SCAN_STATUS_REQUEST_TIMEOUT_MS);
+    let nativePromise;
+    try {
+      // Invoke synchronously at the timer edge so a slow native call is
+      // counted immediately; Promise resolution is still handled below.
+      nativePromise = eAPI.getScanStatus();
+    } catch (error) {
+      nativePromise = Promise.reject(error);
     }
-    pollInFlight = false;
-  }, 700);
+    requestState.promise = Promise.resolve(nativePromise);
+    scanStatusPendingRequest = requestState;
+    requestState.promise
+      .then(status => {
+        // A wallclock stop invalidates the poll loop, but a late response from
+        // this request can still be useful when it carries a non-stale scan
+        // generation (for example, a native call that woke after suspension).
+        const canApply = requestGeneration === scanPollGeneration
+          && state.scanStatusPollTimer === requestTimerId;
+        const statusGeneration = Number(status?.generation);
+        const currentStatusGeneration = Number(state.scanStatus?.generation);
+        const lateGenerationIsSafe = Number.isSafeInteger(statusGeneration)
+          && statusGeneration > 0
+          && (!Number.isSafeInteger(currentStatusGeneration) || statusGeneration >= currentStatusGeneration);
+        const lateAfterWallclock = !canApply
+          && lateGenerationIsSafe
+          && (status?.phase === 'complete' || status?.phase === 'error' || status?.isScanning === false);
+        if (canApply || lateAfterWallclock) updateLoaderScanProgress(status);
+        consecutiveFailures = 0;
+      })
+      .catch(() => {
+        consecutiveFailures += 1;
+        markTemporaryFailure();
+      })
+      .finally(() => {
+        requestState.settled = true;
+        clearTimeout(requestState.timeoutId);
+        if (scanStatusPendingRequest === requestState) scanStatusPendingRequest = null;
+        if (request === requestState) request = null;
+        // Even if the request was late, do not let it permanently gate future
+        // polling for the same generation. Stopped generations stay stopped.
+        if (requestGeneration === scanPollGeneration && state.scanStatusPollTimer === requestTimerId) {
+          pollInFlight = false;
+        }
+      });
+    // The old attempts cap remains a cheap guard for completed requests;
+    // wallclockTimer is the independent cap for a permanently pending call.
+    if (attempts >= 3600 || consecutiveFailures >= 6) stopAfterWallclock();
+  }, SCAN_STATUS_POLL_INTERVAL_MS);
   state.scanStatusPollTimer = timerId;
+  state.scanStatusPollWallclockTimer = setTimeout(stopAfterWallclock, SCAN_STATUS_POLL_WALLCLOCK_MS);
 }
 
 function stopScanStatusPolling() {
   clearInterval(state.scanStatusPollTimer);
+  clearTimeout(state.scanStatusPollWallclockTimer);
   state.scanStatusPollTimer = null;
+  state.scanStatusPollWallclockTimer = null;
   scanPollGeneration += 1;
 }
 

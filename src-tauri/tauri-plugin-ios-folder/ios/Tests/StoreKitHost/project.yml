@@ -17,6 +17,9 @@ targets:
     sources:
       - path: App
       - path: ../StoreKitTestSupport/MemoryPressureStub.c
+    dependencies:
+      - package: tauri-plugin-ios-folder
+        product: tauri-plugin-ios-folder
     settings:
       PRODUCT_BUNDLE_IDENTIFIER: com.windsheep.gai.storekittest
       GENERATE_INFOPLIST_FILE: YES
@@ -38,6 +41,7 @@ targets:
       - target: GAIStoreKitHost
       - package: tauri-plugin-ios-folder
         product: tauri-plugin-ios-folder
+        link: false
     settings:
       PRODUCT_BUNDLE_IDENTIFIER: com.windsheep.gai.storekittest.tests
       GENERATE_INFOPLIST_FILE: YES

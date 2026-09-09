@@ -896,17 +896,20 @@ body {
   padding-bottom: max(108px, calc(100px + env(safe-area-inset-bottom)));
 }
 
+.reader-overlay.mode-webtoon .pages-container img,
+.reader-overlay.mode-webtoon .webtoon-nav-button {
+  max-width: 100%;
+  width: 100%;
+}
+
 .reader-overlay.mode-webtoon .pages-container img {
   max-height: none;
-  max-width: 800px;
-  width: 100%;
   box-shadow: none;
   margin-bottom: 0;
   background-color: transparent;
 }
 
 .reader-overlay.mode-webtoon .webtoon-nav-button {
-  width: 100%;
   min-height: 44px;
   flex: 0 0 44px;
   padding: 10px 16px;

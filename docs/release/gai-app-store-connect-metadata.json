@@ -6,9 +6,9 @@
   "release": {
     "platform": "IOS",
     "lane": "TestFlight-first; App Store submission requires action-time owner confirmation",
-    "appStoreConnectAppId": "TODO: obtain the numeric App Store Connect app ID",
+    "appStoreConnectAppId": "6809937717",
     "bundleId": "com.windsheep.gai",
-    "version": "TODO: confirm App Store Connect marketing version",
+    "version": "1.0.0",
     "build": "TODO: confirm processed build number",
     "minimumOS": "15.0",
     "rustToolchain": "1.98.1",
@@ -21,14 +21,16 @@
       "zh-Hant",
       "en-US",
       "ja"
-    ]
+    ],
+    "appStoreVersionId": "f2110298-4d29-4ba1-8fa4-9310c72ee321",
+    "releaseType": "MANUAL"
   },
   "monetizationDraft": {
     "status": "draft-blocked",
     "model": "Free core reading plus a one-time v1 Pro purchase; no subscription",
     "storeKitStatus": "StoreKit 2 source integrated; TODO: sandbox purchase/restore/offline/revocation and physical release-build evidence",
-    "productId": "TODO: obtain the App Store Connect Product ID",
-    "price": "Owner approved 2026-09-09: TWD 150 one-time v1 Pro purchase; configure and read back regional App Store prices before release",
+    "productId": "com.windsheep.gai.pro.v1",
+    "price": "Configured and read back 2026-09-09: TWD 150 one-time v1 Pro purchase, base territory TWN; not yet approved for sale",
     "apiQuota": "No API quota is bundled with the purchase",
     "aiDelivery": "Cloud BYOK only; no on-device model is included in this launch specification",
     "free": [
@@ -52,7 +54,8 @@
       "Purchased v1 Pro entitlements must remain available in supported later releases and must not be withdrawn because v2 ships or a new subscription is introduced"
     ],
     "localImplementationProductId": "com.windsheep.gai.pro.v1",
-    "implementationEvidence": "docs/release/commerce-implementation-2026-09-08.md"
+    "implementationEvidence": "docs/release/commerce-implementation-2026-09-08.md",
+    "appStoreConnectIapId": "6809937934"
   },
   "storeListing": {
     "appName": "紳士藝術研究所",
@@ -70,12 +73,13 @@
     ],
     "description": "把整本漫畫接成條漫，往下滑就能一路閱讀。\n\nG.A.I 會把圖片資料夾或 ZIP／CBZ 依閱讀順序排好，開啟後即可連續閱讀，不需要先合併原圖。原始檔案維持不變。\n\n三種模式，免費使用。\n\n條漫模式適合連續閱讀；單頁與雙頁模式可依作品切換。閱讀進度會保存，下一次可從上次位置繼續。收藏、搜尋、基本標籤、資料匯出、撤銷與基本復原也都免費。透過系統檔案選擇器開啟已掛載的 NAS 資料夾，同樣屬於免費閱讀範圍。\n\n需要進階整理時，v1 Pro 一次買斷，不做訂閱。\n\nPro 解鎖直接 SMB／NAS、批次標籤、進階整理、重複作品候選，以及 AI 解說／整理工具。Pro 不含 API 額度；AI 使用 BYOK，自備 OpenAI 或 Google API Key，選擇頁面並同意後才會傳送，API 費用另計。\n\n已購買的 v1 Pro 權益會在支援的後續版本保留；未來大版本新增功能可能另外販售。\n\nG.A.I 不提供漫畫下載、來源爬取或內容訂閱。請使用自己有權使用的檔案。",
     "locales": {
-      "primary": "zh-Hant-TW",
+      "primary": "zh-Hant",
       "additional": [
         "en-US",
         "ja"
       ]
-    }
+    },
+    "metadataSyncStatus": "Three locales uploaded and read back 2026-09-09; privacy/support URLs and review assets remain pending"
   },
   "reviewInformation": {
     "sevenRequiredCategories": {

@@ -103,6 +103,7 @@ class FakeElement {
     this.clientHeight = 800;
     this.scrollHeight = 1600;
     this.scrollTop = 0;
+    this._layoutHeight = this.tagName === 'IMG' ? 300 : 0;
     this.isConnected = true;
   }
   addEventListener(type, handler) {
@@ -121,6 +122,7 @@ class FakeElement {
       ...detail,
     };
     for (const handler of [...(this.listeners.get(type) || [])]) handler(event);
+    if (typeof this[`on${type}`] === 'function') this[`on${type}`](event);
     return event;
   }
   append(...nodes) { nodes.filter(Boolean).forEach(node => this.appendChild(node)); }
@@ -136,18 +138,34 @@ class FakeElement {
       return this.icon;
     }
     const match = selector.match(/^img\[data-index="(\d+)"\]$/);
-    if (match) return walk(this).find(node => node.tagName === 'IMG' && node.dataset.index === match[1]) || null;
+    if (match) return walk(this).find(node => node.tagName === 'IMG' && String(node.dataset.index) === match[1]) || null;
     return null;
   }
-  querySelectorAll() { return []; }
+  querySelectorAll(selector) {
+    if (selector === '.webtoon-img') return walk(this).filter(node => node.classList?.contains('webtoon-img'));
+    return [];
+  }
   closest() { return null; }
   contains(node) { return node === this || this.children.some(child => child.contains(node)); }
   setAttribute(name, value) { this.attributes.set(name, String(value)); }
   removeAttribute(name) { this.attributes.delete(name); }
   getAttribute(name) { return this.attributes.get(name) || null; }
-  getBoundingClientRect() { return { top: 0, left: 0 }; }
+  get offsetTop() {
+    if (!this.parentNode) return 0;
+    const siblings = this.parentNode.children || [];
+    const index = siblings.indexOf(this);
+    return siblings.slice(0, index).reduce((sum, child) => sum + Number(child._layoutHeight || 0), 0);
+  }
+  getBoundingClientRect() {
+    const viewport = this.ownerDocument.getElementById('reader-viewport');
+    if (this === viewport) return { top: 0, left: 0 };
+    return { top: this.offsetTop - (viewport?.scrollTop || 0), left: 0 };
+  }
   focus() { this.ownerDocument.activeElement = this; }
-  scrollIntoView() {}
+  scrollIntoView() {
+    const viewport = this.ownerDocument.getElementById('reader-viewport');
+    if (viewport && Number.isFinite(this.offsetTop)) viewport.scrollTop = Math.max(0, this.offsetTop - 64);
+  }
 }
 
 class FakeDocument {
@@ -253,6 +271,78 @@ function findDialog(document) {
   return document.body.children.find(child => child.id === 'reader-navigation-confirm');
 }
 
+function renderWebtoonPages(hooks, count, currentPageIndex) {
+  hooks.elements.readerOverlay.style.display = 'flex';
+  hooks.state.readingMode = 'webtoon';
+  hooks.state.currentComic = comic('anchor-book', 'Anchor book');
+  hooks.state.currentComicPages = Array.from({ length: count }, (_, index) => `/page-${index}.svg`);
+  hooks.state.currentPageIndex = currentPageIndex;
+  hooks.renderPages();
+  return hooks.elements.pagesContainer.querySelector(`img[data-index="${currentPageIndex}"]`);
+}
+
+// Programmatic jumps keep the selected page at the reader's top padding even
+// when an image above it finishes loading asynchronously. An initial scroll
+// event must not overwrite the captured page index.
+{
+  const { hooks, clock } = createRuntimeHarness();
+  const target = renderWebtoonPages(hooks, 20, 9);
+  const viewport = hooks.elements.readerViewport;
+  clock.tick(201);
+  const initialTop = target.offsetTop - viewport.scrollTop;
+  assert.equal(hooks.state.currentPageIndex, 9);
+  assert.equal(initialTop, 64, 'initial anchor lands at scroll padding');
+  viewport.dispatch('scroll');
+  clock.tick(0);
+  assert.equal(hooks.state.currentPageIndex, 9, 'programmatic scroll does not reset page');
+
+  const pageAbove = hooks.elements.pagesContainer.querySelector('img[data-index="2"]');
+  pageAbove._layoutHeight += 420;
+  pageAbove.dispatch('load');
+  assert.equal(target.offsetTop - viewport.scrollTop, 64, 'async layout shift is compensated');
+}
+
+// A real user gesture cancels the one-shot anchor so later image loads do not
+// pull the user's manually chosen position back to the old page.
+{
+  const { hooks, clock } = createRuntimeHarness();
+  const target = renderWebtoonPages(hooks, 20, 9);
+  const viewport = hooks.elements.readerViewport;
+  clock.tick(201);
+  viewport.dispatch('wheel', { deltaY: 80, preventDefault() {} });
+  assert.equal(hooks.state.webtoonAnchor, null, 'wheel cancels anchor');
+  const before = viewport.scrollTop;
+  const pageAbove = hooks.elements.pagesContainer.querySelector('img[data-index="2"]');
+  pageAbove._layoutHeight += 420;
+  pageAbove.dispatch('load');
+  assert.equal(viewport.scrollTop, before, 'cancelled anchor does not force scroll');
+  assert.notEqual(target.offsetTop - viewport.scrollTop, 64);
+}
+
+// Rapid mode/book changes invalidate callbacks from the previous render.
+{
+  const { hooks, clock } = createRuntimeHarness();
+  const oldTarget = renderWebtoonPages(hooks, 20, 9);
+  clock.tick(201);
+  hooks.state.readingMode = 'catalog';
+  hooks.renderPages();
+  oldTarget._layoutHeight += 500;
+  oldTarget.dispatch('load');
+  assert.equal(hooks.state.webtoonAnchor, null, 'mode change clears old anchor');
+
+  const nextTarget = renderWebtoonPages(hooks, 20, 9);
+  clock.tick(201);
+  const oldGeneration = hooks.state.renderGeneration;
+  hooks.state.currentComic = comic('new-book', 'New book');
+  hooks.state.currentComicPages = Array.from({ length: 20 }, (_, index) => `/new-${index}.svg`);
+  hooks.renderPages();
+  const newAnchor = hooks.state.webtoonAnchor;
+  nextTarget._layoutHeight += 500;
+  nextTarget.dispatch('load');
+  assert.ok(hooks.state.renderGeneration > oldGeneration, 'book render has a new generation');
+  assert.equal(hooks.state.webtoonAnchor, newAnchor, 'book change keeps only the new anchor');
+}
+
 // Rendering a webtoon creates only the available adjacent buttons, with no
 // invisible boundary tap path left on the reader viewport.
 {
@@ -338,3 +428,52 @@ function findDialog(document) {
 }
 
 console.log('PASS: webtoon navigation buttons, mode preservation, boundary absence, confirmation, and cleanup are covered');
+
+// Webtoon taps toggle chrome, while swipes (including a swipe that returns to
+// its start), cancelled touches, multi-touch and compatibility mouse movement
+// must leave it hidden. Exercise the real listeners registered by bindEvents.
+for (const scenario of ['tap-pointer-first', 'tap-touch-first', 'jitter', 'vertical-swipe', 'horizontal-swipe', 'return-swipe', 'multi-touch', 'cancelled']) {
+  const { hooks } = createRuntimeHarness();
+  renderWebtoonPages(hooks, 20, 9);
+  const overlay = hooks.elements.readerOverlay;
+  const viewport = hooks.elements.readerViewport;
+  overlay.classList.add('reader-idle');
+  const start = { clientX: 500, clientY: 400, screenX: 500, screenY: 400 };
+  const end = { ...start };
+  const second = { ...start, clientX: 600, screenX: 600 };
+  viewport.dispatch('touchstart', { touches: scenario === 'multi-touch' ? [start, second] : [start], changedTouches: [start] });
+  if (scenario.includes('swipe')) {
+    const moved = { ...start, clientY: 480, screenY: 480 };
+    if (scenario === 'horizontal-swipe') Object.assign(moved, { clientX: 600, screenX: 600, clientY: 400, screenY: 400 });
+    viewport.dispatch('touchmove', { touches: [moved], changedTouches: [moved] });
+    if (scenario !== 'return-swipe') Object.assign(end, moved);
+    overlay.dispatch('mousemove', { clientY: 790, buttons: 0 });
+    assert.equal(overlay.classList.contains('reader-idle'), true, 'compatibility mouse movement during swipe stays hidden');
+  }
+  if (scenario === 'jitter') Object.assign(end, { clientX: 504, screenX: 504 });
+  if (scenario === 'cancelled') viewport.dispatch('touchcancel', { changedTouches: [start] });
+  const pointerEnd = () => viewport.dispatch('pointerup', { pointerType: 'touch', ...end });
+  const touchEnd = () => viewport.dispatch('touchend', { touches: [], changedTouches: [end] });
+  if (scenario === 'tap-touch-first') { touchEnd(); pointerEnd(); } else { pointerEnd(); touchEnd(); }
+  const isTap = scenario.startsWith('tap-') || scenario === 'jitter';
+  assert.equal(overlay.classList.contains('reader-idle'), !isTap, scenario);
+  assert.equal(hooks.state.currentPageIndex, 9, `${scenario}: chrome interaction does not turn the page`);
+}
+
+{
+  const { hooks } = createRuntimeHarness();
+  renderWebtoonPages(hooks, 20, 9);
+  const overlay = hooks.elements.readerOverlay;
+  const viewport = hooks.elements.readerViewport;
+  overlay.classList.add('reader-idle');
+  viewport.dispatch('pointerdown', { pointerType: 'mouse', clientX: 500, clientY: 400 });
+  viewport.dispatch('pointermove', { pointerType: 'mouse', clientX: 500, clientY: 600 });
+  overlay.dispatch('mousemove', { clientY: 790, buttons: 1 });
+  viewport.dispatch('pointerup', { pointerType: 'mouse', clientX: 500, clientY: 600 });
+  assert.equal(overlay.classList.contains('reader-idle'), true, 'mouse drag does not show chrome');
+  const button = { closest: () => button };
+  viewport.dispatch('pointerdown', { pointerType: 'mouse', clientX: 500, clientY: 400, target: button });
+  viewport.dispatch('pointerup', { pointerType: 'mouse', clientX: 500, clientY: 400, target: button });
+  assert.equal(overlay.classList.contains('reader-idle'), true, 'button taps do not also toggle chrome');
+}
+console.log('PASS: webtoon tap shows UI; swipes, drags, multi-touch and cancellation do not');

@@ -329,6 +329,7 @@ let state = {
   readerIdleTimer: null,
   readerContextMenuOpen: false,
   webtoonScrollFrame: null,
+  webtoonAnchor: null,
   scanStatusPollTimer: null,
   scanStatus: null,
   libraryRefreshPending: false,
@@ -991,6 +992,8 @@ function bindEvents() {
 
   // 閱讀器滑鼠活動觸發顯示控制列，邊緣 12% 才觸發，靜止後自動隱藏
   elements.readerOverlay.addEventListener('mousemove', (e) => {
+    // 觸控相容滑鼠事件與按住拖曳不能繞過下方的 tap/swipe 判定。
+    if (e.buttons || readerTouchActive || e.sourceCapabilities?.firesTouchEvents) return;
     const y = e.clientY;
     const h = window.innerHeight;
     if (y < h * 0.12 || y > h * 0.88) {
@@ -1020,11 +1023,15 @@ function bindEvents() {
     readerTouchClickHandled = false;
     readerTouchResetTimer = null;
   };
+  const cancelWebtoonAnchorFromUserInput = () => {
+    if (state.readingMode === 'webtoon') cancelWebtoonAnchor();
+  };
   const deferReaderTouchReset = () => {
     clearTimeout(readerTouchResetTimer);
     readerTouchResetTimer = window.setTimeout(resetReaderTouchSession, 350);
   };
   elements.readerViewport.addEventListener('touchstart', (e) => {
+    cancelWebtoonAnchorFromUserInput();
     clearTimeout(readerTouchResetTimer);
     const touch = e.changedTouches[0];
     readerTouchActive = true;
@@ -1036,6 +1043,7 @@ function bindEvents() {
     readerTouchMoved = false;
   }, { passive: true });
   elements.readerViewport.addEventListener('touchmove', (e) => {
+    cancelWebtoonAnchorFromUserInput();
     if (!readerTouchActive) return;
     if (e.touches?.length > 1 || e.changedTouches?.length !== 1) {
       readerTouchMulti = true;
@@ -1067,6 +1075,7 @@ function bindEvents() {
   }, { passive: true });
 
   elements.readerViewport.addEventListener('pointerdown', event => {
+    cancelWebtoonAnchorFromUserInput();
     if (event.pointerType === 'touch') return;
     readerPointerActive = true;
     readerPointerMoved = false;
@@ -1076,6 +1085,7 @@ function bindEvents() {
   });
   elements.readerViewport.addEventListener('pointermove', event => {
     if (event.pointerType === 'touch' || !readerPointerActive) return;
+    cancelWebtoonAnchorFromUserInput();
     if (Math.hypot(event.clientX - readerPointerStartX, event.clientY - readerPointerStartY) > 12) {
       readerPointerMoved = true;
     }
@@ -3224,6 +3234,7 @@ async function openReader(comicId) {
 async function closeReader() {
   ++state.readerOperation;
   state.renderGeneration += 1;
+  cancelWebtoonAnchor();
   state.readerBoundaryDialog?.finish(false);
   state.readerBoundaryDialog = null;
   const closingComic = state.currentComic;
@@ -3302,6 +3313,11 @@ function createWebtoonNavigationButton(direction) {
 function renderPages() {
   if (!state.currentComic) return;
 
+  cancelWebtoonAnchor();
+  if (state.webtoonScrollFrame) {
+    cancelAnimationFrame(state.webtoonScrollFrame);
+    state.webtoonScrollFrame = null;
+  }
   const renderGeneration = ++state.renderGeneration;
 
   const totalPages = state.currentComicPages.length;
@@ -3434,6 +3450,7 @@ function renderPages() {
     preloadNextPages();
 
   } else if (state.readingMode === 'webtoon') {
+    const initialWebtoonPageIndex = state.currentPageIndex;
     elements.readerOverlay.classList.add('mode-webtoon');
     elements.readerModeIndicator.textContent = readerText('條漫直捲');
     elements.prevZone.style.width = '0';
@@ -3453,6 +3470,16 @@ function renderPages() {
       img.loading = 'lazy';
       img.className = 'webtoon-img';
       img.dataset.index = idx;
+      img.alt = readerText('第 {page} 頁', { page: idx + 1 });
+      // 未載入頁面也要先佔住固定比例的空間，避免跳到遠頁時前方 lazy
+      // 圖片逐張解碼把目標頁往下推。`auto` 會在圖片載入後改用原始比例。
+      img.style.aspectRatio = 'auto 2 / 3';
+      const preserveAnchorAfterLayout = () => {
+        if (state.renderGeneration !== renderGeneration) return;
+        preserveWebtoonAnchorPosition();
+      };
+      img.addEventListener('load', preserveAnchorAfterLayout);
+      img.addEventListener('error', preserveAnchorAfterLayout);
       applyImageEffects(img);
       webtoonFragment.appendChild(img);
     });
@@ -3466,21 +3493,17 @@ function renderPages() {
     elements.readerViewport.onscroll = handleWebtoonScroll;
 
     // 初始化進度
-    elements.pageCounter.textContent = readerText('第 1 / {total} 頁', { total: totalPages });
+    elements.pageCounter.textContent = readerText('第 {page} / {total} 頁', {
+      page: state.currentPageIndex + 1,
+      total: totalPages,
+    });
     elements.progressSlider.max = totalPages;
-    elements.progressSlider.value = 1;
+    elements.progressSlider.value = state.currentPageIndex + 1;
 
-    // 如果進度不是 0，則捲動到該頁面位置
-    if (state.currentPageIndex > 0) {
-      setTimeout(() => {
-        if (state.renderGeneration !== renderGeneration) return;
-        const targetImg = elements.pagesContainer.querySelector(`img[data-index="${state.currentPageIndex}"]`);
-        if (targetImg) {
-          targetImg.scrollIntoView({ behavior: 'auto' });
-          // 手動觸發載入
-          loadWebtoonImagesAround(state.currentPageIndex);
-        }
-      }, 200);
+    // placeholder 已在同步建 DOM 時提供穩定高度，因此立即建立錨點；
+    // 延後到 200ms 會留下 scroll event 改寫 currentPageIndex 的空窗。
+    if (initialWebtoonPageIndex > 0) {
+      anchorWebtoonPage(initialWebtoonPageIndex, { behavior: 'auto', renderGeneration });
     } else {
       loadWebtoonImagesAround(0);
     }
@@ -3822,13 +3845,10 @@ function jumpToPage(pageIndex) {
 
   if (state.readingMode === 'webtoon') {
     state.currentPageIndex = pageIndex;
-    const targetImg = elements.pagesContainer.querySelector(`img[data-index="${pageIndex}"]`);
-    if (targetImg) {
-      targetImg.scrollIntoView({ behavior: 'smooth' });
-      loadWebtoonImagesAround(pageIndex);
-    }
+    anchorWebtoonPage(pageIndex, { behavior: 'smooth', renderGeneration: state.renderGeneration });
     // 更新進度
     elements.pageCounter.textContent = readerText('第 {page} / {total} 頁', { page: pageIndex + 1, total: totalPages });
+    elements.progressSlider.value = pageIndex + 1;
     saveReadingProgress();
   } else {
     // 雙頁模式下，如果點選的是偶數頁，自動調整為奇數頁（對齊排版）
@@ -3881,24 +3901,20 @@ function handleReaderPointerClick(e) {
     return;
   }
 
-  if (state.readingMode === 'webtoon') {
-    return;
-  }
-
   const w = window.innerWidth;
   const x = e.clientX;
 
-  if (x < w * 0.3) {
-    goPreviousByReadingDirection();
-  } else if (x > w * 0.7) {
-    goNextByReadingDirection();
-  } else {
-    // 中間區域呼叫或隱藏 UI
+  // 漫條輕點任何閱讀區域都能切換工具列；滑動已由上游手勢守衛排除。
+  if (state.readingMode === 'webtoon' || (x >= w * 0.3 && x <= w * 0.7)) {
     if (elements.readerOverlay.classList.contains('reader-idle')) {
       triggerControlsActive();
     } else {
       elements.readerOverlay.classList.add('reader-idle');
     }
+  } else if (x < w * 0.3) {
+    goPreviousByReadingDirection();
+  } else {
+    goNextByReadingDirection();
   }
 }
 
@@ -4061,6 +4077,102 @@ function prunePreloadedImages(indicesToPreload = []) {
   }
 }
 
+// 條漫模式的程式化跳頁錨點。目標頁上方的圖片載入或尺寸改變時，只補償
+// 這次跳頁建立的差值；使用者一旦開始操作，便立即交還滾動控制權。
+function cancelWebtoonAnchor() {
+  const anchor = state.webtoonAnchor;
+  if (anchor?.resizeObserver) anchor.resizeObserver.disconnect();
+  state.webtoonAnchor = null;
+}
+
+function isActiveWebtoonAnchor(anchor = state.webtoonAnchor) {
+  return Boolean(anchor
+    && anchor.generation === state.renderGeneration
+    && state.readingMode === 'webtoon'
+    && state.currentComic
+    && anchor.index >= 0
+    && anchor.index < state.currentComicPages.length);
+}
+
+function getWebtoonImage(index) {
+  return elements.pagesContainer.querySelector(`img[data-index="${index}"]`);
+}
+
+function getWebtoonImageOffsetTop(img) {
+  if (!img) return null;
+  const rect = img.getBoundingClientRect?.();
+  const viewportRect = elements.readerViewport.getBoundingClientRect?.();
+  if (Number.isFinite(rect?.top) && Number.isFinite(viewportRect?.top)) {
+    return rect.top - viewportRect.top + elements.readerViewport.scrollTop;
+  }
+  return Number.isFinite(img.offsetTop) ? img.offsetTop : null;
+}
+
+function getWebtoonAnchorViewportOffset() {
+  const computed = typeof getComputedStyle === 'function'
+    ? getComputedStyle(elements.readerViewport)
+    : null;
+  const configured = parseFloat(computed?.scrollPaddingTop);
+  return Number.isFinite(configured) ? configured : 64;
+}
+
+function preserveWebtoonAnchorPosition() {
+  const anchor = state.webtoonAnchor;
+  if (!isActiveWebtoonAnchor(anchor)) return;
+
+  const targetImg = getWebtoonImage(anchor.index);
+  const targetTop = getWebtoonImageOffsetTop(targetImg);
+  if (!Number.isFinite(targetTop)) return;
+
+  if (Number.isFinite(anchor.lastTargetTop)) {
+    const delta = targetTop - anchor.lastTargetTop;
+    if (delta) elements.readerViewport.scrollTop += delta;
+  } else {
+    anchor.targetViewportOffset = targetTop - elements.readerViewport.scrollTop;
+  }
+  anchor.lastTargetTop = targetTop;
+}
+
+function observeWebtoonAnchorLayout(anchor) {
+  const ResizeObserverCtor = window.ResizeObserver || globalThis.ResizeObserver;
+  if (typeof ResizeObserverCtor !== 'function') return;
+  anchor.resizeObserver = new ResizeObserverCtor(() => {
+    if (isActiveWebtoonAnchor(anchor)) preserveWebtoonAnchorPosition();
+  });
+  anchor.resizeObserver.observe(elements.pagesContainer);
+}
+
+function anchorWebtoonPage(index, { behavior = 'auto', renderGeneration = state.renderGeneration } = {}) {
+  if (state.readingMode !== 'webtoon' || renderGeneration !== state.renderGeneration) return false;
+  const targetImg = getWebtoonImage(index);
+  if (!targetImg) return false;
+
+  cancelWebtoonAnchor();
+  const anchor = { index, generation: renderGeneration, lastTargetTop: null, resizeObserver: null };
+  state.webtoonAnchor = anchor;
+  state.currentPageIndex = index;
+  elements.pageCounter.textContent = readerText('第 {page} / {total} 頁', {
+    page: index + 1,
+    total: state.currentComicPages.length,
+  });
+  elements.progressSlider.value = index + 1;
+  loadWebtoonImagesAround(index);
+  targetImg.scrollIntoView({ behavior, block: 'start' });
+  // scrollIntoView 在不同 WKWebView 版本對 nested overflow + scroll-padding
+  // 的處理不一致，直接補一次容器 scrollTop 才能保證目標頁落在工具列下方。
+  const targetTop = getWebtoonImageOffsetTop(targetImg);
+  if (Number.isFinite(targetTop)) {
+    const targetOffset = getWebtoonAnchorViewportOffset();
+    elements.readerViewport.scrollTop = Math.max(0, targetTop - targetOffset);
+  }
+  preserveWebtoonAnchorPosition();
+  observeWebtoonAnchorLayout(anchor);
+  // 某些 WKWebView 會在 scrollIntoView 後才派發 scroll；先記住目標頁，
+  // 避免那個程式化事件把 currentPageIndex 改回第一頁。
+  handleWebtoonScroll();
+  return true;
+}
+
 // 條漫模式滾動載入與進度計算
 function handleWebtoonScroll() {
   if (state.webtoonScrollFrame) return;
@@ -4071,6 +4183,11 @@ function handleWebtoonScroll() {
 }
 
 function updateWebtoonScrollState() {
+  if (state.readingMode !== 'webtoon' || !state.currentComic) return;
+  if (isActiveWebtoonAnchor()) {
+    preserveWebtoonAnchorPosition();
+    return;
+  }
   const imgs = elements.pagesContainer.querySelectorAll('.webtoon-img');
   const viewportTop = elements.readerViewport.scrollTop;
   const viewportHeight = elements.readerViewport.clientHeight;
@@ -4650,6 +4767,7 @@ function stopScanStatusPolling() {
 
 // 滑鼠滾輪翻頁處理
 function handleWheelScroll(e) {
+  if (state.readingMode === 'webtoon') cancelWebtoonAnchor();
   // 如果是條漫模式或目錄模式，允許原生滾動，不作攔截
   if (state.readingMode === 'webtoon' || state.readingMode === 'catalog') return;
 
@@ -5458,6 +5576,9 @@ if (typeof window !== 'undefined' && window.__GIA_TEST_HOOKS__) {
     getComicSourceKey,
     findAdjacentComicInFolder,
     requestWebtoonAdjacentComic,
+    jumpToPage,
+    anchorWebtoonPage,
+    cancelWebtoonAnchor,
     handleReaderPointerClick,
     bindEvents,
     closeReader,

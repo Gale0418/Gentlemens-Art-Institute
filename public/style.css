@@ -907,6 +907,9 @@ body {
   box-shadow: none;
   margin-bottom: 0;
   background-color: transparent;
+  /* lazy 圖片在載入前也保留固定比例；載入後 auto 會回到圖片原始比例。 */
+  aspect-ratio: auto 2 / 3;
+  object-fit: contain;
 }
 
 .reader-overlay.mode-webtoon .webtoon-nav-button {

@@ -162,6 +162,7 @@ class FakeElement {
     return { top: this.offsetTop - (viewport?.scrollTop || 0), left: 0 };
   }
   focus() { this.ownerDocument.activeElement = this; }
+  decode() { return Promise.resolve(); }
   scrollIntoView() {
     const viewport = this.ownerDocument.getElementById('reader-viewport');
     if (viewport && Number.isFinite(this.offsetTop)) viewport.scrollTop = Math.max(0, this.offsetTop - 64);
@@ -428,6 +429,72 @@ function renderWebtoonPages(hooks, count, currentPageIndex) {
 }
 
 console.log('PASS: webtoon navigation buttons, mode preservation, boundary absence, confirmation, and cleanup are covered');
+
+// Two-page controls keep the cover exception, support a one-page offset, and
+// retain that offset for the following two-page navigation.
+{
+  const { hooks } = createRuntimeHarness();
+  hooks.elements.readerOverlay.style.display = 'flex';
+  hooks.state.currentComic = comic('double-book', 'Double book');
+  hooks.state.currentComicPages = Array.from({ length: 7 }, (_, index) => `/double-${index}.svg`);
+  hooks.state.readingMode = 'double';
+  hooks.state.currentPageIndex = 1;
+  hooks.state.doublePairOffset = 1;
+  hooks.renderPages();
+
+  assert.equal(hooks.advanceDoubleBySinglePage(), true);
+  assert.equal(hooks.state.currentPageIndex, 2, 'single-page shift advances one page');
+  assert.equal(hooks.state.doublePairOffset, 0, 'single-page shift stores the offset phase');
+  hooks.nextPage();
+  assert.equal(hooks.state.currentPageIndex, 4, 'next page advances two pages after a shift');
+  hooks.prevPage();
+  assert.equal(hooks.state.currentPageIndex, 2, 'previous page returns by two pages after a shift');
+  hooks.prevPage();
+  assert.equal(hooks.state.currentPageIndex, 0, 'previous page reaches the cover boundary');
+  hooks.nextPage();
+  assert.equal(hooks.state.currentPageIndex, 1, 'leaving the cover restores the normal pair phase');
+  assert.equal(hooks.state.doublePairOffset, 1);
+
+  hooks.state.doublePairOffset = 0;
+  hooks.jumpToPage(3);
+  assert.equal(hooks.state.currentPageIndex, 2, 'jump keeps the shifted even pair start');
+  hooks.state.readingMode = 'double';
+  hooks.state.currentPageIndex = 2;
+  hooks.toggleDoubleDirection();
+  assert.equal(hooks.state.currentPageIndex, 2, 'direction toggle does not jump pages');
+  assert.equal(hooks.state.readingMode, 'double-rtl');
+  hooks.elements.btnModeDouble.dispatch('click');
+  assert.equal(hooks.state.readingMode, 'double-rtl', 'active double button preserves reverse direction');
+  hooks.advanceDoubleBySinglePage();
+  hooks.advanceDoubleBySinglePage();
+  assert.equal(hooks.state.currentPageIndex, 4, 'repeated one-shot actions each advance exactly one page');
+  hooks.state.currentPageIndex = 5;
+  hooks.advanceDoubleBySinglePage();
+  assert.equal(hooks.state.currentPageIndex, 6);
+  assert.equal(hooks.elements.btnDoubleShift.disabled, true, 'last page disables the one-shot action');
+  assert.equal(hooks.advanceDoubleBySinglePage(), false, 'last-page shift is a no-op');
+  assert.equal(hooks.state.currentComic.id, 'double-book', 'shift never opens another book');
+  hooks.state.readingMode = 'single';
+  assert.equal(hooks.advanceDoubleBySinglePage(), false, 'single mode ignores double shift');
+  assert.equal(hooks.toggleDoubleDirection(), false, 'single mode ignores direction action');
+}
+
+// The unified two-page entry remains available while its two auxiliary
+// controls are hidden outside two-page mode.
+{
+  const { hooks } = createRuntimeHarness();
+  hooks.elements.readerOverlay.style.display = 'flex';
+  hooks.state.currentComic = comic('entry-book', 'Entry book');
+  hooks.state.currentComicPages = ['/entry-0.svg', '/entry-1.svg', '/entry-2.svg'];
+  hooks.state.readingMode = 'single';
+  hooks.elements.zoomValue.parentElement = { style: {} };
+  hooks.elements.doubleModeControls.hidden = true;
+  hooks.elements.btnModeDouble.dispatch('click');
+  assert.equal(hooks.state.readingMode, 'double', 'single mode can enter unified two-page mode');
+  assert.equal(hooks.elements.doubleModeControls.hidden, false, 'two-page auxiliary controls become visible');
+}
+
+console.log('PASS: two-page direction, one-page shift, parity snap, and boundaries are covered');
 
 // Webtoon taps toggle chrome, while swipes (including a swipe that returns to
 // its start), cancelled touches, multi-touch and compatibility mouse movement

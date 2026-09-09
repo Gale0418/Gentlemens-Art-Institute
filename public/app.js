@@ -314,6 +314,8 @@ let state = {
   currentComicPages: [],
   currentPageIndex: 0,
   readingMode: 'single', // 'single', 'double', 'double-rtl', 'webtoon'
+  // 雙頁配對相位：1 代表既有封面後的 2-3、4-5…；0 代表單頁錯開後的 3-4、5-6…。
+  doublePairOffset: 1,
   zoomPercentage: 100,
   fitMode: localStorage.getItem('readerFitMode') || 'contain', // 'contain', 'width', 'height'
   rotationAngle: 0, // 0, 90, 180, 270
@@ -463,8 +465,10 @@ const elements = {
 
   // 模式與控制按鈕
   btnModeSingle: document.getElementById('btn-mode-single'),
+  doubleModeControls: document.getElementById('double-mode-controls'),
   btnModeDouble: document.getElementById('btn-mode-double'),
-  btnModeDoubleRtl: document.getElementById('btn-mode-double-rtl'),
+  btnDoubleDirection: document.getElementById('btn-double-direction'),
+  btnDoubleShift: document.getElementById('btn-double-shift'),
   btnModeWebtoon: document.getElementById('btn-mode-webtoon'),
   btnModeCatalog: document.getElementById('btn-mode-catalog'),
   btnZoomOut: document.getElementById('btn-zoom-out'),
@@ -957,8 +961,11 @@ function bindEvents() {
   });
   // 閱讀模式切換
   elements.btnModeSingle.addEventListener('click', () => setReadingMode('single'));
-  elements.btnModeDouble.addEventListener('click', () => setReadingMode('double'));
-  elements.btnModeDoubleRtl.addEventListener('click', () => setReadingMode('double-rtl'));
+  elements.btnModeDouble.addEventListener('click', () => {
+    if (!isDoubleReadingMode()) setReadingMode('double');
+  });
+  elements.btnDoubleDirection?.addEventListener('click', toggleDoubleDirection);
+  elements.btnDoubleShift?.addEventListener('click', advanceDoubleBySinglePage);
   elements.btnModeWebtoon.addEventListener('click', () => setReadingMode('webtoon'));
   elements.btnModeCatalog.addEventListener('click', () => setReadingMode('catalog'));
 
@@ -3177,6 +3184,7 @@ async function openReader(comicId) {
     state.aiExplainPendingRequest = null;
 
     state.currentPageIndex = (data.progress && data.progress.currentPage) ? data.progress.currentPage : 0;
+    state.doublePairOffset = state.currentPageIndex > 0 ? state.currentPageIndex % 2 : 1;
     state.readerCacheWindowPage = state.currentPageIndex;
     state.readerCacheReadyPage = null;
 
@@ -3310,6 +3318,80 @@ function createWebtoonNavigationButton(direction) {
   return button;
 }
 
+function isDoubleReadingMode(mode = state.readingMode) {
+  return mode === 'double' || mode === 'double-rtl';
+}
+
+// 以目前雙頁相位把任意頁面對齊到配對起點；封面永遠保留單頁。
+function doublePageStartForIndex(pageIndex) {
+  if (pageIndex <= 0) return 0;
+  const offset = state.doublePairOffset === 0 ? 0 : 1;
+  const remainder = ((pageIndex - offset) % 2 + 2) % 2;
+  return Math.max(1, pageIndex - remainder);
+}
+
+function syncDoubleModeControls() {
+  const isDouble = isDoubleReadingMode();
+  const isRtl = state.readingMode === 'double-rtl';
+  const totalPages = state.currentComicPages.length;
+  const shiftAvailable = isDouble && state.currentPageIndex + 1 < totalPages;
+
+  if (elements.doubleModeControls) elements.doubleModeControls.hidden = !isDouble;
+  if (elements.btnDoubleDirection) {
+    elements.btnDoubleDirection.hidden = false;
+    elements.btnDoubleDirection.disabled = !isDouble;
+    elements.btnDoubleDirection.setAttribute('aria-pressed', String(isRtl));
+    const label = readerText(isRtl ? '切換為左至右雙頁' : '切換為右至左雙頁');
+    elements.btnDoubleDirection.setAttribute('aria-label', label);
+    elements.btnDoubleDirection.title = label;
+  }
+  if (elements.btnDoubleShift) {
+    elements.btnDoubleShift.hidden = false;
+    elements.btnDoubleShift.disabled = !shiftAvailable;
+    const label = readerText('雙頁往後移一頁');
+    elements.btnDoubleShift.setAttribute('aria-label', label);
+    elements.btnDoubleShift.title = label;
+  }
+
+  const menu = elements.readerContextMenu;
+  const menuDirection = menu?.querySelector('[data-reader-action="double-direction"]');
+  const menuShift = menu?.querySelector('[data-reader-action="double-shift"]');
+  if (menuDirection) {
+    menuDirection.disabled = !isDouble;
+    menuDirection.setAttribute('aria-pressed', String(isRtl));
+    menuDirection.setAttribute('aria-label', readerText('切換雙頁方向'));
+  }
+  if (menuShift) {
+    menuShift.disabled = !shiftAvailable;
+    menuShift.setAttribute('aria-disabled', String(!shiftAvailable));
+  }
+}
+
+// 僅切換左右閱讀方向；頁面位置與配對相位都維持不變。
+function toggleDoubleDirection() {
+  if (!isDoubleReadingMode()) return false;
+  state.readingMode = state.readingMode === 'double-rtl' ? 'double' : 'double-rtl';
+  updateReaderUiControls();
+  renderPages();
+  return true;
+}
+
+// 將目前配對往後移一頁；下一次一般翻頁仍以兩頁為單位。
+function advanceDoubleBySinglePage() {
+  if (!isDoubleReadingMode()) return false;
+  const totalPages = state.currentComicPages.length;
+  const nextIndex = state.currentPageIndex + 1;
+  if (nextIndex >= totalPages) {
+    syncDoubleModeControls();
+    return false;
+  }
+  state.currentPageIndex = nextIndex;
+  // 封面移到下一頁後仍沿用既有 2-3、4-5…配對；其餘情況記住錯開相位。
+  state.doublePairOffset = state.currentPageIndex === 1 ? 1 : state.currentPageIndex % 2;
+  renderPages();
+  return true;
+}
+
 function renderPages() {
   if (!state.currentComic) return;
 
@@ -3374,7 +3456,7 @@ function renderPages() {
 
   } else if (state.readingMode === 'double' || state.readingMode === 'double-rtl') {
     elements.readerOverlay.classList.add('mode-double');
-    elements.readerModeIndicator.textContent = readerText(state.readingMode === 'double-rtl' ? '雙頁模式 (日)' : '雙頁模式');
+    elements.readerModeIndicator.textContent = readerText(state.readingMode === 'double-rtl' ? '雙頁模式 (右至左)' : '雙頁模式');
     elements.prevZone.style.width = '15%';
     elements.nextZone.style.width = '15%';
 
@@ -3522,6 +3604,7 @@ function renderPages() {
     elements.progressSlider.value = state.currentPageIndex + 1;
   }
 
+  syncDoubleModeControls();
   scheduleReaderCacheWindowUpdate();
 
   // 儲存進度到伺服器
@@ -3544,6 +3627,7 @@ function nextPage() {
     if (state.currentPageIndex === 0) {
       if (totalPages > 1) {
         state.currentPageIndex = 1;
+        state.doublePairOffset = 1;
         renderPages();
       } else {
         endReached = true;
@@ -3851,9 +3935,9 @@ function jumpToPage(pageIndex) {
     elements.progressSlider.value = pageIndex + 1;
     saveReadingProgress();
   } else {
-    // 雙頁模式下，如果點選的是偶數頁，自動調整為奇數頁（對齊排版）
-    if ((state.readingMode === 'double' || state.readingMode === 'double-rtl') && pageIndex > 0 && pageIndex % 2 === 0) {
-      state.currentPageIndex = pageIndex - 1;
+    // 雙頁模式依目前配對相位對齊；錯開後可合法落在偶數索引。
+    if (isDoubleReadingMode()) {
+      state.currentPageIndex = doublePageStartForIndex(pageIndex);
     } else {
       state.currentPageIndex = pageIndex;
     }
@@ -3863,6 +3947,7 @@ function jumpToPage(pageIndex) {
 
 function jumpToFirstPage() {
   if (!state.currentComicPages.length) return;
+  if (isDoubleReadingMode()) state.doublePairOffset = 1;
   jumpToPage(0);
   showReaderToast(readerText('已跳到首頁'));
 }
@@ -3963,9 +4048,14 @@ function handleReaderContextAction(action) {
   switch (action) {
     case 'single':
     case 'double':
-    case 'double-rtl':
     case 'webtoon':
-      setReadingMode(action);
+      if (action !== 'double' || !isDoubleReadingMode()) setReadingMode(action);
+      break;
+    case 'double-direction':
+      toggleDoubleDirection();
+      break;
+    case 'double-shift':
+      advanceDoubleBySinglePage();
       break;
     case 'first':
       jumpToFirstPage();
@@ -4257,21 +4347,23 @@ function setReadingMode(mode) {
   if (mode === 'catalog') {
     state.prevReadingMode = state.readingMode !== 'catalog' ? state.readingMode : (state.prevReadingMode || 'single');
   }
+  const wasDouble = isDoubleReadingMode();
   state.readingMode = mode;
+  if (isDoubleReadingMode(mode) && !wasDouble) {
+    state.doublePairOffset = state.currentPageIndex === 0 ? 1 : state.currentPageIndex % 2;
+  }
 
   // 更新按鈕 active 樣式
   elements.btnModeSingle.classList.toggle('active', mode === 'single');
-  elements.btnModeDouble.classList.toggle('active', mode === 'double');
-  elements.btnModeDoubleRtl.classList.toggle('active', mode === 'double-rtl');
+  elements.btnModeDouble.classList.toggle('active', isDoubleReadingMode(mode));
   elements.btnModeWebtoon.classList.toggle('active', mode === 'webtoon');
   elements.btnModeCatalog.classList.toggle('active', mode === 'catalog');
   [
     [elements.btnModeSingle, 'single'],
     [elements.btnModeDouble, 'double'],
-    [elements.btnModeDoubleRtl, 'double-rtl'],
     [elements.btnModeWebtoon, 'webtoon'],
     [elements.btnModeCatalog, 'catalog']
-  ].forEach(([button, value]) => button.setAttribute('aria-pressed', String(mode === value)));
+  ].forEach(([button, value]) => button.setAttribute('aria-pressed', String(value === 'double' ? isDoubleReadingMode(mode) : mode === value)));
 
   // 控制 Zoom 面板的隱藏與顯示
   const disableZoom = mode === 'webtoon' || mode === 'catalog';
@@ -4390,17 +4482,16 @@ function handleKeyDown(e) {
 function updateReaderUiControls() {
   const mode = state.readingMode;
   elements.btnModeSingle.classList.toggle('active', mode === 'single');
-  elements.btnModeDouble.classList.toggle('active', mode === 'double');
-  elements.btnModeDoubleRtl.classList.toggle('active', mode === 'double-rtl');
+  elements.btnModeDouble.classList.toggle('active', isDoubleReadingMode(mode));
   elements.btnModeWebtoon.classList.toggle('active', mode === 'webtoon');
   elements.btnModeCatalog.classList.toggle('active', mode === 'catalog');
   [
     [elements.btnModeSingle, 'single'],
     [elements.btnModeDouble, 'double'],
-    [elements.btnModeDoubleRtl, 'double-rtl'],
     [elements.btnModeWebtoon, 'webtoon'],
     [elements.btnModeCatalog, 'catalog']
-  ].forEach(([button, value]) => button.setAttribute('aria-pressed', String(mode === value)));
+  ].forEach(([button, value]) => button.setAttribute('aria-pressed', String(value === 'double' ? isDoubleReadingMode(mode) : mode === value)));
+  syncDoubleModeControls();
   elements.zoomValue.textContent = `${state.zoomPercentage}%`;
   elements.readerOverlay.classList.toggle('reader-crop-edges', state.cropEdges);
   elements.btnCrop.classList.toggle('active', state.cropEdges);
@@ -5570,6 +5661,12 @@ if (typeof window !== 'undefined' && window.__GIA_TEST_HOOKS__) {
     stopScanStatusPolling,
     updateLoaderScanProgress,
     renderPages,
+    toggleDoubleDirection,
+    advanceDoubleBySinglePage,
+    doublePageStartForIndex,
+    nextPage,
+    prevPage,
+    setReadingMode,
     openReader,
     openNextComicInFolder,
     openPrevComicInFolder,

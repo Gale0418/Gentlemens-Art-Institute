@@ -319,7 +319,10 @@
         <div class="btn-group">
           <button class="mode-btn active" id="btn-mode-single" aria-pressed="true" title="單頁模式 (寬高自適應)" data-i18n-title="單頁模式 (寬高自適應)"><i class="fa-solid fa-file"></i><span data-i18n="單頁">單頁</span></button>
           <button class="mode-btn" id="btn-mode-double" aria-pressed="false" title="雙頁模式 (第一頁封面單顯示)" data-i18n-title="雙頁模式 (第一頁封面單顯示)"><i class="fa-solid fa-book-open"></i><span data-i18n="雙頁">雙頁</span></button>
-          <button class="mode-btn" id="btn-mode-double-rtl" aria-pressed="false" title="雙頁日式 (右至左)" data-i18n-title="雙頁日式 (右至左)"><i class="fa-solid fa-book-open"></i><span data-i18n="雙頁 (日)">雙頁 (日)</span></button>
+          <div class="double-mode-controls" id="double-mode-controls">
+            <button class="mode-sub-btn" id="btn-double-direction" type="button" aria-pressed="false" aria-label="切換為右至左雙頁" data-i18n-aria-label="切換為右至左雙頁" title="切換為右至左雙頁" data-i18n-title="切換為右至左雙頁"><i class="fa-solid fa-arrows-left-right" aria-hidden="true"></i></button>
+            <button class="mode-sub-btn" id="btn-double-shift" type="button" aria-label="雙頁往後移一頁" data-i18n-aria-label="雙頁往後移一頁" title="雙頁往後移一頁" data-i18n-title="雙頁往後移一頁"><i class="fa-solid fa-forward-step" aria-hidden="true"></i></button>
+          </div>
           <button class="mode-btn" id="btn-mode-webtoon" aria-pressed="false" title="直捲條漫模式" data-i18n-title="直捲條漫模式"><i class="fa-solid fa-arrows-up-down"></i><span data-i18n="條漫">條漫</span></button>
           <button class="mode-btn" id="btn-mode-catalog" aria-pressed="false" title="目錄縮圖模式" data-i18n-title="目錄縮圖模式"><i class="fa-solid fa-grip"></i><span data-i18n="目錄">目錄</span></button>
         </div>
@@ -389,7 +392,8 @@
     <div class="reader-context-menu" id="reader-context-menu" style="display: none;">
       <button data-reader-action="single"><i class="fa-solid fa-file"></i><span data-i18n="單頁">單頁</span></button>
       <button data-reader-action="double"><i class="fa-solid fa-book-open"></i><span data-i18n="雙頁">雙頁</span></button>
-      <button data-reader-action="double-rtl"><i class="fa-solid fa-book-open-reader"></i><span data-i18n="日式雙頁">日式雙頁</span></button>
+      <button data-reader-action="double-direction"><i class="fa-solid fa-arrows-left-right"></i><span data-i18n="切換雙頁方向">切換雙頁方向</span></button>
+      <button data-reader-action="double-shift"><i class="fa-solid fa-forward-step"></i><span data-i18n="雙頁往後移一頁">雙頁往後移一頁</span></button>
       <button data-reader-action="webtoon"><i class="fa-solid fa-arrows-up-down"></i><span data-i18n="條漫">條漫</span></button>
       <span class="context-separator"></span>
       <button data-reader-action="first"><i class="fa-solid fa-backward-step"></i><span data-i18n="跳到首頁">跳到首頁</span></button>

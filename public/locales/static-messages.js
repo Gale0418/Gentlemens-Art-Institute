@@ -423,6 +423,26 @@ window.GAIL10n.register({
     "en": "Two-page mode (show the first cover alone)",
     "ja": "見開きモード（最初の表紙は単独表示）"
   },
+  "雙頁模式 (右至左)": {
+    "en": "Two-page mode (right to left)",
+    "ja": "見開きモード（右から左）"
+  },
+  "切換為左至右雙頁": {
+    "en": "Switch to LTR two-page mode",
+    "ja": "左から右の見開きに切り替え"
+  },
+  "切換為右至左雙頁": {
+    "en": "Switch to RTL two-page mode",
+    "ja": "右から左の見開きに切り替え"
+  },
+  "雙頁往後移一頁": {
+    "en": "Advance the two-page spread by one page",
+    "ja": "見開きを1ページずらす"
+  },
+  "切換雙頁方向": {
+    "en": "Switch two-page direction",
+    "ja": "見開き方向を切り替え"
+  },
   "雙頁": {
     "en": "Two-page",
     "ja": "見開き"

@@ -1141,6 +1141,53 @@ body {
   box-shadow: var(--shadow-sm);
 }
 
+.double-mode-controls {
+  display: inline-flex;
+  align-items: center;
+  gap: 2px;
+}
+
+.double-mode-controls[hidden] {
+  display: none;
+}
+
+.mode-sub-btn {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 32px;
+  height: 32px;
+  padding: 0;
+  border: 1px solid rgba(255, 255, 255, 0.08);
+  border-radius: 4px;
+  color: var(--text-muted);
+  background: rgba(255, 255, 255, 0.05);
+  cursor: pointer;
+  transition: all 0.2s ease;
+}
+
+.mode-sub-btn[hidden] {
+  display: none;
+}
+
+.mode-sub-btn:hover:not(:disabled) {
+  color: var(--text-main);
+  background: rgba(255, 255, 255, 0.1);
+}
+
+.mode-sub-btn[aria-pressed="true"] {
+  color: var(--text-main);
+  border-color: rgba(255, 120, 135, 0.62);
+  border-color: color-mix(in srgb, var(--accent) 55%, transparent);
+  background: rgba(255, 255, 255, 0.12);
+  background: color-mix(in srgb, var(--accent) 20%, rgba(255, 255, 255, 0.06));
+}
+
+.mode-sub-btn:disabled {
+  cursor: not-allowed;
+  opacity: 0.38;
+}
+
 /* 縮放樣式 */
 .zoom-controls {
   display: flex;
@@ -4999,6 +5046,7 @@ select:focus-visible,
   .modal-action-btn,
   .browser-btn,
   .mode-btn,
+  .mode-sub-btn,
   .zoom-btn,
   .control-action-btn,
   .back-btn,

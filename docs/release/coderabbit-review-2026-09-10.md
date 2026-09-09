@@ -18,7 +18,7 @@
 
 驗證：完整 npm test 通過（588 個翻譯鍵），包含新增鍵盤、焦點、私人快取、三語商店資料、隱私同步案例。私人快取的實際 cargo metadata --locked --offline 通過，手動效能 fixture 啟動與 HTTP 回應通過並已關閉；未測量 FPS。StoreKitHost Swift 語法與 XcodeGen 設定解析通過，不代表購買交易驗收通過。本輪 Rust 修改僅註解，沒有重新宣稱執行完整 Rust 測試。
 
-本次程式修正正封裝為 build 14；交付結果另記。iPad 掃描、StoreKit 交易與 App 內 AI 操作仍須完成實機驗收。Repository 維持 private，舊內容清除申請處理完畢前不改公開。
+本次程式修正已交付 Mac／iPad build 14，詳見 [交付紀錄](build14-delivery-2026-09-10.md)。iPad 掃描、StoreKit 交易與 App 內 AI 操作仍須完成實機驗收。Repository 維持 private，舊內容清除申請處理完畢前不改公開。
 
 第三輪已核實的補充修正：
 
@@ -38,6 +38,6 @@
 - Major：相簿有限存取／不可用提示在 hidden 屬性存在時明確 display:none，避免作者樣式覆蓋原生隱藏。
 - Major：AI 同意文字更新既有 span，清除舊文字與該 span 的靜態翻譯標記，保留勾選框與切換供應商時撤銷同意。
 
-全部修正後再次執行完整 npm test 通過（589 翻譯鍵）。CommercePolicy 實際 Swift 編譯與執行通過，包含 16 種權益條件與數字識別碼遮蔽；PhotoLibraryPlugin Swift 語法解析通過。Photos 完整平台 typecheck／裝置操作仍待新版封裝驗收。
+全部修正後再次執行完整 npm test 通過（589 翻譯鍵）。CommercePolicy 實際 Swift 編譯與執行通過，包含 16 種權益條件與數字識別碼遮蔽；PhotoLibraryPlugin Swift 語法解析通過。Photos 平台編譯已由 build 14 iOS 建置通過，完整 Photos 裝置操作仍待驗收。
 
 實際 WKWebView 六項檢查通過：OpenAI／Google 同意文字切換、單一 span、兩種照片提示的 hidden／visible 顯示。以原始碼實際快取判斷區塊執行 Swift 轉換測試，重複快照、撤權、恢復後再撤權均通過；這不是 Photos 完整實機測試。

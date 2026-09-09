@@ -18,7 +18,7 @@
       }
     ],
     "security": {
-      "csp": "default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; font-src 'self'; connect-src 'self' gai: http://localhost:4000; img-src 'self' gai: http://localhost:4000 data: blob:; object-src 'none'; base-uri 'self';"
+      "csp": "default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; font-src 'self'; connect-src 'self' gai:; img-src 'self' gai: data: blob:; object-src 'none'; base-uri 'self';"
     }
   },
   "bundle": {

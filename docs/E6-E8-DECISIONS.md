@@ -49,7 +49,7 @@ OPDS 2.0 只作唯讀目錄交換：標題、作者、語言、修改時間、�
 - 發行：TestFlight-first。signed install、processed build、實體裝置錄影與 App Store Connect 欄位以 `docs/release/` 的 canonical metadata / gate 為準；舊裝置或磁碟 blocker 僅保存在本機私人紀錄。
 - 隱私：App Store Connect 與 App 內都要有隱私政策；明列線上服務／AI 傳送的資料、第三方、保存、刪除與撤回方式。
 - 內容：App 只讀使用者自行匯入／連結的漫畫；不內建第三方來源爬取、商店、帳號或下載站。內建 reviewer demo 必須維持原創全年齡內容。
-- 付費：首選一次性付費的 App 本體；任何數位功能解鎖都要重新核對當時有效的 3.1 規則。Reader App entitlement 只有真的提供外部帳號／購買連結時才評估，不能為了繞過 IAP 先加。
+- 付費：依 PRODUCT.md 與 README，App 免費提供基本閱讀，v1 Pro 採非消耗型 App 內購買（non-consumable IAP）一次買斷。正式發行前，依實際上架 storefront 核對數位功能購買與外部連結適用的 App Review 規則並保留驗證紀錄。Reader App entitlement 只有確實提供對應的外部帳號／購買連結流程時才評估，不能只為了繞過 IAP 加入。
 - 發行資產：iPad／iPhone 尺寸截圖、隱私標籤、支援／隱私 URL、年齡分級、第三方授權 notice、崩潰與離線 NAS 流程均須完成。
 
 來源：[Apple App Review Guidelines](https://developer.apple.com/app-store/review/guidelines/)、[Reader Apps 支援頁](https://developer.apple.com/support/reader-apps/)、[App Privacy Details](https://developer.apple.com/app-store/app-privacy-details/)。

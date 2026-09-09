@@ -89,3 +89,18 @@ for (const file of ['app.js', 'commerce.js', 'photo-library.js', 'tauri-api.js']
 }
 assert.ok(html.indexOf('src="i18n.js"') < html.indexOf('src="tauri-api.js"'), 'localization loads before native bridge');
 console.log(`PASS: locale selection, persistence, private-content boundaries, safe interpolation and ${Object.keys(dictionaries).length} translation keys`);
+
+{
+  const store = JSON.parse(fs.readFileSync('docs/release/store-localizations.json', 'utf8'));
+  for (const locale of ['zh-Hant', 'en-US', 'ja']) {
+    const entry = store.locales[locale];
+    assert.ok(entry, `store listing must include ${locale}`);
+    for (const field of ['appName', 'subtitle', 'promotionalText', 'description', 'keywords']) {
+      assert.equal(typeof entry[field], 'string', `${locale} ${field}`);
+      assert.ok(entry[field].trim(), `${locale} ${field} must not be empty`);
+    }
+  }
+  const canonical = JSON.parse(fs.readFileSync('docs/release/gai-app-store-connect-metadata.json', 'utf8'));
+  assert.equal(store.locales['zh-Hant'].description, canonical.storeListing.description, 'Traditional Chinese store copies must stay consistent');
+}
+console.log('PASS: all three store locales are complete and Traditional Chinese matches canonical copy');

@@ -4431,6 +4431,9 @@ function handleKeyDown(e) {
     return;
   }
 
+  if ((state.readingMode === 'webtoon' || state.readingMode === 'catalog')
+    && ['ArrowUp', 'ArrowDown', ' ', 'Spacebar'].includes(e.key)) return;
+
   switch (e.key) {
     case 'ArrowLeft':
       goPreviousByReadingDirection();

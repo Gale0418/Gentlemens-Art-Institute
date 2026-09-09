@@ -1457,7 +1457,7 @@ unsafe fn wait_for_blocking_operation<T>(rx: std::sync::mpsc::Receiver<T>) -> Re
   let interval_as_secs = interval.as_secs_f64();
   let limit = 1.;
   let mut elapsed = 0.;
-  // run event loop until we get the response back, blocking for at most 3 seconds
+  // run event loop until we get the response back, blocking for at most 1 second
   loop {
     if let Ok(response) = rx.recv_timeout(interval) {
       return Ok(response);

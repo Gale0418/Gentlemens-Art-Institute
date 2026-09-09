@@ -40,7 +40,7 @@ Node regression suite 現在只測正式路線：
 - `tests/ai-consent.mjs` — Rust toolchain、local gate、第三方 AI consent。
 - `tests/release-hardening.mjs` — scanner、SMB、ZIP、cache、iOS security scope、reader progress 等 hardening invariants。
 
-`.cargo/config.toml` 將 target-dir 固定在 `/tmp/gai-cargo-target`，並統一設定 `CARGO_INCREMENTAL=0`，避免把建置產物寫到漫畫／NAS 路徑，也避免外接或網路檔案系統不支援 Cargo incremental lock 的問題。iOS/Xcode build 的乾淨工作副本依 `BUILD_GUIDE.md` 排除該 `.cargo` 設定。
+Rust 測試與 Clippy 的 npm scripts 透過 `scripts/with-private-cargo-cache.mjs` 使用目前使用者的私人本機 cache；macOS 預設位於 `~/Library/Caches/com.windsheep.gai/cargo`。目錄必須由目前使用者擁有且不可為符號連結，權限設為 700；明確的 `CARGO_TARGET_DIR` 覆寫同樣驗證。`.cargo/config.toml` 只統一設定 `CARGO_INCREMENTAL=0`。直接 Cargo 指令可使用同一 wrapper；iOS/Xcode staging 依 `BUILD_GUIDE.md` 保留副本內的 target，避免改變生成專案預期的路徑。
 
 本機品質閘門不是 Apple 發行證據。iOS/iPadOS 仍必須另外完成簽名 archive、processed build、實體裝置安裝與錄影驗證。
 

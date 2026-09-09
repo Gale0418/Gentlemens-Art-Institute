@@ -314,7 +314,8 @@
         return;
       }
       if (event.key !== 'Tab') return;
-      const focusable = [...modal.querySelectorAll('button:not([disabled]), [href], input, select, textarea, [tabindex]:not([tabindex="-1"])')];
+      const focusable = [...modal.querySelectorAll('button, [href], input, select, textarea, [tabindex]')]
+        .filter(element => !element.matches(':disabled') && element.tabIndex >= 0);
       if (!focusable.length) return;
       const first = focusable[0];
       const last = focusable[focusable.length - 1];

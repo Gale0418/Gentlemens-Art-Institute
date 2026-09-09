@@ -118,7 +118,7 @@ npm run verify
 
 `package-lock.json` 現在只鎖 `@tauri-apps/cli` 與其平台 binary；沒有 Electron、Express 或舊 browser-server runtime dependencies。
 
-Cargo build output 統一放在 `/tmp/gai-cargo-target`，並關閉 incremental compilation，避免外接磁碟／NAS-backed checkout 的 lock 與大量 local target 問題。
+`npm run build`、`test:rust` 與 `check:clippy` 會使用目前使用者的私人 Cargo cache（macOS：`~/Library/Caches/com.windsheep.gai/cargo`），確認目錄擁有者並限制權限為 700。保留明確的 `CARGO_TARGET_DIR` 覆寫，但同樣檢查擁有者與權限；不再使用固定共享 `/tmp` 路徑。直接執行 Cargo 時可用 `node scripts/with-private-cargo-cache.mjs cargo <參數>`。incremental compilation 仍關閉，避免外接磁碟／NAS 的 lock 問題。
 
 ## Development & builds
 

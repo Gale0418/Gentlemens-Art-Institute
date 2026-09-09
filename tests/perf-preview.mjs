@@ -1,3 +1,5 @@
+// 手動瀏覽器效能驗收：npm run test:perf，開啟 localhost:4179 並操作頁面驗收按鈕。
+// 此程式是持續運行的 fixture server，不加入會自動結束的 npm test；完成後按 Ctrl-C。
 import http from 'node:http';
 import fs from 'node:fs';
 import path from 'node:path';

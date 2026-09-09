@@ -544,3 +544,23 @@ for (const scenario of ['tap-pointer-first', 'tap-touch-first', 'jitter', 'verti
   assert.equal(overlay.classList.contains('reader-idle'), true, 'button taps do not also toggle chrome');
 }
 console.log('PASS: webtoon tap shows UI; swipes, drags, multi-touch and cancellation do not');
+
+// Scrolling layouts must leave vertical keyboard events to the browser.
+for (const mode of ['webtoon', 'catalog', 'single', 'double', 'double-rtl']) {
+  for (const key of ['ArrowUp', 'ArrowDown', ' ', 'Spacebar']) {
+    const calls = [];
+    const handle = vm.runInNewContext(`(${extractFunction('handleKeyDown')})`, {
+      elements: { readerOverlay: { style: { display: 'flex' } } },
+      state: { readingMode: mode },
+      jumpToFirstPage: () => calls.push('first'),
+      jumpToLastPage: () => calls.push('last'),
+      nextPage: () => calls.push('next'),
+    });
+    let prevented = false;
+    handle({ key, preventDefault() { prevented = true; } });
+    const paged = ['single', 'double', 'double-rtl'].includes(mode);
+    assert.equal(prevented, paged, `${mode} ${key}: native scrolling is preserved only for scrolling layouts`);
+    assert.deepEqual(calls, paged ? [key === 'ArrowUp' ? 'first' : key === 'ArrowDown' ? 'last' : 'next'] : []);
+  }
+}
+console.log('PASS: vertical keyboard scrolling and paged navigation remain mode-specific');

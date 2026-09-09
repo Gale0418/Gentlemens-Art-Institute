@@ -1,6 +1,13 @@
 {
   "status": "draft-not-uploaded",
   "locales": {
+    "zh-Hant": {
+      "appName": "紳士藝術研究所",
+      "subtitle": "圖片轉條漫，往下滑就能看",
+      "promotionalText": "圖片資料夾、ZIP／CBZ，依閱讀順序直接連續閱讀。原圖不需合併，免費使用條漫、單頁與雙頁模式，並保存進度、搜尋作品與整理收藏。",
+      "description": "把整本漫畫接成條漫，往下滑就能一路閱讀。\n\nG.A.I 會把圖片資料夾或 ZIP／CBZ 依閱讀順序排好，開啟後即可連續閱讀，不需要先合併原圖。原始檔案維持不變。\n\n三種模式，免費使用。\n\n條漫模式適合連續閱讀；單頁與雙頁模式可依作品切換。閱讀進度會保存，下一次可從上次位置繼續。收藏、搜尋、基本標籤、資料匯出、撤銷與基本復原也都免費。透過系統檔案選擇器開啟已掛載的 NAS 資料夾，同樣屬於免費閱讀範圍。\n\n需要進階整理時，v1 Pro 一次買斷，不做訂閱。\n\nPro 解鎖直接 SMB／NAS、批次標籤、進階整理、重複作品候選，以及 AI 解說／整理工具。Pro 不含 API 額度；AI 使用 BYOK，自備 OpenAI 或 Google API Key，選擇頁面並同意後才會傳送，API 費用另計。\n\n已購買的 v1 Pro 權益會在支援的後續版本保留；未來大版本新增功能可能另外販售。\n\nG.A.I 不提供漫畫下載、來源爬取或內容訂閱。請使用自己有權使用的檔案。",
+      "keywords": "漫畫,閱讀器,條漫,書架,本機,NAS,SMB,收藏"
+    },
     "en-US": {
       "appName": "Gentlemen's Art Institute",
       "subtitle": "Read image comics in a scroll",

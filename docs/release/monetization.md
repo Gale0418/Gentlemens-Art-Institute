@@ -1,6 +1,6 @@
 # G.A.I 首發商業模式規格
 
-狀態：`draft-blocked`。本文件是首發產品／發行規格，不是目前已上線的付款功能證明。已加入 StoreKit 2 原生程式、Rust 權益檢查與 Pro 畫面；v1 Pro NT$150 一次買斷已核准，但端到端交易尚未驗收，App Store Connect Product ID、正式商品設定與實際購買證據仍是 TODO。
+狀態：`draft-blocked`。本文件是首發產品／發行規格，不是目前已上線的付款功能證明。已加入 StoreKit 2 原生程式、Rust 權益檢查與 Pro 畫面；v1 Pro NT$150 一次買斷已核准，但端到端交易尚未驗收，App Store Connect 商品與價格設定依下列 canonical 紀錄追蹤，實際購買證據仍待補齊。
 
 ## 文案的寫作前提
 
@@ -49,8 +49,8 @@ AI 透過使用者選擇的雲端供應商處理。使用者自備 API Key、同
 
 ## 待補欄位
 
-- `TODO`: App Store Connect Product ID。
-- `TODO`: 在 App Store Connect 設定並回讀正式商品與各地區價格；產品核准定價為 NT$150 一次買斷。
+- 依 [canonical metadata](gai-app-store-connect-metadata.json) 的 2026-09-09 紀錄：Product ID 為 `com.windsheep.gai.pro.v1`，台灣基準價格 TWD 150 已設定並回讀，尚未獲准銷售。
+- `TODO`: 發行前核對所有銷售地區的最終價格、商品狀態與交易證據；已核准產品定價為 NT$150 一次買斷。
 - `TODO`: StoreKit sandbox transaction／entitlement 與實機交易測試紀錄；原生程式已落地。
 - `TODO`: 最終包購買、恢復、離線、撤銷／退款驗收結果。
 
@@ -62,4 +62,4 @@ AI 透過使用者選擇的雲端供應商處理。使用者自備 API Key、同
 - Panels：免費下載；Panels 3 NT$350、月訂閱 NT$50、年訂閱 NT$490。https://apps.apple.com/tw/app/panels-comic-reader/id1236567663
 - Panels 官網說明當代功能買斷保留，未來大版本新增功能另購：https://www.panels.app/
 
-G.A.I v1 Pro 首發價格已核准為 NT$150 一次買斷，理由是免費條漫先體驗、付費集中在 NAS 與整理工具。此為產品定價決策，尚未在 App Store Connect 設定或回讀正式商品與當地價格。連續直向閱讀同類已有，不宣稱獨家。
+G.A.I v1 Pro 首發價格已核准為 NT$150 一次買斷，理由是免費條漫先體驗、付費集中在 NAS 與整理工具。依 canonical metadata 的 2026-09-09 紀錄，台灣基準價格已在 App Store Connect 設定並回讀；這不等於商品已獲准銷售或交易驗收通過。連續直向閱讀同類已有，不宣稱獨家。

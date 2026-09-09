@@ -1,6 +1,9 @@
 import fs from 'node:fs';
 import vm from 'node:vm';
 import assert from 'node:assert/strict';
+import os from 'node:os';
+import path from 'node:path';
+import { spawnSync } from 'node:child_process';
 
 const read = (path) => fs.readFileSync(path, 'utf8');
 const state = read('src-tauri/src/state.rs');
@@ -154,3 +157,31 @@ assert.match(pkg.scripts?.quality || '', /test:rust/);
 assert.match(pkg.scripts?.quality || '', /check:clippy/);
 assert.equal(fs.existsSync('.github/workflows'), false, 'GitHub Actions must stay absent while the user has no CI quota');
 console.log('PASS: release hardening invariants are locked');
+
+// The cache wrapper must preserve command results without trusting symlinks
+// or a parent directory that another account could use to swap artifacts.
+{
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'gai-cache-check-'));
+  try {
+    const cache = path.join(root, 'cache');
+    const run = (target, code) => spawnSync(process.execPath,
+      ['scripts/with-private-cargo-cache.mjs', process.execPath, '-e', code],
+      { encoding: 'utf8', env: { ...process.env, CARGO_TARGET_DIR: target } });
+    const result = run(cache, 'console.log(process.env.CARGO_TARGET_DIR); process.exit(7)');
+    assert.equal(result.status, 7, result.stderr);
+    assert.equal(result.stdout.trim(), cache);
+    if (process.getuid) assert.equal(fs.statSync(cache).mode & 0o777, 0o700);
+    const link = path.join(root, 'link');
+    fs.symlinkSync(cache, link, 'dir');
+    assert.notEqual(run(link, 'process.exit(0)').status, 0, 'a cache symlink must never execute the command');
+    if (process.getuid) {
+      const shared = path.join(root, 'shared');
+      fs.mkdirSync(shared);
+      fs.chmodSync(shared, 0o777);
+      assert.notEqual(run(path.join(shared, 'cache'), 'process.exit(0)').status, 0, 'non-sticky writable ancestors permit artifact replacement');
+    }
+  } finally {
+    fs.rmSync(root, { recursive: true, force: true });
+  }
+}
+console.log('PASS: private Cargo cache ownership, permissions, symlink/ancestor rejection and exit status');

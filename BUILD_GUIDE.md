@@ -148,7 +148,9 @@ xcodebuild -list -json -project src-tauri/gen/apple/gai.xcodeproj
 
 確認 scheme 包含 `gai_iOS` 後即可進入 4.4。這不是 archive 或 Release build 驗證。
 
-Repository root 的 `.cargo/config.toml` 把一般 Cargo output 導到 `/tmp/gai-cargo-target`。iOS/Xcode 產物必須跟 Tauri generated Apple project 的預期位置一致，因此同步 iOS 工作副本時**排除 `.cargo`**，不要去刪 repository 的正式設定。
+一般 macOS 建置與 Rust 品質指令透過 `scripts/with-private-cargo-cache.mjs` 使用目前使用者的私人本機 cache；預設為 `~/Library/Caches/com.windsheep.gai/cargo`，並驗證擁有者、拒絕符號連結且設為 700 權限。直接執行 Cargo／Tauri 時，可用 `node scripts/with-private-cargo-cache.mjs cargo <參數>` 或 `node scripts/with-private-cargo-cache.mjs npm run tauri -- build`。`.cargo/config.toml` 不包含共享 target-dir。
+
+iOS/Xcode 產物必須符合 generated Apple project 的預期位置，因此 iOS staging 維持私有本機工作副本的預設 target；不要套用上述 macOS cache wrapper。進入 iOS 副本後先 `unset CARGO_TARGET_DIR`，同步仍**排除 `.cargo`**。
 
 ```bash
 validate_build_paths

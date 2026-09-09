@@ -198,3 +198,32 @@ console.log('PASS: commerce settings, preview lock, native purchase authority, c
   assert.equal(document.getElementById('commerce-pro-modal').hidden, false);
 }
 console.log('PASS: unavailable restore, preview restore, and revoked UI ownership regressions');
+
+{
+  const { document } = harness({});
+  await settle();
+  const modal = document.getElementById('commerce-pro-modal');
+  modal.hidden = false;
+  const control = (id, tabIndex, disabled = false) => {
+    const element = document.add(id);
+    element.tabIndex = tabIndex;
+    element.matches = selector => selector === ':disabled' && disabled;
+    return element;
+  };
+  const first = control('enabled-link', 0);
+  const last = control('enabled-custom-control', 0);
+  const excluded = ['input', 'select', 'textarea', 'button', 'fieldset-child']
+    .map(kind => control(`disabled-${kind}`, 0, true));
+  const negativeTabIndex = control('programmatic-only', -1);
+  modal.querySelectorAll = () => [excluded[0], first, negativeTabIndex, ...excluded.slice(1), last, excluded[0]];
+  for (const shiftKey of [false, true]) {
+    document.activeElement = shiftKey ? first : last;
+    let prevented = false;
+    for (const handler of document.listeners.get('keydown') || []) {
+      handler({ key: 'Tab', shiftKey, preventDefault() { prevented = true; } });
+    }
+    assert.equal(prevented, true);
+    assert.equal(document.activeElement, shiftKey ? last : first, 'focus wraps between enabled keyboard-focusable controls');
+  }
+}
+console.log('PASS: Pro dialog focus trap skips disabled controls and negative tabindex');

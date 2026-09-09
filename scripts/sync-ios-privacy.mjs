@@ -69,7 +69,11 @@ const resourcesPhase = targetResources[0];
 
 const infoMatches = [...project.matchAll(/INFOPLIST_FILE = "?([^;"\r\n]+)"?;/g)];
 if (!infoMatches.length) throw new Error('Missing INFOPLIST_FILE');
-const infoRelative = infoMatches[0][1];
+const infoValues = [...new Set(infoMatches.map(match => match[1]))];
+if (infoValues.length !== 1) {
+  throw new Error('Ambiguous INFOPLIST_FILE paths: ' + infoValues.join(', '));
+}
+const infoRelative = infoValues[0];
 if (infoRelative.includes('$') || path.isAbsolute(infoRelative) || infoRelative.includes('..')) {
   throw new Error('Unexpected Info.plist path');
 }

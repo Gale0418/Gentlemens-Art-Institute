@@ -163,4 +163,35 @@ try {
   fs.rmSync(existingStageRoot, { recursive: true, force: true });
 }
 
+const ambiguousStageRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'gai-ios-privacy-ambiguous-'));
+try {
+  const appleDir = path.join(ambiguousStageRoot, 'gen', 'apple');
+  const projectDir = path.join(appleDir, 'app.xcodeproj');
+  fs.mkdirSync(projectDir, { recursive: true });
+  fs.mkdirSync(path.join(appleDir, 'app_iOS'), { recursive: true });
+  let fixture = fixtureProject('app_iOS').replaceAll('\r\n', '\n');
+  fixture = fixture.replace(
+    '/* End XCBuildConfiguration section */',
+    [
+      '\t\t710000000000000000000001 = {',
+      '\t\t\tisa = XCBuildConfiguration;',
+      '\t\t\tbuildSettings = {',
+      '\t\t\t\tINFOPLIST_FILE = helper/Info.plist;',
+      '\t\t\t};',
+      '\t\t};',
+      '/* End XCBuildConfiguration section */',
+    ].join('\n'),
+  );
+  fs.writeFileSync(path.join(projectDir, 'project.pbxproj'), fixture.replaceAll('\n', '\r\n'));
+  fs.writeFileSync(path.join(appleDir, 'project.yml'),
+    'targets:\n  app_iOS:\n    sources:\n      - path: app_iOS/PrivacyInfo.xcprivacy\n        buildPhase: resources\n');
+  const destination = path.join(appleDir, 'app_iOS/PrivacyInfo.xcprivacy');
+  const ambiguous = run(appleDir);
+  assert.notEqual(ambiguous.status, 0, 'distinct INFOPLIST_FILE paths must fail closed');
+  assert.match(ambiguous.stderr, /Ambiguous INFOPLIST_FILE paths/);
+  assert.equal(fs.existsSync(destination), false, 'ambiguous plist paths must not write a manifest');
+} finally {
+  fs.rmSync(ambiguousStageRoot, { recursive: true, force: true });
+}
+
 console.log('PASS: iOS privacy sync fixture covers app_iOS/gai_iOS, missing references, sync, idempotency, --check and CRLF');

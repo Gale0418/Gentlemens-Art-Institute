@@ -59,22 +59,27 @@ assert.match(
 
 console.log('PASS: Rust 1.98.1, local release gate, and third-party AI consent guards are enforced');
 
-// Label whitespace and legacy text are separate DOM nodes in the real HTML.
-{
+// Cover the current translated span and older direct-text markup.
+for (const hasSpan of [false, true]) {
   const checkbox = { nodeType: 1, checked: true };
+  const span = { nodeType: 1, tagName: 'SPAN', textContent: '舊 Google 說明', removeAttribute(name) { this.removed = name; } };
   const disclosure = {
+    querySelector() { return this.childNodes.find(node => node.tagName === 'SPAN') || null; },
     childNodes: [{ nodeType: 3, textContent: '\n' }, checkbox, { nodeType: 3, textContent: '舊 Google 說明' }],
     append(node) { this.childNodes.push(node); },
   };
+  if (hasSpan) disclosure.childNodes.push(span);
   let change;
   const provider = { value: 'openai', addEventListener(type, handler) { if (type === 'change') change = handler; } };
   const nodes = { 'ai-google-disclosure-wrap': disclosure, 'ai-google-disclosure': checkbox, 'ai-provider': provider };
-  const document = { getElementById: id => nodes[id], createTextNode: textContent => ({ nodeType: 3, textContent }) };
+  const document = { getElementById: id => nodes[id], createElement: () => ({ nodeType: 1, tagName: 'SPAN', textContent: '', removeAttribute() {} }) };
   const start = bridge.indexOf('function installThirdPartyAiConsentGuard()');
   const end = bridge.indexOf('\ninstallThirdPartyAiConsentGuard();', start);
   vm.runInNewContext(bridge.slice(0, bridge.indexOf('/**')) + bridge.slice(start, end) + '\ninstallThirdPartyAiConsentGuard();', { document, window: {} });
-  const label = () => disclosure.childNodes.filter(node => node.nodeType === 3).map(node => node.textContent).join('');
+  const label = () => disclosure.childNodes.filter(node => node !== checkbox).map(node => node.textContent).join('');
   assert.match(label(), /OpenAI/);
+  assert.equal(disclosure.childNodes.filter(node => node.tagName === 'SPAN').length, 1);
+  if (hasSpan) assert.equal(span.removed, 'data-i18n');
   assert.doesNotMatch(label(), /Google/, 'OpenAI must not retain stale Google consent text');
   provider.value = 'google';
   change();

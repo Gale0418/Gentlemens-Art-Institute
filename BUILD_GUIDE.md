@@ -123,9 +123,17 @@ validate_build_paths() {
   case "$work_real" in /|"${HOME:-}"|"$project_real") fail_validation "GAI_IOS_WORK_DIR 是危險輸出目錄";; esac
   case "$ipa_real" in /|"${HOME:-}"|"$project_real") fail_validation "GAI_IPA_EXTRACT_DIR 是危險輸出目錄";; esac
 
+  local shared_root shared_real
+  for shared_root in /tmp /var/tmp "${TMPDIR:-/tmp}"; do
+    shared_real=$(canonical_path "$shared_root") || fail_validation "無法解析系統暫存根目錄"
+    [ "$work_real" != "$shared_real" ] || fail_validation "GAI_IOS_WORK_DIR 不可為系統暫存根目錄"
+    [ "$ipa_real" != "$shared_real" ] || fail_validation "GAI_IPA_EXTRACT_DIR 不可為系統暫存根目錄"
+  done
+
   paths_overlap "$project_real" "$work_real" && fail_validation "來源與 GAI_IOS_WORK_DIR 重疊"
   paths_overlap "$project_real" "$ipa_real" && fail_validation "來源與 GAI_IPA_EXTRACT_DIR 重疊"
   paths_overlap "$work_real" "$ipa_real" && fail_validation "兩個輸出目錄重疊"
+  return 0
 }
 validate_build_paths
 ```

@@ -99,12 +99,14 @@ public struct CommercePolicy {
         )
     }
 
-    /// 過濾 message 中的敏感資訊，防止洩漏 transaction ID 或 secrets
+    /// 遮蔽訊息中可辨識的 UUID 與長數字識別碼；呼叫端仍不可傳入 secrets
     public static func sanitizeMessage(_ message: String) -> String {
         var sanitized = message
         // 遮蔽 UUID 或 64-bit transaction ID 模式
         let uuidPattern = "[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}"
-        if let regex = try? NSRegularExpression(pattern: uuidPattern) {
+        let transactionIDPattern = "\\b[0-9]{9,}\\b"
+        for pattern in [uuidPattern, transactionIDPattern] {
+            guard let regex = try? NSRegularExpression(pattern: pattern) else { continue }
             sanitized = regex.stringByReplacingMatches(
                 in: sanitized,
                 range: NSRange(location: 0, length: sanitized.utf16.count),

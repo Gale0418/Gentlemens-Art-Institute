@@ -454,6 +454,8 @@ private final class PhotoLibraryBridge {
 
   private let operationQueue = DispatchQueue(label: "com.windsheep.gai.photo-library.operations", qos: .userInitiated)
   private let defaults = UserDefaults.standard
+  // Accessed only on operationQueue; repeated snapshots must not evict valid images.
+  private var unavailableLinkedAlbumIDs = Set<String>()
 
   private init() {}
 
@@ -641,11 +643,13 @@ private final class PhotoLibraryBridge {
   private func snapshotPayload() -> [String: Any] {
     let status = PHPhotoLibrary.authorizationStatus(for: .readWrite)
     let linked = linkedAlbumIDs()
-    if !linked.isEmpty && !Set(linked).isSubset(of: availableAlbumIDs(for: status)) {
-      // A revoked permission or deleted album prevents reliable per-album
-      // ownership lookup, so discard only this app's generated cache.
+    let unavailable = Set(linked).subtracting(availableAlbumIDs(for: status))
+    if !unavailable.subtracting(unavailableLinkedAlbumIDs).isEmpty {
+      // Invalidate once when another linked album becomes inaccessible.
+      // Later limited-access snapshots can retain newly generated valid images.
       PhotoLibraryCache.shared.removeAll()
     }
+    unavailableLinkedAlbumIDs = unavailable
     let albums: [[String: Any]] = linked.map { identifier in
       guard status == .authorized || status == .limited else {
         return ["id": identifier, "title": "相簿目前不可用", "available": false, "assetIds": []]

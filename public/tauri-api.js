@@ -177,8 +177,13 @@ function installThirdPartyAiConsentGuard() {
     const policyNote = provider.value === 'google' ? bridgeText(" 若使用 Google 免費層，提交內容可能用於改善產品；請確認自己的雲端 BYOK 方案。") : '';
     const textNodes = Array.from(disclosure.childNodes).filter(node => node.nodeType === 3);
     for (const node of textNodes) node.textContent = '';
-    if (textNodes.length) textNodes[0].textContent = message + policyNote;
-    else disclosure.append(document.createTextNode(message + policyNote));
+    let copy = disclosure.querySelector('span');
+    if (!copy) {
+      copy = document.createElement('span');
+      disclosure.append(copy);
+    }
+    copy.removeAttribute('data-i18n');
+    copy.textContent = message + policyNote;
     disclosure.hidden = false;
   };
 

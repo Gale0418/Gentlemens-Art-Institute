@@ -1,6 +1,8 @@
 import Foundation
 @main struct CommercePolicyChecks {
  static func main() {
+  precondition(CommercePolicy.sanitizeMessage("Transaction 123456789012345 and 550e8400-e29b-41d4-a716-446655440000") == "Transaction [REDACTED] and [REDACTED]")
+  precondition(CommercePolicy.sanitizeMessage("Error 500 on iOS 15") == "Error 500 on iOS 15")
   let id = CommercePolicy.proProductId
   for verified in [false, true] {
    for correct in [false, true] {

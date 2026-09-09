@@ -6130,3 +6130,8 @@ select:focus-visible,
     transition: none;
   }
 }
+
+.photo-library-limited-note[hidden],
+.photo-library-unavailable[hidden] {
+  display: none;
+}

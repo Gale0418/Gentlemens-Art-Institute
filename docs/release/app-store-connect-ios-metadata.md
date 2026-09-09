@@ -2,7 +2,7 @@
 
 狀態：`draft-blocked`。本文件的人讀版本對應 canonical JSON：`docs/release/gai-app-store-connect-metadata.json`。修改欄位時先更新 JSON，再同步本文件；不要把 App Store Connect 私密資料、API key、SMB 密碼或真實裝置識別碼提交到 repo。
 
-本輪只準備資料與證據清單，不呼叫遠端 ASC、不提交版本。`scripts/release/asc-dry-run.sh` 只做本地 JSON／欄位／秘密掃描與命令模板輸出。
+本文件保留發行資料與證據清單；既有遠端設定以 canonical JSON 的日期紀錄為準，本次文件同步未呼叫遠端 ASC 或提交版本。`scripts/release/asc-dry-run.sh` 只做本地 JSON／欄位／秘密掃描與命令模板輸出。
 
 ## 首發商業模型（已整合，待完整交易驗收）
 
@@ -10,7 +10,7 @@
 
 undo／復原、資料安全保護、已產生的 AI 結果與匯出不以付費封鎖。AI 僅走使用者自備金鑰（BYOK）的雲端路徑，不提供裝置端模型或內含 API 額度。v1 Pro 是首發版本的買斷範圍，不承諾所有未來新增功能永久免費；已購得的 v1 Pro 權益必須在後續支援版本中保留，不因 v2 發布或日後新增訂閱方案而收回。
 
-StoreKit 2 原生程式、後端權益檢查與 Pro 介面已整合；本機／沙盒交易與實機證據尚未完成，不代表已具備送審資格。價格、Product ID 與實際 StoreKit 證據維持 `TODO`。正式包送審前，必須能驗證購買、恢復、離線權益判定與 revocation／退款後收回；TestFlight 應驗證完整功能與沙盒購買流程，且沙盒權益不得流入正式環境。
+StoreKit 2 原生程式、後端權益檢查與 Pro 介面已整合；本機／沙盒交易與實機證據尚未完成，不代表已具備送審資格。依 2026-09-09 設定回讀紀錄，Product ID 為 `com.windsheep.gai.pro.v1`，台灣基準價格為 NT$150；尚未核准販售，實際 StoreKit 交易與裝置商店地區／幣別驗證仍為 `TODO`。正式包送審前，必須能驗證購買、恢復、離線權益判定與 revocation／退款後收回；TestFlight 應驗證完整功能與沙盒購買流程，且沙盒權益不得流入正式環境。
 
 ## 已知發行身分
 
@@ -20,9 +20,9 @@ StoreKit 2 原生程式、後端權益檢查與 Pro 介面已整合；本機／�
 | Bundle ID | `com.windsheep.gai` | `package.json`、`src-tauri/gen/apple/project.yml` |
 | 平台 | iOS／iPadOS | Tauri 產生的 iOS target |
 | 最低 OS | iOS 15.0 | `src-tauri/gen/apple/project.yml`；仍須以 processed build 回讀確認 |
-| Rust release toolchain | `1.98.1` | `rust-toolchain.toml`、`src-tauri/Cargo.toml`、GitHub Actions |
-| App Store Connect App ID | `TODO: 從 ASC 取得數字 App ID` | 不捏造 |
-| Marketing version／Build | `TODO` | 以實際上傳並 processed 的 artifact 回讀 |
+| Rust release toolchain | `1.98.1` | `rust-toolchain.toml`、`src-tauri/Cargo.toml`、本機品質檢查 |
+| App Store Connect App ID | `6809937717` | canonical JSON 既有回讀紀錄 |
+| Marketing version／Build | `1.0.0`／processed build `TODO` | 版本依 canonical JSON；build 以實際上傳並 processed 的 artifact 回讀 |
 | 隱私政策 URL | README 隱私政策段落；公開回讀 `TODO` | 使用者指定 README，不另架站；推送後驗證 GitHub main 公開連結 |
 | 支援 URL／聯絡方式 | URL 待發布；公開支援信箱 `coderb0418@gmail.com` | 依使用者指定參考 MediBuddy 上架文件第 57 行；尚未寄信 |
 
@@ -30,7 +30,7 @@ StoreKit 2 原生程式、後端權益檢查與 Pro 介面已整合；本機／�
 
 App Name（zh-Hant-TW）：`紳士藝術研究所`
 
-首發已核准繁體中文、英文（en-US）與日文（ja）；英文名稱為 `Gentlemen's Art Institute`。三語文案已備妥，尚未上傳 App Store Connect。
+首發已核准繁體中文、英文（en-US）與日文（ja）；英文名稱為 `Gentlemen's Art Institute`。依 canonical JSON 紀錄，三語文案已於 2026-09-09 上傳並回讀 App Store Connect；隱私／支援 URL 與審查素材仍待補齊。
 
 Subtitle：`圖片轉條漫，往下滑就能看`
 

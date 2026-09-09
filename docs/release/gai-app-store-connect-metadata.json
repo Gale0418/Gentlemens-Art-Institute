@@ -179,7 +179,7 @@
       "id": "commerce",
       "check": "The intended free core and one-time v1 Pro entitlement are implemented and the final package can verify purchase, restore, offline entitlement, and revocation/refund; no subscription or bundled API quota is claimed",
       "status": "TODO",
-      "evidence": "TODO: StoreKit Product ID, price, transaction/entitlement evidence, and physical release-build test log"
+      "evidence": "Product ID and TWD 150 configuration recorded 2026-09-09 in monetizationDraft; TODO: transaction/entitlement evidence and physical release-build storefront currency/price test log"
     },
     {
       "id": "privacy-and-store",
@@ -191,17 +191,16 @@
       "id": "readiness",
       "check": "Run npm run verify and the local metadata dry-run; owner separately runs asc validate/review dry-run after authenticating and reviewing the plan",
       "status": "local-only-ready",
-      "evidence": "package.json; scripts/release/asc-dry-run.sh; .github/workflows/rust-quality.yml"
+      "evidence": "package.json (npm run quality); scripts/release/asc-dry-run.sh"
     }
   ],
   "unknowns": [
-    "TODO: numeric App Store Connect App ID",
-    "TODO: marketing version, processed build number, and version/build IDs",
+    "TODO: processed build number and build ID",
     "TODO: physical recording filename, device model, OS, and capture evidence",
     "TODO: public G.A.I privacy policy URL and support URL",
     "TODO: final App Privacy answers, age rating, export compliance, and rights/content approval",
-    "TODO: final screenshots, app icon/store asset readback, and localization selection",
-    "TODO: one-time v1 Pro Product ID, price, StoreKit purchase/restore/offline/revocation evidence",
+    "TODO: final screenshots and app icon/store asset readback",
+    "TODO: StoreKit purchase/restore/offline/revocation evidence and physical storefront currency/price verification",
     "TODO: release-build confirmation of network entitlements, external service behavior, and provider availability"
   ],
   "ascCommandTemplates": {

@@ -467,6 +467,10 @@ window.GAIL10n.register({
     "en": "Catalog thumbnail mode",
     "ja": "目次サムネイルモード"
   },
+  "目錄模式": {
+    "en": "Catalog mode",
+    "ja": "カタログモード"
+  },
   "目錄": {
     "en": "Folder",
     "ja": "フォルダー"
@@ -474,6 +478,10 @@ window.GAIL10n.register({
   "縮小": {
     "en": "Zoom out",
     "ja": "縮小"
+  },
+  "放大檢視": {
+    "en": "Zoom in",
+    "ja": "拡大"
   },
   "放大": {
     "en": "Large",

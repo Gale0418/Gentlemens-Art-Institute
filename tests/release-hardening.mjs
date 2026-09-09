@@ -185,3 +185,30 @@ console.log('PASS: release hardening invariants are locked');
   }
 }
 console.log('PASS: private Cargo cache ownership, permissions, symlink/ancestor rejection and exit status');
+
+// Execute only the documented path guard, never its deletion/build examples.
+if (process.platform !== 'win32') {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'gai-build-guard-'));
+  try {
+    const guide = fs.readFileSync('BUILD_GUIDE.md', 'utf8');
+    const guard = guide.match(/```bash\n(fail_validation\(\)[\s\S]*?\nvalidate_build_paths)\n```/)?.[1];
+    assert.ok(guard, 'build guide must retain an executable path guard');
+    const run = (work, extract) => spawnSync('bash', ['-c', guard], {
+      encoding: 'utf8',
+      env: { ...process.env, GAI_PROJECT_DIR: process.cwd(), GAI_DEVICE_ID: 'fixture',
+        GAI_IOS_WORK_DIR: work, GAI_IPA_EXTRACT_DIR: extract },
+    });
+    const work = path.join(root, 'work');
+    const extract = path.join(root, 'extract');
+    assert.equal(run(work, extract).status, 0, 'separate task directories remain valid');
+    for (const shared of ['/tmp', '/var/tmp', os.tmpdir()].filter(p => fs.existsSync(p))) {
+      for (const alias of [shared, fs.realpathSync(shared)]) {
+        assert.equal(run(alias, extract).status, 2, `work must reject shared root ${alias}`);
+        assert.equal(run(work, alias).status, 2, `extract must reject shared root ${alias}`);
+      }
+    }
+  } finally {
+    fs.rmSync(root, { recursive: true, force: true });
+  }
+}
+console.log('PASS: documented build guard rejects shared temporary roots and their canonical aliases');

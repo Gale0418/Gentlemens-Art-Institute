@@ -23,6 +23,10 @@ window.GAIL10n.register({
     "en": "Extra large",
     "ja": "特大"
   },
+  "放大檢視": {
+    "en": "Zoom in",
+    "ja": "拡大"
+  },
   "放大": {
     "en": "Large",
     "ja": "大"

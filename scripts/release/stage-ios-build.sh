@@ -87,7 +87,7 @@ if [[ ! "$free_kib" =~ ^[0-9]+$ ]] || (( free_kib < 6 * 1024 * 1024 )); then
   exit 3
 fi
 stage_root="$(mktemp -d "${TMPDIR:-/tmp}/gai-ios-stage.XXXXXX")"
-for entry in public src-tauri scripts package.json package-lock.json rust-toolchain.toml; do
+for entry in public src-tauri scripts package.json package-lock.json rust-toolchain.toml LICENSE; do
   rsync -a --exclude='.cargo/' --exclude='target/' --exclude='.build/' --exclude='gen/apple/build/' \
     --exclude='gen/apple/Externals/' --exclude='gen/apple/assets/' \
     "$source_root/$entry" "$stage_root/"

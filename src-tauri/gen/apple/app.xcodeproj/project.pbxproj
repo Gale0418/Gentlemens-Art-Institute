@@ -20,6 +20,7 @@
 		C869023DDFE275D42F3FBF29 /* libapp.a in Frameworks */ = {isa = PBXBuildFile; fileRef = 39EEC6A55698228E08917A52 /* libapp.a */; };
 		E68F6CFDAED6503ABB4044A5 /* Metal.framework in Frameworks */ = {isa = PBXBuildFile; fileRef = CE1209BFDECB28E00189B168 /* Metal.framework */; };
 		6A110C000000000000000002 /* GAI InfoPlist.strings in Resources */ = {isa = PBXBuildFile; fileRef = 6A110C000000000000000001 /* GAI InfoPlist.strings */; };
+		6A110C000000000000000014 /* PrivacyInfo.xcprivacy in Resources */ = {isa = PBXBuildFile; fileRef = 6A110C000000000000000013 /* PrivacyInfo.xcprivacy */; };
 /* End PBXBuildFile section */
 
 /* Begin PBXFileReference section */
@@ -48,6 +49,7 @@
 		6A110C000000000000000010 /* zh-Hant */ = {isa = PBXFileReference; lastKnownFileType = text.plist.strings; name = "zh-Hant"; path = "app_iOS/zh-Hant.lproj/InfoPlist.strings"; sourceTree = SOURCE_ROOT; };
 		6A110C000000000000000011 /* en */ = {isa = PBXFileReference; lastKnownFileType = text.plist.strings; name = "en"; path = "app_iOS/en.lproj/InfoPlist.strings"; sourceTree = SOURCE_ROOT; };
 		6A110C000000000000000012 /* ja */ = {isa = PBXFileReference; lastKnownFileType = text.plist.strings; name = "ja"; path = "app_iOS/ja.lproj/InfoPlist.strings"; sourceTree = SOURCE_ROOT; };
+		6A110C000000000000000013 /* PrivacyInfo.xcprivacy */ = {isa = PBXFileReference; lastKnownFileType = text.xml; path = "app_iOS/PrivacyInfo.xcprivacy"; sourceTree = SOURCE_ROOT; };
 /* End PBXFileReference section */
 
 /* Begin PBXFrameworksBuildPhase section */
@@ -136,6 +138,7 @@
 				855775165ACE55D883F89EB3 /* src */,
 				1BBF8C620E54F8C028CA130C /* Frameworks */,
 				EE72B6AC647386A11F795E44 /* Products */,
+				6A110C000000000000000013 /* PrivacyInfo.xcprivacy */,
 			);
 			sourceTree = "<group>";
 		};
@@ -225,6 +228,7 @@
 				C6BD59C055C986EA4A77FDA2 /* Assets.xcassets in Resources */,
 				3036F7131E55779ABF15BD58 /* LaunchScreen.storyboard in Resources */,
 				5C516481BCA83A182C2BCC94 /* assets in Resources */,
+				6A110C000000000000000014 /* PrivacyInfo.xcprivacy in Resources */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};

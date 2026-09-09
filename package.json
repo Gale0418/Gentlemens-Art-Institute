@@ -6,7 +6,7 @@
   "scripts": {
     "sync:ios-icons": "node scripts/sync-ios-icons.mjs",
     "build:ios": "npm run sync:ios-icons && npm run sync:ios-localizations && npm run sync:ios-privacy && tauri ios build",
-    "test": "node tests/tauri-ui-smoke.mjs && node tests/ai-consent.mjs && node tests/release-hardening.mjs && node tests/catalog-scheduling.mjs && node tests/commerce-ui.mjs && node tests/photo-library-ui.mjs && node tests/webtoon-navigation.mjs && node tests/localization.mjs && node tests/ios-privacy-sync.mjs",
+    "test": "node tests/tauri-ui-smoke.mjs && node tests/ai-consent.mjs && node tests/ai-localization.mjs && node tests/release-hardening.mjs && node tests/catalog-scheduling.mjs && node tests/commerce-ui.mjs && node tests/photo-library-ui.mjs && node tests/webtoon-navigation.mjs && node tests/localization.mjs && node tests/ios-privacy-sync.mjs",
     "test:rust": "cargo test --manifest-path src-tauri/Cargo.toml --locked --lib",
     "check:rustfmt": "cargo fmt --manifest-path src-tauri/Cargo.toml --package gai -- --check",
     "check:clippy": "cargo clippy --manifest-path src-tauri/Cargo.toml --locked --lib --bins --no-deps -- -D warnings",

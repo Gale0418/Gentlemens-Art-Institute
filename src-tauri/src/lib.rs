@@ -1323,6 +1323,29 @@ struct AiSessionStatus {
 #[serde(rename_all = "camelCase")]
 struct ExplainPageRequest {
     data_url: String,
+    #[serde(default = "default_explain_page_locale")]
+    target_locale: String,
+}
+
+fn default_explain_page_locale() -> String {
+    "zh-Hant".to_string()
+}
+
+/// Production prompt for page explanation. Keep the requested output language
+/// explicit so the model translates dialogue before giving a short summary.
+fn explain_page_prompt(target_locale: &str) -> Result<&'static str, String> {
+    match target_locale {
+        "zh-Hant" => Ok(
+            "請逐句辨識並列出圖片中看見的對話原文，再提供對應的自然、簡潔繁體中文（台灣用語）翻譯；保留完整詞彙語意，不要逐字拆解，不確定處要標註。接著簡要說明這一頁漫畫在講什麼。摘要只能根據明確可見內容，不要推定角色身分，不要補上未顯示的動作、先後或因果，也不要把請求當成已發生事件；沒有對白時要明說。看不清楚或無法確定的地方要明說，不要杜撰。",
+        ),
+        "en" => Ok(
+            "Identify and list the visible dialogue line by line in its original wording, then provide a corresponding natural, concise English translation. Preserve the complete meaning of each word or phrase; do not split it into literal word-by-word fragments, and mark uncertain readings. Then briefly explain what this comic page is about. Base the summary only on clearly visible content; do not infer character identities or add actions, order, or causality that is not shown, and do not treat a request as an event that already happened. If there is no dialogue, say so. Clearly say when text or details are unclear or uncertain; do not invent content.",
+        ),
+        "ja" => Ok(
+            "画像内で読める会話を一文ずつ原文のまま示し、その後に対応する自然で簡潔な日本語訳を示してください。各語句の完全な意味を保ち、逐語的に分解せず、読み取りに確信がない箇所は明記してください。続けて、この漫画ページの内容を短く説明してください。あらすじは明確に見えている内容だけに基づき、登場人物の身元を推測したり、表示されていない動作・順序・因果関係を補ったり、依頼をすでに起きた出来事として扱ったりしないでください。会話がない場合はその旨を明記してください。文字や内容が読めない、または確信できない場合はその旨を明記し、内容を推測して創作しないでください。",
+        ),
+        unknown => Err(format!("不支援的 AI 輸出語言：{unknown}")),
+    }
 }
 
 #[derive(Debug, serde::Deserialize)]
@@ -1560,12 +1583,8 @@ async fn explain_page(
     if !config.google_content_disclosure {
         return Err("尚未同意第三方 AI 資料分享".into());
     }
-    call_ai(
-        config,
-        Some((mime, encoded)),
-        "請用自然、簡潔的繁體中文（台灣用語）說明這一頁漫畫在講什麼：先概述劇情，再整理對話大意；看不清楚或無法確定的地方要明說，不要杜撰。",
-    )
-    .await
+    let prompt = explain_page_prompt(&data.target_locale)?;
+    call_ai(config, Some((mime, encoded)), prompt).await
 }
 
 fn validate_page_data_url(data_url: &str) -> Result<(&str, &str), String> {
@@ -2503,6 +2522,30 @@ mod tests {
         let mut unknown = capability_comic("unknown", "舊來源");
         unknown.source_id = "legacy-unknown".into();
         assert_eq!(normalize_runtime_item(unknown).r#type, "external-archive");
+    }
+
+    #[test]
+    fn explain_page_request_defaults_to_traditional_chinese() {
+        let request: ExplainPageRequest =
+            serde_json::from_value(serde_json::json!({"dataUrl": "data:image/png;base64,AA=="}))
+                .unwrap();
+        assert_eq!(request.target_locale, "zh-Hant");
+    }
+
+    #[test]
+    fn explain_page_prompts_translate_then_summarize_without_inventing() {
+        for locale in ["zh-Hant", "en", "ja"] {
+            let prompt = explain_page_prompt(locale).unwrap();
+            assert!(
+                prompt.contains("summary")
+                    || prompt.contains("摘要")
+                    || prompt.contains("あらすじ")
+            );
+            assert!(
+                prompt.contains("invent") || prompt.contains("杜撰") || prompt.contains("創作")
+            );
+        }
+        assert!(explain_page_prompt("fr").is_err());
     }
 
     #[test]

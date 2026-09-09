@@ -412,16 +412,16 @@ window.GAIL10n.register({
     "ja": "先にAPIキーを入力してください"
   },
   "尚未設定艦載 AI。Key 只保留到 App 關閉。": {
-    "en": "On-device AI is not configured. The key is kept only until the app closes.",
-    "ja": "オンボードAIは未設定です。キーはアプリ終了までのみ保持されます。"
+    "en": "Cloud AI is not configured. The key is kept only until the app closes.",
+    "ja": "クラウドAIは未設定です。キーはアプリ終了までのみ保持されます。"
   },
   "正在用合成文字測試，不會送出漫畫內容…": {
     "en": "Testing with synthetic text; no comic content will be sent…",
     "ja": "合成テキストでテスト中。コミックの内容は送信されません…"
   },
   "艦載 AI 連線成功。": {
-    "en": "On-device AI connected.",
-    "ja": "オンボードAIに接続しました。"
+    "en": "Cloud AI connected.",
+    "ja": "クラウドAIに接続しました。"
   },
   "已清除本次工作階段的 API Key": {
     "en": "The API key for this session was cleared",
@@ -856,8 +856,8 @@ window.GAIL10n.register({
     "ja": "{label}を有効化 · {model}（このセッションのみ）"
   },
   "艦載 AI 已啟用；Key 只存在本次工作階段": {
-    "en": "On-device AI enabled; the key exists only for this session",
-    "ja": "オンボードAIを有効化しました。キーはこのセッションにのみ存在します"
+    "en": "Cloud AI enabled; the key exists only for this session",
+    "ja": "クラウドAIを有効化しました。キーはこのセッションにのみ存在します"
   },
   "測試失敗：{error}": {
     "en": "Test failed: {error}",
@@ -872,8 +872,20 @@ window.GAIL10n.register({
     "ja": "全書リーディングを開始しました。実際に開いたページだけを分析し、同じページは一度だけ課金されます。"
   },
   "艦載 AI 正在閱讀第 {page} 頁…": {
-    "en": "On-device AI is reading page {page}…",
-    "ja": "オンボードAIが{page}ページ目を読んでいます…"
+    "en": "Cloud AI is reading page {page}…",
+    "ja": "クラウドAIが{page}ページ目を読んでいます…"
+  },
+  "請先到設定輸入艦載 AI API Key": {
+    "en": "Enter the cloud AI API key in Settings first",
+    "ja": "先に設定でクラウドAIのAPIキーを入力してください"
+  },
+  "尚未同意第三方 AI 資料分享": {
+    "en": "You have not consented to sharing data with the third-party AI",
+    "ja": "第三者AIへのデータ共有に同意していません"
+  },
+  "艦載 AI 目前不可用，請稍後再試。": {
+    "en": "Cloud AI is currently unavailable. Try again later.",
+    "ja": "クラウドAIは現在利用できません。後でもう一度お試しください。"
   },
   "Pro 權益目前不可用，已停止全書隨讀；已完成的解說仍保留。": {
     "en": "Pro access is unavailable, so continuous reading stopped; completed explanations remain.",
@@ -884,12 +896,12 @@ window.GAIL10n.register({
     "ja": "無料枠またはリクエスト頻度の上限に達したため全書リーディングを停止しました。後で再試行するか、設定でLunaに切り替えてください。完了済みページはこのセッションのキャッシュに残ります。"
   },
   "艦載 AI 無法說明：{error}": {
-    "en": "On-device AI could not explain this: {error}",
-    "ja": "オンボードAIで説明できませんでした：{error}"
+    "en": "Cloud AI could not explain this: {error}",
+    "ja": "クラウドAIで説明できませんでした：{error}"
   },
   "艦載 AI 沒有提出可確認的候選。": {
-    "en": "On-device AI returned no candidates to review.",
-    "ja": "オンボードAIは確認可能な候補を提案しませんでした。"
+    "en": "Cloud AI returned no candidates to review.",
+    "ja": "クラウドAIは確認可能な候補を提案しませんでした。"
   },
   "可審核候選": {
     "en": "Candidates for review",
@@ -912,20 +924,20 @@ window.GAIL10n.register({
     "ja": "ユーザーによる上書きとして保存しました"
   },
   "請在桌面 App 中使用艦載 AI 整理建議。": {
-    "en": "Use the desktop app for on-device AI organizing suggestions.",
-    "ja": "オンボードAIの整理提案はデスクトップアプリで使用してください。"
+    "en": "Use the desktop app for cloud AI organizing suggestions.",
+    "ja": "クラウドAIの整理提案はデスクトップアプリで使用してください。"
   },
   "漫畫來源目前離線，重新掛載後才能讀取封面。": {
     "en": "The comic source is offline; remount it to read the cover.",
     "ja": "コミックソースがオフラインです。再接続すると表紙を読み込めます。"
   },
   "艦載 AI 正在讀取封面／第一頁，提出可審核的摘要與標籤…": {
-    "en": "On-device AI is reading the cover/first page and preparing summaries and tags for review…",
-    "ja": "オンボードAIが表紙または1ページ目を読み、確認用の概要とタグを作成しています…"
+    "en": "Cloud AI is reading the cover/first page and preparing summaries and tags for review…",
+    "ja": "クラウドAIが表紙または1ページ目を読み、確認用の概要とタグを作成しています…"
   },
   "艦載 AI 建議失敗：{error}": {
-    "en": "On-device AI suggestions failed: {error}",
-    "ja": "オンボードAIの提案に失敗しました：{error}"
+    "en": "Cloud AI suggestions failed: {error}",
+    "ja": "クラウドAIの提案に失敗しました：{error}"
   },
   "為避免掃描整台電腦，請選擇磁碟內實際存放漫畫的子資料夾。": {
     "en": "To avoid scanning the entire computer, choose the subfolder that actually stores your comics.",
@@ -1096,8 +1108,8 @@ window.GAIL10n.register({
     "ja": "フォルダーを開く：{name}"
   },
   "艦載 AI 設定失敗：{error}": {
-    "en": "On-device AI setup failed: {error}",
-    "ja": "オンボードAIの設定に失敗しました：{error}"
+    "en": "Cloud AI setup failed: {error}",
+    "ja": "クラウドAIの設定に失敗しました：{error}"
   },
   "無法讀取目前頁面": {
     "en": "Could not read the current page",

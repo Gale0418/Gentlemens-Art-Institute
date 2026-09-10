@@ -26,9 +26,9 @@ const requiredManifestParts = [
   '<string>3B52.1</string>',
   '<string>NSPrivacyAccessedAPICategoryUserDefaults</string>',
   '<string>CA92.1</string>',
-  '<key>NSPrivacyTracking</key>\n\t<false/>',
 ];
-if (requiredManifestParts.some(part => !sourceText.includes(part))) {
+const hasNoTrackingDeclaration = /<key>NSPrivacyTracking<\/key>\s*<false\s*\/>/.test(sourceText);
+if (requiredManifestParts.some(part => !sourceText.includes(part)) || !hasNoTrackingDeclaration) {
   throw new Error('Canonical iOS privacy manifest is missing a required declaration');
 }
 if (sourceText.includes('35F9.1')) {

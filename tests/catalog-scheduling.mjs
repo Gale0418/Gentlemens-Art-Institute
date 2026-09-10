@@ -506,7 +506,7 @@ const makeCover = id => {
   assert.equal(pages.children.length, 3);
 }
 
-// 初次 fetch 的 scan-status 查詢失敗後，finally 停止 polling 不可遺留 gate。
+// 初次 fetch 的 scan-status 查詢失敗後，仍要保留 polling 等待後端回報終態。
 {
   const initial = createHarness();
   initial.context.window.electronAPI.getLibrary = async () => [{ id: 'book', title: 'Book' }];
@@ -524,7 +524,10 @@ const makeCover = id => {
   await initial.hooks.performLibraryFetch();
   assert.equal(initial.hooks.state.scanStatus.isScanning, true);
   assert.equal(initial.hooks.state.scanStatus.pollError, true);
-  assert.equal(initial.hooks.state.scanStatusPollTimer, null);
+  assert.notEqual(initial.hooks.state.scanStatusPollTimer, null);
+  initial.clock.tick(700);
+  for (let turn = 0; turn < 4; turn += 1) await Promise.resolve();
+  assert.notEqual(initial.hooks.state.scanStatusPollTimer, null);
 }
 
 // 側欄視窗尺寸切換不得重新讀取書庫或重建書架。

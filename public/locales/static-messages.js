@@ -520,8 +520,8 @@ window.GAIL10n.register({
     "ja": "明るさを切り替え（Bキー）"
   },
   "請艦載 AI 說明目前頁面": {
-    "en": "Ask onboard AI to explain this page",
-    "ja": "艦載AIにこのページの説明を依頼"
+    "en": "Ask cloud AI to explain this page",
+    "ja": "クラウドAIにこのページの説明を依頼"
   },
   "這頁在說什麼？": {
     "en": "What is happening on this page?",
@@ -540,12 +540,12 @@ window.GAIL10n.register({
     "ja": "全画面表示を切り替え（Fキー）"
   },
   "艦載 AI": {
-    "en": "Onboard AI",
-    "ja": "艦載AI"
+    "en": "Cloud AI",
+    "ja": "クラウドAI"
   },
   "關閉艦載 AI 面板": {
-    "en": "Close onboard AI panel",
-    "ja": "艦載AIパネルを閉じる"
+    "en": "Close cloud AI panel",
+    "ja": "クラウドAIパネルを閉じる"
   },
   "按下 AI 按鈕後，只會送出目前這一頁；整理候選必須由你逐筆套用。": {
     "en": "Only the current page is sent after you press the AI button; apply organization candidates one by one.",
@@ -788,8 +788,8 @@ window.GAIL10n.register({
     "ja": "Keyを消去"
   },
   "尚未設定艦載 AI。": {
-    "en": "Onboard AI is not configured.",
-    "ja": "艦載AIはまだ設定されていません。"
+    "en": "Cloud AI is not configured.",
+    "ja": "クラウドAIはまだ設定されていません。"
   },
   "後端路徑瀏覽器": {
     "en": "Backend path browser",

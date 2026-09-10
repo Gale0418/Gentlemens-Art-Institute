@@ -34,6 +34,11 @@ fn item_for_path(
         .map_err(|error| error.to_string())?
         .to_string_lossy()
         .into_owned();
+    let relative = if kind == "folder" && relative.is_empty() {
+        ".".to_string()
+    } else {
+        relative
+    };
     let id = general_purpose::URL_SAFE_NO_PAD.encode(relative.as_bytes());
     let updated_at = std::fs::metadata(path)
         .and_then(|metadata| metadata.modified())
@@ -132,9 +137,7 @@ fn main() -> Result<(), String> {
     }
 
     for directory in image_dirs {
-        if directory != root {
-            comics.push(item_for_path(&root, &directory, "folder", "", &progress)?);
-        }
+        comics.push(item_for_path(&root, &directory, "folder", "", &progress)?);
     }
     comics.sort_by(|left, right| left.relative_path.cmp(&right.relative_path));
     println!(

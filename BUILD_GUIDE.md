@@ -173,6 +173,7 @@ rsync -av \
   "${GAI_PROJECT_DIR}/" "${GAI_IOS_WORK_DIR}/"
 
 cd "${GAI_IOS_WORK_DIR}"
+unset CARGO_TARGET_DIR
 npm ci
 ```
 

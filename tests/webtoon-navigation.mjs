@@ -555,12 +555,18 @@ for (const mode of ['webtoon', 'catalog', 'single', 'double', 'double-rtl']) {
       jumpToFirstPage: () => calls.push('first'),
       jumpToLastPage: () => calls.push('last'),
       nextPage: () => calls.push('next'),
+      cancelWebtoonAnchorFromUserInput: () => {
+        if (mode === 'webtoon') calls.push('cancel-anchor');
+      },
     });
     let prevented = false;
     handle({ key, preventDefault() { prevented = true; } });
     const paged = ['single', 'double', 'double-rtl'].includes(mode);
     assert.equal(prevented, paged, `${mode} ${key}: native scrolling is preserved only for scrolling layouts`);
-    assert.deepEqual(calls, paged ? [key === 'ArrowUp' ? 'first' : key === 'ArrowDown' ? 'last' : 'next'] : []);
+    const expectedCalls = paged
+      ? [key === 'ArrowUp' ? 'first' : key === 'ArrowDown' ? 'last' : 'next']
+      : (mode === 'webtoon' ? ['cancel-anchor'] : []);
+    assert.deepEqual(calls, expectedCalls);
   }
 }
 console.log('PASS: vertical keyboard scrolling and paged navigation remain mode-specific');

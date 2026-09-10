@@ -3,6 +3,7 @@ import fs from 'node:fs';
 import vm from 'node:vm';
 
 const app = fs.readFileSync(new URL('../public/app.js', import.meta.url), 'utf8');
+const css = fs.readFileSync(new URL('../public/style.css', import.meta.url), 'utf8');
 
 function extractFunction(name) {
   const asyncStart = app.indexOf(`async function ${name}`);
@@ -88,6 +89,18 @@ assert.deepEqual(calls.map(call => call.targetLocale), ['zh-Hant', 'en', 'ja']);
 pending.shift()('日本語結果');
 await thirdRequest;
 assert.equal(context.state.aiExplainCache.get('comic-1:0:ja'), '日本語結果');
+
+assert.match(
+  app,
+  /if \(activeIndex !== state\.currentPageIndex\) \{[\s\S]{0,500}scheduleAutoPageExplanation\(\);/,
+  'webtoon page changes must schedule automatic explanation'
+);
+assert.match(
+  css,
+  /\.ai-page-panel\s*\{[^}]*pointer-events:\s*none/,
+  'AI panel must not intercept page navigation except its controls'
+);
+assert.match(css, /\.ai-page-panel-header button\s*\{[^}]*pointer-events:\s*auto/);
 
 context.window.GAIL10n.t = source => ({
   '請先到設定輸入艦載 AI API Key': 'Enter the API key in Settings first',

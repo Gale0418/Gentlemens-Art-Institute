@@ -5698,6 +5698,8 @@ select:focus-visible,
 .ai-page-panel {
   position: absolute;
   z-index: 1004;
+  /* 面板是閱讀提示，不應遮住底下的單頁翻頁熱區；只有實際控制項接收點擊。 */
+  pointer-events: none;
   top: 50%;
   right: max(0.75rem, env(safe-area-inset-right));
   bottom: auto;
@@ -5762,11 +5764,13 @@ select:focus-visible,
   text-shadow: 0 2px 2px rgba(0, 0, 0, 0.9);
 }
 .ai-page-panel-header button {
+  pointer-events: auto;
   color: #fff;
   background: rgba(0, 0, 0, 0.72);
   border: 1px solid rgba(255, 255, 255, 0.72);
   border-radius: 999px;
 }
+.ai-page-panel .ai-candidate-apply { pointer-events: auto; }
 .ai-page-panel p { white-space: pre-wrap; line-height: 1.7; }
 .ai-candidate-note { display: block; color: var(--text-muted); margin-top: .25rem; }
 .ai-candidate-list { display: grid; gap: .6rem; margin-top: .7rem; }

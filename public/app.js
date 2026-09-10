@@ -1038,9 +1038,6 @@ function bindEvents() {
     readerTouchClickHandled = false;
     readerTouchResetTimer = null;
   };
-  const cancelWebtoonAnchorFromUserInput = () => {
-    if (state.readingMode === 'webtoon') cancelWebtoonAnchor();
-  };
   const deferReaderTouchReset = () => {
     clearTimeout(readerTouchResetTimer);
     readerTouchResetTimer = window.setTimeout(resetReaderTouchSession, 350);
@@ -2160,13 +2157,19 @@ async function performLibraryFetch({ background = false } = {}) {
           isScanning: true,
           pollError: true,
         };
+        if (!state.scanStatusPollTimer) startScanStatusPolling();
+      } else {
+        stopScanStatusPolling();
       }
       if (state.scanStatus?.isScanning !== false) updateLoaderScanProgress(state.scanStatus);
-      stopScanStatusPolling();
       state.loaderHideTimer = window.setTimeout(hideLoader, 6000);
     } else if (state.scanStatus?.pollError || state.scanStatus?.phase === 'error') {
       updateLoaderScanProgress(state.scanStatus);
-      stopScanStatusPolling();
+      if (state.scanStatus?.isScanning !== false) {
+        if (!state.scanStatusPollTimer) startScanStatusPolling();
+      } else {
+        stopScanStatusPolling();
+      }
       state.loaderHideTimer = window.setTimeout(hideLoader, 6000);
     } else {
       stopScanStatusPolling();
@@ -4195,6 +4198,10 @@ function cancelWebtoonAnchor() {
   state.webtoonAnchor = null;
 }
 
+function cancelWebtoonAnchorFromUserInput() {
+  if (state.readingMode === 'webtoon') cancelWebtoonAnchor();
+}
+
 function isActiveWebtoonAnchor(anchor = state.webtoonAnchor) {
   return Boolean(anchor
     && anchor.generation === state.renderGeneration
@@ -4261,6 +4268,7 @@ function anchorWebtoonPage(index, { behavior = 'auto', renderGeneration = state.
   const anchor = { index, generation: renderGeneration, lastTargetTop: null, resizeObserver: null };
   state.webtoonAnchor = anchor;
   state.currentPageIndex = index;
+  scheduleAutoPageExplanation();
   elements.pageCounter.textContent = readerText('第 {page} / {total} 頁', {
     page: index + 1,
     total: state.currentComicPages.length,
@@ -4319,6 +4327,9 @@ function updateWebtoonScrollState() {
     state.currentPageIndex = activeIndex;
     elements.pageCounter.textContent = readerText('第 {page} / {total} 頁', { page: state.currentPageIndex + 1, total: state.currentComicPages.length });
     elements.progressSlider.value = state.currentPageIndex + 1;
+    // 條漫不會經過 replaceReaderImages；頁面隨捲動變更時要重新排程
+    // 隨讀翻譯，否則只會翻譯開啟功能當下的那一頁。
+    scheduleAutoPageExplanation();
 
     // 即時懶加載附近的圖片
     loadWebtoonImagesAround(activeIndex);
@@ -4432,7 +4443,10 @@ function handleKeyDown(e) {
   }
 
   if ((state.readingMode === 'webtoon' || state.readingMode === 'catalog')
-    && ['ArrowUp', 'ArrowDown', ' ', 'Spacebar'].includes(e.key)) return;
+    && ['ArrowUp', 'ArrowDown', ' ', 'Spacebar'].includes(e.key)) {
+    cancelWebtoonAnchorFromUserInput();
+    return;
+  }
 
   switch (e.key) {
     case 'ArrowLeft':
@@ -5562,12 +5576,13 @@ async function requestPageExplanation(pageIndex, automatic = false) {
     if (state.currentComic?.id === comicId
       && state.currentPageIndex === pageIndex
       && getAiExplainLocale() === locale) {
+      const rawMessage = error?.message || String(error);
       const message = localizeAiExplainError(error);
-      if (/^PRO_REQUIRED:/i.test(message)) {
+      if (/^PRO_REQUIRED:/i.test(rawMessage)) {
         setAutoPageExplanation(false);
         elements.aiPageResult.textContent = readerText('Pro 權益目前不可用，已停止全書隨讀；已完成的解說仍保留。');
         if (!automatic) window.GaiCommerce?.handleError(error);
-      } else if (/HTTP 429|RESOURCE_EXHAUSTED|quota|rate limit/i.test(message)) {
+      } else if (/HTTP 429|RESOURCE_EXHAUSTED|quota|rate limit/i.test(rawMessage)) {
         setAutoPageExplanation(false);
         elements.aiPageResult.textContent = readerText('免費額度或請求頻率暫時用完，已停止全書隨讀。稍後再試，或到設定切換 Luna。已完成的頁面仍保留在本次快取。');
       } else {

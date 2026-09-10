@@ -207,6 +207,17 @@ pub(crate) fn local_source_id(root: &Path) -> String {
     )
 }
 
+fn local_item_relative_path(relative_path: &str) -> String {
+    // The configured scan directory can itself be an image folder. A dot is
+    // the canonical safe path for that directory and remains compatible with
+    // Path::join, protocol path validation, and the folder reader.
+    if relative_path.is_empty() {
+        ".".to_string()
+    } else {
+        relative_path.to_string()
+    }
+}
+
 pub(crate) fn external_source_id(bookmark: &str) -> String {
     format!(
         "external:{}",
@@ -778,12 +789,17 @@ pub async fn start_background_scan(state: Arc<AppState>, app_handle: tauri::AppH
                     return;
                 };
                 let is_external = virtual_prefix.is_some();
+                let local_relative_path = if is_external {
+                    rel_path.to_string()
+                } else {
+                    local_item_relative_path(rel_path)
+                };
                 let actual_path_str = if is_external {
                     dir.to_string_lossy().to_string()
                 } else {
-                    rel_path.to_string()
+                    local_relative_path.clone()
                 };
-                if !rel_path.is_empty() || is_external {
+                if !local_relative_path.is_empty() || is_external {
                     let id = general_purpose::URL_SAFE_NO_PAD.encode(actual_path_str.as_bytes());
                     let virtual_path = if let Some(prefix) = virtual_prefix {
                         if rel_path.is_empty() {
@@ -792,7 +808,7 @@ pub async fn start_background_scan(state: Arc<AppState>, app_handle: tauri::AppH
                             format!("📁 外部裝置/{prefix}/{rel_path}")
                         }
                     } else {
-                        rel_path.to_string()
+                        local_relative_path.clone()
                     };
                     let title = dir
                         .file_name()
@@ -1328,6 +1344,12 @@ mod tests {
     fn local_source_id_is_reproducible_for_an_offline_configured_path() {
         let configured = Path::new("/Volumes/ComicsNAS/Library");
         assert_eq!(local_source_id(configured), local_source_id(configured));
+    }
+
+    #[test]
+    fn local_scan_root_image_folder_uses_dot_relative_path() {
+        assert_eq!(local_item_relative_path(""), ".");
+        assert_eq!(local_item_relative_path("series/book"), "series/book");
     }
 
     #[test]

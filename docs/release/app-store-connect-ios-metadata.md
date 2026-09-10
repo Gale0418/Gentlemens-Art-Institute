@@ -90,7 +90,7 @@ Not applicable as a regulated service: the app provides no medical, diagnostic, 
 | 目的與對象 | 草案完成 | `PRODUCT.md` 與最終 listing |
 | 設定與操作 | 草案完成 | 本機／掛載 NAS 流程，SMB credentials 另行安全提供 |
 | 外部服務 | 草案完成，待 release build 確認 | SMB 使用者端點；可選 OpenAI／Google AI 的資料路徑、provider 揭露與 explicit consent |
-| 商業模型／IAP | StoreKit 已整合；Xcode 本機購買與權益查詢成功，交易列舉失敗、撤銷未驗證，待完整驗收 | 最終包可驗證購買、恢復、離線權益與 revocation；正式價格／ASC 商品建立仍待完成 |
+| 商業模型／IAP | StoreKit 已整合；台灣基準價格 TWD 150 與 ASC 商品已設定並回讀；Xcode 本機購買與權益查詢成功，交易列舉失敗、撤銷未驗證，待完整驗收 | 最終包可驗證購買、恢復、離線權益與 revocation；正式販售核准與完整交易驗收仍待完成 |
 | 區域差異 | 草案完成，待確認 | 主要語系、商店區域與 provider availability |
 | 受管制／受保護內容 | 需主人決策 | reviewer sample 權利、年齡分級、App Privacy、export compliance |
 

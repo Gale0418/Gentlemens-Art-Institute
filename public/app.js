@@ -272,6 +272,14 @@ function isBuiltInDemoComic(comic) {
   return Boolean(comic?.isBuiltInDemo || comic?.sourceId === BUILT_IN_DEMO_SOURCE_ID);
 }
 
+// 實體圖片資料夾本身是一部可閱讀的漫畫；只有前端折疊出的虛擬資料夾
+// 才是純導航項目。分開辨識，避免根目錄的散圖被誤標成「目錄」。
+function isReadableImageFolder(comic) {
+  return Boolean(comic && !comic.isDirectory && (
+    comic.type === 'folder' || comic.type === 'external-folder'
+  ));
+}
+
 function builtInDemoPageUrls(comic) {
   const slug = String(comic?.demoSlug || comic?.id || '').replace(/^builtin:landscape-/, '');
   const pageCount = Math.max(1, Number(comic?.pageCount) || 1);
@@ -3079,7 +3087,7 @@ function renderGrid({ skipUnchanged = false, background = false } = {}) {
             <i class="${isFavorite ? 'fa-solid' : 'fa-regular'} fa-heart"></i>
           </button>`}
 
-          <span class="comic-format-tag ${String(comic.type || '').includes('archive') ? 'tag-archive' : 'tag-folder'}" data-ext="${escapeHtml(comic.ext || 'folder')}">${sourceOffline ? `<i class="fa-solid fa-plug-circle-xmark"></i> ${readerText('來源離線')}` : String(comic.type || '').includes('archive') ? escapeHtml((comic.ext || '.cbz').replace('.','').toUpperCase()) : isPhotoAlbum(comic) ? readerText('相簿') : `📁 ${readerText('目錄')}`}</span>
+          <span class="comic-format-tag ${String(comic.type || '').includes('archive') ? 'tag-archive' : 'tag-folder'}" data-ext="${escapeHtml(comic.ext || 'folder')}">${sourceOffline ? `<i class="fa-solid fa-plug-circle-xmark"></i> ${readerText('來源離線')}` : String(comic.type || '').includes('archive') ? escapeHtml((comic.ext || '.cbz').replace('.','').toUpperCase()) : isPhotoAlbum(comic) ? readerText('相簿') : isReadableImageFolder(comic) ? `<i class="fa-solid fa-images"></i> ${readerText('圖片資料夾')}` : `📁 ${readerText('目錄')}`}</span>
           ${badgeHtml}
           ${hasProgress ? `
             <div class="comic-progress-overlay">
@@ -3090,14 +3098,20 @@ function renderGrid({ skipUnchanged = false, background = false } = {}) {
         <div class="comic-info">
           <div class="comic-title" title="${escapeHtml(comic.title)}">${escapeHtml(comic.title)}</div>
           <div class="comic-meta">
-            <span>${readerText('共 {total} 頁', { total: comic.pageCount > 0 ? comic.pageCount : '---' })}</span>
+            <span>${isReadableImageFolder(comic) && comic.pageCount > 0
+              ? readerText('共 {total} 張圖片', { total: comic.pageCount })
+              : readerText('共 {total} 頁', { total: comic.pageCount > 0 ? comic.pageCount : '---' })}</span>
             <span>${hasProgress ? readerText('第 {page} 頁', { page: comic.progress.currentPage + 1 }) : readerText('未讀')}</span>
           </div>
         </div>
       `;
 
       card.onclick = () => activateGridComic(comic);
-      configureInteractiveItem(card, state.organizeMode ? readerText('選取漫畫：{title}', { title: comic.title }) : readerText('選取漫畫：{title}；再次操作即可開始閱讀', { title: comic.title }), card.onclick);
+      configureInteractiveItem(card, state.organizeMode
+        ? readerText('選取漫畫：{title}', { title: comic.title })
+        : isReadableImageFolder(comic)
+          ? readerText('選取圖片資料夾：{title}；再次操作即可開始閱讀', { title: comic.title })
+          : readerText('選取漫畫：{title}；再次操作即可開始閱讀', { title: comic.title }), card.onclick);
       card.setAttribute('aria-pressed', String(state.organizeMode ? state.organizeSelection.has(comic.id) : state.selectedComicId === comic.id));
       card.oncontextmenu = (e) => showGridContextMenu(e, comic);
 

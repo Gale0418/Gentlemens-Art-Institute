@@ -645,6 +645,24 @@ const makeCover = id => {
   assert.deepEqual(Array.from(root.slice(0, 8), item => item.id), Array.from(demos, item => item.id));
   assert.equal(root.some(item => item.isDirectory && item.title === '正式系列'), true, '正式庫項目仍留在根目錄折疊結果');
 
+  catalog.hooks.state.comics = [{
+    id: 'root-images',
+    title: '目標資料夾',
+    type: 'folder',
+    relativePath: '.',
+    pageCount: 3,
+  }];
+  catalog.hooks.state.currentPath = '';
+  const rootImages = catalog.hooks.getDirectoryItems();
+  assert.deepEqual(Array.from(rootImages, item => item.id), ['root-images']);
+  assert.equal(rootImages[0].isDirectory, false, '掃描根目錄的圖片集合必須是可閱讀項目');
+
+  catalog.hooks.state.comics = [
+    { id: 'formal-z', title: '正式 Z', series: '正式系列', relativePath: '正式 Z.cbz', pageCount: 2 },
+    { id: 'formal-a', title: '正式 A', series: '正式系列', relativePath: '正式 A.cbz', pageCount: 2 },
+    { id: 'folder-book', title: '子目錄書', series: '正式系列', relativePath: '正式系列/子目錄書.cbz', pageCount: 2 },
+    ...demos,
+  ];
   catalog.hooks.state.currentPath = '正式系列';
   const child = catalog.hooks.getDirectoryItems();
   assert.deepEqual(Array.from(child, item => item.id), ['folder-book']);

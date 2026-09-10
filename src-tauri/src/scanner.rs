@@ -653,6 +653,7 @@ pub async fn start_background_scan(state: Arc<AppState>, app_handle: tauri::AppH
                 }
             };
             let mut has_images = false;
+            let mut image_count = 0usize;
             let mut subdirs = Vec::new();
             for entry in entries {
                 if state.scan_generation.load(Ordering::Acquire) != my_gen {
@@ -700,6 +701,7 @@ pub async fn start_background_scan(state: Arc<AppState>, app_handle: tauri::AppH
                 let ext_lower = format!(".{}", ext.to_lowercase());
                 if IMAGE_EXTENSIONS.contains(&ext_lower.as_str()) {
                     has_images = true;
+                    image_count += 1;
                     continue;
                 }
                 if ext_lower != ".cbz" && ext_lower != ".zip" {
@@ -844,7 +846,7 @@ pub async fn start_background_scan(state: Arc<AppState>, app_handle: tauri::AppH
                         title,
                         series,
                         updated_at,
-                        page_count: 0,
+                        page_count: image_count,
                         progress: saved_progress,
                         source_id: external_bookmark
                             .map(external_source_id)

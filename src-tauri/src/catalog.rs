@@ -19,6 +19,19 @@ const ARCHIVE_SAMPLE_BYTES: usize = 256 * 1024;
 const DIRECTORY_SAMPLE_BYTES: usize = 64 * 1024;
 const PAGE_SIZE_MAX: usize = 200;
 
+fn runtime_type_for_location(online: bool, kind: &str, _source_id: &str) -> String {
+    if !online {
+        return "offline".into();
+    }
+    if kind.contains("folder") {
+        "external-folder".into()
+    } else if kind.contains("image") {
+        "external-image".into()
+    } else {
+        "external-archive".into()
+    }
+}
+
 #[derive(Clone)]
 struct LocationSignature {
     size: Option<i64>,
@@ -810,14 +823,10 @@ impl CatalogStore {
                 if !catalog_only_sources.contains(&source_id) { continue; }
                 let Some(actual_path) = actual_path else { continue };
                 let ext = Path::new(&actual_path).extension().and_then(|value| value.to_str()).map(|value| format!(".{value}")).unwrap_or_default();
-                let item_type = if online {
-                    if kind == "folder" { "external-folder" } else { "external-archive" }
-                } else {
-                    "offline"
-                };
+                let item_type = runtime_type_for_location(online, &kind, &source_id);
                 items.push(ComicItem {
                     id: runtime_id,
-                    r#type: item_type.into(),
+                    r#type: item_type,
                     relative_path,
                     ext,
                     title,
@@ -870,18 +879,10 @@ impl CatalogStore {
                             .and_then(|value| value.to_str())
                             .map(|value| format!(".{value}"))
                             .unwrap_or_default();
-                        let item_type = if online {
-                            if kind == "folder" {
-                                "external-folder"
-                            } else {
-                                "external-archive"
-                            }
-                        } else {
-                            "offline"
-                        };
+                        let item_type = runtime_type_for_location(online, &kind, &source_id);
                         Ok(ComicItem {
                             id: runtime_id,
-                            r#type: item_type.into(),
+                            r#type: item_type,
                             relative_path,
                             ext,
                             title,
@@ -3559,6 +3560,22 @@ mod tests {
     use super::*;
     use std::sync::{atomic::{AtomicBool, Ordering}, Arc};
     use std::time::Instant;
+
+    #[test]
+    fn location_kind_preserves_loose_image_runtime_types() {
+        assert_eq!(
+            runtime_type_for_location(true, "image", "local:library"),
+            "external-image"
+        );
+        assert_eq!(
+            runtime_type_for_location(true, "external-image", "external:bookmark"),
+            "external-image"
+        );
+        assert_eq!(
+            runtime_type_for_location(false, "image", "local:library"),
+            "offline"
+        );
+    }
 
     fn store(name: &str) -> CatalogStore {
         let path = std::env::temp_dir().join(format!(

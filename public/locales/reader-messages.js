@@ -263,6 +263,10 @@ window.GAIL10n.register({
     "en": "Image folder",
     "ja": "画像フォルダー"
   },
+  "圖片檔案": {
+    "en": "Image file",
+    "ja": "画像ファイル"
+  },
   "批次整理 TAG 與書籍資料": {
     "en": "Organize tags and comic data",
     "ja": "タグと作品データを整理"
@@ -739,6 +743,10 @@ window.GAIL10n.register({
     "en": "{total} images",
     "ja": "画像{total}枚"
   },
+  "1 張圖片": {
+    "en": "1 image",
+    "ja": "画像1枚"
+  },
   "選取漫畫：{title}": {
     "en": "Select comic: {title}",
     "ja": "コミックを選択：{title}"
@@ -750,6 +758,10 @@ window.GAIL10n.register({
   "選取圖片資料夾：{title}；再次操作即可開始閱讀": {
     "en": "Select image folder: {title}; activate again to start reading",
     "ja": "画像フォルダーを選択：{title}。もう一度操作すると読み始めます"
+  },
+  "選取圖片：{title}；再次操作即可開啟": {
+    "en": "Select image: {title}; activate again to open",
+    "ja": "画像を選択：{title}。もう一度操作すると開きます"
   },
   "這本漫畫仍保留在書架，但原本的磁碟位置目前無法存取。請重新掛載 NAS，或選擇新的漫畫目錄。": {
     "en": "This comic remains on the shelf, but its original disk location is unavailable. Remount the NAS or choose a new comic folder.",

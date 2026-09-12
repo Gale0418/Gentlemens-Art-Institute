@@ -280,6 +280,12 @@ function isReadableImageFolder(comic) {
   ));
 }
 
+function isLooseImage(comic) {
+  return Boolean(comic && !comic.isDirectory && (
+    comic.type === 'image' || comic.type === 'external-image'
+  ));
+}
+
 function builtInDemoPageUrls(comic) {
   const slug = String(comic?.demoSlug || comic?.id || '').replace(/^builtin:landscape-/, '');
   const pageCount = Math.max(1, Number(comic?.pageCount) || 1);
@@ -2454,7 +2460,15 @@ function renderComicInspector(comic, options = {}) {
   const photoAlbum = isPhotoAlbum(comic);
   const sourceOffline = isComicOffline(comic);
   const progress = getProgressInfo(comic);
-  const format = photoAlbum ? readerText('照片相簿') : builtInDemo ? readerText('風景選集') : isDirectory ? readerText('目錄') : (String(comic.type || '').includes('archive') ? 'CBZ/ZIP' : readerText('圖片資料夾'));
+  const format = photoAlbum
+    ? readerText('照片相簿')
+    : builtInDemo
+      ? readerText('風景選集')
+      : isDirectory
+        ? readerText('目錄')
+        : isLooseImage(comic)
+          ? readerText('圖片檔案')
+          : (String(comic.type || '').includes('archive') ? 'CBZ/ZIP' : readerText('圖片資料夾'));
   const favorite = !isDirectory && !builtInDemo && state.favorites.includes(comic.id);
   const coverId = comic.coverComicId || comic.id;
 
@@ -3087,7 +3101,7 @@ function renderGrid({ skipUnchanged = false, background = false } = {}) {
             <i class="${isFavorite ? 'fa-solid' : 'fa-regular'} fa-heart"></i>
           </button>`}
 
-          <span class="comic-format-tag ${String(comic.type || '').includes('archive') ? 'tag-archive' : 'tag-folder'}" data-ext="${escapeHtml(comic.ext || 'folder')}">${sourceOffline ? `<i class="fa-solid fa-plug-circle-xmark"></i> ${readerText('來源離線')}` : String(comic.type || '').includes('archive') ? escapeHtml((comic.ext || '.cbz').replace('.','').toUpperCase()) : isPhotoAlbum(comic) ? readerText('相簿') : isReadableImageFolder(comic) ? `<i class="fa-solid fa-images"></i> ${readerText('圖片資料夾')}` : `📁 ${readerText('目錄')}`}</span>
+          <span class="comic-format-tag ${String(comic.type || '').includes('archive') ? 'tag-archive' : 'tag-folder'}" data-ext="${escapeHtml(comic.ext || 'folder')}">${sourceOffline ? `<i class="fa-solid fa-plug-circle-xmark"></i> ${readerText('來源離線')}` : String(comic.type || '').includes('archive') ? escapeHtml((comic.ext || '.cbz').replace('.','').toUpperCase()) : isPhotoAlbum(comic) ? readerText('相簿') : isLooseImage(comic) ? `<i class="fa-solid fa-image"></i> ${escapeHtml((comic.ext || '.img').replace('.','').toUpperCase())}` : isReadableImageFolder(comic) ? `<i class="fa-solid fa-images"></i> ${readerText('圖片資料夾')}` : `📁 ${readerText('目錄')}`}</span>
           ${badgeHtml}
           ${hasProgress ? `
             <div class="comic-progress-overlay">
@@ -3098,7 +3112,9 @@ function renderGrid({ skipUnchanged = false, background = false } = {}) {
         <div class="comic-info">
           <div class="comic-title" title="${escapeHtml(comic.title)}">${escapeHtml(comic.title)}</div>
           <div class="comic-meta">
-            <span>${isReadableImageFolder(comic) && comic.pageCount > 0
+            <span>${isLooseImage(comic)
+              ? readerText('1 張圖片')
+              : isReadableImageFolder(comic) && comic.pageCount > 0
               ? readerText('共 {total} 張圖片', { total: comic.pageCount })
               : readerText('共 {total} 頁', { total: comic.pageCount > 0 ? comic.pageCount : '---' })}</span>
             <span>${hasProgress ? readerText('第 {page} 頁', { page: comic.progress.currentPage + 1 }) : readerText('未讀')}</span>
@@ -3109,7 +3125,9 @@ function renderGrid({ skipUnchanged = false, background = false } = {}) {
       card.onclick = () => activateGridComic(comic);
       configureInteractiveItem(card, state.organizeMode
         ? readerText('選取漫畫：{title}', { title: comic.title })
-        : isReadableImageFolder(comic)
+        : isLooseImage(comic)
+          ? readerText('選取圖片：{title}；再次操作即可開啟', { title: comic.title })
+          : isReadableImageFolder(comic)
           ? readerText('選取圖片資料夾：{title}；再次操作即可開始閱讀', { title: comic.title })
           : readerText('選取漫畫：{title}；再次操作即可開始閱讀', { title: comic.title }), card.onclick);
       card.setAttribute('aria-pressed', String(state.organizeMode ? state.organizeSelection.has(comic.id) : state.selectedComicId === comic.id));
@@ -5826,6 +5844,7 @@ if (typeof window !== 'undefined' && window.__GIA_TEST_HOOKS__) {
     getCoverUrl,
     getDirectoryItems,
     isBuiltInDemoComic,
+    isLooseImage,
     resetCoverLoadQueue,
     enqueueCoverLoad,
     drainCoverLoadQueue,

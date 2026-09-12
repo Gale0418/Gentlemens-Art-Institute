@@ -97,6 +97,19 @@ pub async fn preload_comic_window(
             .find(|comic| comic.id == id)
             .map(|comic| comic.r#type.clone())
     };
+    if comic_type
+        .as_deref()
+        .is_some_and(|kind| kind.contains("image"))
+    {
+        let _ = app_handle.emit(
+            "ram-cache-progress",
+            serde_json::json!({
+                "id": id, "generation": generation, "pageIndex": current_page,
+                "loaded": 0, "total": 0, "finished": true
+            }),
+        );
+        return;
+    }
     let scan_dir = state.scan_dir.read().unwrap().clone();
     let smb_temp_dir = app_handle
         .path()

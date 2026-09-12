@@ -745,6 +745,28 @@ for (const formalLibrary of [
 
 console.log('catalog scheduling behavior tests passed');
 
+// 掃描目標根層的散圖是可直接選取的一頁項目，不能再被折成整個根資料夾。
+{
+  const looseImages = createHarness();
+  looseImages.hooks.state.comics = [{
+    id: 'root-png',
+    title: '下載圖片',
+    type: 'image',
+    relativePath: '下載圖片.png',
+    ext: '.png',
+    pageCount: 1,
+  }];
+  looseImages.hooks.state.currentPath = '';
+  looseImages.hooks.elements.searchInput.value = '';
+  looseImages.hooks.state.activeSeries = 'all';
+  looseImages.hooks.state.activeFilter = 'all';
+  const items = looseImages.hooks.getDirectoryItems();
+  const image = items.find(item => item.id === 'root-png');
+  assert.ok(image, '根層 PNG 應直接出現在書架');
+  assert.equal(image.isDirectory, false);
+  assert.equal(looseImages.hooks.isLooseImage(image), true);
+}
+
 {
   const malformed = createHarness();
   malformed.hooks.state.comics = [{ id: 'missing-path', title: 'Missing path' }];

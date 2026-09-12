@@ -218,6 +218,69 @@ fn local_item_relative_path(relative_path: &str) -> String {
     }
 }
 
+fn loose_root_image_item(
+    path: &Path,
+    root_dir: &Path,
+    ext: &str,
+    all_progress: &std::collections::HashMap<String, Progress>,
+    virtual_prefix: Option<&str>,
+    external_bookmark: Option<&str>,
+) -> Option<ComicItem> {
+    let relative_path = path.strip_prefix(root_dir).ok()?.to_str()?;
+    let is_external = virtual_prefix.is_some();
+    let capability_path = if is_external {
+        path.to_string_lossy().into_owned()
+    } else {
+        relative_path.to_string()
+    };
+    let id = general_purpose::URL_SAFE_NO_PAD.encode(capability_path.as_bytes());
+    let shelf_path = virtual_prefix
+        .map(|prefix| format!("📁 外部裝置/{prefix}/{relative_path}"))
+        .unwrap_or_else(|| relative_path.to_string());
+    let title = path
+        .file_stem()
+        .and_then(|value| value.to_str())
+        .unwrap_or("Unknown")
+        .to_string();
+    let series = root_dir
+        .file_name()
+        .and_then(|value| value.to_str())
+        .unwrap_or("未分類")
+        .to_string();
+    let updated_at = std::fs::metadata(path)
+        .and_then(|metadata| metadata.modified())
+        .map(|time| chrono::DateTime::<chrono::Utc>::from(time).to_rfc3339())
+        .unwrap_or_else(|_| chrono::Utc::now().to_rfc3339());
+    let saved_progress = all_progress.get(&id).cloned().unwrap_or(Progress {
+        current_page: 0,
+        total_pages: 0,
+        percent: 0.0,
+        updated_at: None,
+    });
+
+    Some(ComicItem {
+        id,
+        r#type: if is_external {
+            "external-image"
+        } else {
+            "image"
+        }
+        .to_string(),
+        relative_path: shelf_path,
+        ext: ext.to_string(),
+        title,
+        series,
+        updated_at,
+        page_count: 1,
+        progress: saved_progress,
+        source_id: external_bookmark
+            .map(external_source_id)
+            .unwrap_or_else(|| local_source_id(root_dir)),
+        source_path: Some(path.to_string_lossy().into_owned()),
+        external_bookmark: external_bookmark.map(str::to_owned),
+    })
+}
+
 pub(crate) fn external_source_id(bookmark: &str) -> String {
     format!(
         "external:{}",
@@ -702,6 +765,36 @@ pub async fn start_background_scan(state: Arc<AppState>, app_handle: tauri::AppH
                 if IMAGE_EXTENSIONS.contains(&ext_lower.as_str()) {
                     has_images = true;
                     image_count += 1;
+                    // The selected scan root behaves like an inbox: loose image
+                    // files must be visible individually on the shelf. Nested
+                    // image directories remain one readable comic so a large
+                    // library does not explode into page-level catalog rows.
+                    if depth == 0 {
+                        if let Some(item) = loose_root_image_item(
+                            &path,
+                            root_dir,
+                            &ext_lower,
+                            all_progress,
+                            virtual_prefix,
+                            external_bookmark,
+                        ) {
+                            results.push(item);
+                            publish_partial_library(
+                                results,
+                                state,
+                                app_handle,
+                                my_gen,
+                                published,
+                                published_at,
+                            );
+                        } else {
+                            incomplete.store(true, Ordering::Release);
+                            eprintln!(
+                                "⚠️ 根目錄圖片無法安全轉為書庫項目：{}",
+                                path.display()
+                            );
+                        }
+                    }
                     continue;
                 }
                 if ext_lower != ".cbz" && ext_lower != ".zip" {
@@ -780,7 +873,7 @@ pub async fn start_background_scan(state: Arc<AppState>, app_handle: tauri::AppH
                 );
             }
 
-            if has_images {
+            if has_images && depth > 0 {
                 let Some(rel_path) = dir
                     .strip_prefix(root_dir)
                     .ok()
@@ -1352,6 +1445,30 @@ mod tests {
     fn local_scan_root_image_folder_uses_dot_relative_path() {
         assert_eq!(local_item_relative_path(""), ".");
         assert_eq!(local_item_relative_path("series/book"), "series/book");
+    }
+
+    #[test]
+    fn loose_root_image_becomes_a_single_page_shelf_item() {
+        let root = Path::new("/library");
+        let image = root.join("下載圖片.png");
+        let item = loose_root_image_item(
+            &image,
+            root,
+            ".png",
+            &std::collections::HashMap::new(),
+            None,
+            None,
+        )
+        .unwrap();
+        assert_eq!(item.r#type, "image");
+        assert_eq!(item.relative_path, "下載圖片.png");
+        assert_eq!(item.title, "下載圖片");
+        assert_eq!(item.series, "library");
+        assert_eq!(item.page_count, 1);
+        assert_eq!(
+            item.id,
+            general_purpose::URL_SAFE_NO_PAD.encode("下載圖片.png".as_bytes())
+        );
     }
 
     #[test]

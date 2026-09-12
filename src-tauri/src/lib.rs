@@ -27,17 +27,22 @@ fn normalize_runtime_item(mut item: ComicItem) -> ComicItem {
         return item;
     }
     let is_folder = item.r#type.contains("folder");
+    let is_image = item.r#type.contains("image");
     item.r#type = if item.source_id == "smb" {
         "smb-archive"
     } else if item.source_id.starts_with("external:") {
         if is_folder {
             "external-folder"
+        } else if is_image {
+            "external-image"
         } else {
             "external-archive"
         }
     } else if item.source_id.starts_with("local:") {
         if is_folder {
             "folder"
+        } else if is_image {
+            "image"
         } else {
             "archive"
         }
@@ -984,6 +989,9 @@ async fn open_comic(
             cached_files.push(path.to_string_lossy().to_string());
         }
         cached_files
+    } else if comic_info.r#type.contains("image") {
+        pages.push(format!("gai://page/{id}/0"));
+        vec![full_path.to_string_lossy().into_owned()]
     } else {
         let entry_names =
             crate::utils::get_archive_images(&full_path).map_err(|error| error.to_string())?;
@@ -2522,6 +2530,18 @@ mod tests {
         external.source_id = "external:bookmark".into();
         external.r#type = "folder".into();
         assert_eq!(normalize_runtime_item(external).r#type, "external-folder");
+
+        let mut local_image = capability_comic("local-image", "本機圖片");
+        local_image.r#type = "image".into();
+        assert_eq!(normalize_runtime_item(local_image).r#type, "image");
+
+        let mut external_image = capability_comic("external-image", "外部圖片");
+        external_image.source_id = "external:bookmark".into();
+        external_image.r#type = "image".into();
+        assert_eq!(
+            normalize_runtime_item(external_image).r#type,
+            "external-image"
+        );
 
         let mut unknown = capability_comic("unknown", "舊來源");
         unknown.source_id = "legacy-unknown".into();

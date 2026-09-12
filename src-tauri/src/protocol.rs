@@ -89,7 +89,10 @@ fn cache_control_for_comic(comic: &ComicItem) -> &'static str {
     // become /3, so any WebView cache would serve the wrong image. Archive
     // entry indexes are stable for the current reader session and benefit from
     // a small private cache, especially when a large shelf asks for covers.
-    if comic.r#type.contains("folder") || comic.ext.is_empty() {
+    if comic.r#type.contains("folder")
+        || comic.r#type.contains("image")
+        || comic.ext.is_empty()
+    {
         MUTABLE_IMAGE_CACHE_CONTROL
     } else {
         ARCHIVE_IMAGE_CACHE_CONTROL
@@ -609,7 +612,50 @@ pub fn handle_comic_request(
             }
         }
 
-        if full_path.is_dir() {
+        if comic_info.r#type.contains("image") {
+            if page_index != 0 || !full_path.is_file() {
+                return Response::builder()
+                    .status(StatusCode::NOT_FOUND)
+                    .body(b"image page not found".to_vec())
+                    .map_err(Into::into);
+            }
+            let mut file = match File::open(&full_path) {
+                Ok(file) => file,
+                Err(_) => {
+                    return Response::builder()
+                        .status(StatusCode::NOT_FOUND)
+                        .body(b"image not found".to_vec())
+                        .map_err(Into::into)
+                }
+            };
+            let buf = match read_image_limited(&mut file) {
+                Ok(buf) => buf,
+                Err(error) if error.kind() == io::ErrorKind::InvalidData => {
+                    return Response::builder()
+                        .status(StatusCode::PAYLOAD_TOO_LARGE)
+                        .body(b"image too large".to_vec())
+                        .map_err(Into::into)
+                }
+                Err(_) => {
+                    return Response::builder()
+                        .status(StatusCode::UNPROCESSABLE_ENTITY)
+                        .body(b"image read failed".to_vec())
+                        .map_err(Into::into)
+                }
+            };
+            let ext = full_path
+                .extension()
+                .and_then(|value| value.to_str())
+                .unwrap_or("");
+            let mime = detect_mime(&buf, &format!(".{ext}"));
+            return Response::builder()
+                .header("Content-Type", mime)
+                .header("Cache-Control", MUTABLE_IMAGE_CACHE_CONTROL)
+                .header("X-Content-Type-Options", "nosniff")
+                .header("Access-Control-Allow-Origin", "*")
+                .body(buf)
+                .map_err(Into::into);
+        } else if full_path.is_dir() {
             let images = crate::utils::get_folder_images(&full_path);
             if let Some(image_path) = images.get(page_index) {
                 if let Some(canonical_image) = canonical_image_within(image_path, &full_path) {
@@ -811,6 +857,10 @@ mod tests {
         assert_eq!(
             cache_control_for_comic(&comic_item("archive", ".cbz")),
             ARCHIVE_IMAGE_CACHE_CONTROL
+        );
+        assert_eq!(
+            cache_control_for_comic(&comic_item("image", ".png")),
+            MUTABLE_IMAGE_CACHE_CONTROL
         );
         assert_eq!(
             cache_control_for_comic(&comic_item("offline", "")),

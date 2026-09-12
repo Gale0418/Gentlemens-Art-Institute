@@ -1087,7 +1087,8 @@ function bindEvents() {
     if (!touch || e.changedTouches?.length !== 1) readerTouchMulti = true;
     const dx = (touch?.screenX ?? touch?.clientX ?? 0) - touchStartX;
     const dy = (touch?.screenY ?? touch?.clientY ?? 0) - touchStartY;
-    if (!readerTouchCancelled && !readerTouchMulti && Math.abs(dx) > Math.abs(dy) && Math.abs(dx) > 40) {
+    const horizontalPanAvailable = state.readingMode === 'single' && readerViewportCanScroll('x');
+    if (!readerTouchCancelled && !readerTouchMulti && !horizontalPanAvailable && Math.abs(dx) > Math.abs(dy) && Math.abs(dx) > 40) {
       if (dx < 0) goNextByReadingDirection(); // 左滑下一頁
       else goPreviousByReadingDirection(); // 右滑上一頁
     }
@@ -1381,14 +1382,27 @@ function readerImageFitScale(img) {
 
 function applyReaderImageTransform(img) {
   if (!img || img.classList.contains('webtoon-img')) return;
-  const fitScale = readerImageFitScale(img);
   const zoomScale = state.zoomPercentage / 100;
-  const scale = Number.isFinite(fitScale) && fitScale > 0 ? fitScale * zoomScale : zoomScale;
+  const layoutAwareSinglePage = state.readingMode === 'single';
+  // 單頁直接放大承載容器，讓尺寸真正進入 scroll geometry；其他模式
+  // 維持 transform，避免改變既有雙頁排版。
+  const singlePageZoom = layoutAwareSinglePage ? `${state.zoomPercentage}%` : '100%';
+  if (typeof elements.pagesContainer.style.setProperty === 'function') {
+    elements.pagesContainer.style.setProperty('--single-page-zoom', singlePageZoom);
+  } else {
+    elements.pagesContainer.style['--single-page-zoom'] = singlePageZoom;
+  }
+  img.style.zoom = '';
+  const fitScale = readerImageFitScale(img);
+  const scale = Number.isFinite(fitScale) && fitScale > 0
+    ? fitScale * (layoutAwareSinglePage ? 1 : zoomScale)
+    : (layoutAwareSinglePage ? 1 : zoomScale);
   img.style.transform = `scale(${scale}) rotate(${state.rotationAngle}deg)`;
 }
 
 function refreshReaderImageTransforms() {
   elements.pagesContainer.querySelectorAll('img').forEach(applyReaderImageTransform);
+  elements.readerOverlay.classList.toggle('single-page-pannable', readerViewportCanScroll());
 }
 
 function scheduleReaderImageTransformRefresh() {
@@ -1401,6 +1415,14 @@ function replaceReaderImages(images) {
   images.filter(Boolean).forEach(img => elements.pagesContainer.appendChild(img));
   scheduleReaderImageTransformRefresh();
   scheduleAutoPageExplanation();
+}
+
+function readerViewportCanScroll(axis) {
+  const viewport = elements.readerViewport;
+  if (!viewport || state.readingMode !== 'single') return false;
+  if (axis === 'x') return Number(viewport.scrollWidth || 0) > Number(viewport.clientWidth || 0) + 1;
+  if (axis === 'y') return Number(viewport.scrollHeight || 0) > Number(viewport.clientHeight || 0) + 1;
+  return readerViewportCanScroll('x') || readerViewportCanScroll('y');
 }
 
 function imageFilterValue() {
@@ -3461,12 +3483,14 @@ function renderPages() {
 
   // 移除所有模式 class
   elements.readerOverlay.classList.remove('mode-single', 'mode-double', 'mode-webtoon', 'mode-catalog');
+  elements.readerOverlay.classList.remove('single-page-pannable');
 
   // BUG-10 修正：每次重新渲染前先清除 onscroll，避免切換模式後 webtoon 事件殘留
   elements.readerViewport.onscroll = null;
 
   // 重設滾動位置，防止切頁時停留在中段
   elements.readerViewport.scrollTop = 0;
+  elements.readerViewport.scrollLeft = 0;
 
   if (state.readingMode === 'single') {
     elements.readerOverlay.classList.add('mode-single');
@@ -5882,6 +5906,7 @@ if (typeof window !== 'undefined' && window.__GIA_TEST_HOOKS__) {
     anchorWebtoonPage,
     cancelWebtoonAnchor,
     handleReaderPointerClick,
+    readerViewportCanScroll,
     bindEvents,
     closeReader,
     getCoverQueueState() {

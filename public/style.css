@@ -859,7 +859,27 @@ body {
 }
 
 /* --- 單頁模式 --- */
+.reader-overlay.mode-single .reader-viewport {
+  align-items: flex-start;
+  justify-content: flex-start;
+  overflow: auto;
+  overscroll-behavior: contain;
+  -webkit-overflow-scrolling: touch;
+  touch-action: pan-x pan-y;
+}
+
+/* 溢位時讓整個閱讀區接收原生捲動；翻頁仍可由輕點分區、鍵盤或控制列完成。 */
+.reader-overlay.mode-single.single-page-pannable .nav-zone {
+  pointer-events: none;
+}
+
 .reader-overlay.mode-single .pages-container {
+  box-sizing: border-box;
+  flex: 0 0 auto;
+  width: var(--single-page-zoom, 100%);
+  height: var(--single-page-zoom, 100%);
+  min-width: 100%;
+  min-height: 100%;
   padding: 20px;
 }
 
@@ -1005,11 +1025,15 @@ body {
 
 /* 3. 高度適應 (Fit Height) - 高度拉滿 */
 .reader-overlay.mode-single.fit-height .pages-container img {
+  flex: 0 0 auto;
   height: 100% !important;
   max-height: 100% !important;
   width: auto !important;
   max-width: none !important;
   object-fit: contain !important;
+}
+.reader-overlay.mode-single.fit-height .pages-container {
+  width: max-content;
 }
 .reader-overlay.mode-double.fit-height .pages-container img {
   height: 100% !important;

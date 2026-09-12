@@ -41,6 +41,9 @@ assert.doesNotMatch(pointer, /requestWebtoonAdjacentComic/);
 assert.doesNotMatch(pointer, /getWebtoonEdgeAtPoint/);
 assert.match(app, /function createWebtoonNavigationButton\(direction\)/);
 assert.match(css, /\.reader-overlay\.mode-webtoon \.webtoon-nav-button[\s\S]*min-height: 44px/);
+assert.match(css, /\.reader-overlay\.mode-single \.reader-viewport[\s\S]*overflow: auto/);
+assert.match(css, /\.reader-overlay\.mode-single \.reader-viewport[\s\S]*touch-action: pan-x pan-y/);
+assert.match(css, /\.reader-overlay\.mode-single\.single-page-pannable \.nav-zone[\s\S]*pointer-events: none/);
 assert.match(messages, /"上一本"[\s\S]*"Previous comic"[\s\S]*"前のコミック"/);
 assert.match(messages, /"下一本"[\s\S]*"Next comic"[\s\S]*"次のコミック"/);
 
@@ -544,6 +547,37 @@ for (const scenario of ['tap-pointer-first', 'tap-touch-first', 'jitter', 'verti
   assert.equal(overlay.classList.contains('reader-idle'), true, 'button taps do not also toggle chrome');
 }
 console.log('PASS: webtoon tap shows UI; swipes, drags, multi-touch and cancellation do not');
+
+// A horizontally oversized single page owns the swipe gesture: native panning
+// must not also advance the comic page.
+{
+  const { hooks } = createRuntimeHarness();
+  const viewport = hooks.elements.readerViewport;
+  hooks.elements.readerOverlay.style.display = 'flex';
+  hooks.state.currentComic = comic('large-single-page');
+  hooks.state.currentComicPages = ['/large-0.jpg', '/large-1.jpg', '/large-2.jpg'];
+  hooks.state.currentPageIndex = 1;
+  hooks.state.readingMode = 'single';
+  viewport.clientWidth = 800;
+  viewport.scrollWidth = 1400;
+  assert.equal(hooks.readerViewportCanScroll('x'), true);
+  const start = { clientX: 600, clientY: 400, screenX: 600, screenY: 400 };
+  const end = { clientX: 480, clientY: 400, screenX: 480, screenY: 400 };
+  viewport.dispatch('touchstart', { touches: [start], changedTouches: [start] });
+  viewport.dispatch('touchmove', { touches: [end], changedTouches: [end] });
+  viewport.dispatch('touchend', { touches: [], changedTouches: [end] });
+  assert.equal(hooks.state.currentPageIndex, 1, 'oversized single-page swipe pans without turning the page');
+
+  hooks.elements.readerOverlay.classList.add('single-page-pannable');
+  hooks.state.readingMode = 'catalog';
+  hooks.renderPages();
+  assert.equal(
+    hooks.elements.readerOverlay.classList.contains('single-page-pannable'),
+    false,
+    'leaving single-page mode clears the panning state',
+  );
+}
+console.log('PASS: oversized single pages pan in both axes without accidental page turns');
 
 // Scrolling layouts must leave vertical keyboard events to the browser.
 for (const mode of ['webtoon', 'catalog', 'single', 'double', 'double-rtl']) {

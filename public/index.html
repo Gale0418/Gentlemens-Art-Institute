@@ -80,7 +80,7 @@
           <i class="fa-solid fa-rotate-right"></i><span data-i18n="重新整理">重新整理</span>
         </button>
         <button id="import-photo-btn" class="action-btn" title="從相簿匯入圖片" data-i18n-title="從相簿匯入圖片" style="display: none; background: rgba(255, 255, 255, 0.05); border-color: var(--card-border); color: var(--text-muted);">
-          <i class="fa-regular fa-images"></i><span data-i18n="匯入圖片">匯入圖片</span>
+          <i class="fa-solid fa-file-import" aria-hidden="true"></i><span data-i18n="匯入圖片">匯入圖片</span>
         </button>
         <button id="photo-library-link-btn" class="action-btn photo-library-link-btn" type="button" title="連結 iOS 相簿" data-i18n-title="連結 iOS 相簿" hidden>
           <i class="fa-regular fa-images" aria-hidden="true"></i><span data-i18n="連結相簿">連結相簿</span>
@@ -277,7 +277,7 @@
   </div>
 
   <!-- 全螢幕漫畫閱讀器層 -->
-  <div class="reader-overlay" id="reader-overlay" role="dialog" aria-modal="true" aria-labelledby="reader-comic-title" style="display: none;">
+  <div class="reader-overlay" id="reader-overlay" role="dialog" aria-modal="true" aria-labelledby="reader-comic-title" aria-hidden="true" tabindex="-1" style="display: none;">
     <!-- 頂部浮動標題列 (滑鼠靠近時顯示) -->
     <div class="reader-top-bar" id="reader-top-bar">
       <button class="back-btn" id="reader-back-btn" aria-label="返回漫畫書架" data-i18n-aria-label="返回漫畫書架">
@@ -543,7 +543,7 @@
         <section class="ai-settings" aria-labelledby="ai-settings-title">
           <div>
             <h3 id="ai-settings-title"><i class="fa-solid fa-wand-sparkles"></i><span data-i18n="艦載 AI">艦載 AI</span></h3>
-            <p data-i18n="Key 只保留到 App 關閉，不寫入硬碟。AI 透過雲端供應商處理，費用與免費額度依供應商方案為準；需要自備 API Key。">Key 只保留到 App 關閉，不寫入硬碟。AI 透過雲端供應商處理，費用與免費額度依供應商方案為準；需要自備 API Key。</p>
+            <p data-i18n="Key 預設只保留本次工作階段；勾選記住後會由本機 Keychain 保管，不會寫入一般設定檔。每次啟用 AI（包含 App 重新啟動後）都要重新同意目前工作階段的資料傳送；重新啟動後請再選擇使用已儲存金鑰。你可以在設定中清除已記住的 Key。">Key 預設只保留本次工作階段；勾選記住後會由本機 Keychain 保管，不會寫入一般設定檔。每次啟用 AI（包含 App 重新啟動後）都要重新同意目前工作階段的資料傳送；重新啟動後請再選擇使用已儲存金鑰。你可以在設定中清除已記住的 Key。</p>
           </div>
           <label for="ai-provider" data-i18n="供應商">供應商</label>
           <select id="ai-provider">
@@ -552,12 +552,17 @@
           </select>
           <label for="ai-api-key" data-i18n="API Key">API Key</label>
           <input id="ai-api-key" type="password" autocomplete="off" spellcheck="false" placeholder="手動貼上，只保留本次執行階段" data-i18n-placeholder="手動貼上，只保留本次執行階段">
+          <label class="ai-remember-key">
+            <input id="ai-remember-key" type="checkbox">
+            <span data-i18n="使用本機 Keychain 記住這個 Key（只保存一個供應商；儲存另一家會取代既有 Key）">使用本機 Keychain 記住這個 Key（只保存一個供應商；儲存另一家會取代既有 Key）</span>
+          </label>
           <label class="ai-disclosure" id="ai-google-disclosure-wrap" hidden>
             <input id="ai-google-disclosure" type="checkbox">
             <span data-i18n="我了解雲端 BYOK 會將我選擇的頁面與提示傳送至供應商；啟用前請確認上方所選供應商與資料使用說明。">我了解雲端 BYOK 會將我選擇的頁面與提示傳送至供應商；啟用前請確認上方所選供應商與資料使用說明。</span>
           </label>
           <div class="ai-settings-actions">
             <button id="ai-save-btn" class="modal-action-btn primary" type="button" data-i18n="啟用本次工作階段">啟用本次工作階段</button>
+            <button id="ai-restore-btn" class="modal-action-btn" type="button" data-i18n="使用已儲存金鑰" hidden>使用已儲存金鑰</button>
             <button id="ai-test-btn" class="modal-action-btn" type="button" data-i18n="用合成文字測試">用合成文字測試</button>
             <button id="ai-clear-btn" class="modal-action-btn" type="button" data-i18n="清除 Key">清除 Key</button>
           </div>

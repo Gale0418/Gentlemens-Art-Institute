@@ -27,7 +27,10 @@ let package = Package(
             dependencies: [
                 .byName(name: "Tauri")
             ],
-            path: "Sources"),
+            path: "Sources",
+            linkerSettings: [
+                .linkedFramework("Security")
+            ]),
         .target(
             name: "StoreKitTestSupport",
             path: "Tests/StoreKitTestSupport",

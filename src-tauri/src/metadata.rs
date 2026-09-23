@@ -643,7 +643,10 @@ fn filename_source(path: &Path) -> ParsedMetadataSource {
 }
 
 /// 由掃描器提供已知類型，避免僅解析檔名卻再次存取外部 Files provider。
-pub(crate) fn filename_metadata_for_discovered_path(path: &Path, is_directory: bool) -> ParsedMetadataSource {
+pub(crate) fn filename_metadata_for_discovered_path(
+    path: &Path,
+    is_directory: bool,
+) -> ParsedMetadataSource {
     let title = if is_directory {
         path.file_name()
     } else {

@@ -34,9 +34,9 @@ pub(crate) fn safe_archive_entry_name(name: &str) -> bool {
 
 fn visible_archive_page_name(name: &str) -> bool {
     safe_archive_entry_name(name)
-        && !name.split(['/', '\\']).any(|part| {
-            part.starts_with('.') || part.eq_ignore_ascii_case("__MACOSX")
-        })
+        && !name
+            .split(['/', '\\'])
+            .any(|part| part.starts_with('.') || part.eq_ignore_ascii_case("__MACOSX"))
 }
 
 fn supported_image_extension(path: &Path) -> bool {

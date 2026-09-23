@@ -362,5 +362,9 @@ window.GAIL10n.register({
   "啟用 {provider} 前，請先明確同意將目前頁面影像與提示文字傳送至該第三方 AI 供應商。": {
     "en": "Before enabling {provider}, explicitly consent to sending the current page image and prompt to this third-party AI provider.",
     "ja": "{provider}を有効にする前に、現在のページ画像とプロンプトをこの第三者AIに送信することに明示的に同意してください。"
+  },
+  "使用已儲存 {provider} Key 前，請先明確同意將目前頁面影像與提示文字傳送至該第三方 AI 供應商。": {
+    "en": "Before using the saved {provider} key, explicitly consent to sending the current page image and prompt to this third-party AI provider.",
+    "ja": "保存済みの{provider}キーを使用する前に、現在のページ画像とプロンプトをこの第三者AIに送信することに明示的に同意してください。"
   }
 });

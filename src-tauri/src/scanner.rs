@@ -789,10 +789,7 @@ pub async fn start_background_scan(state: Arc<AppState>, app_handle: tauri::AppH
                             );
                         } else {
                             incomplete.store(true, Ordering::Release);
-                            eprintln!(
-                                "⚠️ 根目錄圖片無法安全轉為書庫項目：{}",
-                                path.display()
-                            );
+                            eprintln!("⚠️ 根目錄圖片無法安全轉為書庫項目：{}", path.display());
                         }
                     }
                     continue;

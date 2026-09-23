@@ -91,6 +91,8 @@ const httpAPI = {
   undoTagOperation: null,
   getAiSessionStatus: null,
   setAiSessionConfig: null,
+  restoreAiSessionConfig: null,
+  revokeAiSessionConfig: null,
   clearAiSessionConfig: null,
   testAiSession: null,
   explainPage: null,
@@ -114,6 +116,34 @@ let lastContinueRenderSignature = '';
 let lastInspectorRenderSignature = '';
 let libraryRefreshRunner = null;
 let incrementalLibraryRenderFrame = null;
+// Native command 排程不保證呼叫者的完成順序；把每筆進度快照排成單一
+// promise chain，避免快速翻頁時較舊頁碼晚於新頁碼落庫。
+let readingProgressSaveQueue = Promise.resolve();
+// Rust 會在 WebView reload 後保留本次 app runtime 已提交的序號；將
+// 最後發出的序號留在 tab session，讓立即 reload 也不會退回較舊值。
+const READING_PROGRESS_SEQUENCE_KEY = 'gai:readingProgressSequence';
+function initialReadingProgressSaveSequence() {
+  const wallClock = Date.now() * 1000;
+  try {
+    const previous = Number(sessionStorage.getItem(READING_PROGRESS_SEQUENCE_KEY));
+    return Number.isSafeInteger(previous) ? Math.max(wallClock, previous) : wallClock;
+  } catch (error) {
+    return wallClock;
+  }
+}
+let readingProgressSaveSequence = initialReadingProgressSaveSequence();
+function nextReadingProgressSaveSequence() {
+  readingProgressSaveSequence = Math.max(readingProgressSaveSequence + 1, Date.now() * 1000);
+  try {
+    sessionStorage.setItem(READING_PROGRESS_SEQUENCE_KEY, String(readingProgressSaveSequence));
+  } catch (error) {
+    // Native queue remains ordered even if tab storage is unavailable.
+  }
+  return readingProgressSaveSequence;
+}
+// 外部資料夾清單是全量寫入；所有 UI intent 必須在同一條 queue 內重讀
+// localStorage，避免兩個舊 snapshot 互相覆蓋。
+let externalBookmarkMutationQueue = Promise.resolve();
 
 function isLibraryRefreshBlocked() {
   return Boolean(
@@ -139,6 +169,7 @@ function queueIncrementalLibraryRender() {
     filterAndRenderGrid({ skipUnchanged: true, background: true });
     renderSidebar();
     renderContinueStrip();
+    restoreLibraryRefreshFocus();
     updateStats();
   };
   if (typeof requestAnimationFrame === 'function') {
@@ -180,6 +211,7 @@ function applyIncrementalLibraryBatch(payload) {
         state.comics[index] = comic;
       }
     });
+  invalidateComicNavigationCache();
   state.scanStatus = {
     ...(state.scanStatus || {}),
     generation,
@@ -252,8 +284,26 @@ const READER_PRELOAD_RADIUS = 10;
 const MAX_PRELOADED_IMAGES = READER_PRELOAD_RADIUS * 2;
 const READER_CACHE_UPDATE_DELAY_MS = 120;
 const WEBTOON_EAGER_IMAGES = 3;
+const WEBTOON_RENDER_BEFORE = 12;
+const WEBTOON_RENDER_AFTER = 28;
+const CATALOG_RENDER_PAGE_SIZE = 160;
+const CATALOG_IMAGE_CONCURRENCY = 8;
 const BUILT_IN_DEMO_SOURCE_ID = 'builtin:landscapes';
 const BUILT_IN_DEMO_ID_PREFIX = 'builtin:landscape-';
+
+// 閱讀器相鄰漫畫會在每次 window render 查兩次；依書庫世代快取分組與排序，
+// 避免長書庫每次滾動都重複 filter + Intl.Collator.sort。
+let comicNavigationCache = {
+  comics: null,
+  revision: -1,
+  groups: new Map(),
+  byId: new Map(),
+};
+let catalogImageObserver = null;
+let catalogImageQueue = [];
+const catalogImageTasks = new Set();
+let catalogImageActive = 0;
+let catalogImageGeneration = 0;
 
 const BUILT_IN_DEMO_GROUPS = Object.freeze([
   { slug: 'mountains', title: '層疊群山', pageCount: 2 },
@@ -341,6 +391,7 @@ let state = {
   fitMode: localStorage.getItem('readerFitMode') || 'contain', // 'contain', 'width', 'height'
   rotationAngle: 0, // 0, 90, 180, 270
   favorites: [],
+  favoriteIds: new Set(),
   activeSeries: 'all',
   activeFilter: 'all',
   currentPath: '', // 目錄樹當前路徑 (姬米妮貼心追加 ✨)
@@ -353,6 +404,19 @@ let state = {
   readerContextMenuOpen: false,
   webtoonScrollFrame: null,
   webtoonAnchor: null,
+  webtoonWindowStart: 0,
+  webtoonWindowEnd: 0,
+  webtoonPageHeights: [],
+  webtoonMetricsViewportWidth: 0,
+  webtoonMeasuredPageHeights: new Map(),
+  webtoonPagePrefixHeights: [],
+  webtoonPendingPageHeights: new Map(),
+  webtoonHeightUpdateFrame: null,
+  webtoonNavigationOffset: 0,
+  catalogWindowStart: 0,
+  comicsRevision: 0,
+  readerReturnFocus: null,
+  libraryRefreshFocusSnapshot: null,
   scanStatusPollTimer: null,
   scanStatusPollWallclockTimer: null,
   scanStatus: null,
@@ -375,6 +439,14 @@ let state = {
   pendingComicId: null,
   readerBoundaryDialog: null,
   dialogReturnFocus: null,
+  aiSessionStatus: null,
+  aiSessionSwitchPending: false,
+  aiSessionRevocationFailed: false,
+  aiSessionSwitchGeneration: 0,
+  aiSessionMutationPending: false,
+  aiSessionMutationKind: null,
+  aiSessionMutationGeneration: 0,
+  aiProviderCommitted: null,
   organizeMode: false,
   organizeSelection: new Set(),
   lastUndoToken: null,
@@ -392,6 +464,16 @@ let state = {
   sidebarCollapsed: false,
   inspectorCollapsed: false,
 };
+
+function setFavorites(favorites) {
+  state.favorites = Array.isArray(favorites) ? favorites : [];
+  state.favoriteIds = new Set(state.favorites);
+  return state.favorites;
+}
+
+function isFavoriteId(comicId) {
+  return state.favoriteIds.has(comicId);
+}
 
 const THEME_STORAGE_KEY = 'gai:theme';
 const THEMES = new Set(['midnight', 'sakura', 'ink', 'aurora']);
@@ -544,9 +626,11 @@ const elements = {
   catalogImportPreview: document.getElementById('catalog-import-preview'),
   aiProvider: document.getElementById('ai-provider'),
   aiApiKey: document.getElementById('ai-api-key'),
-  aiGoogleDisclosureWrap: document.getElementById('ai-google-disclosure-wrap'),
+  aiRememberKey: document.getElementById('ai-remember-key'),
+  aiGoogleDisclosureWrap: document.getElementById('ai-google-disclosure-wrap') || document.getElementById('ai-third-party-disclosure-wrap'),
   aiGoogleDisclosure: document.getElementById('ai-google-disclosure'),
   aiSaveBtn: document.getElementById('ai-save-btn'),
+  aiRestoreBtn: document.getElementById('ai-restore-btn'),
   aiTestBtn: document.getElementById('ai-test-btn'),
   aiClearBtn: document.getElementById('ai-clear-btn'),
   aiSessionStatus: document.getElementById('ai-session-status'),
@@ -713,6 +797,7 @@ function applyLibraryCardSize(value, { persist = true } = {}) {
 // 初始化載入
 async function initApp() {
   document.getElementById('zoom-value').textContent = '100%';
+  sanitizeSmbConfig();
 
   // 如果是 iOS，顯示相簿匯入按鈕
   const isIOS = /iPad|iPhone|iPod/.test(navigator.userAgent) || (navigator.platform === 'MacIntel' && navigator.maxTouchPoints > 1);
@@ -730,7 +815,7 @@ async function initApp() {
   // 開始第一波撈取
   showLoader(readerText('正在載入漫畫…'), { progress: null, detail: readerText('請稍候...') });
   if (eAPI && eAPI.getFavorites) {
-    try { state.favorites = await eAPI.getFavorites(); } catch(e) {}
+    try { setFavorites(await eAPI.getFavorites()); } catch(e) {}
   }
   const savedScanDir = localStorage.getItem('gai:scanDir');
   if (savedScanDir) {
@@ -743,19 +828,14 @@ async function initApp() {
     }
   }
 
-  // 載入外部書籤
+  // 載入外部書籤；和新增／刪除共用 queue，避免初始化 restore 覆蓋
+  // 使用者在另一個 UI 事件中剛提交的最新清單。
   if (eAPI.setBookmarks) {
-    let savedBookmarks = [];
     try {
-      savedBookmarks = JSON.parse(localStorage.getItem('gai:externalBookmarks') || '[]');
-    } catch (e) {}
-    if (savedBookmarks.length > 0) {
-      try {
-        await eAPI.setBookmarks(savedBookmarks);
-      } catch (error) {
-        console.error('恢復外部資料夾失敗：', error);
-        alert(readerText('部分外部資料夾權限無法恢復，請在設定中重新加入：\n{error}', { error }));
-      }
+      await restoreExternalBookmarks();
+    } catch (error) {
+      console.error('恢復外部資料夾失敗：', error);
+      alert(readerText('部分外部資料夾權限無法恢復，請在設定中重新加入：\n{error}', { error }));
     }
   }
   await fetchLibrary();
@@ -770,6 +850,70 @@ function classifyBookmarkUpdateError(error) {
   };
 }
 
+function readExternalBookmarks() {
+  try {
+    const bookmarks = JSON.parse(localStorage.getItem('gai:externalBookmarks') || '[]');
+    return Array.isArray(bookmarks) ? bookmarks : [];
+  } catch (error) {
+    console.warn('外部資料夾清單格式無效，將重新建立：', error);
+    return [];
+  }
+}
+
+function sanitizeSmbConfig() {
+  let rawConfig = null;
+  try {
+    rawConfig = localStorage.getItem('gai:smb');
+  } catch (error) {
+    try {
+      localStorage.removeItem('gai:smb');
+    } catch (removeError) {
+      // Storage is unavailable; retry sanitization on the next App startup.
+    }
+    return {};
+  }
+  if (!rawConfig) return {};
+
+  let stored = {};
+  try {
+    const parsed = JSON.parse(rawConfig);
+    if (parsed && typeof parsed === 'object' && !Array.isArray(parsed)) stored = parsed;
+  } catch (error) {
+    // Invalid legacy data is replaced with an empty safe config below.
+  }
+  const safeConfig = {
+    host: typeof stored.host === 'string' ? stored.host : '',
+    share: typeof stored.share === 'string' ? stored.share : '',
+    username: typeof stored.username === 'string' ? stored.username : '',
+  };
+  try {
+    localStorage.setItem('gai:smb', JSON.stringify(safeConfig));
+  } catch (error) {
+    try {
+      localStorage.removeItem('gai:smb');
+    } catch (removeError) {
+      // Best effort: a storage backend may reject both writes and removal.
+    }
+    return {};
+  }
+  return safeConfig;
+}
+
+function enqueueExternalBookmarkMutation(operation) {
+  const queued = externalBookmarkMutationQueue.then(operation, operation);
+  // 保留目前操作的 rejection 給呼叫端，但讓後續 UI intent 繼續排程。
+  externalBookmarkMutationQueue = queued.catch(() => {});
+  return queued;
+}
+
+async function restoreExternalBookmarks() {
+  if (!eAPI?.setBookmarks) return;
+  await enqueueExternalBookmarkMutation(async () => {
+    // 空清單也是有效的全量提交，用來清除 native process 內殘留的來源。
+    await eAPI.setBookmarks(readExternalBookmarks());
+  });
+}
+
 function isIOSLibraryDevice() {
   return /iPad|iPhone|iPod/.test(navigator.userAgent)
     || (navigator.platform === 'MacIntel' && navigator.maxTouchPoints > 1);
@@ -781,27 +925,39 @@ async function addIOSLibrarySource() {
   }
 
   let desiredBookmarks = null;
+  let duplicateBookmark = false;
+  let renamedBookmark = false;
   try {
     const result = await window.electronAPI.openExternalFolder();
     if (!result?.bookmark) return;
 
-    let bookmarks = [];
-    try {
-      bookmarks = JSON.parse(localStorage.getItem('gai:externalBookmarks') || '[]');
-    } catch (error) {
-      console.warn('外部資料夾清單格式無效，將重新建立：', error);
-    }
+    await enqueueExternalBookmarkMutation(async () => {
+      const bookmarks = readExternalBookmarks();
+      const existingIndex = bookmarks.findIndex(bookmark => bookmark.bookmark === result.bookmark);
+      if (existingIndex >= 0) {
+        if (bookmarks[existingIndex].name === result.name) {
+          duplicateBookmark = true;
+          alert(readerText('這個資料夾已經加入了。'));
+          return;
+        }
+        const renamedBookmarks = bookmarks.map((bookmark, index) => (
+          index === existingIndex ? { ...bookmark, name: result.name } : bookmark
+        ));
+        desiredBookmarks = renamedBookmarks;
+        renamedBookmark = true;
+        await window.electronAPI.setBookmarks(renamedBookmarks);
+        localStorage.setItem('gai:externalBookmarks', JSON.stringify(renamedBookmarks));
+        return;
+      }
 
-    if (bookmarks.some(bookmark => bookmark.name === result.name && bookmark.bookmark === result.bookmark)) {
-      alert(readerText('這個資料夾已經加入了。'));
-      return;
-    }
-
-    bookmarks.push({ bookmark: result.bookmark, name: result.name });
-    desiredBookmarks = bookmarks;
-    await window.electronAPI.setBookmarks(bookmarks);
-    localStorage.setItem('gai:externalBookmarks', JSON.stringify(bookmarks));
+      const nextBookmarks = [...bookmarks, { bookmark: result.bookmark, name: result.name }];
+      desiredBookmarks = nextBookmarks;
+      await window.electronAPI.setBookmarks(nextBookmarks);
+      localStorage.setItem('gai:externalBookmarks', JSON.stringify(nextBookmarks));
+    });
+    if (duplicateBookmark) return;
     renderExternalBookmarks();
+    if (renamedBookmark) return;
     if (elements.scanDirStatus) elements.scanDirStatus.textContent = readerText('已加入：{name}，正在重新掃描。', { name: result.name });
     showLoader(readerText('正在掃描新加入的漫畫來源...'), { progress: null, detail: readerText('掃描完成後會更新書架，期間仍可操作目前畫面') });
     startScanStatusPolling();
@@ -812,6 +968,7 @@ async function addIOSLibrarySource() {
     if (stateWasUpdated && desiredBookmarks) {
       localStorage.setItem('gai:externalBookmarks', JSON.stringify(desiredBookmarks));
       renderExternalBookmarks();
+      if (renamedBookmark) return;
       if (elements.scanDirStatus) {
         elements.scanDirStatus.textContent = readerText('外部資料夾已更新，但舊資料夾權限釋放部分失敗：{message}', { message });
       }
@@ -1018,6 +1175,8 @@ function bindEvents() {
 
   // 監聽鍵盤快捷鍵
   document.addEventListener('keydown', handleKeyDown);
+  document.addEventListener('focusin', guardReaderFocus);
+  elements.readerOverlay.addEventListener('keydown', trapReaderFocus);
 
   // 閱讀器滑鼠活動觸發顯示控制列，邊緣 12% 才觸發，靜止後自動隱藏
   elements.readerOverlay.addEventListener('mousemove', (e) => {
@@ -1195,8 +1354,10 @@ function bindEvents() {
       elements.catalogImportInput?.click();
     }
   });
-  elements.aiProvider?.addEventListener('change', updateAiProviderDisclosure);
+  elements.aiProvider?.addEventListener('change', handleAiProviderChange);
+  elements.aiGoogleDisclosure?.addEventListener('change', () => renderAiSessionStatus(state.aiSessionStatus));
   elements.aiSaveBtn?.addEventListener('click', saveAiSession);
+  elements.aiRestoreBtn?.addEventListener('click', restoreAiSession);
   elements.aiTestBtn?.addEventListener('click', testAiSession);
   elements.aiClearBtn?.addEventListener('click', clearAiSession);
   elements.btnAiExplain?.addEventListener('click', explainCurrentPage);
@@ -1402,6 +1563,7 @@ function applyReaderImageTransform(img) {
 
 function refreshReaderImageTransforms() {
   elements.pagesContainer.querySelectorAll('img').forEach(applyReaderImageTransform);
+  refreshWebtoonPageMetricsForResize();
   elements.readerOverlay.classList.toggle('single-page-pannable', readerViewportCanScroll());
 }
 
@@ -1715,6 +1877,7 @@ async function applyOrganizerBatch(tagAction) {
     const result = await eAPI.applyBatchMetadata(request);
     state.lastUndoToken = result.undoToken;
     if (series) state.comics.filter(comic => state.organizeSelection.has(comic.id)).forEach(comic => { comic.series = series; });
+    invalidateComicNavigationCache();
     updateOrganizerUi(readerText('已更新 {count} 本；可撤銷本次操作。', { count: result.updated }));
     refreshTagLibrary();
     await refreshCatalogSearch(elements.searchInput.value.trim());
@@ -1849,6 +2012,7 @@ const failedCoverIds = new Map();
 
 function resetCoverLoadQueue() {
   coverLoadGeneration += 1;
+  const queuedImages = coverLoadQueue.slice();
   coverLoadQueue = [];
   coverVisibleImages.clear();
   if (coverLoadTimer !== null) {
@@ -1860,7 +2024,16 @@ function resetCoverLoadQueue() {
     task.img.removeEventListener('load', task.onLoad);
     task.img.removeEventListener('error', task.onError);
     task.img.src = '';
+    if (task.src && !task.img.dataset.src) task.img.dataset.src = task.src;
+    delete task.img.dataset.coverQueued;
+    task.img.dataset.coverState = 'idle';
+    task.img.closest('.comic-cover-wrapper')?.classList.add('cover-pending');
   }
+  queuedImages.forEach(img => {
+    delete img.dataset.coverQueued;
+    img.dataset.coverState = 'idle';
+    img.closest('.comic-cover-wrapper')?.classList.add('cover-pending');
+  });
   coverLoadTasks.clear();
   // 舊 task 的 callback 可能仍在事件佇列中，但不再擁有新世代的名額。
   coverLoadActive = 0;
@@ -1938,6 +2111,7 @@ function drainCoverLoadQueue() {
 
     const task = {
       img,
+      src,
       generation: coverLoadGeneration,
       cancelled: false,
       onLoad: null,
@@ -2150,10 +2324,12 @@ async function performLibraryFetch({ background = false } = {}) {
       return;
     }
     state.comics = nextComics;
-    state.favorites = nextFavorites;
+    invalidateComicNavigationCache();
+    setFavorites(nextFavorites);
     filterAndRenderGrid({ skipUnchanged: silentRefresh, background: silentRefresh });
     renderSidebar();
     renderContinueStrip();
+    restoreLibraryRefreshFocus();
     updateStats();
     if (scanStillRunning && !silentRefresh) {
       updateLoaderScanProgress(latestScanStatus);
@@ -2169,10 +2345,12 @@ async function performLibraryFetch({ background = false } = {}) {
     // 已有正式漫畫時保留現況，避免例外分支把使用者書架清空或覆蓋。
     if (!state.comics.some(comic => !isBuiltInDemoComic(comic))) {
       state.comics = createBuiltInDemoComics();
-      state.favorites = [];
+      invalidateComicNavigationCache();
+      setFavorites([]);
       filterAndRenderGrid();
       renderSidebar();
       renderContinueStrip();
+      restoreLibraryRefreshFocus();
       updateStats();
     }
     if (!silentRefresh) {
@@ -2341,7 +2519,7 @@ function renderContinueStrip() {
 
   const readable = state.comics.filter(comic => comic && !comic.isDirectory && !isBuiltInDemoComic(comic));
   const candidates = readable
-    .filter(comic => getProgressInfo(comic).hasProgress || state.favorites.includes(comic.id))
+    .filter(comic => getProgressInfo(comic).hasProgress || isFavoriteId(comic.id))
     .sort((a, b) => {
       const ta = new Date(a.progress?.updatedAt || a.updatedAt).getTime();
       const tb = new Date(b.progress?.updatedAt || b.updatedAt).getTime();
@@ -2356,7 +2534,7 @@ function renderContinueStrip() {
       comic.title,
       progress.currentPage,
       progress.totalPages,
-      state.favorites.includes(comic.id) ? 'favorite' : ''
+      isFavoriteId(comic.id) ? 'favorite' : ''
     ].join(':');
   }).join('|') || 'empty';
   if (renderSignature === lastContinueRenderSignature) return;
@@ -2374,7 +2552,7 @@ function renderContinueStrip() {
 
   elements.continueStrip.innerHTML = candidates.map(comic => {
     const progress = getProgressInfo(comic);
-    const favorite = state.favorites.includes(comic.id);
+    const favorite = isFavoriteId(comic.id);
     return `
       <button class="continue-card" data-comic-id="${comic.id}">
         <img src="${escapeHtml(getCoverUrl(comic.id))}" loading="lazy" decoding="async" fetchpriority="low" alt="${escapeHtml(comic.title)}" onerror="this.style.display='none';">
@@ -2406,7 +2584,7 @@ function inspectorRenderSignature(comic) {
     progress.totalPages,
     progress.percent,
     isComicOffline(comic) ? 'offline' : 'online',
-    state.favorites.includes(comic.id) ? 'favorite' : '',
+    isFavoriteId(comic.id) ? 'favorite' : '',
     state.organizeMode ? 'organize' : 'browse',
   ].join(':');
 }
@@ -2491,7 +2669,7 @@ function renderComicInspector(comic, options = {}) {
         : isLooseImage(comic)
           ? readerText('圖片檔案')
           : (String(comic.type || '').includes('archive') ? 'CBZ/ZIP' : readerText('圖片資料夾'));
-  const favorite = !isDirectory && !builtInDemo && state.favorites.includes(comic.id);
+  const favorite = !isDirectory && !builtInDemo && isFavoriteId(comic.id);
   const coverId = comic.coverComicId || comic.id;
 
   elements.comicInspector.innerHTML = `
@@ -2526,7 +2704,7 @@ function renderComicInspector(comic, options = {}) {
         <span><span style="width: ${progress.percent}%"></span></span>
       </div>
       <div class="inspector-actions">
-        <button class="inspector-primary" data-inspector-action="open">
+        <button class="inspector-primary" data-inspector-action="open" data-comic-id="${escapeHtml(comic.id)}">
           <i class="fa-solid ${sourceOffline || isDirectory ? 'fa-folder-open' : 'fa-book-open-reader'}"></i>
           ${builtInDemo ? readerText('開啟風景選集') : sourceOffline ? readerText('檢查漫畫目錄') : isDirectory ? readerText('打開目錄') : readerText('開始閱讀')}
         </button>
@@ -2586,7 +2764,7 @@ function renderComicInspector(comic, options = {}) {
   if (favoriteBtn) {
     favoriteBtn.onclick = async () => {
       if (!eAPI?.toggleFavorite) return;
-      state.favorites = await eAPI.toggleFavorite(comic.id);
+      setFavorites(await eAPI.toggleFavorite(comic.id));
       renderComicInspector(comic, { keepSelection: true });
       renderContinueStrip();
       if (state.activeFilter === 'favorite') filterAndRenderGrid();
@@ -2817,7 +2995,7 @@ function getDirectoryItems() {
     } else if (state.activeFilter === 'finished') {
       return isFinished;
     } else if (state.activeFilter === 'favorite') {
-      return state.favorites.includes(comic.id);
+      return isFavoriteId(comic.id);
     }
 
     return true;
@@ -2970,6 +3148,115 @@ function filterAndRenderGrid(options = {}) {
   ensureInspectorSelection({ skipUnchanged: Boolean(options.skipUnchanged) });
 }
 
+function getShelfCardRenderKey(comic) {
+  if (comic.isDirectory) {
+    return [
+      'dir',
+      comic.id,
+      comic.title,
+      comic.relativePath,
+      comic.sourceId,
+      comic.coverComicId || '',
+      comic.comicsCount || 0,
+      isComicOffline(comic) ? 'offline' : 'online'
+    ].join(':');
+  }
+  return [
+    comic.id,
+    comic.title,
+    comic.relativePath,
+    comic.sourceId,
+    comic.series,
+    comic.type,
+    comic.ext,
+    comic.pageCount,
+    comic.progress?.currentPage || 0,
+    comic.progress?.totalPages || 0,
+    isComicOffline(comic) ? 'offline' : 'online',
+    isFavoriteId(comic.id) ? 'favorite' : ''
+  ].join(':');
+}
+
+function getShelfCardTagName(comic) {
+  return (state.organizeMode && !comic.isDirectory ? 'BUTTON' : 'DIV');
+}
+
+function updateShelfCardState(card, comic) {
+  if (!card) return;
+  card.classList.toggle('source-offline', isComicOffline(comic));
+  card.classList.toggle('selected', state.selectedComicId === comic.id);
+  card.classList.toggle('organize-selectable', state.organizeMode && !comic.isDirectory);
+  card.classList.toggle('organize-selected', state.organizeMode && state.organizeSelection.has(comic.id));
+  if (isBuiltInDemoComic(comic)) {
+    card.setAttribute('aria-pressed', 'false');
+  } else if (!comic.isDirectory) {
+    card.setAttribute('aria-pressed', String(state.organizeMode
+      ? state.organizeSelection.has(comic.id)
+      : state.selectedComicId === comic.id));
+  }
+}
+
+function captureShelfFocus() {
+  const active = document.activeElement;
+  if (!active || !elements.comicGrid?.contains(active)) return null;
+  const card = active.closest?.('.comic-card[data-comic-id]');
+  if (!card?.dataset?.comicId) return null;
+  return {
+    comicId: card.dataset.comicId,
+    favorite: active.classList?.contains('favorite-toggle-btn') || false,
+  };
+}
+
+function captureLibraryFocus(target = document.activeElement) {
+  if (!target) return null;
+  const continueCard = target.closest?.('.continue-card[data-comic-id]');
+  if (continueCard?.dataset?.comicId) {
+    return { area: 'continue', comicId: continueCard.dataset.comicId };
+  }
+  const inspectorOpen = target.closest?.('[data-inspector-action="open"][data-comic-id]');
+  if (inspectorOpen?.dataset?.comicId) {
+    return { area: 'inspector', comicId: inspectorOpen.dataset.comicId };
+  }
+  return null;
+}
+
+function findLibraryFocusTarget(root, snapshot) {
+  if (!root || !snapshot) return null;
+  const visit = node => {
+    if (!node) return null;
+    if (node.dataset?.comicId === snapshot.comicId
+      && ((snapshot.area === 'continue' && node.classList?.contains('continue-card'))
+        || (snapshot.area === 'inspector' && node.dataset?.inspectorAction === 'open'))) {
+      return node;
+    }
+    for (const child of node.children || []) {
+      const match = visit(child);
+      if (match) return match;
+    }
+    return null;
+  };
+  return visit(root);
+}
+
+function restoreLibraryRefreshFocus() {
+  const snapshot = state.libraryRefreshFocusSnapshot;
+  if (!snapshot) return false;
+  state.libraryRefreshFocusSnapshot = null;
+  const root = snapshot.area === 'continue' ? elements.continueStrip : elements.comicInspector;
+  const target = findLibraryFocusTarget(root, snapshot);
+  if (!target || target.isConnected === false) return false;
+  target.focus?.({ preventScroll: true });
+  return true;
+}
+
+function restoreShelfFocus(snapshot) {
+  if (!snapshot) return;
+  const card = [...(elements.comicGrid?.children || [])]
+    .find(item => item.dataset?.comicId === snapshot.comicId);
+  const target = snapshot.favorite ? card?.querySelector('.favorite-toggle-btn') : card;
+  target?.focus?.({ preventScroll: true });
+}
+
 // 繪製漫畫卡片網格
 function renderGrid({ skipUnchanged = false, background = false } = {}) {
   if (state.filteredComics.length === 0) {
@@ -2997,24 +3284,47 @@ function renderGrid({ skipUnchanged = false, background = false } = {}) {
     state.activeSeries,
     state.activeFilter,
     state.organizeMode ? 'organize' : 'browse',
-    visibleComics.map(comic => comic.isDirectory
-      ? `dir:${comic.id}:${comic.coverComicId || ''}:${comic.comicsCount || 0}`
-      : [
-          comic.id,
-          comic.title,
-          comic.series,
-          comic.type,
-          comic.pageCount,
-          comic.progress?.currentPage || 0,
-          comic.progress?.totalPages || 0,
-          isComicOffline(comic) ? 'offline' : 'online',
-          state.favorites.includes(comic.id) ? 'favorite' : ''
-        ].join(':')
-    ).join('|')
+    visibleComics.map(getShelfCardRenderKey).join('|')
   ].join('::');
 
   if (skipUnchanged && renderSignature === lastGridRenderSignature) return;
   lastGridRenderSignature = renderSignature;
+
+  const existingCards = new Map(
+    [...elements.comicGrid.children]
+      .filter(card => card?.dataset?.comicId)
+      .map(card => [card.dataset.comicId, card])
+  );
+  const focusSnapshot = captureShelfFocus();
+  const scrollTop = Number.isFinite(elements.contentArea?.scrollTop) ? elements.contentArea.scrollTop : null;
+
+  // 掃描進度、篩選器與背景刷新很常只改變卡片順序或選取狀態。沿用既有節點
+  // 可以保留焦點、圖片 observer 與瀏覽器的圖片解碼快取，也避免 200 張卡片
+  // 每次都觸發 replaceChildren 的長工作。
+  const canReuseAll = visibleComics.length === existingCards.size
+    && visibleComics.every(comic => {
+      const card = existingCards.get(comic.id);
+      return card
+        && card.dataset.renderKey === getShelfCardRenderKey(comic)
+        && card.tagName === getShelfCardTagName(comic);
+    });
+  if (canReuseAll) {
+    const needsReorder = visibleComics.some((comic, index) => (
+      existingCards.get(comic.id) !== elements.comicGrid.children[index]
+    ));
+    visibleComics.forEach(comic => {
+      const card = existingCards.get(comic.id);
+      updateShelfCardState(card, comic);
+      // 只有順序真的變更時才移動節點；同順序刷新保持完全靜止。
+      if (needsReorder) elements.comicGrid.appendChild(card);
+    });
+    elements.comicGrid.classList.toggle('background-refresh', background);
+    restoreShelfFocus(focusSnapshot);
+    if (scrollTop !== null) elements.contentArea.scrollTop = scrollTop;
+    if (background) requestAnimationFrame(() => elements.comicGrid.classList.remove('background-refresh'));
+    return;
+  }
+
   coverObserver?.disconnect();
   coverObserver = null;
   resetCoverLoadQueue();
@@ -3022,8 +3332,19 @@ function renderGrid({ skipUnchanged = false, background = false } = {}) {
   const gridFragment = document.createDocumentFragment();
 
   visibleComics.forEach(comic => {
+    const renderKey = getShelfCardRenderKey(comic);
+    const expectedTagName = getShelfCardTagName(comic);
+    const reusableCard = existingCards.get(comic.id);
+    if (reusableCard
+      && reusableCard.dataset.renderKey === renderKey
+      && reusableCard.tagName === expectedTagName) {
+      updateShelfCardState(reusableCard, comic);
+      gridFragment.appendChild(reusableCard);
+      return;
+    }
+
     const sourceOffline = isComicOffline(comic);
-    const card = document.createElement(state.organizeMode && !comic.isDirectory ? 'button' : 'div');
+    const card = document.createElement(expectedTagName.toLowerCase());
     if (card instanceof HTMLButtonElement) card.type = 'button';
     card.className = 'comic-card' + (comic.isDirectory ? ' folder-card' : '');
     if (sourceOffline) card.classList.add('source-offline');
@@ -3101,7 +3422,7 @@ function renderGrid({ skipUnchanged = false, background = false } = {}) {
       }
 
       // 是否已被收藏
-      const isFavorite = state.favorites.includes(comic.id);
+      const isFavorite = isFavoriteId(comic.id);
 
       card.innerHTML = `
         <div class="comic-cover-wrapper cover-pending">
@@ -3164,8 +3485,8 @@ function renderGrid({ skipUnchanged = false, background = false } = {}) {
           e.stopPropagation(); // 阻止開啟閱讀器
           if (eAPI && eAPI.toggleFavorite) {
             try {
-              state.favorites = await eAPI.toggleFavorite(comic.id);
-              const isFav = state.favorites.includes(comic.id);
+              setFavorites(await eAPI.toggleFavorite(comic.id));
+              const isFav = isFavoriteId(comic.id);
 
               // 姬米妮的流暢 UI 動態過渡 ✨
               favBtn.classList.toggle('active', isFav);
@@ -3188,6 +3509,7 @@ function renderGrid({ skipUnchanged = false, background = false } = {}) {
       }
     }
 
+    card.dataset.renderKey = renderKey;
     gridFragment.appendChild(card);
   });
   elements.comicGrid.replaceChildren(gridFragment);
@@ -3219,6 +3541,8 @@ function renderGrid({ skipUnchanged = false, background = false } = {}) {
   if (background) {
     requestAnimationFrame(() => elements.comicGrid.classList.remove('background-refresh'));
   }
+  restoreShelfFocus(focusSnapshot);
+  if (scrollTop !== null) elements.contentArea.scrollTop = scrollTop;
 }
 
 // ==========================================================================
@@ -3233,9 +3557,14 @@ async function openReader(comicId) {
     showLibrarySourceRecovery(readerText('這本漫畫仍保留在書架，但原本的磁碟位置目前無法存取。請重新掛載 NAS，或選擇新的漫畫目錄。'));
     return;
   }
+  if (!state.readerReturnFocus && !elements.readerOverlay.contains(document.activeElement)) {
+    state.readerReturnFocus = document.activeElement;
+  }
   await state.readerClosePromise;
+  const savedReturnFocus = state.readerReturnFocus;
   if (state.currentComic) {
     await closeReader();
+    if (savedReturnFocus && !state.readerReturnFocus) state.readerReturnFocus = savedReturnFocus;
   }
   const operation = ++state.readerOperation;
   state.pendingComicId = comicId;
@@ -3289,12 +3618,14 @@ async function openReader(comicId) {
     applyFitMode();
 
     elements.readerOverlay.style.display = 'flex';
+    elements.readerOverlay.setAttribute('aria-hidden', 'false');
     elements.readerOverlay.classList.remove('reader-idle');
     document.body.style.overflow = 'hidden';
     hideReaderContextMenu();
 
     renderPages();
     triggerControlsActive();
+    focusReaderEntry();
   } catch (e) {
     if (operation !== state.readerOperation) return;
     console.error('開啟閱讀器出錯：', e);
@@ -3302,6 +3633,8 @@ async function openReader(comicId) {
     state.currentComic = null;
     state.currentComicPages = [];
     state.pendingComicId = null;
+    elements.readerOverlay.setAttribute('aria-hidden', 'true');
+    restoreReaderFocus();
     const message = typeof e === 'string' ? e : (e && e.message) || String(e);
     if (/來源目前離線|找不到.*漫畫|掃描目錄無效/.test(message)) {
       showLibrarySourceRecovery(message);
@@ -3324,9 +3657,11 @@ async function closeReader() {
   state.readerBoundaryDialog = null;
   const closingComic = state.currentComic;
   const closingId = closingComic ? closingComic.id : state.pendingComicId;
+  const libraryFocusSnapshot = captureLibraryFocus(state.readerReturnFocus);
   state.currentComic = null;
   state.currentComicPages = [];
   state.pendingComicId = null;
+  state.webtoonMeasuredPageHeights.clear();
   setAutoPageExplanation(false);
   clearTimeout(state.aiExplainTimer);
   state.aiExplainTimer = null;
@@ -3343,6 +3678,7 @@ async function closeReader() {
     document.exitFullscreen().catch(() => {});
   }
   elements.readerOverlay.style.display = 'none';
+  elements.readerOverlay.setAttribute('aria-hidden', 'true');
   elements.readerOverlay.classList.remove('reader-idle');
   document.body.style.overflow = 'auto';
   if (state.webtoonScrollFrame) {
@@ -3363,6 +3699,8 @@ async function closeReader() {
 
   if (elements.btnAiExplain) elements.btnAiExplain.hidden = false;
   if (elements.btnAiAutoExplain) elements.btnAiAutoExplain.hidden = false;
+  restoreReaderFocus();
+  state.libraryRefreshFocusSnapshot = libraryFocusSnapshot;
 
   // 重新整理書架（更新最近閱讀與進度條）
   scheduleLibraryRefresh();
@@ -3393,6 +3731,332 @@ function createWebtoonNavigationButton(direction) {
     requestWebtoonAdjacentComic(direction);
   });
   return button;
+}
+
+function getReaderFocusableElements() {
+  const selectors = 'button:not([disabled]), input:not([disabled]), select:not([disabled]), textarea:not([disabled]), a[href], [tabindex]:not([tabindex="-1"])';
+  return [...(elements.readerOverlay?.querySelectorAll?.(selectors) || [])]
+    .filter(isReaderElementActuallyFocusable);
+}
+
+function isReaderElementActuallyFocusable(element) {
+  if (!element || element.hidden || element.disabled || element.getAttribute?.('aria-hidden') === 'true') return false;
+  let current = element;
+  while (current) {
+    if (current.nodeType && current.nodeType !== 1) break;
+    if (current.hidden || current.disabled || current.getAttribute?.('aria-hidden') === 'true') return false;
+    if (typeof getComputedStyle === 'function') {
+      const style = getComputedStyle(current);
+      if (style.display === 'none' || style.visibility === 'hidden' || style.pointerEvents === 'none' || style.opacity === '0') return false;
+    }
+    current = current.parentElement || current.parentNode;
+  }
+  const rect = element.getBoundingClientRect?.();
+  if (rect && Number.isFinite(rect.width) && Number.isFinite(rect.height)) {
+    const viewportWidth = Number(window.innerWidth) || 0;
+    const viewportHeight = Number(window.innerHeight) || 0;
+    if (rect.width <= 0 || rect.height <= 0
+      || (viewportWidth > 0 && (rect.right <= 0 || rect.left >= viewportWidth))
+      || (viewportHeight > 0 && (rect.bottom <= 0 || rect.top >= viewportHeight))) return false;
+  }
+  return true;
+}
+
+function focusReaderEntry() {
+  const entry = elements.readerBackBtn;
+  if (entry && isReaderElementActuallyFocusable(entry)) {
+    entry.focus?.({ preventScroll: true });
+    return true;
+  }
+  // 若頂部 chrome 仍因 viewport／CSS 狀態不可見，讓 overlay 本身成為
+  // 可程式聚焦的鍵盤入口，避免 Tab 被困在不可見的返回鍵上。
+  elements.readerOverlay?.focus?.({ preventScroll: true });
+  return false;
+}
+
+function trapReaderFocus(event) {
+  if (elements.readerOverlay.style.display === 'none' || event.key !== 'Tab') return;
+  const focusables = getReaderFocusableElements();
+  if (!focusables.length) {
+    event.preventDefault();
+    // idle 狀態會把上下 chrome 移出 viewport；先喚醒，再把焦點交給可見入口。
+    triggerControlsActive();
+    focusReaderEntry();
+    return;
+  }
+  const first = focusables[0];
+  const last = focusables[focusables.length - 1];
+  if (!elements.readerOverlay.contains(document.activeElement)) {
+    event.preventDefault();
+    focusReaderEntry();
+  } else if (event.shiftKey && document.activeElement === first) {
+    event.preventDefault();
+    last.focus({ preventScroll: true });
+  } else if (!event.shiftKey && document.activeElement === last) {
+    event.preventDefault();
+    first.focus({ preventScroll: true });
+  }
+}
+
+function guardReaderFocus(event) {
+  if (elements.readerOverlay.style.display === 'none') return;
+  if (state.readerBoundaryDialog?.overlay?.contains?.(event.target)) return;
+  if (!elements.readerOverlay.contains(event.target)) focusReaderEntry();
+}
+
+function restoreReaderFocus() {
+  const returnFocus = state.readerReturnFocus;
+  state.readerReturnFocus = null;
+  if (returnFocus && returnFocus.isConnected !== false) {
+    returnFocus.focus?.({ preventScroll: true });
+  }
+}
+
+function webtoonEstimatedPageHeight() {
+  const viewportWidth = Number(elements.readerViewport?.clientWidth) || 800;
+  return Math.max(160, viewportWidth * 1.5);
+}
+
+function rebuildWebtoonPagePrefixHeights() {
+  const heights = state.webtoonPageHeights;
+  const prefix = new Array(heights.length + 1);
+  prefix[0] = 0;
+  for (let index = 0; index < heights.length; index += 1) {
+    prefix[index + 1] = prefix[index] + heights[index];
+  }
+  state.webtoonPagePrefixHeights = prefix;
+}
+
+function resetWebtoonPageMetrics(totalPages) {
+  const estimate = webtoonEstimatedPageHeight();
+  state.webtoonMetricsViewportWidth = Number(elements.readerViewport?.clientWidth) || 800;
+  const previousMeasured = state.webtoonMeasuredPageHeights;
+  const nextMeasured = new Map();
+  state.webtoonPageHeights = Array.from({ length: totalPages }, (_, index) => {
+    const measured = previousMeasured.get(index);
+    if (Number.isFinite(measured) && measured > 0) {
+      nextMeasured.set(index, measured);
+      return measured;
+    }
+    return estimate;
+  });
+  state.webtoonMeasuredPageHeights = nextMeasured;
+  state.webtoonPendingPageHeights.clear();
+  rebuildWebtoonPagePrefixHeights();
+}
+
+function syncWebtoonWindowSpacers() {
+  const top = elements.pagesContainer.querySelector('[data-webtoon-spacer="top"]');
+  const bottom = elements.pagesContainer.querySelector('[data-webtoon-spacer="bottom"]');
+  if (top) top.style.height = `${webtoonPageOffset(state.webtoonWindowStart)}px`;
+  if (bottom) bottom.style.height = `${Math.max(0,
+    webtoonPageOffset(state.webtoonPageHeights.length) - webtoonPageOffset(state.webtoonWindowEnd))}px`;
+}
+
+function refreshWebtoonPageMetricsForResize() {
+  if (state.readingMode !== 'webtoon' || !state.webtoonPageHeights.length) return;
+  const nextWidth = Number(elements.readerViewport?.clientWidth) || 0;
+  const previousWidth = state.webtoonMetricsViewportWidth;
+  if (!nextWidth || !previousWidth || Math.abs(nextWidth - previousWidth) < 1) return;
+
+  // 先以舊幾何記住視窗所在頁及頁內比例，再將已量測與預估高度一起
+  // 縮放。這讓遠處的 spacer 在旋轉當下就準確，不必等圖片重新載入。
+  cancelWebtoonPageHeightFlush();
+  const viewport = elements.readerViewport;
+  const anchorOffset = getWebtoonAnchorViewportOffset();
+  const contentTop = Math.max(0, viewport.scrollTop - state.webtoonNavigationOffset - anchorOffset);
+  const visiblePage = webtoonPageIndexAtOffset(contentTop);
+  const previousPageHeight = state.webtoonPageHeights[visiblePage] || 1;
+  const pageFraction = Math.max(0, Math.min(1,
+    (contentTop - webtoonPageOffset(visiblePage)) / previousPageHeight));
+  const scale = nextWidth / previousWidth;
+  state.webtoonPageHeights = state.webtoonPageHeights.map(height => height * scale);
+  state.webtoonMeasuredPageHeights.forEach((height, index) => {
+    state.webtoonMeasuredPageHeights.set(index, height * scale);
+  });
+  state.webtoonMetricsViewportWidth = nextWidth;
+  rebuildWebtoonPagePrefixHeights();
+  // 重量測可能立即 flush；先清掉旋轉前的 anchor 座標，避免以舊 top
+  // 做一次補償，最後定位時又補償一次。
+  if (isActiveWebtoonAnchor()) state.webtoonAnchor.lastTargetTop = null;
+  elements.pagesContainer.querySelectorAll('img.webtoon-img[data-index]').forEach(image => {
+    const index = Number(image.dataset.index);
+    if (image.dataset.webtoonMeasuredPlaceholder === 'true') {
+      image.style.height = `${state.webtoonMeasuredPageHeights.get(index)}px`;
+    } else if (image.complete && image.naturalWidth > 0) {
+      updateWebtoonPageHeight(index, image);
+    }
+  });
+  // 已掛載的圖片由實際 clientHeight 修正；未掛載頁仍採寬度比例估值。
+  if (state.webtoonPendingPageHeights.size) {
+    if (state.webtoonHeightUpdateFrame !== null) {
+      if (typeof cancelAnimationFrame === 'function') cancelAnimationFrame(state.webtoonHeightUpdateFrame);
+      clearTimeout(state.webtoonHeightUpdateFrame);
+      state.webtoonHeightUpdateFrame = null;
+    }
+    flushWebtoonPageHeightUpdates();
+  }
+  syncWebtoonWindowSpacers();
+  if (isActiveWebtoonAnchor()) {
+    const anchorTop = getWebtoonImageOffsetTop(getWebtoonImage(state.webtoonAnchor.index));
+    if (Number.isFinite(anchorTop)) viewport.scrollTop = Math.max(0, anchorTop - getWebtoonAnchorViewportOffset());
+    state.webtoonAnchor.lastTargetTop = null;
+    preserveWebtoonAnchorPosition();
+  } else {
+    viewport.scrollTop = state.webtoonNavigationOffset
+      + anchorOffset
+      + webtoonPageOffset(visiblePage)
+      + state.webtoonPageHeights[visiblePage] * pageFraction;
+  }
+}
+
+function cancelWebtoonPageHeightFlush() {
+  if (state.webtoonHeightUpdateFrame !== null) {
+    if (typeof cancelAnimationFrame === 'function') cancelAnimationFrame(state.webtoonHeightUpdateFrame);
+    clearTimeout(state.webtoonHeightUpdateFrame);
+    state.webtoonHeightUpdateFrame = null;
+  }
+  state.webtoonPendingPageHeights.clear();
+}
+
+function webtoonPageOffset(index) {
+  const prefix = state.webtoonPagePrefixHeights;
+  if (!prefix.length) return 0;
+  const safeIndex = Math.max(0, Math.min(prefix.length - 1, Number(index) || 0));
+  return prefix[safeIndex] || 0;
+}
+
+function webtoonPageIndexAtOffset(offset) {
+  const prefix = state.webtoonPagePrefixHeights;
+  if (prefix.length < 2) return 0;
+  const target = Math.max(0, Number(offset) || 0);
+  let low = 0;
+  let high = prefix.length - 1;
+  while (low < high) {
+    const middle = Math.ceil((low + high) / 2);
+    if (prefix[middle] > target) high = middle - 1;
+    else low = middle;
+  }
+  return Math.min(state.currentComicPages.length - 1, Math.max(0, low));
+}
+
+function flushWebtoonPageHeightUpdates() {
+  state.webtoonHeightUpdateFrame = null;
+  if (state.readingMode !== 'webtoon' || !state.webtoonPendingPageHeights.size) {
+    state.webtoonPendingPageHeights.clear();
+    return;
+  }
+
+  const pending = state.webtoonPendingPageHeights;
+  const scrollTop = elements.readerViewport.scrollTop;
+  const anchorOffset = getWebtoonAnchorViewportOffset();
+  let scrollCompensation = 0;
+  pending.forEach((nextHeight, index) => {
+    const previousHeight = state.webtoonPageHeights[index];
+    const pageTop = state.webtoonNavigationOffset + anchorOffset + webtoonPageOffset(index);
+    if (!isActiveWebtoonAnchor() && pageTop < scrollTop) scrollCompensation += nextHeight - previousHeight;
+    state.webtoonPageHeights[index] = nextHeight;
+  });
+  pending.clear();
+  rebuildWebtoonPagePrefixHeights();
+  syncWebtoonWindowSpacers();
+  if (!isActiveWebtoonAnchor() && Math.abs(scrollCompensation) >= 1) {
+    elements.readerViewport.scrollTop += scrollCompensation;
+  }
+  if (isActiveWebtoonAnchor()) preserveWebtoonAnchorPosition();
+}
+
+function scheduleWebtoonPageHeightFlush() {
+  if (state.webtoonHeightUpdateFrame !== null) return;
+  const callback = flushWebtoonPageHeightUpdates;
+  state.webtoonHeightUpdateFrame = typeof requestAnimationFrame === 'function'
+    ? requestAnimationFrame(callback)
+    : window.setTimeout(callback, 0);
+}
+
+function updateWebtoonPageHeight(index, image, { measured = true } = {}) {
+  if (state.readingMode !== 'webtoon' || !image || !Number.isFinite(image.clientHeight)) return;
+  const nextHeight = Number(image.clientHeight);
+  if (nextHeight <= 0 || index < 0 || index >= state.webtoonPageHeights.length) return;
+  if (measured) state.webtoonMeasuredPageHeights.set(index, nextHeight);
+  const previousHeight = state.webtoonPendingPageHeights.get(index) ?? state.webtoonPageHeights[index];
+  if (Math.abs(nextHeight - previousHeight) < 1) return;
+  state.webtoonPendingPageHeights.set(index, nextHeight);
+  scheduleWebtoonPageHeightFlush();
+}
+
+function getWebtoonWindowBounds(totalPages, currentIndex = state.currentPageIndex) {
+  const safeCurrent = Math.max(0, Math.min(totalPages - 1, Number(currentIndex) || 0));
+  const start = Math.max(0, safeCurrent - WEBTOON_RENDER_BEFORE);
+  const end = Math.min(totalPages, Math.max(start + 1, safeCurrent + WEBTOON_RENDER_AFTER + 1));
+  return { start, end };
+}
+
+function createWebtoonPageImage(src, index, renderGeneration) {
+  const img = document.createElement('img');
+  img.dataset.src = src;
+  img.decoding = 'async';
+  img.fetchPriority = index < WEBTOON_EAGER_IMAGES ? 'auto' : 'low';
+  if (index < WEBTOON_EAGER_IMAGES) img.src = src;
+  img.loading = 'lazy';
+  img.className = 'webtoon-img';
+  img.dataset.index = index;
+  img.alt = readerText('第 {page} 頁', { page: index + 1 });
+  img.style.aspectRatio = 'auto 2 / 3';
+  const measuredHeight = state.webtoonMeasuredPageHeights.get(index);
+  if (Number.isFinite(measuredHeight) && measuredHeight > 0) {
+    img.style.height = `${measuredHeight}px`;
+    img.dataset.webtoonMeasuredPlaceholder = 'true';
+  }
+  const updateMetrics = (measured = true) => {
+    if (state.renderGeneration !== renderGeneration) return;
+    if (img.dataset.webtoonMeasuredPlaceholder === 'true') {
+      img.style.height = '';
+      img.style.aspectRatio = 'auto 2 / 3';
+      delete img.dataset.webtoonMeasuredPlaceholder;
+    }
+    updateWebtoonPageHeight(index, img, { measured });
+  };
+  img.addEventListener('load', () => updateMetrics(true));
+  img.addEventListener('error', () => updateMetrics(false));
+  applyImageEffects(img);
+  return img;
+}
+
+function renderWebtoonWindow(currentIndex = state.currentPageIndex, renderGeneration = state.renderGeneration) {
+  const totalPages = state.currentComicPages.length;
+  if (!totalPages) return;
+  if (state.webtoonPageHeights.length !== totalPages) resetWebtoonPageMetrics(totalPages);
+
+  const { start, end } = getWebtoonWindowBounds(totalPages, currentIndex);
+  const hasPreviousComic = Boolean(findAdjacentComicInFolder('prev'));
+  const hasNextComic = Boolean(findAdjacentComicInFolder('next'));
+  const fragment = document.createDocumentFragment();
+  state.webtoonNavigationOffset = hasPreviousComic ? 56 : 0;
+  if (hasPreviousComic) fragment.appendChild(createWebtoonNavigationButton('prev'));
+
+  const topSpacer = document.createElement('div');
+  topSpacer.className = 'webtoon-window-spacer';
+  topSpacer.dataset.webtoonSpacer = 'top';
+  topSpacer.style.height = `${webtoonPageOffset(start)}px`;
+  topSpacer.setAttribute('aria-hidden', 'true');
+  fragment.appendChild(topSpacer);
+
+  for (let index = start; index < end; index += 1) {
+    fragment.appendChild(createWebtoonPageImage(state.currentComicPages[index], index, renderGeneration));
+  }
+
+  const bottomSpacer = document.createElement('div');
+  bottomSpacer.className = 'webtoon-window-spacer';
+  bottomSpacer.dataset.webtoonSpacer = 'bottom';
+  bottomSpacer.style.height = `${Math.max(0, webtoonPageOffset(totalPages) - webtoonPageOffset(end))}px`;
+  bottomSpacer.setAttribute('aria-hidden', 'true');
+  fragment.appendChild(bottomSpacer);
+  if (hasNextComic) fragment.appendChild(createWebtoonNavigationButton('next'));
+
+  state.webtoonWindowStart = start;
+  state.webtoonWindowEnd = end;
+  elements.pagesContainer.replaceChildren(fragment);
 }
 
 function isDoubleReadingMode(mode = state.readingMode) {
@@ -3477,6 +4141,7 @@ function renderPages() {
     cancelAnimationFrame(state.webtoonScrollFrame);
     state.webtoonScrollFrame = null;
   }
+  cancelWebtoonPageHeightFlush();
   const renderGeneration = ++state.renderGeneration;
 
   const totalPages = state.currentComicPages.length;
@@ -3617,40 +4282,12 @@ function renderPages() {
     elements.prevZone.style.width = '0';
     elements.nextZone.style.width = '0';
 
-    // 條漫模式一次載入所有圖片，使用瀏覽器原生 lazy loading 與極佳的後端傳輸
-    const webtoonFragment = document.createDocumentFragment();
-    if (findAdjacentComicInFolder('prev')) {
-      webtoonFragment.appendChild(createWebtoonNavigationButton('prev'));
-    }
-    state.currentComicPages.forEach((src, idx) => {
-      const img = document.createElement('img');
-      img.dataset.src = src; // 儲存真實路徑
-      img.decoding = 'async';
-      img.fetchPriority = idx < WEBTOON_EAGER_IMAGES ? 'auto' : 'low';
-      if (idx < WEBTOON_EAGER_IMAGES) img.src = src; // 前幾張立刻載入，其餘滾動載入
-      img.loading = 'lazy';
-      img.className = 'webtoon-img';
-      img.dataset.index = idx;
-      img.alt = readerText('第 {page} 頁', { page: idx + 1 });
-      // 未載入頁面也要先佔住固定比例的空間，避免跳到遠頁時前方 lazy
-      // 圖片逐張解碼把目標頁往下推。`auto` 會在圖片載入後改用原始比例。
-      img.style.aspectRatio = 'auto 2 / 3';
-      const preserveAnchorAfterLayout = () => {
-        if (state.renderGeneration !== renderGeneration) return;
-        preserveWebtoonAnchorPosition();
-      };
-      img.addEventListener('load', preserveAnchorAfterLayout);
-      img.addEventListener('error', preserveAnchorAfterLayout);
-      applyImageEffects(img);
-      webtoonFragment.appendChild(img);
-    });
-    if (findAdjacentComicInFolder('next')) {
-      webtoonFragment.appendChild(createWebtoonNavigationButton('next'));
-    }
-    // 模式切換可能重複進入此 branch；一次替換避免舊 webtoon 頁面累積。
-    elements.pagesContainer.replaceChildren(webtoonFragment);
+    // 只保留目前頁面附近的圖片；上下 spacer 代表未掛載頁面的高度。
+    // 這讓長條漫不再把整本圖片與事件一次放進 WKWebView DOM。
+    resetWebtoonPageMetrics(totalPages);
+    renderWebtoonWindow(initialWebtoonPageIndex, renderGeneration);
 
-    // 監聽滾動事件，用來即時更新進度條與 Lazy Load 觸發
+    // 監聽滾動事件，用來更新頁碼與附近視窗；頁碼查找使用 prefix heights 二分搜尋。
     elements.readerViewport.onscroll = handleWebtoonScroll;
 
     // 初始化進度
@@ -3661,8 +4298,7 @@ function renderPages() {
     elements.progressSlider.max = totalPages;
     elements.progressSlider.value = state.currentPageIndex + 1;
 
-    // placeholder 已在同步建 DOM 時提供穩定高度，因此立即建立錨點；
-    // 延後到 200ms 會留下 scroll event 改寫 currentPageIndex 的空窗。
+    // placeholder 已在同步建 DOM 時提供穩定高度，因此立即建立錨點。
     if (initialWebtoonPageIndex > 0) {
       anchorWebtoonPage(initialWebtoonPageIndex, { behavior: 'auto', renderGeneration });
     } else {
@@ -3729,16 +4365,168 @@ function nextPage() {
 // 📋 目錄縮圖網格 (Catalog Grid)
 // ==========================================================================
 
-function renderCatalogGrid() {
+function captureCatalogFocus() {
+  const active = document.activeElement;
+  if (!active || !elements.pagesContainer.contains?.(active)) return null;
+  if (active.dataset?.catalogWindowControl) {
+    return { type: 'window-control', direction: active.dataset.catalogWindowControl };
+  }
+  if (catalogHasClass(active, 'catalog-thumb') && active.dataset?.index != null) {
+    return { type: 'thumbnail', index: String(active.dataset.index) };
+  }
+  return null;
+}
+
+function catalogHasClass(element, className) {
+  return Boolean(element?.classList?.contains?.(className)
+    || String(element?.className || '').split(/\s+/).includes(className));
+}
+
+function restoreCatalogFocus(descriptor) {
+  if (!descriptor) return;
+  const children = [...(elements.pagesContainer.children || [])];
+  let target = null;
+  if (descriptor.type === 'window-control') {
+    const controls = children.find(child => catalogHasClass(child, 'reader-catalog-window-controls'));
+    target = [...(controls?.children || [])].find(child => child.dataset?.catalogWindowControl === descriptor.direction);
+  } else if (descriptor.type === 'thumbnail') {
+    const grid = children.find(child => catalogHasClass(child, 'reader-catalog-grid'));
+    target = [...(grid?.children || [])].find(child => String(child.dataset?.index) === descriptor.index);
+  }
+  target?.focus?.({ preventScroll: true });
+}
+
+function resetCatalogThumbnailLoader() {
+  catalogImageGeneration += 1;
+  catalogImageObserver?.disconnect?.();
+  catalogImageObserver = null;
+  catalogImageQueue = [];
+  catalogImageTasks.forEach(task => task.cancel?.());
+  catalogImageTasks.clear();
+  // 舊世代圖片仍可能在 native 解碼中；立即釋放槽位，讓新視窗能開始載入。
+  // 舊 callback 會以 task 狀態驗證，不能再扣到新世代的計數。
+  catalogImageActive = 0;
+}
+
+function pumpCatalogThumbnailLoads() {
+  while (catalogImageActive < CATALOG_IMAGE_CONCURRENCY && catalogImageQueue.length) {
+    const task = catalogImageQueue.shift();
+    if (!task?.img?.isConnected || task.generation !== catalogImageGeneration || !task.img.dataset.src) continue;
+    const img = task.img;
+    const source = img.dataset.src;
+    delete img.dataset.src;
+    const taskGeneration = task.generation;
+    const activeTask = { img, generation: taskGeneration, cancel: null };
+    catalogImageTasks.add(activeTask);
+    catalogImageActive += 1;
+    let finished = false;
+    const finish = () => {
+      if (finished) return;
+      finished = true;
+      img.removeEventListener?.('load', finish);
+      img.removeEventListener?.('error', finish);
+      catalogImageTasks.delete(activeTask);
+      if (taskGeneration !== catalogImageGeneration) return;
+      catalogImageActive = Math.max(0, catalogImageActive - 1);
+      pumpCatalogThumbnailLoads();
+    };
+    activeTask.cancel = () => {
+      if (finished) return;
+      finished = true;
+      img.removeEventListener?.('load', finish);
+      img.removeEventListener?.('error', finish);
+      img.removeAttribute?.('src');
+      catalogImageTasks.delete(activeTask);
+    };
+    img.addEventListener('load', finish, { once: true });
+    img.addEventListener('error', finish, { once: true });
+    img.src = source;
+  }
+}
+
+function enqueueCatalogThumbnailLoad(img, generation = catalogImageGeneration) {
+  if (!img?.dataset?.src || img.dataset.catalogLoadQueued) return;
+  img.dataset.catalogLoadQueued = 'true';
+  catalogImageQueue.push({ img, generation });
+  pumpCatalogThumbnailLoads();
+}
+
+function startCatalogThumbnailLoads(grid) {
+  resetCatalogThumbnailLoader();
+  const images = [...(grid.querySelectorAll?.('img[data-src]') || [])];
+  const generation = catalogImageGeneration;
+  if (typeof IntersectionObserver === 'function') {
+    catalogImageObserver = new IntersectionObserver(entries => {
+      entries.forEach(entry => {
+        if (!entry.isIntersecting) return;
+        catalogImageObserver?.unobserve?.(entry.target);
+        enqueueCatalogThumbnailLoad(entry.target, generation);
+      });
+    }, { root: elements.readerViewport, rootMargin: '360px' });
+    images.forEach(img => catalogImageObserver.observe(img));
+  } else {
+    // 舊 WKWebView 沒有 IntersectionObserver 時仍限制同時解碼數，避免 160 張一起壓垮主執行緒。
+    images.forEach(img => enqueueCatalogThumbnailLoad(img, generation));
+  }
+}
+
+function renderCatalogGrid({ preserveWindow = false } = {}) {
   const totalPages = state.currentComicPages.length;
+  const focusDescriptor = captureCatalogFocus();
 
   // 每次目錄重繪都先移除上一個 grid，避免切書或刪頁後舊縮圖疊在新內容上。
   elements.pagesContainer.replaceChildren();
 
+  const maxStart = Math.max(0, totalPages - CATALOG_RENDER_PAGE_SIZE);
+  const requestedStart = Number.isSafeInteger(state.catalogWindowStart) ? state.catalogWindowStart : 0;
+  const currentPage = Math.max(0, Math.min(totalPages - 1, state.currentPageIndex));
+  const windowStart = preserveWindow
+    ? Math.max(0, Math.min(maxStart, requestedStart))
+    : Math.max(0, Math.min(maxStart,
+      currentPage < requestedStart || currentPage >= requestedStart + CATALOG_RENDER_PAGE_SIZE
+        ? currentPage - Math.floor(CATALOG_RENDER_PAGE_SIZE / 2)
+        : requestedStart));
+  const windowEnd = Math.min(totalPages, windowStart + CATALOG_RENDER_PAGE_SIZE);
+  state.catalogWindowStart = windowStart;
+
+  const controls = document.createElement('div');
+  controls.className = 'reader-catalog-window-controls';
+  const previous = document.createElement('button');
+  previous.type = 'button';
+  previous.className = 'catalog-window-btn';
+  previous.dataset.catalogWindowControl = 'previous';
+  previous.textContent = readerText('顯示前 {count} 頁', { count: CATALOG_RENDER_PAGE_SIZE });
+  previous.disabled = windowStart === 0;
+  previous.addEventListener('click', () => {
+    state.catalogWindowStart = Math.max(0, windowStart - CATALOG_RENDER_PAGE_SIZE);
+    renderCatalogGrid({ preserveWindow: true });
+  });
+  const status = document.createElement('span');
+  status.textContent = readerText('顯示第 {start}–{end} / {total} 頁', {
+    start: windowStart + 1,
+    end: windowEnd,
+    total: totalPages,
+  });
+  const next = document.createElement('button');
+  next.type = 'button';
+  next.className = 'catalog-window-btn';
+  next.dataset.catalogWindowControl = 'next';
+  next.textContent = readerText('顯示後 {count} 頁', { count: CATALOG_RENDER_PAGE_SIZE });
+  next.disabled = windowEnd >= totalPages;
+  next.addEventListener('click', () => {
+    state.catalogWindowStart = Math.min(maxStart, windowStart + CATALOG_RENDER_PAGE_SIZE);
+    renderCatalogGrid({ preserveWindow: true });
+  });
+  controls.appendChild(previous);
+  controls.appendChild(status);
+  controls.appendChild(next);
+  elements.pagesContainer.appendChild(controls);
+
   const grid = document.createElement('div');
   grid.className = 'reader-catalog-grid';
 
-  state.currentComicPages.forEach((src, idx) => {
+  state.currentComicPages.slice(windowStart, windowEnd).forEach((src, offset) => {
+    const idx = windowStart + offset;
     const thumb = document.createElement('div');
     thumb.className = 'catalog-thumb';
     if (idx === state.currentPageIndex) thumb.classList.add('current');
@@ -3752,7 +4540,7 @@ function renderCatalogGrid() {
     const img = document.createElement('img');
     img.loading = 'lazy';
     img.decoding = 'async';
-    img.src = src;
+    img.dataset.src = src;
     img.alt = readerText('第 {page} 頁', { page: idx + 1 });
 
     const label = document.createElement('div');
@@ -3772,6 +4560,8 @@ function renderCatalogGrid() {
   });
 
   elements.pagesContainer.appendChild(grid);
+  startCatalogThumbnailLoads(grid);
+  restoreCatalogFocus(focusDescriptor);
 
   // 滾動到當前頁
   const currentThumb = grid.querySelector('.catalog-thumb.current');
@@ -3815,10 +4605,42 @@ function getComicSourceKey(comic) {
   return comic?.id ? `comic:${comic.id}` : '';
 }
 
+function invalidateComicNavigationCache() {
+  state.comicsRevision += 1;
+  comicNavigationCache = {
+    comics: null,
+    revision: -1,
+    groups: new Map(),
+    byId: new Map(),
+  };
+}
+
+function getComicNavigationCache() {
+  if (comicNavigationCache.comics === state.comics
+    && comicNavigationCache.revision === state.comicsRevision) {
+    return comicNavigationCache;
+  }
+
+  const groups = new Map();
+  const byId = new Map();
+  state.comics.forEach(comic => {
+    if (!comic?.id) return;
+    byId.set(comic.id, comic);
+    if (comic.isDirectory) return;
+    const key = JSON.stringify([getComicSourceKey(comic), getParentPath(comic.relativePath)]);
+    const group = groups.get(key) || [];
+    group.push(comic);
+    groups.set(key, group);
+  });
+  groups.forEach(group => group.sort((a, b) => comicTitleCollator.compare(String(a.title || ''), String(b.title || ''))));
+  comicNavigationCache = { comics: state.comics, revision: state.comicsRevision, groups, byId };
+  return comicNavigationCache;
+}
+
 function getReaderNavigationCurrent() {
   const currentId = state.currentComic?.id || state.pendingComicId;
   if (!currentId) return null;
-  const shelfComic = state.comics.find(comic => comic.id === currentId);
+  const shelfComic = getComicNavigationCache().byId.get(currentId);
   return {
     current: state.currentComic || shelfComic,
     shelfComic,
@@ -3833,12 +4655,7 @@ function findAdjacentComicInFolder(direction) {
   const relativePath = reader.current.relativePath ?? anchor.relativePath;
   const parentPath = getParentPath(relativePath);
   const sourceKey = getComicSourceKey(anchor);
-  const siblings = state.comics
-    .filter(comic => !comic.isDirectory
-      && comic.id
-      && getComicSourceKey(comic) === sourceKey
-      && getParentPath(comic.relativePath) === parentPath)
-    .sort((a, b) => comicTitleCollator.compare(String(a.title || ''), String(b.title || '')));
+  const siblings = getComicNavigationCache().groups.get(JSON.stringify([sourceKey, parentPath])) || [];
   const currentIndex = siblings.findIndex(comic => comic.id === reader.currentId);
   const targetIndex = direction === 'next' ? currentIndex + 1 : currentIndex - 1;
   return currentIndex >= 0 && targetIndex >= 0 && targetIndex < siblings.length
@@ -3928,7 +4745,7 @@ function showReaderNavigationConfirm(target, direction) {
       returnFocus?.focus?.({ preventScroll: true });
       resolve(value);
     };
-    state.readerBoundaryDialog = { finish };
+    state.readerBoundaryDialog = { finish, overlay };
     cancel.addEventListener('click', () => finish(false));
     confirm.addEventListener('click', () => finish(true));
     overlay.addEventListener('click', event => {
@@ -4317,6 +5134,11 @@ function observeWebtoonAnchorLayout(anchor) {
 
 function anchorWebtoonPage(index, { behavior = 'auto', renderGeneration = state.renderGeneration } = {}) {
   if (state.readingMode !== 'webtoon' || renderGeneration !== state.renderGeneration) return false;
+  if (index < state.webtoonWindowStart || index >= state.webtoonWindowEnd) {
+    const scrollTop = elements.readerViewport.scrollTop;
+    renderWebtoonWindow(index, renderGeneration);
+    elements.readerViewport.scrollTop = scrollTop;
+  }
   const targetImg = getWebtoonImage(index);
   if (!targetImg) return false;
 
@@ -4362,22 +5184,23 @@ function updateWebtoonScrollState() {
     preserveWebtoonAnchorPosition();
     return;
   }
-  const imgs = elements.pagesContainer.querySelectorAll('.webtoon-img');
   const viewportTop = elements.readerViewport.scrollTop;
   const viewportHeight = elements.readerViewport.clientHeight;
   const viewportCenter = viewportTop + viewportHeight / 2;
+  const pageContentOffset = state.webtoonNavigationOffset + getWebtoonAnchorViewportOffset();
+  const activeIndex = webtoonPageIndexAtOffset(viewportCenter - pageContentOffset);
 
-  let activeIndex = 0;
-
-  imgs.forEach(img => {
-    const top = img.offsetTop;
-    const height = img.clientHeight;
-
-    // 如果視窗中心線在這張圖片範圍內，這張圖片就是目前主要閱讀的頁面
-    if (viewportCenter >= top && viewportCenter <= top + height) {
-      activeIndex = parseInt(img.dataset.index, 10);
-    }
-  });
+  const nextWindow = getWebtoonWindowBounds(state.currentComicPages.length, activeIndex);
+  const outsideWindow = activeIndex < state.webtoonWindowStart || activeIndex >= state.webtoonWindowEnd;
+  const nearWindowEdge = activeIndex < state.webtoonWindowStart + 6
+    || activeIndex >= state.webtoonWindowEnd - 6;
+  if ((outsideWindow || nearWindowEdge)
+    && (nextWindow.start !== state.webtoonWindowStart || nextWindow.end !== state.webtoonWindowEnd)) {
+    const previousScrollTop = viewportTop;
+    renderWebtoonWindow(activeIndex);
+    elements.readerViewport.scrollTop = previousScrollTop;
+    loadWebtoonImagesAround(activeIndex);
+  }
 
   if (activeIndex !== state.currentPageIndex) {
     state.currentPageIndex = activeIndex;
@@ -4401,8 +5224,10 @@ function loadWebtoonImagesAround(index) {
   const total = state.currentComicPages.length;
   const range = 3; // 載入前後 3 頁
 
-  for (let i = Math.max(0, index - range); i <= Math.min(total - 1, index + range); i++) {
-    const img = elements.pagesContainer.querySelector(`img[data-index="${i}"]`);
+  const start = Math.max(state.webtoonWindowStart, index - range);
+  const end = Math.min(state.webtoonWindowEnd - 1, index + range, total - 1);
+  for (let i = start; i <= end; i += 1) {
+    const img = getWebtoonImage(i);
     if (img && !img.getAttribute('src')) {
       tuneImageForLowPriority(img);
       img.src = img.dataset.src;
@@ -4413,15 +5238,20 @@ function loadWebtoonImagesAround(index) {
 // 儲存進度至主程序
 async function saveReadingProgress() {
   if (!state.currentComic || isBuiltInDemoComic(state.currentComic)) return;
-  try {
-    await eAPI.saveProgress({
-      id: state.currentComic.id,
-      currentPage: state.currentPageIndex,
-      totalPages: state.currentComicPages.length
+  const snapshot = {
+    id: state.currentComic.id,
+    currentPage: state.currentPageIndex,
+    totalPages: state.currentComicPages.length,
+    sequence: nextReadingProgressSaveSequence(),
+  };
+  readingProgressSaveQueue = readingProgressSaveQueue
+    .catch(() => {})
+    .then(() => eAPI.saveProgress(snapshot))
+    .catch(error => {
+      // 單筆 native failure 不得中斷後續快照；下一筆會接續同一條 queue。
+      console.error('保存進度失敗：', error);
     });
-  } catch (e) {
-    console.error('保存進度失敗：', e);
-  }
+  await readingProgressSaveQueue;
 }
 
 // ==========================================================================
@@ -4456,6 +5286,7 @@ function setReadingMode(mode) {
   const disableZoom = mode === 'webtoon' || mode === 'catalog';
   elements.zoomValue.parentElement.style.opacity = disableZoom ? '0.3' : '1';
   elements.zoomValue.parentElement.style.pointerEvents = disableZoom ? 'none' : 'auto';
+  updateReaderUiControls();
 
   // 重繪
   renderPages();
@@ -4491,6 +5322,10 @@ function toggleFullscreen() {
 function handleKeyDown(e) {
   // 只有當閱讀器打開時，才觸發閱讀器快捷鍵
   if (elements.readerOverlay.style.display === 'none') return;
+  // 進度 range 的方向／跳格鍵交給原生控制與 input handler，避免 document
+  // 快捷鍵再翻一次頁；Escape、F 等 reader shortcut 仍要能正常作用。
+  if (e.target && (e.target === elements.progressSlider || e.target?.id === 'progress-slider')
+    && ['ArrowLeft', 'ArrowRight', 'ArrowUp', 'ArrowDown', 'Home', 'End', 'PageUp', 'PageDown'].includes(e.key)) return;
   // Confirmation owns keyboard input until it resolves. Its own keydown
   // handler stops bubbling; this guard also covers programmatic focus drift.
   if (state.readerBoundaryDialog) {
@@ -4592,8 +5427,15 @@ function updateReaderUiControls() {
   elements.btnBrightness.classList.toggle('active', state.brightness !== 100);
   elements.btnBrightness.setAttribute('aria-label', readerText('目前亮度 {brightness}%，按下切換', { brightness: state.brightness }));
 
-  // 條漫模式下不支援螢幕適應與旋轉
-  if (mode === 'webtoon') {
+  // 條漫與目錄模式都沒有可套用 fit/rotate 的單頁圖片，控制項必須真的停用。
+  const imageTransformDisabled = mode === 'webtoon' || mode === 'catalog';
+  const imageTransformControls = [elements.btnFitMode, elements.btnRotateLeft, elements.btnRotateRight];
+  imageTransformControls.forEach(button => {
+    if (!button) return;
+    button.disabled = imageTransformDisabled;
+    button.setAttribute('aria-disabled', String(imageTransformDisabled));
+  });
+  if (imageTransformDisabled) {
     elements.btnFitMode.style.opacity = '0.3';
     elements.btnFitMode.style.pointerEvents = 'none';
     elements.btnRotateLeft.style.opacity = '0.3';
@@ -4612,7 +5454,7 @@ function updateReaderUiControls() {
 
 // 📺 切換螢幕適應模式 (適應螢幕 -> 寬度適應 -> 高度適應)
 function toggleFitMode() {
-  if (state.readingMode === 'webtoon') return;
+  if (state.readingMode === 'webtoon' || state.readingMode === 'catalog') return;
 
   const modes = ['contain', 'width', 'height'];
   let currentIndex = modes.indexOf(state.fitMode);
@@ -4661,6 +5503,10 @@ function applyFitMode() {
 function rotateImage(degrees) {
   if (state.readingMode === 'webtoon') {
     showReaderToast(readerText('條漫模式不支援旋轉。'));
+    return;
+  }
+  if (state.readingMode === 'catalog') {
+    showReaderToast(readerText('目錄模式不支援旋轉。'));
     return;
   }
 
@@ -5215,17 +6061,14 @@ function renderExternalBookmarks() {
   const container = document.getElementById('external-bookmarks-list');
   if (!container) return;
 
-  let bookmarks = [];
-  try {
-    bookmarks = JSON.parse(localStorage.getItem('gai:externalBookmarks') || '[]');
-  } catch (e) {}
+  const bookmarks = readExternalBookmarks();
   if (bookmarks.length === 0) {
     container.innerHTML = `<div style="font-size: 0.9em; color: var(--text-muted);"><i class="fa-solid fa-info-circle"></i> ${readerText('目前沒有已加入的外部資料夾')}</div>`;
     return;
   }
 
   container.innerHTML = `<div style="font-size: 0.9em; color: var(--text-muted); margin-bottom: 5px;"><i class="fa-solid fa-link"></i> ${readerText('已連結的外部資料夾：')}</div>`;
-  bookmarks.forEach((b, idx) => {
+  bookmarks.forEach((b) => {
     const item = document.createElement('div');
     item.style.display = 'flex';
     item.style.justifyContent = 'space-between';
@@ -5249,14 +6092,21 @@ function renderExternalBookmarks() {
     delBtn.style.padding = '5px 10px';
     delBtn.style.borderRadius = '4px';
     delBtn.style.cursor = 'pointer';
+    const bookmarkIdentity = b.bookmark;
     delBtn.onclick = async () => {
       if (confirm(readerText('確定要移除外部資料夾 [{name}] 嗎？', { name: b.name }))) {
-        const nextBookmarks = bookmarks.filter((_, bookmarkIndex) => bookmarkIndex !== idx);
+        let desiredBookmarks = null;
         try {
-          if (window.electronAPI && window.electronAPI.setBookmarks) {
-            await window.electronAPI.setBookmarks(nextBookmarks);
-          }
-          localStorage.setItem('gai:externalBookmarks', JSON.stringify(nextBookmarks));
+          await enqueueExternalBookmarkMutation(async () => {
+            const latestBookmarks = readExternalBookmarks();
+            const nextBookmarks = latestBookmarks.filter(bookmark => bookmark.bookmark !== bookmarkIdentity);
+            desiredBookmarks = nextBookmarks;
+            if (nextBookmarks.length === latestBookmarks.length) return;
+            if (window.electronAPI && window.electronAPI.setBookmarks) {
+              await window.electronAPI.setBookmarks(nextBookmarks);
+            }
+            localStorage.setItem('gai:externalBookmarks', JSON.stringify(nextBookmarks));
+          });
         } catch (error) {
           const { message, stateWasUpdated } = classifyBookmarkUpdateError(error);
           if (!stateWasUpdated) {
@@ -5265,7 +6115,7 @@ function renderExternalBookmarks() {
             return;
           }
           // 原生清單已提交；仍保存新清單，避免下次啟動重新加入已移除的來源。
-          localStorage.setItem('gai:externalBookmarks', JSON.stringify(nextBookmarks));
+          if (desiredBookmarks) localStorage.setItem('gai:externalBookmarks', JSON.stringify(desiredBookmarks));
           if (elements.scanDirStatus) elements.scanDirStatus.textContent = readerText('來源已移除；舊存取權限將在 App 結束後釋放。');
         }
         renderExternalBookmarks();
@@ -5288,15 +6138,11 @@ function closeSettingsModal() {
 
 function openSmbModal() {
   closeSettingsModal();
-  // 載入當前設定
-  let smbConfig = {};
-  try {
-    smbConfig = JSON.parse(localStorage.getItem('gai:smb') || '{}');
-  } catch (e) {}
+  const smbConfig = sanitizeSmbConfig();
   elements.smbHost.value = smbConfig.host || '';
   elements.smbShare.value = smbConfig.share || '';
   elements.smbUser.value = smbConfig.username || '';
-  elements.smbPass.value = smbConfig.password || '';
+  elements.smbPass.value = '';
   elements.smbModal.style.display = 'flex';
   state.dialogReturnFocus = document.activeElement;
   elements.closeSmbBtn.focus();
@@ -5413,74 +6259,333 @@ async function fetchBrowserFolders(dirPath) {
   }
 }
 
+function beginAiSessionMutation(kind, options = {}) {
+  const canReplaceProviderSwitch = options.replaceProviderSwitch
+    && state.aiSessionMutationKind === 'provider-switch';
+  if (state.aiSessionMutationPending && !canReplaceProviderSwitch) return null;
+  const generation = ++state.aiSessionMutationGeneration;
+  state.aiSessionMutationPending = true;
+  state.aiSessionMutationKind = kind;
+  // Any queued explanation belongs to the previous native session.  Clear it
+  // immediately; an active request will also be rejected by its generation
+  // check when it settles.
+  state.aiExplainPendingPage = null;
+  state.aiExplainPendingRequest = null;
+  setAiSessionActionAvailability();
+  return generation;
+}
+
+function finishAiSessionMutation(generation) {
+  if (generation !== state.aiSessionMutationGeneration) return false;
+  state.aiSessionMutationPending = false;
+  state.aiSessionMutationKind = null;
+  setAiSessionActionAvailability();
+  return true;
+}
+
+function isCurrentAiSessionMutation(generation) {
+  return generation === state.aiSessionMutationGeneration;
+}
+
+function setAiSessionActionAvailability() {
+  const blocked = state.aiSessionSwitchPending
+    || state.aiSessionMutationPending
+    || state.aiSessionRevocationFailed
+    || !state.aiSessionStatus?.configured;
+  [elements.btnAiExplain, elements.btnAiAutoExplain, elements.aiTestBtn].forEach(button => {
+    if (!button) return;
+    button.disabled = blocked;
+    button.setAttribute('aria-disabled', String(blocked));
+  });
+  if (elements.aiSaveBtn) {
+    elements.aiSaveBtn.disabled = Boolean(state.aiSessionMutationPending);
+    elements.aiSaveBtn.setAttribute('aria-disabled', String(Boolean(state.aiSessionMutationPending)));
+  }
+  if (elements.aiClearBtn) {
+    elements.aiClearBtn.disabled = Boolean(state.aiSessionMutationPending);
+    elements.aiClearBtn.setAttribute('aria-disabled', String(Boolean(state.aiSessionMutationPending)));
+  }
+  if (elements.aiSessionStatus) {
+    elements.aiSessionStatus.setAttribute('aria-busy', String(Boolean(state.aiSessionMutationPending)));
+  }
+  const metadataButton = elements.comicInspector?.querySelector('[data-inspector-action="ai-suggest"]');
+  if (metadataButton) {
+    metadataButton.disabled = Boolean(blocked);
+    metadataButton.setAttribute('aria-disabled', String(Boolean(blocked)));
+  }
+}
+
+async function handleAiProviderChange() {
+  const committedProvider = state.aiProviderCommitted
+    || state.aiSessionStatus?.provider
+    || state.aiSessionStatus?.rememberedProvider
+    || 'openai';
+  const mutationGeneration = beginAiSessionMutation('provider-switch', { replaceProviderSwitch: true });
+  if (mutationGeneration === null) {
+    if (elements.aiProvider) elements.aiProvider.value = committedProvider;
+    showReaderToast(readerText('目前正在變更艦載 AI 設定，請稍後再切換供應商。'));
+    return;
+  }
+  const generation = ++state.aiSessionSwitchGeneration;
+  state.aiSessionSwitchPending = true;
+  state.aiSessionRevocationFailed = false;
+  setAutoPageExplanation(false);
+  setAiPagePanelVisible(false);
+  updateAiProviderDisclosure();
+  if (elements.aiSessionStatus) elements.aiSessionStatus.textContent = readerText('正在撤銷上一家供應商的艦載 AI 工作階段…');
+
+  if (!eAPI?.revokeAiSessionConfig) {
+    if (generation !== state.aiSessionSwitchGeneration || !isCurrentAiSessionMutation(mutationGeneration)) return;
+    state.aiSessionSwitchPending = false;
+    state.aiSessionRevocationFailed = true;
+    if (elements.aiSessionStatus) elements.aiSessionStatus.textContent = readerText('切換供應商失敗：目前版本無法撤銷舊的艦載 AI 工作階段。');
+    setAiSessionActionAvailability();
+    finishAiSessionMutation(mutationGeneration);
+    showReaderToast(readerText('切換供應商失敗，已暫停 AI 操作；請先更新 App。'));
+    return;
+  }
+
+  try {
+    await eAPI.revokeAiSessionConfig();
+    if (generation !== state.aiSessionSwitchGeneration || !isCurrentAiSessionMutation(mutationGeneration)) return;
+    state.aiSessionSwitchPending = false;
+    state.aiSessionRevocationFailed = false;
+    state.aiProviderCommitted = elements.aiProvider?.value || committedProvider;
+    state.aiSessionStatus = null;
+    renderAiSessionStatus({ configured: false, remembered: false, rememberedProvider: null });
+    await refreshAiSessionStatus();
+    finishAiSessionMutation(mutationGeneration);
+  } catch (error) {
+    if (generation !== state.aiSessionSwitchGeneration || !isCurrentAiSessionMutation(mutationGeneration)) return;
+    state.aiSessionSwitchPending = false;
+    state.aiSessionRevocationFailed = true;
+    if (elements.aiSessionStatus) elements.aiSessionStatus.textContent = readerText('切換供應商失敗：{error} AI 操作已暫停。', { error: error?.message || error });
+    setAiSessionActionAvailability();
+    finishAiSessionMutation(mutationGeneration);
+    showReaderToast(readerText('切換供應商失敗，已暫停 AI 操作。'));
+  }
+}
+
 function updateAiProviderDisclosure() {
   if (!elements.aiGoogleDisclosureWrap) return;
-  elements.aiGoogleDisclosureWrap.hidden = elements.aiProvider?.value !== 'google';
+  // 後端欄位沿用 googleContentDisclosure，但同意內容涵蓋所有雲端供應商。
+  // 切換供應商時必須重新確認，避免把上一家供應商的同意誤套用過來。
+  elements.aiGoogleDisclosureWrap.hidden = false;
+  if (elements.aiGoogleDisclosure) elements.aiGoogleDisclosure.checked = false;
+  if (elements.aiRememberKey) elements.aiRememberKey.checked = false;
+  renderAiSessionStatus(state.aiSessionStatus);
 }
 
 function renderAiSessionStatus(status) {
   if (!elements.aiSessionStatus) return;
-  if (!status?.configured) {
-    elements.aiSessionStatus.textContent = readerText('尚未設定艦載 AI。Key 只保留到 App 關閉。');
+  state.aiSessionStatus = status || null;
+  if (status?.provider) state.aiProviderCommitted = status.provider;
+  else if (status?.rememberedProvider) state.aiProviderCommitted = status.rememberedProvider;
+  setAiSessionActionAvailability();
+  const selectedProvider = elements.aiProvider?.value || '';
+  const rememberedProvider = status?.rememberedProvider || null;
+  const remembered = Boolean(status?.remembered);
+  const keychainLookupFailed = Boolean(status?.rememberedLookupFailed);
+  const configured = Boolean(status?.configured);
+  const providerLabel = provider => provider === 'google' ? 'Google Gemma 4' : 'OpenAI Luna';
+
+  if (elements.aiRestoreBtn) {
+    const providerMatches = Boolean(rememberedProvider) && rememberedProvider === selectedProvider;
+    elements.aiRestoreBtn.hidden = !((remembered || keychainLookupFailed) && !configured);
+    elements.aiRestoreBtn.disabled = Boolean(state.aiSessionMutationPending)
+      || !(!configured && (providerMatches || keychainLookupFailed) && elements.aiGoogleDisclosure?.checked);
+    elements.aiRestoreBtn.setAttribute('aria-disabled', String(Boolean(elements.aiRestoreBtn.disabled)));
+  }
+
+  if (keychainLookupFailed) {
+    elements.aiSessionStatus.textContent = configured
+      ? readerText('已啟用 {label} · {model}；暫時無法查詢本機 Keychain，已儲存 Key 狀態未知。', { label: providerLabel(status.provider), model: status.model })
+      : readerText('暫時無法查詢本機 Keychain，已儲存 Key 狀態未知。請解鎖裝置後重開設定，或選擇供應商並重試還原。');
     return;
   }
-  const label = status.provider === 'google' ? 'Google Gemma 4' : 'OpenAI Luna';
-  elements.aiSessionStatus.textContent = readerText('已啟用 {label} · {model}（工作階段限定）', { label, model: status.model });
+
+  if (remembered && !configured) {
+    if (!rememberedProvider) {
+      elements.aiSessionStatus.textContent = readerText('本機 Keychain 有已儲存 Key，但目前版本無法確認所屬供應商；請先更新 App。');
+    } else if (rememberedProvider !== selectedProvider) {
+      elements.aiSessionStatus.textContent = readerText('本機 Keychain 已記住 {label} Key；請切換回 {provider}，再勾選本次同意後使用。', {
+        label: providerLabel(rememberedProvider),
+        provider: providerLabel(rememberedProvider),
+      });
+    } else {
+      elements.aiSessionStatus.textContent = readerText('本機 Keychain 已記住 {label} Key；請勾選本次同意後按「使用已儲存金鑰」。', {
+        label: providerLabel(rememberedProvider || selectedProvider),
+      });
+    }
+    return;
+  }
+
+  if (!configured) {
+    elements.aiSessionStatus.textContent = readerText('尚未設定艦載 AI。Key 預設只保留本次工作階段。');
+    return;
+  }
+
+  const label = providerLabel(status.provider);
+  const storage = remembered && rememberedProvider === status.provider
+    ? readerText('；Key 已由本機 Keychain 記住')
+    : readerText('；Key 只保留本次工作階段');
+  elements.aiSessionStatus.textContent = readerText('已啟用 {label} · {model}{storage}', { label, model: status.model, storage });
 }
 
 async function refreshAiSessionStatus() {
   if (!eAPI?.getAiSessionStatus) return;
+  const mutationGeneration = state.aiSessionMutationGeneration;
   try {
-    renderAiSessionStatus(await eAPI.getAiSessionStatus());
+    const status = await eAPI.getAiSessionStatus();
+    if (mutationGeneration !== state.aiSessionMutationGeneration) return null;
+    renderAiSessionStatus(status);
+    return status;
   } catch (error) {
     console.error('讀取艦載 AI 狀態失敗', error);
+    return null;
   }
 }
 
 async function saveAiSession() {
   if (!eAPI?.setAiSessionConfig) return;
+  if (state.aiSessionMutationPending) return;
   const apiKey = elements.aiApiKey?.value.trim() || '';
   if (!apiKey) {
     showReaderToast(readerText('請先手動輸入 API Key'));
     return;
   }
-  elements.aiSaveBtn.disabled = true;
+  const mutationGeneration = beginAiSessionMutation('save');
+  if (mutationGeneration === null) return;
   try {
+    const provider = elements.aiProvider.value;
     const status = await eAPI.setAiSessionConfig({
-      provider: elements.aiProvider.value,
+      provider,
       apiKey,
-      googleContentDisclosure: Boolean(elements.aiGoogleDisclosure?.checked)
+      googleContentDisclosure: Boolean(elements.aiGoogleDisclosure?.checked),
+      rememberKey: Boolean(elements.aiRememberKey?.checked),
     });
+    if (!isCurrentAiSessionMutation(mutationGeneration)) return;
     elements.aiApiKey.value = '';
+    state.aiSessionSwitchPending = false;
+    state.aiSessionRevocationFailed = false;
+    state.aiProviderCommitted = provider;
     renderAiSessionStatus(status);
-    showReaderToast(readerText('艦載 AI 已啟用；Key 只存在本次工作階段'));
+    showReaderToast(readerText(status?.remembered ? '艦載 AI 已啟用；Key 已由本機 Keychain 記住' : '艦載 AI 已啟用；Key 只存在本次工作階段'));
   } catch (error) {
-    showReaderToast(readerText('艦載 AI 設定失敗：{error}', { error: error?.message || error }));
+    if (isCurrentAiSessionMutation(mutationGeneration)) {
+      // Native may revoke the old RAM session before reporting a Keychain
+      // failure.  Fail closed instead of leaving the UI claiming that the old
+      // session is still usable; keep the typed key so the user can retry.
+      const previousStatus = state.aiSessionStatus || {};
+      const failedStatus = {
+        ...previousStatus,
+        configured: false,
+        provider: previousStatus.provider || elements.aiProvider?.value || null,
+      };
+      state.aiSessionSwitchPending = false;
+      state.aiSessionRevocationFailed = true;
+      state.aiSessionStatus = failedStatus;
+      setAutoPageExplanation(false);
+      setAiPagePanelVisible(false);
+      renderAiSessionStatus(failedStatus);
+      showReaderToast(readerText('艦載 AI 設定失敗：{error}', { error: error?.message || error }));
+    }
   } finally {
-    elements.aiSaveBtn.disabled = false;
+    finishAiSessionMutation(mutationGeneration);
+  }
+}
+
+async function restoreAiSession() {
+  if (!eAPI?.restoreAiSessionConfig) return;
+  if (state.aiSessionMutationPending) return;
+  const status = state.aiSessionStatus;
+  const provider = elements.aiProvider?.value;
+  if ((!status?.remembered && !status?.rememberedLookupFailed) || status.configured) return;
+  if (!status.rememberedProvider && !status.rememberedLookupFailed) {
+    showReaderToast(readerText('目前版本無法確認已儲存 Key 所屬供應商，請先更新 App。'));
+    return;
+  }
+  if (status.rememberedProvider && status.rememberedProvider !== provider) {
+    showReaderToast(readerText('請先切換回已儲存 Key 所屬的供應商：{provider}', { provider: status.rememberedProvider === 'google' ? 'Google' : 'OpenAI' }));
+    return;
+  }
+  if (!elements.aiGoogleDisclosure?.checked) {
+    showReaderToast(readerText('使用已儲存金鑰前，請先勾選本次第三方 AI 資料分享同意。'));
+    return;
+  }
+  const mutationGeneration = beginAiSessionMutation('restore');
+  if (mutationGeneration === null) return;
+  try {
+    const nextStatus = await eAPI.restoreAiSessionConfig({
+      provider,
+      googleContentDisclosure: true,
+    });
+    if (!isCurrentAiSessionMutation(mutationGeneration)) return;
+    state.aiSessionSwitchPending = false;
+    state.aiSessionRevocationFailed = false;
+    state.aiProviderCommitted = provider;
+    renderAiSessionStatus(nextStatus);
+    showReaderToast(readerText('已從本機 Keychain 還原艦載 AI；本次同意只適用於目前工作階段。'));
+  } catch (error) {
+    if (isCurrentAiSessionMutation(mutationGeneration)) {
+      showReaderToast(readerText('還原艦載 AI 失敗：{error}', { error: error?.message || error }));
+      renderAiSessionStatus(state.aiSessionStatus);
+    }
+  } finally {
+    finishAiSessionMutation(mutationGeneration);
   }
 }
 
 async function testAiSession() {
   if (!eAPI?.testAiSession) return;
+  if (state.aiSessionSwitchPending || state.aiSessionMutationPending || state.aiSessionRevocationFailed || !state.aiSessionStatus?.configured) return;
+  const mutationGeneration = state.aiSessionMutationGeneration;
   elements.aiTestBtn.disabled = true;
   elements.aiSessionStatus.textContent = readerText('正在用合成文字測試，不會送出漫畫內容…');
   try {
     const response = await eAPI.testAiSession();
+    if (mutationGeneration !== state.aiSessionMutationGeneration) return;
     elements.aiSessionStatus.textContent = response || readerText('艦載 AI 連線成功。');
   } catch (error) {
+    if (mutationGeneration !== state.aiSessionMutationGeneration) return;
     elements.aiSessionStatus.textContent = readerText('測試失敗：{error}', { error: error?.message || error });
   } finally {
-    elements.aiTestBtn.disabled = false;
+    if (mutationGeneration === state.aiSessionMutationGeneration) {
+      elements.aiTestBtn.disabled = false;
+      setAiSessionActionAvailability();
+    }
   }
 }
 
 async function clearAiSession() {
   if (!eAPI?.clearAiSessionConfig) return;
-  await eAPI.clearAiSessionConfig();
-  if (elements.aiApiKey) elements.aiApiKey.value = '';
-  renderAiSessionStatus(null);
-  showReaderToast(readerText('已清除本次工作階段的 API Key'));
+  if (state.aiSessionMutationPending) return;
+  const previousStatus = state.aiSessionStatus ? { ...state.aiSessionStatus } : null;
+  const mutationGeneration = beginAiSessionMutation('clear');
+  if (mutationGeneration === null) return;
+  try {
+    await eAPI.clearAiSessionConfig();
+    if (!isCurrentAiSessionMutation(mutationGeneration)) return;
+    if (elements.aiApiKey) elements.aiApiKey.value = '';
+    if (elements.aiRememberKey) elements.aiRememberKey.checked = false;
+    if (elements.aiGoogleDisclosure) elements.aiGoogleDisclosure.checked = false;
+    state.aiSessionSwitchPending = false;
+    state.aiSessionRevocationFailed = false;
+    state.aiProviderCommitted = elements.aiProvider?.value || state.aiProviderCommitted;
+    renderAiSessionStatus(null);
+    showReaderToast(readerText('已清除工作階段 API Key 與本機 Keychain 記錄'));
+  } catch (error) {
+    if (isCurrentAiSessionMutation(mutationGeneration)) {
+      // native clear 可能已撤銷 RAM session 才回報失敗；保留舊 configured
+      // snapshot，並阻斷後續 AI 請求，直到使用者重新啟用或切換供應商。
+      state.aiSessionStatus = previousStatus;
+      state.aiSessionRevocationFailed = true;
+      renderAiSessionStatus(previousStatus);
+      showReaderToast(readerText('清除艦載 AI 失敗：{error}', { error: error?.message || error }));
+    }
+  } finally {
+    finishAiSessionMutation(mutationGeneration);
+  }
 }
 
 function blobAsDataUrl(blob) {
@@ -5533,6 +6638,7 @@ function setAutoPageExplanation(enabled) {
 }
 
 function toggleAutoPageExplanation() {
+  if (state.aiSessionSwitchPending || state.aiSessionMutationPending || state.aiSessionRevocationFailed || !state.aiSessionStatus?.configured) return;
   if (isBuiltInDemoComic(state.currentComic)) {
     showReaderToast(readerText('風景選集不會送出頁面內容給 AI。'));
     return;
@@ -5580,6 +6686,10 @@ function localizeAiExplainError(error) {
 }
 
 async function requestPageExplanation(pageIndex, automatic = false) {
+  if (state.aiSessionSwitchPending || state.aiSessionMutationPending || state.aiSessionRevocationFailed || !state.aiSessionStatus?.configured) {
+    if (!automatic) showReaderToast(readerText('艦載 AI 工作階段正在切換，請稍後再試。'));
+    return;
+  }
   if (isBuiltInDemoComic(state.currentComic)) {
     if (!automatic) showReaderToast(readerText('風景選集不會送出頁面內容給 AI。'));
     return;
@@ -5613,6 +6723,8 @@ async function requestPageExplanation(pageIndex, automatic = false) {
 
   state.aiExplainInFlight = true;
   state.aiExplainActiveRequest = { comicId, pageIndex, locale, automatic };
+  const sessionGeneration = state.aiSessionSwitchGeneration;
+  const mutationGeneration = state.aiSessionMutationGeneration;
   state.aiExplainPendingPage = null;
   state.aiExplainPendingRequest = null;
   setAiPagePanelVisible(true);
@@ -5621,7 +6733,11 @@ async function requestPageExplanation(pageIndex, automatic = false) {
   syncReaderRotationUi();
   try {
     const dataUrl = await pageDataUrl(state.currentComicPages[pageIndex]);
+    if (sessionGeneration !== state.aiSessionSwitchGeneration
+      || mutationGeneration !== state.aiSessionMutationGeneration) return;
     const explanation = await eAPI.explainPage({ dataUrl, targetLocale: locale });
+    if (sessionGeneration !== state.aiSessionSwitchGeneration
+      || mutationGeneration !== state.aiSessionMutationGeneration) return;
     state.aiExplainCache.set(cacheKey, explanation);
     if (state.currentComic?.id === comicId
       && state.currentPageIndex === pageIndex
@@ -5629,6 +6745,8 @@ async function requestPageExplanation(pageIndex, automatic = false) {
       elements.aiPageResult.textContent = explanation;
     }
   } catch (error) {
+    if (sessionGeneration !== state.aiSessionSwitchGeneration
+      || mutationGeneration !== state.aiSessionMutationGeneration) return;
     if (state.currentComic?.id === comicId
       && state.currentPageIndex === pageIndex
       && getAiExplainLocale() === locale) {
@@ -5648,11 +6766,13 @@ async function requestPageExplanation(pageIndex, automatic = false) {
   } finally {
     state.aiExplainInFlight = false;
     state.aiExplainActiveRequest = null;
-    elements.btnAiExplain.disabled = false;
+    setAiSessionActionAvailability();
     const pendingRequest = state.aiExplainPendingRequest;
     state.aiExplainPendingPage = null;
     state.aiExplainPendingRequest = null;
-    if (pendingRequest
+    if (sessionGeneration === state.aiSessionSwitchGeneration
+      && mutationGeneration === state.aiSessionMutationGeneration
+      && pendingRequest
       && pendingRequest.comicId === state.currentComic?.id
       && pendingRequest.pageIndex === state.currentPageIndex
       && (!pendingRequest.automatic || state.aiAutoExplain)) {
@@ -5713,6 +6833,11 @@ function renderAiMetadataCandidates(candidates, comicId, resultContainer = eleme
 }
 
 async function suggestInspectorMetadata(comic, button, resultContainer) {
+  if (state.aiSessionSwitchPending || state.aiSessionMutationPending || state.aiSessionRevocationFailed || !state.aiSessionStatus?.configured) {
+    resultContainer.hidden = false;
+    resultContainer.textContent = readerText('艦載 AI 工作階段正在切換，請稍後再試。');
+    return;
+  }
   resultContainer.hidden = false;
   button.setAttribute('aria-expanded', 'true');
   if (!eAPI?.suggestComicMetadata || !comic?.id) {
@@ -5724,15 +6849,30 @@ async function suggestInspectorMetadata(comic, button, resultContainer) {
     return;
   }
   resultContainer.textContent = readerText('艦載 AI 正在讀取封面／第一頁，提出可審核的摘要與標籤…');
+  const sessionGeneration = state.aiSessionSwitchGeneration;
+  const mutationGeneration = state.aiSessionMutationGeneration;
   button.disabled = true;
   try {
     const dataUrl = await comicPreviewDataUrl(comic.id);
+    if (sessionGeneration !== state.aiSessionSwitchGeneration
+      || mutationGeneration !== state.aiSessionMutationGeneration) return;
     const candidates = await eAPI.suggestComicMetadata({ comicId: comic.id, dataUrl });
+    if (sessionGeneration !== state.aiSessionSwitchGeneration
+      || mutationGeneration !== state.aiSessionMutationGeneration) return;
     renderAiMetadataCandidates(candidates, comic.id, resultContainer);
   } catch (error) {
+    if (sessionGeneration !== state.aiSessionSwitchGeneration
+      || mutationGeneration !== state.aiSessionMutationGeneration) return;
     resultContainer.textContent = readerText('艦載 AI 建議失敗：{error}', { error: error?.message || error });
   } finally {
-    if (button.isConnected) button.disabled = false;
+    if (button.isConnected) {
+      const blocked = state.aiSessionSwitchPending
+        || state.aiSessionMutationPending
+        || state.aiSessionRevocationFailed
+        || !state.aiSessionStatus?.configured;
+      button.disabled = Boolean(blocked);
+      button.setAttribute('aria-disabled', String(Boolean(blocked)));
+    }
   }
 }
 
@@ -5751,6 +6891,7 @@ async function saveSettingsPath(pathStr) {
 
     // 馬上清空目前的書架，避免使用者看到舊的漫畫
     state.comics = [];
+    invalidateComicNavigationCache();
     resetLibraryNavigationState();
     filterAndRenderGrid();
     renderSidebar();
@@ -5867,6 +7008,11 @@ if (typeof window !== 'undefined' && window.__GIA_TEST_HOOKS__) {
     builtInDemoReaderData,
     getCoverUrl,
     getDirectoryItems,
+    setFavorites,
+    isFavoriteId,
+    addIOSLibrarySource,
+    renderExternalBookmarks,
+    restoreExternalBookmarks,
     isBuiltInDemoComic,
     isLooseImage,
     resetCoverLoadQueue,
@@ -5889,7 +7035,10 @@ if (typeof window !== 'undefined' && window.__GIA_TEST_HOOKS__) {
     startScanStatusPolling,
     stopScanStatusPolling,
     updateLoaderScanProgress,
+    renderGrid,
+    getShelfCardRenderKey,
     renderPages,
+    saveReadingProgress,
     toggleDoubleDirection,
     advanceDoubleBySinglePage,
     doublePageStartForIndex,
@@ -5900,11 +7049,24 @@ if (typeof window !== 'undefined' && window.__GIA_TEST_HOOKS__) {
     openNextComicInFolder,
     openPrevComicInFolder,
     getComicSourceKey,
+    getComicNavigationCache,
+    invalidateComicNavigationCache,
     findAdjacentComicInFolder,
     requestWebtoonAdjacentComic,
     jumpToPage,
     anchorWebtoonPage,
     cancelWebtoonAnchor,
+    renderCatalogGrid,
+    updateReaderUiControls,
+    captureCatalogFocus,
+    restoreCatalogFocus,
+    captureLibraryFocus,
+    restoreLibraryRefreshFocus,
+    getCatalogThumbnailLoadState() {
+      return { generation: catalogImageGeneration, active: catalogImageActive, queued: catalogImageQueue.length };
+    },
+    handleKeyDown,
+    trapReaderFocus,
     handleReaderPointerClick,
     readerViewportCanScroll,
     bindEvents,

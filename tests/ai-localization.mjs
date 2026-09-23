@@ -40,6 +40,10 @@ const context = {
     aiExplainPendingPage: null,
     aiExplainPendingRequest: null,
     aiAutoExplain: false,
+    aiSessionStatus: { configured: true },
+    aiSessionSwitchPending: false,
+    aiSessionRevocationFailed: false,
+    aiSessionSwitchGeneration: 0,
   },
   elements: {
     aiPageResult: { textContent: '' },
@@ -57,6 +61,7 @@ const context = {
   syncReaderRotationUi: () => {},
   readerText: (source, vars = {}) => source.replace(/\{(\w+)\}/g, (_, key) => String(vars[key] ?? `{${key}}`)),
   setAutoPageExplanation: () => {},
+  setAiSessionActionAvailability: () => {},
   showReaderToast: () => {},
 };
 context.readerText = (source, vars = {}) => context.window.GAIL10n.t(source)

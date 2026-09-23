@@ -2,6 +2,7 @@ import SwiftRs
 import Tauri
 import UIKit
 import UniformTypeIdentifiers
+import Security
 
 @_silgen_name("gai_memory_pressure")
 private func gaiMemoryPressure(_ level: UInt8)
@@ -19,7 +20,14 @@ class EnsureAvailableArgs: Decodable {
   let path: String
 }
 
+class AiKeyArgs: Decodable {
+  let provider: String
+  let apiKey: String?
+}
+
 class ExamplePlugin: Plugin, UIDocumentPickerDelegate {
+  private let aiKeychainService = "com.windsheep.gai.ai-api-key"
+  private let bookmarkAliasesDefaultsKey = "com.windsheep.gai.external-bookmark-aliases"
   var activePickers: [UIDocumentPickerViewController: Invoke] = [:]
   var activeAccesses: [String: URL] = [:]
   private let accessQueue = DispatchQueue(label: "com.windsheep.gai.security-scope")
@@ -75,16 +83,37 @@ class ExamplePlugin: Plugin, UIDocumentPickerDelegate {
       gaiMemoryPressure(2)
     }
   }
+
+  private func bookmarkAlias(for bookmark: String) -> String? {
+    (UserDefaults.standard.dictionary(forKey: bookmarkAliasesDefaultsKey) as? [String: String])?[bookmark]
+  }
+
+  private func saveBookmarkAlias(_ alias: String, for bookmark: String) {
+    var aliases = UserDefaults.standard.dictionary(forKey: bookmarkAliasesDefaultsKey) as? [String: String] ?? [:]
+    aliases[bookmark] = alias
+    UserDefaults.standard.set(aliases, forKey: bookmarkAliasesDefaultsKey)
+  }
+
+  private func removeBookmarkAlias(for bookmark: String) {
+    guard var aliases = UserDefaults.standard.dictionary(forKey: bookmarkAliasesDefaultsKey) as? [String: String] else {
+      return
+    }
+    aliases.removeValue(forKey: bookmark)
+    UserDefaults.standard.set(aliases, forKey: bookmarkAliasesDefaultsKey)
+  }
   #endif
 
   private func presentationController() -> UIViewController? {
-    var root: UIViewController?
-    if let scene = UIApplication.shared.connectedScenes.first(where: { $0.activationState == .foregroundActive }) as? UIWindowScene,
-       let window = scene.windows.first(where: { $0.isKeyWindow }) {
-      root = window.rootViewController
-    } else {
-      root = UIApplication.shared.windows.first?.rootViewController
-    }
+    let scenes = UIApplication.shared.connectedScenes.compactMap { $0 as? UIWindowScene }
+    let foregroundWindows = scenes
+      .filter { $0.activationState == .foregroundActive }
+      .flatMap(\.windows)
+    let allWindows = scenes.flatMap(\.windows)
+    let window = foregroundWindows.first(where: { $0.isKeyWindow })
+      ?? foregroundWindows.first(where: { $0.rootViewController != nil })
+      ?? allWindows.first(where: { $0.isKeyWindow })
+      ?? allWindows.first(where: { $0.rootViewController != nil })
+    var root = window?.rootViewController
     while let presented = root?.presentedViewController {
       root = presented
     }
@@ -154,21 +183,45 @@ class ExamplePlugin: Plugin, UIDocumentPickerDelegate {
       if let existingURL = activeAccesses[bookmark] {
         return (existingURL, false, nil)
       }
-      guard let data = Data(base64Encoded: bookmark) else {
-        return (nil, false, "Invalid bookmark base64")
-      }
-
-      do {
-        var isStale = false
-        let url = try URL(resolvingBookmarkData: data, bookmarkDataIsStale: &isStale)
-        guard url.startAccessingSecurityScopedResource() else {
-          return (nil, false, "Failed to start accessing")
+      let candidates = [bookmarkAlias(for: bookmark), bookmark].compactMap { $0 }
+      var lastError = "外部資料夾授權已失效，請重新加入資料夾"
+      for candidate in candidates {
+        guard let data = Data(base64Encoded: candidate) else {
+          lastError = "Invalid bookmark base64"
+          continue
         }
-        activeAccesses[bookmark] = url
-        return (url, isStale, nil)
-      } catch {
-        return (nil, false, "Failed to resolve bookmark: \(error)")
+
+        do {
+          var isStale = false
+          let url = try URL(resolvingBookmarkData: data, bookmarkDataIsStale: &isStale)
+          guard url.startAccessingSecurityScopedResource() else {
+            lastError = "外部資料夾授權已失效，請重新加入資料夾"
+            continue
+          }
+
+          // On iOS, `.withSecurityScope` is unavailable. A stale minimal
+          // bookmark can still be refreshed while its scope is active. Keep
+          // the original bookmark as the stable external source ID and store
+          // refreshed data under that ID for the next launch.
+          if isStale {
+            do {
+              let refreshed = try url.bookmarkData(
+                options: .minimalBookmark,
+                includingResourceValuesForKeys: nil,
+                relativeTo: nil
+              )
+              saveBookmarkAlias(refreshed.base64EncodedString(), for: bookmark)
+            } catch {
+              // The current access remains usable; retry refresh next launch.
+            }
+          }
+          activeAccesses[bookmark] = url
+          return (url, isStale, nil)
+        } catch {
+          lastError = "Failed to resolve bookmark: \(error)"
+        }
       }
+      return (nil, false, lastError)
     }
 
     if let url = resolution.url {
@@ -184,7 +237,106 @@ class ExamplePlugin: Plugin, UIDocumentPickerDelegate {
     if let url = accessQueue.sync(execute: { activeAccesses.removeValue(forKey: bookmark) }) {
       url.stopAccessingSecurityScopedResource()
     }
+    accessQueue.sync { removeBookmarkAlias(for: bookmark) }
     invoke.resolve([:])
+  }
+
+  @objc public func saveAiKey(_ invoke: Invoke) throws {
+    let args = try invoke.parseArgs(AiKeyArgs.self)
+    guard Self.isAiProvider(args.provider), let apiKey = args.apiKey,
+          apiKey.utf8.count >= 16, apiKey.utf8.count <= 512,
+          !apiKey.unicodeScalars.contains(where: { CharacterSet.controlCharacters.contains($0) }) else {
+      invoke.reject("Invalid AI key")
+      return
+    }
+    let query = aiKeychainQuery(provider: args.provider)
+    let attributes: [String: Any] = [
+      kSecValueData as String: Data(apiKey.utf8),
+      kSecAttrAccessible as String: kSecAttrAccessibleWhenUnlockedThisDeviceOnly
+    ]
+    let status = SecItemUpdate(query as CFDictionary, attributes as CFDictionary)
+    if status == errSecItemNotFound {
+      var item = query
+      item.merge(attributes) { _, new in new }
+      let addStatus = SecItemAdd(item as CFDictionary, nil)
+      guard addStatus == errSecSuccess else {
+        invoke.reject("Unable to save AI key")
+        return
+      }
+    } else if status != errSecSuccess {
+      invoke.reject("Unable to save AI key")
+      return
+    }
+    invoke.resolve([:])
+  }
+
+  @objc public func loadAiKey(_ invoke: Invoke) throws {
+    let args = try invoke.parseArgs(AiKeyArgs.self)
+    guard Self.isAiProvider(args.provider) else {
+      invoke.reject("Invalid AI provider")
+      return
+    }
+    var query = aiKeychainQuery(provider: args.provider)
+    query[kSecReturnData as String] = true
+    query[kSecMatchLimit as String] = kSecMatchLimitOne
+    var result: CFTypeRef?
+    let status = SecItemCopyMatching(query as CFDictionary, &result)
+    guard status == errSecSuccess else {
+      if status == errSecItemNotFound {
+        invoke.reject("iOS Keychain 沒有此供應商的 API Key")
+      } else {
+        invoke.reject("Unable to read AI key")
+      }
+      return
+    }
+    guard let data = result as? Data,
+          let apiKey = String(data: data, encoding: .utf8), !apiKey.isEmpty else {
+      invoke.reject("iOS Keychain 沒有此供應商的 API Key")
+      return
+    }
+    invoke.resolve(["apiKey": apiKey])
+  }
+
+  @objc public func hasAiKey(_ invoke: Invoke) throws {
+    let args = try invoke.parseArgs(AiKeyArgs.self)
+    guard Self.isAiProvider(args.provider) else {
+      invoke.reject("Invalid AI provider")
+      return
+    }
+    let status = SecItemCopyMatching(aiKeychainQuery(provider: args.provider) as CFDictionary, nil)
+    if status == errSecSuccess {
+      invoke.resolve(["present": true])
+    } else if status == errSecItemNotFound {
+      invoke.resolve(["present": false])
+    } else {
+      invoke.reject("Unable to read AI key")
+    }
+  }
+
+  @objc public func deleteAiKey(_ invoke: Invoke) throws {
+    let args = try invoke.parseArgs(AiKeyArgs.self)
+    guard Self.isAiProvider(args.provider) else {
+      invoke.reject("Invalid AI provider")
+      return
+    }
+    let status = SecItemDelete(aiKeychainQuery(provider: args.provider) as CFDictionary)
+    guard status == errSecSuccess || status == errSecItemNotFound else {
+      invoke.reject("Unable to delete AI key")
+      return
+    }
+    invoke.resolve([:])
+  }
+
+  private func aiKeychainQuery(provider: String) -> [String: Any] {
+    [
+      kSecClass as String: kSecClassGenericPassword,
+      kSecAttrService as String: aiKeychainService,
+      kSecAttrAccount as String: provider
+    ]
+  }
+
+  private static func isAiProvider(_ provider: String) -> Bool {
+    provider == "openai" || provider == "google"
   }
 
   @objc public func ensureAvailable(_ invoke: Invoke) throws {

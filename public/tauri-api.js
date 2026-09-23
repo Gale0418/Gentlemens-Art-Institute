@@ -242,8 +242,21 @@ if (window.__TAURI__) {
       if (!data?.googleContentDisclosure) {
         return Promise.reject(new Error(bridgeText("啟用 {provider} 前，請先明確同意將目前頁面影像與提示文字傳送至該第三方 AI 供應商。", { provider: providerName })));
       }
-      return invoke('set_ai_session_config', { data });
+      return invoke('set_ai_session_config', {
+        data: {
+          ...data,
+          rememberKey: Boolean(data.rememberKey),
+        },
+      });
     },
+    restoreAiSessionConfig: (data) => {
+      const providerName = data?.provider === 'google' ? 'Google' : 'OpenAI';
+      if (!data?.googleContentDisclosure) {
+        return Promise.reject(new Error(bridgeText("使用已儲存 {provider} Key 前，請先明確同意將目前頁面影像與提示文字傳送至該第三方 AI 供應商。", { provider: providerName })));
+      }
+      return invoke('restore_ai_session_config', { data });
+    },
+    revokeAiSessionConfig: () => invoke('revoke_ai_session_config'),
     clearAiSessionConfig: () => invoke('clear_ai_session_config'),
     testAiSession: () => invoke('test_ai_session'),
     explainPage: (data) => invoke('explain_page', { data }),

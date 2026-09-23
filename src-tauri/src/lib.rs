@@ -15,12 +15,47 @@ use state::{AppState, ComicItem, Progress};
 use std::collections::BTreeSet;
 use std::io::Write;
 use std::path::Path;
-use std::sync::Arc;
+use std::sync::{Arc, OnceLock};
 use tauri::{AppHandle, Manager, State};
 
 const SCAN_DIRECTORY_SETTINGS_FILE: &str = "scan-directory.txt";
 const MAX_IMPORTED_PHOTO_BYTES: usize = 64 * 1024 * 1024;
 const MAX_CATALOG_EXPORT_BYTES: usize = 64 * 1024 * 1024;
+const MAX_AI_IMAGE_BYTES: usize = 20 * 1024 * 1024;
+const MAX_AI_BASE64_BYTES: usize = MAX_AI_IMAGE_BYTES.div_ceil(3) * 4;
+const MAX_AI_RESPONSE_BYTES: usize = 1024 * 1024;
+
+static AI_HTTP_CLIENT: OnceLock<Result<reqwest::Client, String>> = OnceLock::new();
+
+// `AppState::ai_send_lifecycle` predates concurrent AI sends and is a
+// `Mutex<()>`, which cannot express the read/write barrier needed here. Keep
+// this barrier in this module so sends can share a read guard while session
+// transitions take the write side. The app has one process-wide AppState.
+static AI_SEND_LIFECYCLE: OnceLock<tokio::sync::RwLock<()>> = OnceLock::new();
+static AI_SEND_CANCELLATION: OnceLock<tokio::sync::watch::Sender<u64>> = OnceLock::new();
+
+fn ai_send_lifecycle() -> &'static tokio::sync::RwLock<()> {
+    AI_SEND_LIFECYCLE.get_or_init(|| tokio::sync::RwLock::new(()))
+}
+
+fn ai_send_cancellation() -> &'static tokio::sync::watch::Sender<u64> {
+    AI_SEND_CANCELLATION.get_or_init(|| {
+        let (sender, _) = tokio::sync::watch::channel(0);
+        sender
+    })
+}
+
+fn cancel_ai_sends(generation: u64) {
+    // A send can already be waiting on the request gate or in reqwest's
+    // connection setup. The generation check handles the former; the watch
+    // signal interrupts the latter so the transition can acquire the write
+    // side promptly.
+    let _ = ai_send_cancellation().send(generation);
+}
+
+async fn wait_for_ai_sends() {
+    drop(ai_send_lifecycle().write().await);
+}
 
 fn normalize_runtime_item(mut item: ComicItem) -> ComicItem {
     if item.r#type == "offline" {
@@ -1206,15 +1241,26 @@ async fn update_reader_cache_window(
 }
 
 #[tauri::command]
-async fn get_config(state: State<'_, Arc<AppState>>, app_handle: AppHandle) -> Result<serde_json::Value, String> {
+async fn get_config(
+    state: State<'_, Arc<AppState>>,
+    app_handle: AppHandle,
+) -> Result<serde_json::Value, String> {
     let dir = state.scan_dir.read().unwrap();
     let available = dir.is_empty() || Path::new(dir.as_str()).exists();
     #[cfg(target_os = "ios")]
-    let is_local_library = app_handle.path().document_dir().ok()
+    let is_local_library = app_handle
+        .path()
+        .document_dir()
+        .ok()
         .is_some_and(|documents| Path::new(dir.as_str()) == documents);
     #[cfg(not(target_os = "ios"))]
-    let is_local_library = { let _ = app_handle; false };
-    Ok(serde_json::json!({ "scanDir": dir.clone(), "available": available, "isLocalLibrary": is_local_library }))
+    let is_local_library = {
+        let _ = app_handle;
+        false
+    };
+    Ok(
+        serde_json::json!({ "scanDir": dir.clone(), "available": available, "isLocalLibrary": is_local_library }),
+    )
 }
 
 #[tauri::command]
@@ -1239,7 +1285,13 @@ async fn set_config(
         .ok_or_else(|| "設定缺少 scanDir 字串".to_string())?;
     let scan_dir = validate_scan_directory(scan_dir)?;
     #[cfg(target_os = "ios")]
-    let scan_dir = relocate_ios_documents(&scan_dir, &app_handle.path().document_dir().map_err(|error| error.to_string())?);
+    let scan_dir = relocate_ios_documents(
+        &scan_dir,
+        &app_handle
+            .path()
+            .document_dir()
+            .map_err(|error| error.to_string())?,
+    );
     let current_scan_dir = state.scan_dir.read().unwrap().clone();
     if current_scan_dir == scan_dir {
         return Ok(serde_json::json!({ "success": true, "changed": false, "scanDir": scan_dir }));
@@ -1317,6 +1369,15 @@ struct AiSessionRequest {
     provider: String,
     api_key: String,
     google_content_disclosure: bool,
+    #[serde(default)]
+    remember_key: bool,
+}
+
+#[derive(serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct AiSessionRestoreRequest {
+    provider: String,
+    google_content_disclosure: bool,
 }
 
 #[derive(serde::Serialize)]
@@ -1325,6 +1386,9 @@ struct AiSessionStatus {
     configured: bool,
     provider: Option<String>,
     model: Option<String>,
+    remembered: bool,
+    remembered_provider: Option<String>,
+    remembered_lookup_failed: bool,
 }
 
 #[derive(serde::Deserialize)]
@@ -1377,25 +1441,43 @@ struct SaveProgressRequest {
     id: String,
     current_page: u64,
     total_pages: u64,
+    /// Optional during the migration; UI clients should send a strictly
+    /// increasing value per comic so an older request cannot overwrite a
+    /// newer page after it was delayed by the runtime.
+    #[serde(default)]
+    sequence: Option<u64>,
 }
 
-fn ai_status(config: Option<&crate::state::AiSessionConfig>) -> AiSessionStatus {
+fn ai_status(
+    config: Option<&crate::state::AiSessionConfig>,
+    remembered_provider: Option<String>,
+) -> AiSessionStatus {
     AiSessionStatus {
         configured: config.is_some(),
         provider: config.map(|value| value.provider.clone()),
         model: config.map(|value| value.model.clone()),
+        remembered: remembered_provider.is_some(),
+        remembered_provider,
+        remembered_lookup_failed: false,
     }
 }
 
-fn validate_ai_session(data: AiSessionRequest) -> Result<crate::state::AiSessionConfig, String> {
-    let api_key = data.api_key.trim();
+fn validate_ai_session(
+    provider_name: &str,
+    raw_api_key: &str,
+    google_content_disclosure: bool,
+) -> Result<crate::state::AiSessionConfig, String> {
+    let api_key = raw_api_key.trim();
     if api_key.len() < 16 || api_key.len() > 512 {
         return Err("API Key 格式不正確".into());
     }
-    if !data.google_content_disclosure {
+    if api_key.chars().any(char::is_control) {
+        return Err("API Key 格式不正確".into());
+    }
+    if !google_content_disclosure {
         return Err("啟用第三方艦載 AI 前，必須明確同意傳送目前頁面影像與提示文字".into());
     }
-    let (provider, model) = match data.provider.as_str() {
+    let (provider, model) = match provider_name {
         "openai" => ("openai", "gpt-5.6-luna"),
         "google" => ("google", "gemma-4-26b-a4b-it"),
         _ => return Err("不支援的艦載 AI 供應商".into()),
@@ -1408,10 +1490,280 @@ fn validate_ai_session(data: AiSessionRequest) -> Result<crate::state::AiSession
     })
 }
 
+/// Revoke the in-memory AI session before any potentially fallible cleanup.
+/// Incrementing first also invalidates requests that are waiting on the AI gate.
+fn revoke_ai_session_in_memory(state: &AppState) -> Result<(), String> {
+    let mut session = state
+        .ai_session
+        .write()
+        .map_err(|_| "艦載 AI 工作階段鎖定失敗".to_string())?;
+    // Keep the generation and config transition under the same write lock so
+    // snapshots can never pair an old key with a new generation.
+    let generation = state
+        .ai_session_generation
+        .fetch_add(1, std::sync::atomic::Ordering::SeqCst)
+        .wrapping_add(1);
+    cancel_ai_sends(generation);
+    *session = None;
+    Ok(())
+}
+
+fn ai_session_snapshot_locked(
+    state: &AppState,
+) -> Result<(crate::state::AiSessionConfig, u64), String> {
+    let session = state
+        .ai_session
+        .read()
+        .map_err(|_| "艦載 AI 工作階段鎖定失敗".to_string())?;
+    let config = session
+        .clone()
+        .ok_or_else(|| "請先到設定輸入艦載 AI API Key".to_string())?;
+    let generation = state
+        .ai_session_generation
+        .load(std::sync::atomic::Ordering::SeqCst);
+    Ok((config, generation))
+}
+
+async fn ai_session_snapshot(
+    state: &AppState,
+) -> Result<(crate::state::AiSessionConfig, u64), String> {
+    let _lifecycle = state.ai_session_lifecycle.lock().await;
+    ai_session_snapshot_locked(state)
+}
+
+#[cfg(target_os = "macos")]
+const MACOS_AI_KEYCHAIN_SERVICE: &str = "com.windsheep.gai.ai-api-key";
+
+#[cfg(target_os = "macos")]
+// Security.framework's documented `errSecItemNotFound` OSStatus.
+const MACOS_ERR_SEC_ITEM_NOT_FOUND: i32 = -25300;
+
+#[cfg(target_os = "macos")]
+fn macos_ai_keychain_save(provider: &str, api_key: &str) -> Result<(), String> {
+    security_framework::passwords::set_generic_password(
+        MACOS_AI_KEYCHAIN_SERVICE,
+        provider,
+        api_key.as_bytes(),
+    )
+    .map_err(|error| format!("macOS Keychain 儲存 AI API Key 失敗：{error}"))
+}
+
+#[cfg(target_os = "macos")]
+fn macos_ai_keychain_load(provider: &str) -> Result<String, String> {
+    let bytes =
+        security_framework::passwords::get_generic_password(MACOS_AI_KEYCHAIN_SERVICE, provider)
+            .map_err(|error| format!("macOS Keychain 讀取 AI API Key 失敗：{error}"))?;
+    String::from_utf8(bytes).map_err(|_| "macOS Keychain 的 AI API Key 格式不正確".into())
+}
+
+#[cfg(target_os = "macos")]
+fn macos_ai_keychain_has(provider: &str) -> Result<bool, String> {
+    match security_framework::passwords::get_generic_password(MACOS_AI_KEYCHAIN_SERVICE, provider) {
+        Ok(_) => Ok(true),
+        Err(error) if error.code() == MACOS_ERR_SEC_ITEM_NOT_FOUND => Ok(false),
+        Err(error) => Err(format!("macOS Keychain 查詢 AI API Key 失敗：{error}")),
+    }
+}
+
+#[cfg(target_os = "macos")]
+fn macos_ai_keychain_delete(provider: &str) -> Result<(), String> {
+    match security_framework::passwords::delete_generic_password(
+        MACOS_AI_KEYCHAIN_SERVICE,
+        provider,
+    ) {
+        Ok(()) => Ok(()),
+        Err(error) if error.code() == MACOS_ERR_SEC_ITEM_NOT_FOUND => Ok(()),
+        Err(error) => Err(format!("macOS Keychain 刪除 AI API Key 失敗：{error}")),
+    }
+}
+
+async fn ai_keychain_load_for_provider(
+    app_handle: &AppHandle,
+    provider: &str,
+) -> Result<String, String> {
+    #[cfg(target_os = "ios")]
+    {
+        let app_handle = app_handle.clone();
+        let provider = provider.to_string();
+        let response = tauri::async_runtime::spawn_blocking(move || {
+            use tauri_plugin_ios_folder::TauriPluginIosFolderExt;
+            app_handle.tauri_plugin_ios_folder().load_ai_key(&provider)
+        })
+        .await
+        .map_err(|error| format!("讀取 iOS Keychain 背景工作失敗：{error}"))?
+        .map_err(|error| error.to_string())?;
+        response
+            .get("apiKey")
+            .and_then(serde_json::Value::as_str)
+            .filter(|key| !key.is_empty())
+            .map(str::to_string)
+            .ok_or_else(|| "iOS Keychain 沒有此供應商的 API Key".to_string())
+    }
+    #[cfg(target_os = "macos")]
+    {
+        let _ = app_handle;
+        let provider = provider.to_string();
+        tauri::async_runtime::spawn_blocking(move || macos_ai_keychain_load(&provider))
+            .await
+            .map_err(|error| format!("macOS Keychain 讀取背景工作失敗：{error}"))?
+    }
+    #[cfg(all(not(target_os = "ios"), not(target_os = "macos")))]
+    {
+        let _ = (app_handle, provider);
+        Err("此平台沒有已保存的 API Key".into())
+    }
+}
+
+async fn ai_keychain_remembered_provider(app_handle: &AppHandle) -> Result<Option<String>, String> {
+    for provider in ["openai", "google"] {
+        #[cfg(target_os = "ios")]
+        {
+            let app_handle = app_handle.clone();
+            let provider_name = provider.to_string();
+            let response = tauri::async_runtime::spawn_blocking(move || {
+                use tauri_plugin_ios_folder::TauriPluginIosFolderExt;
+                app_handle
+                    .tauri_plugin_ios_folder()
+                    .has_ai_key(&provider_name)
+            })
+            .await
+            .map_err(|error| format!("查詢 iOS Keychain 背景工作失敗：{error}"))?
+            .map_err(|error| error.to_string())?;
+            if response.get("present").and_then(serde_json::Value::as_bool) == Some(true) {
+                return Ok(Some(provider.to_string()));
+            }
+        }
+        #[cfg(target_os = "macos")]
+        {
+            let _ = app_handle;
+            let provider_name = provider.to_string();
+            let present =
+                tauri::async_runtime::spawn_blocking(move || macos_ai_keychain_has(&provider_name))
+                    .await
+                    .map_err(|error| format!("macOS Keychain 查詢背景工作失敗：{error}"))??;
+            if present {
+                return Ok(Some(provider.to_string()));
+            }
+        }
+        #[cfg(all(not(target_os = "ios"), not(target_os = "macos")))]
+        {
+            let _ = (app_handle, provider);
+        }
+    }
+    Ok(None)
+}
+
+async fn ai_keychain_save(
+    app_handle: &AppHandle,
+    provider: &str,
+    api_key: &str,
+) -> Result<(), String> {
+    #[cfg(target_os = "ios")]
+    {
+        let app_handle = app_handle.clone();
+        let provider = provider.to_string();
+        let api_key = api_key.to_string();
+        tauri::async_runtime::spawn_blocking(move || {
+            use tauri_plugin_ios_folder::TauriPluginIosFolderExt;
+            app_handle
+                .tauri_plugin_ios_folder()
+                .save_ai_key(&provider, &api_key)
+        })
+        .await
+        .map_err(|error| format!("保存 iOS Keychain 背景工作失敗：{error}"))?
+        .map_err(|error| error.to_string())?;
+        Ok(())
+    }
+    #[cfg(target_os = "macos")]
+    {
+        let _ = app_handle;
+        let provider = provider.to_string();
+        let api_key = api_key.to_string();
+        tauri::async_runtime::spawn_blocking(move || macos_ai_keychain_save(&provider, &api_key))
+            .await
+            .map_err(|error| format!("macOS Keychain 儲存背景工作失敗：{error}"))??;
+        Ok(())
+    }
+    #[cfg(all(not(target_os = "ios"), not(target_os = "macos")))]
+    {
+        let _ = (app_handle, provider, api_key);
+        Ok(())
+    }
+}
+
+async fn ai_keychain_delete(app_handle: &AppHandle, provider: &str) -> Result<(), String> {
+    #[cfg(target_os = "ios")]
+    {
+        let app_handle = app_handle.clone();
+        let provider = provider.to_string();
+        tauri::async_runtime::spawn_blocking(move || {
+            use tauri_plugin_ios_folder::TauriPluginIosFolderExt;
+            app_handle
+                .tauri_plugin_ios_folder()
+                .delete_ai_key(&provider)
+        })
+        .await
+        .map_err(|error| format!("刪除 iOS Keychain 背景工作失敗：{error}"))?
+        .map_err(|error| error.to_string())?;
+        Ok(())
+    }
+    #[cfg(target_os = "macos")]
+    {
+        let _ = app_handle;
+        let provider = provider.to_string();
+        tauri::async_runtime::spawn_blocking(move || macos_ai_keychain_delete(&provider))
+            .await
+            .map_err(|error| format!("macOS Keychain 刪除背景工作失敗：{error}"))??;
+        Ok(())
+    }
+    #[cfg(all(not(target_os = "ios"), not(target_os = "macos")))]
+    {
+        let _ = (app_handle, provider);
+        Ok(())
+    }
+}
+
+async fn ai_keychain_delete_all(app_handle: &AppHandle) -> Result<(), String> {
+    let mut errors = Vec::new();
+    for provider in ["openai", "google"] {
+        if let Err(error) = ai_keychain_delete(app_handle, provider).await {
+            errors.push(format!("{provider}: {error}"));
+        }
+    }
+    if errors.is_empty() {
+        Ok(())
+    } else {
+        Err(format!(
+            "刪除已記住的 AI API Key 時發生錯誤：{}",
+            errors.join("; ")
+        ))
+    }
+}
+
 #[tauri::command]
-async fn get_ai_session_status(state: State<'_, Arc<AppState>>) -> Result<AiSessionStatus, String> {
-    let config = state.ai_session.read().unwrap();
-    Ok(ai_status(config.as_ref()))
+async fn get_ai_session_status(
+    app_handle: AppHandle,
+    state: State<'_, Arc<AppState>>,
+) -> Result<AiSessionStatus, String> {
+    let _lifecycle = state.ai_session_lifecycle.lock().await;
+    let (remembered_provider, remembered_lookup_failed) =
+        match ai_keychain_remembered_provider(&app_handle).await {
+            Ok(provider) => (provider, false),
+            Err(_) => {
+                // A Keychain status failure must not hide an otherwise valid RAM
+                // session. Do not log the underlying provider error because
+                // native implementations may include security details.
+                log::warn!("查詢已記住的 AI API Key 狀態失敗；保留記憶體中的工作階段狀態");
+                (None, true)
+            }
+        };
+    let config = state
+        .ai_session
+        .read()
+        .map_err(|_| "艦載 AI 工作階段鎖定失敗".to_string())?;
+    let mut status = ai_status(config.as_ref(), remembered_provider);
+    status.remembered_lookup_failed = remembered_lookup_failed;
+    Ok(status)
 }
 
 #[tauri::command]
@@ -1420,16 +1772,104 @@ async fn set_ai_session_config(
     data: AiSessionRequest,
     state: State<'_, Arc<AppState>>,
 ) -> Result<AiSessionStatus, String> {
+    let config = validate_ai_session(
+        &data.provider,
+        &data.api_key,
+        data.google_content_disclosure,
+    )?;
+    let _lifecycle = state.ai_session_lifecycle.lock().await;
+    // Acquire the lifecycle before any asynchronous entitlement check.  A
+    // clear/revoke that is issued while this command is waiting must not be
+    // followed by a late commit from this older transition.
     commerce::require_pro(&app_handle).await?;
-    let config = validate_ai_session(data)?;
-    let status = ai_status(Some(&config));
-    *state.ai_session.write().unwrap() = Some(config);
+    // Revoke before touching Keychain so a failed save/delete can never leave
+    // the previous provider usable through an already queued request.
+    revoke_ai_session_in_memory(state.inner())?;
+    // Wait for a request that already passed its generation check to finish
+    // sending before this transition can commit and return.
+    wait_for_ai_sends().await;
+    if data.remember_key {
+        let other_provider = if config.provider == "openai" {
+            "google"
+        } else {
+            "openai"
+        };
+        ai_keychain_save(&app_handle, &config.provider, &config.api_key).await?;
+        if let Err(delete_error) = ai_keychain_delete(&app_handle, other_provider).await {
+            let rollback = ai_keychain_delete(&app_handle, &config.provider).await;
+            return match rollback {
+                Ok(()) => Err(format!(
+                    "刪除舊的 {other_provider} API Key 失敗，已回復目前 Key：{delete_error}"
+                )),
+                Err(rollback_error) => {
+                    // Make a best-effort cleanup pass so a failed rollback
+                    // cannot silently leave both provider keys persisted.
+                    match ai_keychain_delete_all(&app_handle).await {
+                        Ok(()) => Err(format!(
+                            "切換 API Key 儲存供應商失敗，已清除已記住的 Key：{delete_error}；回復目前 Key 失敗：{rollback_error}"
+                        )),
+                        Err(cleanup_error) => Err(format!(
+                            "切換 API Key 儲存供應商失敗，Keychain 清除也失敗：{delete_error}；回復目前 Key 失敗：{rollback_error}；清除失敗：{cleanup_error}"
+                        )),
+                    }
+                }
+            };
+        }
+    } else {
+        ai_keychain_delete_all(&app_handle).await?;
+    }
+    let remembered_provider = ai_keychain_remembered_provider(&app_handle).await?;
+    let status = ai_status(Some(&config), remembered_provider);
+    *state
+        .ai_session
+        .write()
+        .map_err(|_| "艦載 AI 工作階段鎖定失敗".to_string())? = Some(config);
     Ok(status)
 }
 
 #[tauri::command]
-async fn clear_ai_session_config(state: State<'_, Arc<AppState>>) -> Result<(), String> {
-    *state.ai_session.write().unwrap() = None;
+async fn restore_ai_session_config(
+    app_handle: AppHandle,
+    data: AiSessionRestoreRequest,
+    state: State<'_, Arc<AppState>>,
+) -> Result<AiSessionStatus, String> {
+    if !matches!(data.provider.as_str(), "openai" | "google") {
+        return Err("不支援的艦載 AI 供應商".into());
+    }
+    let _lifecycle = state.ai_session_lifecycle.lock().await;
+    // See set_ai_session_config: entitlement lookup is part of the session
+    // transition, so it cannot race a clear/revoke and restore stale RAM.
+    commerce::require_pro(&app_handle).await?;
+    revoke_ai_session_in_memory(state.inner())?;
+    wait_for_ai_sends().await;
+    let api_key = ai_keychain_load_for_provider(&app_handle, &data.provider).await?;
+    let config = validate_ai_session(&data.provider, &api_key, data.google_content_disclosure)?;
+    let status = ai_status(Some(&config), Some(config.provider.clone()));
+    *state
+        .ai_session
+        .write()
+        .map_err(|_| "艦載 AI 工作階段鎖定失敗".to_string())? = Some(config);
+    Ok(status)
+}
+
+#[tauri::command]
+async fn clear_ai_session_config(
+    app_handle: AppHandle,
+    state: State<'_, Arc<AppState>>,
+) -> Result<(), String> {
+    let _lifecycle = state.ai_session_lifecycle.lock().await;
+    revoke_ai_session_in_memory(state.inner())?;
+    wait_for_ai_sends().await;
+    // Cleanup may fail (for example while the device is locked), but RAM was
+    // already revoked, so the caller cannot continue using the old AI key.
+    ai_keychain_delete_all(&app_handle).await
+}
+
+#[tauri::command]
+async fn revoke_ai_session_config(state: State<'_, Arc<AppState>>) -> Result<(), String> {
+    let _lifecycle = state.ai_session_lifecycle.lock().await;
+    revoke_ai_session_in_memory(state.inner())?;
+    wait_for_ai_sends().await;
     Ok(())
 }
 
@@ -1464,15 +1904,60 @@ fn should_try_gemma_fallback(status: reqwest::StatusCode, model: &str) -> bool {
     status == reqwest::StatusCode::TOO_MANY_REQUESTS && model == "gemma-4-26b-a4b-it"
 }
 
+async fn send_ai_request(
+    state: &AppState,
+    expected_generation: u64,
+    request: reqwest::RequestBuilder,
+    failure_prefix: &str,
+) -> Result<reqwest::Response, String> {
+    // The shared read guard covers the generation check and request start
+    // together. A revoke first advances the generation and notifies active
+    // sends, then takes the write side; this lets concurrent sends proceed
+    // without serializing while still closing the check/start race.
+    let _send_lifecycle = ai_send_lifecycle().read().await;
+    let mut cancellation = ai_send_cancellation().subscribe();
+    if state
+        .ai_session_generation
+        .load(std::sync::atomic::Ordering::SeqCst)
+        != expected_generation
+    {
+        return Err("艦載 AI 工作階段已撤銷或切換，請重新提交".into());
+    }
+    tokio::select! {
+        result = request.send() => result
+            .map_err(|error| format!("{failure_prefix}{error}")),
+        _ = cancellation.changed() => Err("艦載 AI 工作階段已撤銷或切換，請重新提交".into()),
+    }
+}
+
 async fn call_ai(
+    state: &AppState,
     config: crate::state::AiSessionConfig,
+    expected_generation: u64,
     image: Option<(&str, &str)>,
     prompt: &str,
 ) -> Result<String, String> {
-    let client = reqwest::Client::builder()
-        .timeout(std::time::Duration::from_secs(60))
-        .build()
-        .map_err(|error| error.to_string())?;
+    let _permit = state
+        .ai_request_gate
+        .acquire()
+        .await
+        .map_err(|_| "艦載 AI 併發限制已關閉".to_string())?;
+    if state
+        .ai_session_generation
+        .load(std::sync::atomic::Ordering::SeqCst)
+        != expected_generation
+    {
+        return Err("艦載 AI 工作階段已撤銷或切換，請重新提交".into());
+    }
+    let client = AI_HTTP_CLIENT
+        .get_or_init(|| {
+            reqwest::Client::builder()
+                .timeout(std::time::Duration::from_secs(60))
+                .build()
+                .map_err(|error| error.to_string())
+        })
+        .as_ref()
+        .map_err(Clone::clone)?;
     if config.provider == "openai" {
         let mut content = Vec::new();
         if let Some((mime, data)) = image {
@@ -1482,20 +1967,22 @@ async fn call_ai(
             }));
         }
         content.push(serde_json::json!({ "type": "input_text", "text": prompt }));
-        let response = client
-            .post("https://api.openai.com/v1/responses")
-            .bearer_auth(&config.api_key)
-            .json(&serde_json::json!({
-                "model": config.model,
-                "reasoning": { "effort": "low" },
-                "input": [{ "role": "user", "content": content }],
-                "max_output_tokens": 700
-            }))
-            .send()
-            .await
-            .map_err(|error| format!("Luna 連線失敗：{error}"))?;
-        let status = response.status();
-        let value: serde_json::Value = response.json().await.map_err(|error| error.to_string())?;
+        let response = send_ai_request(
+            state,
+            expected_generation,
+            client
+                .post("https://api.openai.com/v1/responses")
+                .bearer_auth(&config.api_key)
+                .json(&serde_json::json!({
+                    "model": config.model,
+                    "reasoning": { "effort": "low" },
+                    "input": [{ "role": "user", "content": content }],
+                    "max_output_tokens": 700
+                })),
+            "Luna 連線失敗：",
+        )
+        .await?;
+        let (status, value) = limited_ai_json_response(response).await?;
         if !status.is_success() {
             return Err(format!(
                 "Luna 拒絕請求（HTTP {}）：{}",
@@ -1518,22 +2005,23 @@ async fn call_ai(
             let endpoint = format!(
                 "https://generativelanguage.googleapis.com/v1beta/models/{model}:generateContent"
             );
-            let response = client
-                .post(endpoint)
-                .header("x-goog-api-key", &config.api_key)
-                .json(&serde_json::json!({
-                    "contents": [{ "role": "user", "parts": parts.clone() }],
-                    "generationConfig": {
-                        "maxOutputTokens": 700,
-                        "thinkingConfig": { "thinkingLevel": "minimal" }
-                    }
-                }))
-                .send()
-                .await
-                .map_err(|error| format!("Gemma 4 連線失敗：{error}"))?;
-            let status = response.status();
-            let value: serde_json::Value =
-                response.json().await.map_err(|error| error.to_string())?;
+            let response = send_ai_request(
+                state,
+                expected_generation,
+                client
+                    .post(endpoint)
+                    .header("x-goog-api-key", &config.api_key)
+                    .json(&serde_json::json!({
+                        "contents": [{ "role": "user", "parts": parts.clone() }],
+                        "generationConfig": {
+                            "maxOutputTokens": 700,
+                            "thinkingConfig": { "thinkingLevel": "minimal" }
+                        }
+                    })),
+                "Gemma 4 連線失敗：",
+            )
+            .await?;
+            let (status, value) = limited_ai_json_response(response).await?;
             if status.is_success() {
                 return gemma_response_text(&value)
                     .ok_or_else(|| "Gemma 4 沒有回傳可顯示文字".to_string());
@@ -1554,20 +2042,37 @@ async fn call_ai(
     }
 }
 
+async fn limited_ai_json_response(
+    mut response: reqwest::Response,
+) -> Result<(reqwest::StatusCode, serde_json::Value), String> {
+    let status = response.status();
+    let mut body = Vec::new();
+    while let Some(chunk) = response
+        .chunk()
+        .await
+        .map_err(|error| format!("艦載 AI 回應讀取失敗：{error}"))?
+    {
+        if body.len().saturating_add(chunk.len()) > MAX_AI_RESPONSE_BYTES {
+            return Err("艦載 AI 回應超過 1 MiB 安全上限".into());
+        }
+        body.extend_from_slice(&chunk);
+    }
+    serde_json::from_slice(&body)
+        .map(|value| (status, value))
+        .map_err(|error| format!("艦載 AI 回應格式不正確：{error}"))
+}
+
 #[tauri::command]
 async fn test_ai_session(
     app_handle: AppHandle,
     state: State<'_, Arc<AppState>>,
 ) -> Result<String, String> {
     commerce::require_pro(&app_handle).await?;
-    let config = state
-        .ai_session
-        .read()
-        .unwrap()
-        .clone()
-        .ok_or_else(|| "請先輸入 API Key".to_string())?;
+    let (config, generation) = ai_session_snapshot(state.inner()).await?;
     call_ai(
+        state.inner(),
         config,
+        generation,
         None,
         "請只回答：艦載 AI 連線成功。不要補充其他內容。",
     )
@@ -1581,18 +2086,20 @@ async fn explain_page(
     state: State<'_, Arc<AppState>>,
 ) -> Result<String, String> {
     commerce::require_pro(&app_handle).await?;
-    let config = state
-        .ai_session
-        .read()
-        .unwrap()
-        .clone()
-        .ok_or_else(|| "請先到設定輸入艦載 AI API Key".to_string())?;
+    let (config, generation) = ai_session_snapshot(state.inner()).await?;
     let (mime, encoded) = validate_page_data_url(&data.data_url)?;
     if !config.google_content_disclosure {
         return Err("尚未同意第三方 AI 資料分享".into());
     }
     let prompt = explain_page_prompt(&data.target_locale)?;
-    call_ai(config, Some((mime, encoded)), prompt).await
+    call_ai(
+        state.inner(),
+        config,
+        generation,
+        Some((mime, encoded)),
+        prompt,
+    )
+    .await
 }
 
 fn validate_page_data_url(data_url: &str) -> Result<(&str, &str), String> {
@@ -1610,10 +2117,13 @@ fn validate_page_data_url(data_url: &str) -> Result<(&str, &str), String> {
     ) {
         return Err("艦載 AI 目前只接受 JPEG、PNG、WebP 或 GIF".into());
     }
+    if encoded.len() > MAX_AI_BASE64_BYTES {
+        return Err("頁面圖片超過 20 MiB 安全上限".into());
+    }
     let decoded = base64::engine::general_purpose::STANDARD
         .decode(encoded)
         .map_err(|_| "頁面圖片 base64 損壞".to_string())?;
-    if decoded.is_empty() || decoded.len() > 20 * 1024 * 1024 {
+    if decoded.is_empty() || decoded.len() > MAX_AI_IMAGE_BYTES {
         return Err("頁面圖片必須介於 1 byte 與 20 MiB".into());
     }
     Ok((mime, encoded))
@@ -1679,22 +2189,30 @@ async fn suggest_comic_metadata(
     state: State<'_, Arc<AppState>>,
 ) -> Result<Vec<AiMetadataSuggestion>, String> {
     commerce::require_pro(&app_handle).await?;
-    let config = state
-        .ai_session
-        .read()
-        .map_err(|_| "艦載 AI 工作階段鎖定失敗".to_string())?
-        .clone()
-        .ok_or_else(|| "請先到設定輸入艦載 AI API Key".to_string())?;
+    let (config, generation) = ai_session_snapshot(state.inner()).await?;
+    if !config.google_content_disclosure {
+        return Err("尚未同意第三方 AI 資料分享".into());
+    }
     let (mime, encoded) = validate_page_data_url(&data.data_url)?;
     let provider = config.provider.clone();
     let model = config.model.clone();
     let response = call_ai(
+        state.inner(),
         config,
+        generation,
         Some((mime, encoded)),
         "請只回傳 JSON array，不要 Markdown。從目前這一頁提出可人工審核的漫畫 metadata 候選，格式為 [{\"field\":\"summary\",\"value\":\"繁中摘要\",\"confidence\":0.0},{\"field\":\"tags\",\"value\":[{\"namespace\":\"general\",\"value\":\"標籤\"}],\"confidence\":0.0}]。只可使用 summary 或 tags；看不清楚就不要猜，最多 8 筆。",
     )
     .await?;
     let suggestions = parse_ai_metadata_suggestions(&response)?;
+    let _lifecycle = state.ai_session_lifecycle.lock().await;
+    if state
+        .ai_session_generation
+        .load(std::sync::atomic::Ordering::SeqCst)
+        != generation
+    {
+        return Err("艦載 AI 工作階段已撤銷或切換，候選未寫入目錄".into());
+    }
     let store = catalog_store(&state)?;
     let comic_id = data.comic_id;
     let raw = response.clone();
@@ -1716,6 +2234,7 @@ async fn set_bookmarks(
     state: State<'_, Arc<AppState>>,
     app_handle: tauri::AppHandle,
 ) -> Result<(), String> {
+    let _bookmark_lifecycle = state.bookmark_lifecycle.lock().await;
     let old_bookmarks = state.external_bookmarks.read().unwrap().clone();
     let removed_bookmarks: Vec<_> = old_bookmarks
         .into_iter()
@@ -1755,11 +2274,13 @@ async fn set_bookmarks(
             let store = catalog_store(&state)?;
             let source_ids = removed_source_ids.iter().cloned().collect::<Vec<_>>();
             tokio::task::spawn_blocking(move || {
-                source_ids.into_iter().try_fold(0usize, |removed, source_id| {
-                    store
-                        .forget_source_locations(&source_id)
-                        .map(|count| removed + count)
-                })
+                source_ids
+                    .into_iter()
+                    .try_fold(0usize, |removed, source_id| {
+                        store
+                            .forget_source_locations(&source_id)
+                            .map(|count| removed + count)
+                    })
             })
             .await
             .map_err(|error| error.to_string())??;
@@ -2239,6 +2760,42 @@ fn write_progress_file(scan_dir: &Path, id: &str, progress: Progress) -> Result<
     result
 }
 
+async fn comic_progress_lock(state: &AppState, comic_id: &str) -> Arc<tokio::sync::Mutex<()>> {
+    let mut locks = state.progress_locks.lock().await;
+    locks
+        .entry(comic_id.to_string())
+        .or_insert_with(|| Arc::new(tokio::sync::Mutex::new(())))
+        .clone()
+}
+
+async fn progress_sequence_is_current(
+    state: &AppState,
+    comic_id: &str,
+    sequence: Option<u64>,
+) -> Result<(), String> {
+    let Some(sequence) = sequence else {
+        return Ok(());
+    };
+    let sequences = state.progress_sequences.lock().await;
+    if sequences
+        .get(comic_id)
+        .is_some_and(|last| sequence <= *last)
+    {
+        return Err("閱讀進度請求已過期，已保留較新的進度".into());
+    }
+    Ok(())
+}
+
+async fn commit_progress_sequence(state: &AppState, comic_id: &str, sequence: Option<u64>) {
+    if let Some(sequence) = sequence {
+        state
+            .progress_sequences
+            .lock()
+            .await
+            .insert(comic_id.to_string(), sequence);
+    }
+}
+
 #[tauri::command]
 async fn save_progress(
     app_handle: AppHandle,
@@ -2249,6 +2806,9 @@ async fn save_progress(
     if id.is_empty() || id.len() > 4096 {
         return Err("閱讀進度漫畫識別碼格式不正確".into());
     }
+    let progress_lock = comic_progress_lock(state.inner(), &id).await;
+    let _progress_lifecycle = progress_lock.lock().await;
+    progress_sequence_is_current(state.inner(), &id, data.sequence).await?;
     let opened_total_pages = state
         .opened_comic_files
         .read()
@@ -2269,7 +2829,7 @@ async fn save_progress(
         let photo_progress = {
             let stored = state.photo_progress.lock().await;
             let mut next = stored.clone();
-            next.insert(id, progress);
+            next.insert(id.clone(), progress);
             next
         };
         let directory = app_handle
@@ -2283,25 +2843,24 @@ async fn save_progress(
         .await
         .map_err(|error| format!("照片進度背景工作失敗：{error}"))??;
         *state.photo_progress.lock().await = photo_progress;
+        commit_progress_sequence(state.inner(), &id, data.sequence).await;
         return Ok(());
     }
     let scan_dir = state.scan_dir.read().unwrap().clone();
     let now = chrono::Utc::now().to_rfc3339();
     let (progress, is_local_source) = {
-        let mut comics = state.comics.lock().await;
+        let comics = state.comics.lock().await;
         let comic = comics
-            .iter_mut()
+            .iter()
             .find(|comic| comic.id == id)
             .ok_or_else(|| "找不到閱讀中的漫畫，已拒絕寫入孤兒進度".to_string())?;
-        comic.progress.current_page = current_page;
-        comic.progress.total_pages = total_pages;
-        comic.progress.percent = percent;
-        comic.progress.updated_at = Some(now);
-        comic.page_count = total_pages;
-        (
-            comic.progress.clone(),
-            comic.source_id.starts_with("local:"),
-        )
+        let progress = Progress {
+            current_page,
+            total_pages,
+            percent,
+            updated_at: Some(now),
+        };
+        (progress, comic.source_id.starts_with("local:"))
     };
 
     let store = catalog_store(&state)?;
@@ -2311,17 +2870,31 @@ async fn save_progress(
         .await
         .map_err(|error| format!("穩定進度儲存工作失敗: {error}"))??;
 
+    // SQLite is authoritative. Only publish to the in-memory catalogue after
+    // persistence succeeds, otherwise a failed write would display fake
+    // progress until the next scan.
+    {
+        let mut comics = state.comics.lock().await;
+        if let Some(comic) = comics.iter_mut().find(|comic| comic.id == id) {
+            comic.progress = progress.clone();
+            comic.page_count = total_pages;
+        }
+    }
+
     if is_local_source && !scan_dir.is_empty() {
         let _file_guard = state.progress_file_lock.lock().await;
         let scan_dir = std::path::PathBuf::from(scan_dir);
-        if let Err(error) =
-            tokio::task::spawn_blocking(move || write_progress_file(&scan_dir, &id, progress))
-                .await
-                .map_err(|error| format!("進度相容檔背景工作失敗: {error}"))?
+        let progress_id = id.clone();
+        if let Err(error) = tokio::task::spawn_blocking(move || {
+            write_progress_file(&scan_dir, &progress_id, progress)
+        })
+        .await
+        .map_err(|error| format!("進度相容檔背景工作失敗: {error}"))?
         {
             eprintln!("⚠️ SQLite 進度已儲存，但相容 sidecar 寫入失敗：{error}");
         }
     }
+    commit_progress_sequence(state.inner(), &id, data.sequence).await;
     Ok(())
 }
 
@@ -2444,6 +3017,8 @@ pub fn run() {
             set_online_services_config,
             get_ai_session_status,
             set_ai_session_config,
+            restore_ai_session_config,
+            revoke_ai_session_config,
             clear_ai_session_config,
             test_ai_session,
             explain_page,
@@ -2685,7 +3260,10 @@ mod tests {
         ] {
             assert_eq!(relocate_ios_documents(external, current), external);
         }
-        assert_eq!(relocate_ios_documents(&current.to_string_lossy(), current), current.to_string_lossy());
+        assert_eq!(
+            relocate_ios_documents(&current.to_string_lossy(), current),
+            current.to_string_lossy()
+        );
     }
 
     #[test]
@@ -2812,33 +3390,154 @@ mod tests {
 
     #[test]
     fn ai_session_locks_models_and_requires_provider_neutral_disclosure() {
-        assert!(validate_ai_session(AiSessionRequest {
-            provider: "openai".into(),
-            api_key: "not-a-real-api-key-for-tests".into(),
-            google_content_disclosure: false,
-        })
-        .is_err());
-        let openai = validate_ai_session(AiSessionRequest {
-            provider: "openai".into(),
-            api_key: "not-a-real-api-key-for-tests".into(),
-            google_content_disclosure: true,
-        })
-        .unwrap();
+        assert!(validate_ai_session("openai", "not-a-real-api-key-for-tests", false,).is_err());
+        let openai = validate_ai_session("openai", "not-a-real-api-key-for-tests", true).unwrap();
         assert_eq!(openai.model, "gpt-5.6-luna");
 
-        assert!(validate_ai_session(AiSessionRequest {
-            provider: "google".into(),
-            api_key: "not-a-real-api-key-for-tests".into(),
-            google_content_disclosure: false,
-        })
-        .is_err());
-        let google = validate_ai_session(AiSessionRequest {
-            provider: "google".into(),
-            api_key: "not-a-real-api-key-for-tests".into(),
-            google_content_disclosure: true,
-        })
-        .unwrap();
+        assert!(validate_ai_session("google", "not-a-real-api-key-for-tests", false,).is_err());
+        let google = validate_ai_session("google", "not-a-real-api-key-for-tests", true).unwrap();
         assert_eq!(google.model, "gemma-4-26b-a4b-it");
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn macos_ai_keychain_roundtrip_is_provider_scoped_and_removable() {
+        let suffix = format!(
+            "{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap_or_default()
+                .as_nanos()
+        );
+        let provider = format!("gai-test-openai-{suffix}");
+        let other_provider = format!("gai-test-google-{suffix}");
+        macos_ai_keychain_delete(&provider).unwrap();
+        macos_ai_keychain_delete(&other_provider).unwrap();
+
+        let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            assert!(!macos_ai_keychain_has(&provider).unwrap());
+            macos_ai_keychain_save(&provider, "first-test-key").unwrap();
+            assert!(macos_ai_keychain_has(&provider).unwrap());
+            assert!(!macos_ai_keychain_has(&other_provider).unwrap());
+            assert_eq!(macos_ai_keychain_load(&provider).unwrap(), "first-test-key");
+
+            macos_ai_keychain_save(&provider, "second-test-key").unwrap();
+            assert_eq!(
+                macos_ai_keychain_load(&provider).unwrap(),
+                "second-test-key"
+            );
+        }));
+        macos_ai_keychain_delete(&provider).unwrap();
+        macos_ai_keychain_delete(&other_provider).unwrap();
+        result.unwrap();
+        assert!(!macos_ai_keychain_has(&provider).unwrap());
+    }
+
+    #[test]
+    fn ai_session_generation_cannot_advance_before_revoke_lock() {
+        let state = Arc::new(AppState::new());
+        *state.ai_session.write().unwrap() =
+            Some(validate_ai_session("openai", "not-a-real-api-key-for-tests", true).unwrap());
+        let read_guard = state.ai_session.read().unwrap();
+        let (started_tx, started_rx) = std::sync::mpsc::channel();
+        let state_for_revoke = state.clone();
+        let revoke_thread = std::thread::spawn(move || {
+            started_tx.send(()).unwrap();
+            revoke_ai_session_in_memory(&state_for_revoke).unwrap();
+        });
+        started_rx.recv().unwrap();
+        // The writer is blocked by the snapshot's read lock, so no caller can
+        // observe a new generation paired with the old config.
+        assert_eq!(
+            state
+                .ai_session_generation
+                .load(std::sync::atomic::Ordering::SeqCst),
+            0
+        );
+        drop(read_guard);
+        revoke_thread.join().unwrap();
+        assert!(ai_session_snapshot_locked(&state).is_err());
+        assert_eq!(
+            state
+                .ai_session_generation
+                .load(std::sync::atomic::Ordering::SeqCst),
+            1
+        );
+    }
+
+    #[tokio::test]
+    async fn ai_transition_waits_for_shared_send_barrier_before_revoke_returns() {
+        let state = Arc::new(AppState::new());
+        *state.ai_session.write().unwrap() =
+            Some(validate_ai_session("openai", "not-a-real-api-key-for-tests", true).unwrap());
+        let send_guard = ai_send_lifecycle().read().await;
+        let mut cancellation = ai_send_cancellation().subscribe();
+        let state_for_revoke = state.clone();
+        let revoke = tokio::spawn(async move {
+            let _lifecycle = state_for_revoke.ai_session_lifecycle.lock().await;
+            revoke_ai_session_in_memory(&state_for_revoke).unwrap();
+            wait_for_ai_sends().await;
+        });
+        tokio::time::timeout(std::time::Duration::from_secs(1), cancellation.changed())
+            .await
+            .unwrap()
+            .unwrap();
+        assert!(!revoke.is_finished());
+        drop(send_guard);
+        revoke.await.unwrap();
+        assert!(ai_session_snapshot_locked(&state).is_err());
+    }
+
+    #[tokio::test]
+    async fn comic_progress_lock_serializes_late_persistence() {
+        let state = Arc::new(AppState::new());
+        let order = Arc::new(tokio::sync::Mutex::new(Vec::new()));
+        let first_lock = comic_progress_lock(&state, "comic").await;
+        let first_guard = first_lock.lock().await;
+        let state_for_late = state.clone();
+        let order_for_late = order.clone();
+        let late = tokio::spawn(async move {
+            let lock = comic_progress_lock(&state_for_late, "comic").await;
+            let _guard = lock.lock().await;
+            order_for_late.lock().await.push("late");
+        });
+        order.lock().await.push("first");
+        tokio::task::yield_now().await;
+        assert!(!late.is_finished());
+        drop(first_guard);
+        late.await.unwrap();
+        assert_eq!(&*order.lock().await, &["first", "late"]);
+    }
+
+    #[tokio::test]
+    async fn progress_sequence_rejects_older_request_after_newer_commit() {
+        let state = AppState::new();
+        progress_sequence_is_current(&state, "comic", Some(2))
+            .await
+            .unwrap();
+        commit_progress_sequence(&state, "comic", Some(2)).await;
+        let error = progress_sequence_is_current(&state, "comic", Some(1))
+            .await
+            .unwrap_err();
+        assert!(error.contains("過期"));
+        assert!(progress_sequence_is_current(&state, "comic", Some(3))
+            .await
+            .is_ok());
+    }
+
+    #[tokio::test]
+    async fn bookmark_lifecycle_serializes_full_list_updates() {
+        let state = Arc::new(AppState::new());
+        let first_guard = state.bookmark_lifecycle.lock().await;
+        let state_for_update = state.clone();
+        let update = tokio::spawn(async move {
+            let _guard = state_for_update.bookmark_lifecycle.lock().await;
+        });
+        tokio::task::yield_now().await;
+        assert!(!update.is_finished());
+        drop(first_guard);
+        update.await.unwrap();
     }
 
     #[test]
@@ -2900,5 +3599,12 @@ mod tests {
         assert!(validate_page_data_url("data:text/plain;base64,SGk=").is_err());
         assert!(validate_page_data_url("data:image/png;base64,***").is_err());
         assert!(validate_page_data_url("data:image/png;base64,AA==").is_ok());
+    }
+
+    #[test]
+    fn page_data_url_rejects_oversized_base64_before_decoding() {
+        let encoded = "A".repeat(MAX_AI_BASE64_BYTES + 4);
+        let data_url = format!("data:image/png;base64,{encoded}");
+        assert!(validate_page_data_url(&data_url).is_err());
     }
 }

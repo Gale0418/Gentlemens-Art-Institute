@@ -793,6 +793,8 @@ body {
   align-items: center;
   justify-content: center;
   cursor: pointer;
+  /* 讓 viewport 收到邊緣的 touch/pointer 手勢；翻頁由 reader 的 click 判定處理。 */
+  pointer-events: none;
 }
 
 .prev-zone { left: 0; }
@@ -930,6 +932,12 @@ body {
   /* lazy 圖片在載入前也保留固定比例；載入後 auto 會回到圖片原始比例。 */
   aspect-ratio: auto 2 / 3;
   object-fit: contain;
+}
+
+.reader-overlay.mode-webtoon .webtoon-window-spacer {
+  flex: 0 0 auto;
+  width: 100%;
+  pointer-events: none;
 }
 
 .reader-overlay.mode-webtoon .webtoon-nav-button {
@@ -2717,6 +2725,33 @@ body {
   padding-bottom: 20px;
 }
 
+.reader-catalog-window-controls {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+  width: 100%;
+  margin-bottom: 14px;
+  color: var(--text-muted);
+  font-size: 12px;
+}
+
+.catalog-window-btn {
+  min-height: 44px;
+  padding: 8px 12px;
+  border: 1px solid var(--line-subtle);
+  border-radius: 8px;
+  color: var(--text-main);
+  background: var(--surface-interactive);
+  font: inherit;
+  cursor: pointer;
+}
+
+.catalog-window-btn:disabled {
+  opacity: .45;
+  cursor: not-allowed;
+}
+
 .catalog-thumb {
   position: relative;
   border-radius: 10px;
@@ -2918,6 +2953,7 @@ input:focus-visible,
 .fa-xmark::before { content: "×"; }
 .fa-rotate-right::before { content: "↻"; }
 .fa-images::before { content: "▧"; }
+.fa-file-import::before { content: "↥"; }
 .fa-globe::before { content: "◎"; }
 .fa-gear::before { content: "⚙"; }
 .fa-hard-drive::before { content: "▣"; }
@@ -4964,7 +5000,8 @@ select:focus-visible,
 
 }
 
-@media (max-width: 820px) {
+/* iPad 11 吋直向 viewport 約 834px；控制列在此寬度也要進入可水平滑動的兩列版。 */
+@media (max-width: 900px) {
   .reader-overlay.mode-webtoon .reader-viewport {
     scroll-padding-top: max(64px, calc(56px + env(safe-area-inset-top)));
     scroll-padding-bottom: max(140px, calc(120px + env(safe-area-inset-bottom)));
@@ -5833,6 +5870,15 @@ select:focus-visible,
 }
 
 .ai-disclosure input { width: auto; margin-top: 0.25rem; }
+.ai-remember-key {
+  display: flex;
+  align-items: center;
+  gap: 0.55rem;
+  min-height: 2.75rem;
+  line-height: 1.5;
+}
+
+.ai-remember-key input { width: auto; margin: 0; }
 .ai-settings-actions { justify-content: flex-start; flex-wrap: wrap; }
 
 /* iPad master-detail library and collapsible series rail */

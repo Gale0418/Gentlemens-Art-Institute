@@ -32,20 +32,105 @@ const readerAnchor = extractFunction('getReaderNavigationCurrent');
 const adjacent = extractFunction('findAdjacentComicInFolder');
 assert.match(readerAnchor, /state\.currentComic\?\.id \|\| state\.pendingComicId/);
 assert.doesNotMatch(`${readerAnchor}\n${adjacent}`, /selectedComicId/);
-assert.match(adjacent, /getComicSourceKey\(comic\) === sourceKey/);
-assert.match(adjacent, /getParentPath\(comic\.relativePath\) === parentPath/);
+assert.match(adjacent, /getComicNavigationCache\(\)\.groups\.get/);
+assert.match(app, /groups\.forEach\(group => group\.sort\(\(a, b\) => comicTitleCollator\.compare/);
 
 const pointer = extractFunction('handleReaderPointerClick');
 assert.match(pointer, /state\.readingMode === 'webtoon'/);
 assert.doesNotMatch(pointer, /requestWebtoonAdjacentComic/);
 assert.doesNotMatch(pointer, /getWebtoonEdgeAtPoint/);
 assert.match(app, /function createWebtoonNavigationButton\(direction\)/);
+const focusableCheck = vm.runInNewContext(`(${extractFunction('isReaderElementActuallyFocusable')})`, {
+  getComputedStyle: element => element.computedStyle || {},
+  window: { innerWidth: 1000, innerHeight: 800 },
+});
+const visibleControl = {
+  hidden: false,
+  disabled: false,
+  getAttribute: () => null,
+  computedStyle: { display: 'block', visibility: 'visible', pointerEvents: 'auto', opacity: '1' },
+};
+assert.equal(focusableCheck(visibleControl), true, 'visible enabled reader control remains focusable');
+assert.equal(focusableCheck({ ...visibleControl, disabled: true }), false, 'disabled reader control is excluded from focus trap');
+assert.equal(focusableCheck({ ...visibleControl, computedStyle: { ...visibleControl.computedStyle, display: 'none' } }), false, 'CSS hidden reader control is excluded from focus trap');
+const hiddenParent = { hidden: false, disabled: false, parentNode: null, getAttribute: () => null, computedStyle: { display: 'none' } };
+assert.equal(focusableCheck({ ...visibleControl, parentNode: hiddenParent }), false, 'control under a CSS hidden reader bar is excluded from focus trap');
+assert.match(extractFunction('trapReaderFocus'), /triggerControlsActive\(\)/, 'empty reader focus trap wakes idle chrome');
 assert.match(css, /\.reader-overlay\.mode-webtoon \.webtoon-nav-button[\s\S]*min-height: 44px/);
 assert.match(css, /\.reader-overlay\.mode-single \.reader-viewport[\s\S]*overflow: auto/);
 assert.match(css, /\.reader-overlay\.mode-single \.reader-viewport[\s\S]*touch-action: pan-x pan-y/);
 assert.match(css, /\.reader-overlay\.mode-single\.single-page-pannable \.nav-zone[\s\S]*pointer-events: none/);
+assert.match(css, /\.nav-zone[\s\S]*pointer-events: none/, 'nav zones must not intercept viewport touch gestures');
+assert.match(css, /@media \(max-width: 900px\) \{[\s\S]*\.reader-bottom-bar[\s\S]*grid-template-columns: auto minmax\(0, 1fr\)/, 'iPad portrait reader controls use a compact two-row layout');
+assert.match(css, /\.reader-bottom-bar \.bottom-bar-right[\s\S]*overflow-x: auto/, 'narrow reader controls remain horizontally scrollable');
+assert.match(app, /if \(readerTouchClickHandled \|\| readerTouchMoved \|\| readerTouchMulti \|\| readerTouchCancelled\)/, 'reader pointer clicks must retain swipe guards');
+assert.match(app, /e\.target === elements\.progressSlider \|\| e\.target\?\.id === 'progress-slider'/, 'range arrow keys must not trigger document page navigation');
+assert.match(app, /let readingProgressSaveSequence = initialReadingProgressSaveSequence\(\)/, 'progress sequence must survive WebView reloads');
+assert.match(app, /const nextWindow = getWebtoonWindowBounds\(state\.currentComicPages\.length, activeIndex\)/, 'webtoon scroll should compare the next window before rebuilding');
 assert.match(messages, /"上一本"[\s\S]*"Previous comic"[\s\S]*"前のコミック"/);
 assert.match(messages, /"下一本"[\s\S]*"Next comic"[\s\S]*"次のコミック"/);
+
+// iPad 旋轉時，遠離 DOM 視窗的頁面也必須立即換算高度與 spacer。
+{
+  const topSpacer = { style: {} };
+  const bottomSpacer = { style: {} };
+  const viewport = { clientWidth: 400, scrollTop: 64 + 80 * 1200 + 300 };
+  const state = {
+    readingMode: 'webtoon',
+    currentComicPages: Array(100).fill('page'),
+    webtoonPageHeights: Array(100).fill(1200),
+    webtoonPagePrefixHeights: Array.from({ length: 101 }, (_, index) => index * 1200),
+    webtoonMeasuredPageHeights: new Map([[5, 1200]]),
+    webtoonPendingPageHeights: new Map(),
+    webtoonHeightUpdateFrame: null,
+    webtoonMetricsViewportWidth: 800,
+    webtoonWindowStart: 70,
+    webtoonWindowEnd: 90,
+    webtoonNavigationOffset: 0,
+  };
+  let visibleImages = [];
+  const elements = {
+    readerViewport: viewport,
+    pagesContainer: {
+      querySelector: selector => selector.includes('"top"') ? topSpacer : bottomSpacer,
+      querySelectorAll: () => visibleImages,
+    },
+  };
+  let anchored = false;
+  let preserved = false;
+  const resizeContext = {
+    state, elements,
+    cancelWebtoonPageHeightFlush() {},
+    getWebtoonAnchorViewportOffset: () => 64,
+    isActiveWebtoonAnchor: () => anchored,
+    getWebtoonImage: () => ({}),
+    getWebtoonImageOffsetTop: () => 64 + state.webtoonPagePrefixHeights[80],
+    updateWebtoonPageHeight: index => state.webtoonPendingPageHeights.set(index, 299),
+    flushWebtoonPageHeightUpdates: () => {
+      assert.equal(state.webtoonAnchor.lastTargetTop, null, 'height flush cannot use the pre-resize anchor top');
+      state.webtoonPendingPageHeights.clear();
+    },
+    preserveWebtoonAnchorPosition: () => {
+      assert.equal(state.webtoonAnchor.lastTargetTop, null, 'old anchor position must not be compensated twice');
+      preserved = true;
+    },
+  };
+  const functions = ['webtoonPageOffset', 'webtoonPageIndexAtOffset', 'rebuildWebtoonPagePrefixHeights',
+    'syncWebtoonWindowSpacers', 'refreshWebtoonPageMetricsForResize'];
+  vm.runInNewContext(`${functions.map(extractFunction).join('\n')}\nrefreshWebtoonPageMetricsForResize();`, resizeContext);
+  assert.equal(state.webtoonPageHeights[80], 600);
+  assert.equal(state.webtoonMeasuredPageHeights.get(5), 600);
+  assert.equal(topSpacer.style.height, '42000px');
+  assert.equal(bottomSpacer.style.height, '6000px');
+  assert.equal(viewport.scrollTop, 64 + 80 * 600 + 150, 'resize preserves the same page and relative location');
+  anchored = true;
+  state.webtoonAnchor = { index: 80, lastTargetTop: 98765 };
+  visibleImages = [{ dataset: { index: '80' }, complete: true, naturalWidth: 100 }];
+  viewport.clientWidth = 200;
+  vm.runInNewContext('refreshWebtoonPageMetricsForResize();', resizeContext);
+  assert.equal(viewport.scrollTop, 80 * 300, 'programmatic anchor remains under the scroll padding after resize');
+  assert.equal(preserved, true);
+}
 
 class FakeClock {
   constructor() { this.now = 0; this.nextId = 1; this.tasks = new Map(); }
@@ -204,7 +289,7 @@ function walk(node) {
   return [node, ...node.children.flatMap(child => walk(child))];
 }
 
-function createRuntimeHarness() {
+function createRuntimeHarness(sharedSessionStorage = null) {
   const clock = new FakeClock();
   const document = new FakeDocument();
   const openCalls = [];
@@ -236,11 +321,13 @@ function createRuntimeHarness() {
     __GIA_TEST_HOOKS__: {},
   };
   const storage = { values: new Map(), getItem(key) { return this.values.get(key) || null; }, setItem(key, value) { this.values.set(key, String(value)); } };
+  const sessionStorage = sharedSessionStorage || { values: new Map(), getItem(key) { return this.values.get(key) || null; }, setItem(key, value) { this.values.set(key, String(value)); } };
   class FakeImage extends FakeElement { constructor() { super(document, 'img'); } }
   const context = {
     window,
     document,
     localStorage: storage,
+    sessionStorage,
     fetch: async () => ({ ok: true, json: async () => ({}) }),
     Image: FakeImage,
     Option: class {},
@@ -260,12 +347,99 @@ function createRuntimeHarness() {
   vm.runInContext(app, context, { filename: 'public/app.js' });
   const hooks = window.__GIA_TEST_HOOKS__;
   hooks.bindEvents();
-  return { clock, document, hooks, openCalls };
+  return { clock, document, hooks, openCalls, context };
 }
 
 function comic(id, title = id) {
   return { id, title, relativePath: `folder/${id}.cbz`, sourceId: 'local:one' };
 }
+
+async function flushMicrotasks() {
+  await new Promise(resolve => setImmediate(resolve));
+}
+
+// 快速前進、往回翻的進度快照必須依入隊順序落庫，且每筆快照捕獲呼叫當下頁碼。
+{
+  const runtime = createRuntimeHarness();
+  const calls = [];
+  const pending = [];
+  runtime.context.window.electronAPI.saveProgress = payload => {
+    calls.push({ ...payload });
+    return new Promise((resolve, reject) => pending.push({ resolve, reject }));
+  };
+  runtime.hooks.state.currentComic = comic('progress-book');
+  runtime.hooks.state.currentComicPages = ['p1', 'p2', 'p3', 'p4'];
+  runtime.hooks.state.currentPageIndex = 1;
+  const first = runtime.hooks.saveReadingProgress();
+  await flushMicrotasks();
+  runtime.hooks.state.currentPageIndex = 3;
+  const second = runtime.hooks.saveReadingProgress();
+  runtime.hooks.state.currentComic = comic('other-progress-book');
+  runtime.hooks.state.currentPageIndex = 0;
+  const third = runtime.hooks.saveReadingProgress();
+  await flushMicrotasks();
+  assert.deepEqual(calls.map(call => call.currentPage), [1], 'only the first progress command starts immediately');
+
+  pending.shift().resolve();
+  await flushMicrotasks();
+  assert.deepEqual(calls.map(call => call.currentPage), [1, 3], 'next progress snapshot waits for the previous command');
+  pending.shift().resolve();
+  await flushMicrotasks();
+  assert.deepEqual(calls.map(call => call.currentPage), [1, 3, 0], 'backward progress snapshot keeps invocation order');
+  pending.shift().resolve();
+  await Promise.all([first, second, third]);
+  assert.deepEqual(calls.map(call => call.id), ['progress-book', 'progress-book', 'other-progress-book']);
+  const sequences = calls.map(call => call.sequence);
+  assert.ok(sequences.every((sequence, index) => index === 0 || sequence > sequences[index - 1]), 'progress sequence is strict across comics in one app session');
+}
+
+// 單筆 native failure 不得讓 queue 卡死，後續頁碼仍會送出。
+{
+  const runtime = createRuntimeHarness();
+  runtime.context.console = { error() {} };
+  const calls = [];
+  const sequences = [];
+  let callCount = 0;
+  runtime.context.window.electronAPI.saveProgress = payload => {
+    calls.push(payload.currentPage);
+    sequences.push(payload.sequence);
+    callCount += 1;
+    return callCount === 1 ? Promise.reject(new Error('temporary native failure')) : Promise.resolve();
+  };
+  runtime.hooks.state.currentComic = comic('progress-retry');
+  runtime.hooks.state.currentComicPages = ['p1', 'p2'];
+  runtime.hooks.state.currentPageIndex = 0;
+  const failed = runtime.hooks.saveReadingProgress();
+  runtime.hooks.state.currentPageIndex = 1;
+  const recovered = runtime.hooks.saveReadingProgress();
+  await Promise.all([failed, recovered]);
+  assert.deepEqual(calls, [0, 1], 'queue continues after one native progress failure');
+  assert.ok(sequences[1] > sequences[0], 'failed progress still consumes one session sequence');
+}
+console.log('PASS: serialized reading progress preserves rapid and backward navigation order');
+
+// WebView reload 不會重啟 Rust runtime；前一輪即使快速發出遠高於目前
+// wall-clock baseline 的序號，下一輪也必須接在它後面。
+{
+  const sessionStorage = { values: new Map(), getItem(key) { return this.values.get(key) || null; }, setItem(key, value) { this.values.set(key, String(value)); } };
+  const first = createRuntimeHarness(sessionStorage);
+  first.hooks.state.currentComic = comic('reload-progress');
+  first.hooks.state.currentComicPages = ['p1', 'p2'];
+  const firstCalls = [];
+  first.context.window.electronAPI.saveProgress = async payload => { firstCalls.push(payload.sequence); };
+  await first.hooks.saveReadingProgress();
+  const priorHighWater = firstCalls[0] + 10000;
+  sessionStorage.setItem('gai:readingProgressSequence', String(priorHighWater));
+
+  const reloaded = createRuntimeHarness(sessionStorage);
+  reloaded.hooks.state.currentComic = comic('reload-progress');
+  reloaded.hooks.state.currentComicPages = ['p1', 'p2'];
+  const reloadedCalls = [];
+  reloaded.context.window.electronAPI.saveProgress = async payload => { reloadedCalls.push(payload.sequence); };
+  await reloaded.hooks.saveReadingProgress();
+  assert.ok(reloadedCalls[0] > priorHighWater, 'first save after WebView reload advances the persisted high-water sequence');
+}
+console.log('PASS: progress save sequence survives a rapid WebView reload');
 
 function webtoonButtons(pagesContainer) {
   return walk(pagesContainer).filter(node => node.classList?.contains('webtoon-nav-button'));
@@ -303,6 +477,7 @@ function renderWebtoonPages(hooks, count, currentPageIndex) {
   const pageAbove = hooks.elements.pagesContainer.querySelector('img[data-index="2"]');
   pageAbove._layoutHeight += 420;
   pageAbove.dispatch('load');
+  clock.tick(0);
   assert.equal(target.offsetTop - viewport.scrollTop, 64, 'async layout shift is compensated');
 }
 
@@ -316,11 +491,87 @@ function renderWebtoonPages(hooks, count, currentPageIndex) {
   viewport.dispatch('wheel', { deltaY: 80, preventDefault() {} });
   assert.equal(hooks.state.webtoonAnchor, null, 'wheel cancels anchor');
   const before = viewport.scrollTop;
+  const beforeTargetOffset = target.offsetTop - before;
   const pageAbove = hooks.elements.pagesContainer.querySelector('img[data-index="2"]');
   pageAbove._layoutHeight += 420;
+  pageAbove.clientHeight = 1620;
   pageAbove.dispatch('load');
-  assert.equal(viewport.scrollTop, before, 'cancelled anchor does not force scroll');
-  assert.notEqual(target.offsetTop - viewport.scrollTop, 64);
+  clock.tick(0);
+  assert.equal(viewport.scrollTop, before + 420, 'user scroll keeps its reading position after an image above loads');
+  assert.equal(target.offsetTop - viewport.scrollTop, beforeTargetOffset, 'user scroll compensation preserves the visible page');
+}
+
+// Large webtoon books keep a bounded image window while preserving page metrics.
+{
+  const { hooks } = createRuntimeHarness();
+  renderWebtoonPages(hooks, 5000, 2500);
+  const renderedImages = walk(hooks.elements.pagesContainer).filter(node => node.classList?.contains('webtoon-img'));
+  assert.ok(renderedImages.length <= 42, 'large webtoon books do not create one image node per page');
+  assert.equal(hooks.state.webtoonWindowStart, 2488);
+  assert.equal(hooks.state.webtoonWindowEnd, 2529);
+}
+
+// 中央區域只更新頁碼；靠近視窗邊緣才重建 window，且重建保留使用者 scrollTop。
+{
+  const runtime = createRuntimeHarness();
+  renderWebtoonPages(runtime.hooks, 5000, 2500);
+  runtime.hooks.cancelWebtoonAnchor();
+  const viewport = runtime.hooks.elements.readerViewport;
+  const originalRender = runtime.context.renderWebtoonWindow;
+  let renderCount = 0;
+  runtime.context.renderWebtoonWindow = (...args) => {
+    renderCount += 1;
+    return originalRender(...args);
+  };
+  viewport.scrollTop = 2500 * 1200;
+  vm.runInContext('updateWebtoonScrollState()', runtime.context);
+  assert.equal(renderCount, 0, 'middle-of-window scrolling must not rebuild the webtoon window');
+
+  viewport.scrollTop = 2488 * 1200;
+  const before = viewport.scrollTop;
+  vm.runInContext('updateWebtoonScrollState()', runtime.context);
+  assert.equal(renderCount, 1, 'near-edge scrolling rebuilds the webtoon window');
+  assert.equal(viewport.scrollTop, before, 'webtoon window rebuild preserves scrollTop');
+}
+
+// 重建條漫 window 時，先前已量測頁高要先作為 placeholder；圖片載入後再更新量測。
+{
+  const runtime = createRuntimeHarness();
+  const firstTarget = renderWebtoonPages(runtime.hooks, 20, 9);
+  firstTarget.clientHeight = 300;
+  firstTarget.dispatch('load');
+  runtime.clock.tick(0);
+  assert.equal(runtime.hooks.state.webtoonMeasuredPageHeights.get(9), 300);
+
+  runtime.hooks.renderPages();
+  const recreated = runtime.hooks.elements.pagesContainer.querySelector('img[data-index="9"]');
+  assert.equal(recreated.style.height, '300px', 'recreated image reserves its previous valid measured height');
+  recreated.clientHeight = 340;
+  recreated.dispatch('load');
+  runtime.clock.tick(0);
+  assert.equal(runtime.hooks.state.webtoonMeasuredPageHeights.get(9), 340, 'loaded image replaces the placeholder measurement');
+}
+
+// Adjacent-comic lookup builds one sorted source/folder index per library
+// generation, then reuses it across the two buttons in every render window.
+{
+  const { hooks } = createRuntimeHarness();
+  hooks.state.comics = Array.from({ length: 5000 }, (_, index) => ({
+    id: `book-${String(index).padStart(4, '0')}`,
+    title: `Book ${String(index).padStart(4, '0')}`,
+    relativePath: 'folder/book.cbz',
+    sourceId: 'local:one',
+    isDirectory: false,
+  }));
+  hooks.state.currentComic = hooks.state.comics[2500];
+  const firstCache = hooks.getComicNavigationCache();
+  assert.equal(hooks.findAdjacentComicInFolder('next').id, 'book-2501');
+  assert.equal(hooks.findAdjacentComicInFolder('prev').id, 'book-2499');
+  assert.equal(hooks.getComicNavigationCache(), firstCache, 'repeated adjacent lookup reuses the sorted cache');
+  hooks.state.comics[2501].title = 'Book 0000';
+  hooks.invalidateComicNavigationCache();
+  const refreshedCache = hooks.getComicNavigationCache();
+  assert.notEqual(refreshedCache, firstCache, 'metadata/order changes invalidate the sorted cache');
 }
 
 // Rapid mode/book changes invalidate callbacks from the previous render.
@@ -345,6 +596,23 @@ function renderWebtoonPages(hooks, count, currentPageIndex) {
   nextTarget.dispatch('load');
   assert.ok(hooks.state.renderGeneration > oldGeneration, 'book render has a new generation');
   assert.equal(hooks.state.webtoonAnchor, newAnchor, 'book change keeps only the new anchor');
+}
+
+// Opening an adjacent comic must keep the original shelf focus as the eventual
+// close target; the intermediate close must not consume it.
+{
+  const runtime = createRuntimeHarness();
+  const shelfFocus = runtime.document.createElement('button');
+  runtime.document.activeElement = shelfFocus;
+  runtime.hooks.state.comics = [comic('a', 'webtoon a'), comic('b', 'webtoon b')];
+  runtime.hooks.state.currentComic = comic('a', 'webtoon a');
+  runtime.hooks.state.currentComicPages = ['/old-page.svg'];
+  runtime.hooks.state.readingMode = 'webtoon';
+  runtime.hooks.elements.readerOverlay.style.display = 'flex';
+  await runtime.hooks.openReader('b');
+  assert.equal(runtime.hooks.state.readerReturnFocus, shelfFocus, 'adjacent open preserves original shelf return focus');
+  await runtime.hooks.closeReader();
+  assert.equal(runtime.document.activeElement, shelfFocus, 'closing the adjacent comic restores the shelf focus');
 }
 
 // Rendering a webtoon creates only the available adjacent buttons, with no
@@ -499,6 +767,20 @@ console.log('PASS: webtoon navigation buttons, mode preservation, boundary absen
 
 console.log('PASS: two-page direction, one-page shift, parity snap, and boundaries are covered');
 
+// Idle 後若 chrome 沒有可見 focusable，Tab 必須先喚醒工具列，再把焦點交回返回鍵，
+// 不能 preventDefault 後把焦點留在隱藏控制列造成鍵盤卡死。
+{
+  const { hooks, document } = createRuntimeHarness();
+  hooks.elements.readerOverlay.style.display = 'flex';
+  hooks.elements.readerOverlay.classList.add('reader-idle');
+  let prevented = false;
+  hooks.trapReaderFocus({ key: 'Tab', shiftKey: false, preventDefault() { prevented = true; } });
+  assert.equal(prevented, true, 'empty reader focus trap owns Tab');
+  assert.equal(hooks.elements.readerOverlay.classList.contains('reader-idle'), false, 'empty focus trap wakes reader chrome');
+  assert.equal(document.activeElement, hooks.elements.readerBackBtn, 'empty focus trap focuses visible keyboard entry');
+}
+console.log('PASS: idle reader chrome restores a keyboard focus entry');
+
 // Webtoon taps toggle chrome, while swipes (including a swipe that returns to
 // its start), cancelled touches, multi-touch and compatibility mouse movement
 // must leave it hidden. Exercise the real listeners registered by bindEvents.
@@ -604,3 +886,38 @@ for (const mode of ['webtoon', 'catalog', 'single', 'double', 'double-rtl']) {
   }
 }
 console.log('PASS: vertical keyboard scrolling and paged navigation remain mode-specific');
+
+// The native range control owns ArrowLeft/ArrowRight; document shortcuts must
+// not turn the page a second time while the slider is focused.
+{
+  const calls = [];
+  const slider = { id: 'progress-slider' };
+  const handle = vm.runInNewContext(`(${extractFunction('handleKeyDown')})`, {
+    elements: { readerOverlay: { style: { display: 'flex' } }, progressSlider: slider },
+    state: { readingMode: 'single' },
+    goPreviousByReadingDirection: () => calls.push('previous'),
+    goNextByReadingDirection: () => calls.push('next'),
+  });
+  let prevented = false;
+  handle({ target: slider, key: 'ArrowRight', preventDefault() { prevented = true; } });
+  assert.deepEqual(calls, [], 'range ArrowRight does not also turn the page');
+  assert.equal(prevented, false, 'range ArrowRight remains native');
+}
+console.log('PASS: progress range arrows have a single native input path');
+
+// Slider navigation keys stay native, while reader shortcuts such as Escape
+// still reach the document handler when the slider owns focus.
+{
+  const calls = [];
+  const slider = { id: 'progress-slider' };
+  const handle = vm.runInNewContext(`(${extractFunction('handleKeyDown')})`, {
+    elements: { readerOverlay: { style: { display: 'flex' } }, progressSlider: slider },
+    state: { readingMode: 'single', readerContextMenuOpen: false },
+    closeReader: () => calls.push('close'),
+  });
+  let prevented = false;
+  handle({ target: slider, key: 'Escape', preventDefault() { prevented = true; } });
+  assert.deepEqual(calls, ['close'], 'slider focus must not swallow Escape');
+  assert.equal(prevented, true, 'reader Escape keeps its default prevention');
+}
+console.log('PASS: progress range keeps reader shortcuts available');

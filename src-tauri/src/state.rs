@@ -1,6 +1,6 @@
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
-use std::sync::atomic::{AtomicBool, AtomicU8, AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, AtomicU8, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex as StdMutex, OnceLock, Weak};
 use tokio::sync::Mutex;
 
@@ -338,6 +338,17 @@ pub struct AppState {
     pub smb_config: std::sync::RwLock<Option<SmbConfig>>,
     pub external_bookmarks: std::sync::RwLock<Vec<ExternalBookmark>>,
     pub progress_file_lock: tokio::sync::Mutex<()>,
+    /// Serializes AI session transitions across Keychain awaits.
+    pub ai_session_lifecycle: tokio::sync::Mutex<()>,
+    /// Prevents a revoke from completing while an HTTP request is being started.
+    pub ai_send_lifecycle: tokio::sync::Mutex<()>,
+    /// Serializes full-list bookmark updates so read/cleanup/commit is atomic.
+    pub bookmark_lifecycle: tokio::sync::Mutex<()>,
+    /// Serializes persistence and RAM publication for each comic independently.
+    pub progress_locks: tokio::sync::Mutex<HashMap<String, Arc<tokio::sync::Mutex<()>>>>,
+    /// Last client sequence committed for each comic. Older requests are
+    /// rejected once the frontend supplies a sequence number.
+    pub progress_sequences: tokio::sync::Mutex<HashMap<String, u64>>,
     pub active_bookmarks: std::sync::Mutex<HashMap<String, String>>,
     pub active_comic_id: std::sync::Mutex<Option<String>>,
     pub pending_open_id: std::sync::Mutex<Option<String>>,
@@ -348,6 +359,12 @@ pub struct AppState {
     pub catalog_sync: tokio::sync::Mutex<()>,
     pub online_services: std::sync::RwLock<OnlineServicesConfig>,
     pub ai_session: std::sync::RwLock<Option<AiSessionConfig>>,
+    /// Monotonically changes whenever the in-memory AI session is revoked or replaced.
+    /// Requests waiting on the concurrency gate use this token to reject stale configs.
+    pub ai_session_generation: AtomicU64,
+    /// Bounds concurrent cloud AI calls so multiple metadata actions cannot
+    /// multiply image buffers and provider requests on low-memory devices.
+    pub ai_request_gate: Arc<tokio::sync::Semaphore>,
     /// Photo albums are a separate native-backed source. Scanner refreshes
     /// must never replace or remove this snapshot.
     pub photo_albums: Mutex<Vec<crate::photo_library::PhotoAlbumSnapshot>>,
@@ -385,6 +402,11 @@ impl AppState {
             smb_config: std::sync::RwLock::new(None),
             external_bookmarks: std::sync::RwLock::new(Vec::new()),
             progress_file_lock: tokio::sync::Mutex::new(()),
+            ai_session_lifecycle: tokio::sync::Mutex::new(()),
+            ai_send_lifecycle: tokio::sync::Mutex::new(()),
+            bookmark_lifecycle: tokio::sync::Mutex::new(()),
+            progress_locks: tokio::sync::Mutex::new(HashMap::new()),
+            progress_sequences: tokio::sync::Mutex::new(HashMap::new()),
             active_bookmarks: std::sync::Mutex::new(HashMap::new()),
             active_comic_id: std::sync::Mutex::new(None),
             pending_open_id: std::sync::Mutex::new(None),
@@ -395,6 +417,8 @@ impl AppState {
             catalog_sync: tokio::sync::Mutex::new(()),
             online_services: std::sync::RwLock::new(OnlineServicesConfig::default()),
             ai_session: std::sync::RwLock::new(None),
+            ai_session_generation: AtomicU64::new(0),
+            ai_request_gate: Arc::new(tokio::sync::Semaphore::new(2)),
             photo_albums: Mutex::new(Vec::new()),
             photo_progress: Mutex::new(HashMap::new()),
             photo_authorization: std::sync::RwLock::new("notDetermined".into()),
@@ -508,8 +532,8 @@ impl Default for AppState {
 #[cfg(test)]
 mod tests {
     use super::{
-        calculate_memory_budget, device_cache_budget, AppState, MemoryBudgetInputs,
-        MemoryPressure, OnlineServicesConfig, GIB, MAX_COMPRESSED_PAGE_CACHE_BYTES,
+        calculate_memory_budget, device_cache_budget, AppState, MemoryBudgetInputs, MemoryPressure,
+        OnlineServicesConfig, GIB, MAX_COMPRESSED_PAGE_CACHE_BYTES,
     };
     use std::collections::HashMap;
 

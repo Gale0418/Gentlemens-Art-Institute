@@ -67,9 +67,13 @@ assert.match(swift, /activePickers\.removeValue\(forKey: picker\)/);
 assert.match(swift, /stopAccessingSecurityScopedResource\(\)/);
 assert.match(swift, /resolvingSymlinksInPath\(\)/);
 assert.match(swift, /self\?\.memoryPressureSource\?\.data/);
+const scopeStart = swift.indexOf('let resolution:');
+const scopeEnd = swift.indexOf('if let url = resolution.url', scopeStart);
+const scopeBlock = swift.slice(scopeStart, scopeEnd);
+assert.ok(scopeStart >= 0 && scopeEnd > scopeStart, 'security-scope resolution block must exist');
 assert.match(
-  swift,
-  /let resolution:[\s\S]{0,500}accessQueue\.sync[\s\S]{0,900}startAccessingSecurityScopedResource\(\)[\s\S]{0,300}activeAccesses\[bookmark\] = url/,
+  scopeBlock,
+  /accessQueue\.sync[\s\S]*startAccessingSecurityScopedResource\(\)[\s\S]*activeAccesses\[bookmark\] = url/,
   'security-scope existence check, acquisition and registration must be serialized atomically'
 );
 

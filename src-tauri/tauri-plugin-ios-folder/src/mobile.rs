@@ -30,6 +30,33 @@ impl<R: Runtime> TauriPluginIosFolder<R> {
         self.0.run_mobile_plugin(method, ()).map_err(Into::into)
     }
 
+    pub fn save_ai_key(&self, provider: &str, api_key: &str) -> crate::Result<()> {
+        self.0
+            .run_mobile_plugin(
+                "saveAiKey",
+                serde_json::json!({ "provider": provider, "apiKey": api_key }),
+            )
+            .map_err(Into::into)
+    }
+
+    pub fn load_ai_key(&self, provider: &str) -> crate::Result<serde_json::Value> {
+        self.0
+            .run_mobile_plugin("loadAiKey", serde_json::json!({ "provider": provider }))
+            .map_err(Into::into)
+    }
+
+    pub fn has_ai_key(&self, provider: &str) -> crate::Result<serde_json::Value> {
+        self.0
+            .run_mobile_plugin("hasAiKey", serde_json::json!({ "provider": provider }))
+            .map_err(Into::into)
+    }
+
+    pub fn delete_ai_key(&self, provider: &str) -> crate::Result<()> {
+        self.0
+            .run_mobile_plugin("deleteAiKey", serde_json::json!({ "provider": provider }))
+            .map_err(Into::into)
+    }
+
     pub fn pick_folder(&self) -> crate::Result<PickFolderResponse> {
         self.0
             .run_mobile_plugin("pickFolder", ())
@@ -78,9 +105,7 @@ impl<R: Runtime> TauriPluginIosFolder<R> {
             .map_err(Into::into)
     }
 
-    pub fn linked_photo_album_snapshots(
-        &self,
-    ) -> crate::Result<LinkedPhotoAlbumSnapshotsResponse> {
+    pub fn linked_photo_album_snapshots(&self) -> crate::Result<LinkedPhotoAlbumSnapshotsResponse> {
         self.0
             .run_mobile_plugin("linkedPhotoAlbumSnapshots", ())
             .map_err(Into::into)

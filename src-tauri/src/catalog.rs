@@ -7,7 +7,7 @@ use rayon::prelude::*;
 use rusqlite::{params, Connection, OptionalExtension, Transaction};
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
-use std::collections::{BTreeMap, BTreeSet, HashMap};
+use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 use std::fs::File;
 use std::io::{Read, Seek, SeekFrom};
 use std::path::{Path, PathBuf};
@@ -18,7 +18,6 @@ const FINGERPRINT_VERSION: &str = "blake3-sampled-v1";
 const ARCHIVE_SAMPLE_BYTES: usize = 256 * 1024;
 const DIRECTORY_SAMPLE_BYTES: usize = 64 * 1024;
 const PAGE_SIZE_MAX: usize = 200;
-
 fn runtime_type_for_location(online: bool, kind: &str, _source_id: &str) -> String {
     if !online {
         return "offline".into();
@@ -456,54 +455,70 @@ impl CatalogStore {
                             )],
                             diagnostics: vec![],
                         });
-                        (comic.clone(), signature, fingerprint, fingerprint_version, parse)
+                        (
+                            comic.clone(),
+                            signature,
+                            fingerprint,
+                            fingerprint_version,
+                            parse,
+                        )
                     })
                     .collect::<Vec<_>>()
             } else {
-                pool.as_ref().expect("normal sync has a metadata pool").install(|| {
-                    batch
-                        .par_iter()
-                        .map(|comic| {
-                            let path = comic.source_path.as_deref().map(Path::new);
-                            let signature = path.and_then(file_signature);
-                            let key = (comic.source_id.clone(), comic.relative_path.clone());
-                            let previous = known.get(&key);
-                            let unchanged = previous.is_some_and(|item| {
-                                item.fingerprint_version.as_deref() == Some(FINGERPRINT_VERSION)
-                                    && item.size == signature.as_ref().and_then(|value| value.0)
-                                    && item.mtime
-                                        == signature.as_ref().and_then(|value| value.1.clone())
-                            });
-                            let fingerprint = if unchanged {
-                                previous.and_then(|item| item.fingerprint.clone())
-                            } else {
-                                path.and_then(|item| sampled_fingerprint(item).ok())
-                            };
-                            let fingerprint_version = if unchanged {
-                                previous.and_then(|item| item.fingerprint_version.clone())
-                            } else {
-                                fingerprint
-                                    .as_ref()
-                                    .map(|_| FINGERPRINT_VERSION.to_string())
-                            };
-                            let parse = if unchanged {
-                                None
-                            } else {
-                                Some(
-                                    path.filter(|item| item.exists())
-                                        .map(metadata::parse_metadata_for_path)
-                                        .unwrap_or_else(|| metadata::ParseOutcome {
-                                            sources: vec![metadata::filename_metadata_for_path(
-                                                Path::new(&comic.relative_path),
-                                            )],
-                                            diagnostics: vec![],
-                                        }),
+                pool.as_ref()
+                    .expect("normal sync has a metadata pool")
+                    .install(|| {
+                        batch
+                            .par_iter()
+                            .map(|comic| {
+                                let path = comic.source_path.as_deref().map(Path::new);
+                                let signature = path.and_then(file_signature);
+                                let key = (comic.source_id.clone(), comic.relative_path.clone());
+                                let previous = known.get(&key);
+                                let unchanged = previous.is_some_and(|item| {
+                                    item.fingerprint_version.as_deref() == Some(FINGERPRINT_VERSION)
+                                        && item.size == signature.as_ref().and_then(|value| value.0)
+                                        && item.mtime
+                                            == signature.as_ref().and_then(|value| value.1.clone())
+                                });
+                                let fingerprint = if unchanged {
+                                    previous.and_then(|item| item.fingerprint.clone())
+                                } else {
+                                    path.and_then(|item| sampled_fingerprint(item).ok())
+                                };
+                                let fingerprint_version = if unchanged {
+                                    previous.and_then(|item| item.fingerprint_version.clone())
+                                } else {
+                                    fingerprint
+                                        .as_ref()
+                                        .map(|_| FINGERPRINT_VERSION.to_string())
+                                };
+                                let parse = if unchanged {
+                                    None
+                                } else {
+                                    Some(
+                                        path.filter(|item| item.exists())
+                                            .map(metadata::parse_metadata_for_path)
+                                            .unwrap_or_else(|| metadata::ParseOutcome {
+                                                sources: vec![
+                                                    metadata::filename_metadata_for_path(
+                                                        Path::new(&comic.relative_path),
+                                                    ),
+                                                ],
+                                                diagnostics: vec![],
+                                            }),
+                                    )
+                                };
+                                (
+                                    comic.clone(),
+                                    signature,
+                                    fingerprint,
+                                    fingerprint_version,
+                                    parse,
                                 )
-                            };
-                            (comic.clone(), signature, fingerprint, fingerprint_version, parse)
-                        })
-                        .collect::<Vec<_>>()
-                })
+                            })
+                            .collect::<Vec<_>>()
+                    })
             };
             ensure_sync_current(&is_current)?;
 
@@ -1391,7 +1406,9 @@ impl CatalogStore {
 
     pub fn forget_source_locations(&self, source_id: &str) -> Result<usize, String> {
         self.with_connection(|connection| {
-            let tx = connection.transaction().map_err(|error| error.to_string())?;
+            let tx = connection
+                .transaction()
+                .map_err(|error| error.to_string())?;
             let comic_ids = {
                 let mut statement = tx
                     .prepare("SELECT DISTINCT comic_id FROM comic_locations WHERE source_id=?1")
@@ -1623,6 +1640,37 @@ const MIGRATION_7: &str = "
         CREATE INDEX IF NOT EXISTS idx_locations_comic_online ON comic_locations(comic_id, online);
 ";
 
+// unicode61 indexes an entire run of CJK characters as one token, so a query
+// for a substring such as "漫畫" cannot match "測試漫畫".  FTS5's trigram
+// tokenizer keeps substring search while preserving the existing catalog_fts
+// columns.  The index is repopulated after this migration because the FTS
+// table is intentionally contentless from the catalog tables' perspective.
+const MIGRATION_8: &str = "
+        DROP TABLE IF EXISTS catalog_fts;
+        CREATE VIRTUAL TABLE catalog_fts USING fts5(comic_id UNINDEXED, title, series, path, creators, tags, language, tokenize='trigram');
+";
+
+// build_view loads the most recent diagnostics for each comic while rebuilding
+// the FTS table. Keep both the per-comic filter and its descending id order in
+// the index so a large catalog does not rescan or sort all diagnostics per row.
+const MIGRATION_9: &str = "
+        CREATE INDEX IF NOT EXISTS idx_import_diagnostics_comic_id
+          ON import_diagnostics(comic_id, id DESC);
+";
+
+// A leading-wildcard LIKE cannot use a normal SQLite index. Keep one- and
+// two-codepoint grams in an equality-searchable side index for short queries;
+// the existing ParsedQuery matcher still performs the final field-aware check.
+const MIGRATION_10: &str = "
+        CREATE TABLE IF NOT EXISTS catalog_short_ngrams(
+          comic_id TEXT NOT NULL REFERENCES comics(id) ON DELETE CASCADE,
+          gram TEXT NOT NULL,
+          PRIMARY KEY(comic_id, gram)
+        );
+        CREATE INDEX IF NOT EXISTS idx_catalog_short_ngrams_gram
+          ON catalog_short_ngrams(gram, comic_id);
+";
+
 const MIGRATIONS: &[(i64, &str)] = &[
     (1, MIGRATION_1),
     (2, MIGRATION_2),
@@ -1631,6 +1679,9 @@ const MIGRATIONS: &[(i64, &str)] = &[
     (5, MIGRATION_5),
     (6, MIGRATION_6),
     (7, MIGRATION_7),
+    (8, MIGRATION_8),
+    (9, MIGRATION_9),
+    (10, MIGRATION_10),
 ];
 
 fn load_file_operation(
@@ -1691,6 +1742,7 @@ fn migrate(connection: &mut Connection) -> Result<(), String> {
         }
     }
 
+    let mut fts_rebuild_required = false;
     for (version, sql) in MIGRATIONS
         .iter()
         .filter(|(version, _)| !applied.contains(version))
@@ -1709,9 +1761,38 @@ fn migrate(connection: &mut Connection) -> Result<(), String> {
             .map_err(|error| format!("無法更新 SQLite user_version {version}：{error}"))?;
         tx.commit()
             .map_err(|error| format!("無法提交 SQLite migration {version}：{error}"))?;
+        if *version == 8 || *version == 10 {
+            fts_rebuild_required = true;
+        }
     }
     backfill_canonical_tags(connection)?;
+    if fts_rebuild_required || catalog_fts_needs_rebuild(connection)? {
+        rebuild_catalog_fts(connection)?;
+    }
     Ok(())
+}
+
+fn catalog_fts_needs_rebuild(connection: &Connection) -> Result<bool, String> {
+    let comic_count: i64 = connection
+        .query_row("SELECT COUNT(*) FROM comics", [], |row| row.get(0))
+        .map_err(|error| error.to_string())?;
+    let fts_count: i64 = connection
+        .query_row("SELECT COUNT(*) FROM catalog_fts", [], |row| row.get(0))
+        .map_err(|error| error.to_string())?;
+    let short_gram_missing: i64 = connection
+        .query_row(
+            "SELECT EXISTS(
+               SELECT 1 FROM comics c
+               WHERE NOT EXISTS(
+                 SELECT 1 FROM catalog_short_ngrams grams
+                 WHERE grams.comic_id=c.id
+               )
+             )",
+            [],
+            |row| row.get(0),
+        )
+        .map_err(|error| error.to_string())?;
+    Ok(comic_count != fts_count || short_gram_missing != 0)
 }
 
 fn normalize_tag_key(value: &str) -> String {
@@ -1826,7 +1907,10 @@ fn retire_unseen_sources(
     source_ids: &BTreeSet<String>,
     current_locations: &[(String, String)],
 ) -> Result<(), String> {
-    if source_ids.iter().any(|source_id| source_id == "local" || source_id.starts_with("local:")) {
+    if source_ids
+        .iter()
+        .any(|source_id| source_id == "local" || source_id.starts_with("local:"))
+    {
         tx.execute(
             "UPDATE comic_locations SET online = 0 WHERE source_id = 'local' OR source_id LIKE 'local:%'",
             [],
@@ -2253,41 +2337,54 @@ fn refresh_fts_batch(connection: &Connection, comic_ids: &BTreeSet<String>) -> R
     connection
         .execute(&delete_sql, rusqlite::params_from_iter(comic_ids.iter()))
         .map_err(|error| error.to_string())?;
+    let delete_short_sql =
+        format!("DELETE FROM catalog_short_ngrams WHERE comic_id IN ({placeholders})");
+    connection
+        .execute(
+            &delete_short_sql,
+            rusqlite::params_from_iter(comic_ids.iter()),
+        )
+        .map_err(|error| error.to_string())?;
     let mut insert = connection
         .prepare("INSERT INTO catalog_fts(comic_id,title,series,path,creators,tags,language) VALUES(?1,?2,?3,?4,?5,?6,?7)")
         .map_err(|error| error.to_string())?;
+    let mut short_insert = connection
+        .prepare("INSERT OR IGNORE INTO catalog_short_ngrams(comic_id,gram) VALUES(?1,?2)")
+        .map_err(|error| error.to_string())?;
     for comic_id in comic_ids {
         let view = build_view(connection, comic_id)?;
-        let creators = view
-            .creators
-            .values()
-            .flatten()
-            .cloned()
-            .collect::<Vec<_>>()
-            .join(" ");
-        let tags = view
-            .tags
-            .iter()
-            .map(|tag| format!("{}:{} {}", tag.namespace, tag.value, tag.value))
-            .collect::<Vec<_>>()
-            .join(" ");
-        insert
-            .execute(params![
-                comic_id,
-                view.title,
-                view.series,
-                view.relative_path,
-                creators,
-                tags,
-                view.language
-            ])
-            .map_err(|error| error.to_string())?;
+        insert_fts_view(&mut insert, comic_id, &view)?;
+        insert_short_ngrams(&mut short_insert, comic_id, &view)?;
     }
     Ok(())
 }
 
 fn refresh_fts_inner(connection: &Connection, comic_id: &str) -> Result<(), String> {
     let view = build_view(connection, comic_id)?;
+    connection
+        .execute("DELETE FROM catalog_fts WHERE comic_id=?1", [comic_id])
+        .map_err(|error| error.to_string())?;
+    connection
+        .execute(
+            "DELETE FROM catalog_short_ngrams WHERE comic_id=?1",
+            [comic_id],
+        )
+        .map_err(|error| error.to_string())?;
+    let mut insert = connection
+        .prepare("INSERT INTO catalog_fts(comic_id,title,series,path,creators,tags,language) VALUES(?1,?2,?3,?4,?5,?6,?7)")
+        .map_err(|error| error.to_string())?;
+    insert_fts_view(&mut insert, comic_id, &view)?;
+    let mut short_insert = connection
+        .prepare("INSERT OR IGNORE INTO catalog_short_ngrams(comic_id,gram) VALUES(?1,?2)")
+        .map_err(|error| error.to_string())?;
+    insert_short_ngrams(&mut short_insert, comic_id, &view)
+}
+
+fn insert_fts_view(
+    statement: &mut rusqlite::Statement<'_>,
+    comic_id: &str,
+    view: &ComicMetadataView,
+) -> Result<(), String> {
     let creators = view
         .creators
         .values()
@@ -2301,11 +2398,108 @@ fn refresh_fts_inner(connection: &Connection, comic_id: &str) -> Result<(), Stri
         .map(|tag| format!("{}:{} {}", tag.namespace, tag.value, tag.value))
         .collect::<Vec<_>>()
         .join(" ");
-    connection
-        .execute("DELETE FROM catalog_fts WHERE comic_id=?1", [comic_id])
+    statement
+        .execute(params![
+            comic_id,
+            view.title,
+            view.series,
+            view.relative_path,
+            creators,
+            tags,
+            view.language
+        ])
         .map_err(|error| error.to_string())?;
-    connection.execute("INSERT INTO catalog_fts(comic_id,title,series,path,creators,tags,language) VALUES(?1,?2,?3,?4,?5,?6,?7)", params![comic_id, view.title, view.series, view.relative_path, creators, tags, view.language]).map_err(|error| error.to_string())?;
     Ok(())
+}
+
+fn add_short_ngrams(grams: &mut HashSet<String>, value: &str) {
+    let chars = value.to_lowercase().chars().collect::<Vec<_>>();
+    for &character in &chars {
+        grams.insert(encode_short_gram(&[character]));
+    }
+    for pair in chars.windows(2) {
+        grams.insert(encode_short_gram(pair));
+    }
+}
+
+fn encode_short_gram(chars: &[char]) -> String {
+    let prefix = match chars.len() {
+        1 => "g1",
+        2 => "g2",
+        _ => unreachable!("short grams contain one or two codepoints"),
+    };
+    let mut encoded = String::with_capacity(prefix.len() + chars.len() * 6);
+    encoded.push_str(prefix);
+    for character in chars {
+        encoded.push_str(&format!("{:06x}", *character as u32));
+    }
+    encoded
+}
+
+fn insert_short_ngrams(
+    statement: &mut rusqlite::Statement<'_>,
+    comic_id: &str,
+    view: &ComicMetadataView,
+) -> Result<(), String> {
+    let mut grams = HashSet::new();
+    add_short_ngrams(&mut grams, &view.title);
+    if let Some(series) = view.series.as_deref() {
+        add_short_ngrams(&mut grams, series);
+    }
+    if let Some(path) = view.relative_path.as_deref() {
+        add_short_ngrams(&mut grams, path);
+    }
+    for creator in view.creators.values().flatten() {
+        add_short_ngrams(&mut grams, creator);
+    }
+    for tag in &view.tags {
+        add_short_ngrams(&mut grams, &tag.namespace);
+        add_short_ngrams(&mut grams, &tag.value);
+    }
+    if let Some(language) = view.language.as_deref() {
+        add_short_ngrams(&mut grams, language);
+    }
+    for gram in grams {
+        statement
+            .execute(params![comic_id, gram])
+            .map_err(|error| error.to_string())?;
+    }
+    Ok(())
+}
+
+fn rebuild_catalog_fts(connection: &mut Connection) -> Result<(), String> {
+    let tx = connection
+        .transaction()
+        .map_err(|error| error.to_string())?;
+    tx.execute("DELETE FROM catalog_fts", [])
+        .map_err(|error| error.to_string())?;
+    tx.execute("DELETE FROM catalog_short_ngrams", [])
+        .map_err(|error| error.to_string())?;
+    let comic_ids = {
+        let mut statement = tx
+            .prepare("SELECT id FROM comics ORDER BY id")
+            .map_err(|error| error.to_string())?;
+        let comic_ids = statement
+            .query_map([], |row| row.get::<_, String>(0))
+            .map_err(|error| error.to_string())?
+            .collect::<Result<Vec<_>, _>>()
+            .map_err(|error| error.to_string())?;
+        comic_ids
+    };
+    let mut insert = tx
+        .prepare("INSERT INTO catalog_fts(comic_id,title,series,path,creators,tags,language) VALUES(?1,?2,?3,?4,?5,?6,?7)")
+        .map_err(|error| error.to_string())?;
+    let mut short_insert = tx
+        .prepare("INSERT OR IGNORE INTO catalog_short_ngrams(comic_id,gram) VALUES(?1,?2)")
+        .map_err(|error| error.to_string())?;
+    for comic_id in comic_ids {
+        let view = build_view(&tx, &comic_id)?;
+        insert_fts_view(&mut insert, &comic_id, &view)?;
+        insert_short_ngrams(&mut short_insert, &comic_id, &view)?;
+    }
+    drop(insert);
+    drop(short_insert);
+    tx.commit().map_err(|error| error.to_string())
 }
 
 fn search_catalog(
@@ -2392,16 +2586,97 @@ fn search_catalog(
             process_id(row.map_err(|error| error.to_string())?)?;
         }
     } else {
-        let fts = seed_terms
+        let long_terms = seed_terms
             .iter()
-            .map(|term| format!("\"{}\"", term.replace('"', "\"\"")))
-            .collect::<Vec<_>>()
-            .join(" AND ");
+            .filter(|term| term.chars().count() >= 3)
+            .collect::<Vec<_>>();
+        let short_terms = seed_terms
+            .iter()
+            .filter(|term| term.chars().count() < 3)
+            .collect::<Vec<_>>();
+        let short_grams = short_terms
+            .iter()
+            .map(|term| short_query_grams(term))
+            .collect::<Vec<_>>();
+        if long_terms.is_empty() {
+            // Short-only searches must stay on the gram index. Selecting from
+            // catalog_fts by its UNINDEXED comic_id would still scan FTS rows.
+            let mut bind_values = Vec::new();
+            let mut predicates = Vec::new();
+            for (index, grams) in short_grams.iter().enumerate() {
+                let placeholders = (0..grams.len())
+                    .map(|_| "?".to_string())
+                    .collect::<Vec<_>>()
+                    .join(",");
+                bind_values.extend(grams.iter().cloned());
+                if index == 0 {
+                    predicates.push(format!("base.gram IN ({placeholders})"));
+                } else {
+                    predicates.push(format!(
+                        "EXISTS (SELECT 1 FROM catalog_short_ngrams gram_{index}
+                                 WHERE gram_{index}.comic_id=base.comic_id
+                                   AND gram_{index}.gram IN ({placeholders}))"
+                    ));
+                }
+            }
+            let sql = format!(
+                "SELECT DISTINCT base.comic_id FROM catalog_short_ngrams base
+                 JOIN comics c ON c.id=base.comic_id
+                 WHERE {} ORDER BY c.updated_at DESC,c.title COLLATE NOCASE,base.comic_id",
+                predicates.join(" AND ")
+            );
+            let mut statement = connection
+                .prepare(&sql)
+                .map_err(|error| error.to_string())?;
+            let rows = statement
+                .query_map(rusqlite::params_from_iter(bind_values.iter()), |row| {
+                    row.get::<_, String>(0)
+                })
+                .map_err(|error| error.to_string())?;
+            for row in rows {
+                process_id(row.map_err(|error| error.to_string())?)?;
+            }
+            return Ok(CatalogSearchResult {
+                items,
+                total,
+                facets,
+            });
+        }
+        let mut predicates = Vec::new();
+        let mut bind_values = Vec::new();
+        if !long_terms.is_empty() {
+            let fts = long_terms
+                .iter()
+                .map(|term| format!("\"{}\"", term.replace('"', "\"\"")))
+                .collect::<Vec<_>>()
+                .join(" AND ");
+            predicates.push("catalog_fts MATCH ?".to_string());
+            bind_values.push(fts);
+        }
+        for grams in short_grams {
+            if grams.is_empty() {
+                continue;
+            }
+            let placeholders = (0..grams.len())
+                .map(|_| "?".to_string())
+                .collect::<Vec<_>>()
+                .join(",");
+            predicates.push(format!(
+                "comic_id IN (SELECT comic_id FROM catalog_short_ngrams WHERE gram IN ({placeholders}))"
+            ));
+            bind_values.extend(grams);
+        }
+        let sql = format!(
+            "SELECT comic_id FROM catalog_fts WHERE {} ORDER BY rank",
+            predicates.join(" AND ")
+        );
         let mut statement = connection
-            .prepare("SELECT comic_id FROM catalog_fts WHERE catalog_fts MATCH ?1 ORDER BY rank")
+            .prepare(&sql)
             .map_err(|error| error.to_string())?;
         let rows = statement
-            .query_map([fts], |row| row.get::<_, String>(0))
+            .query_map(rusqlite::params_from_iter(bind_values.iter()), |row| {
+                row.get::<_, String>(0)
+            })
             .map_err(|error| error.to_string())?;
         for row in rows {
             process_id(row.map_err(|error| error.to_string())?)?;
@@ -2412,6 +2687,17 @@ fn search_catalog(
         total,
         facets,
     })
+}
+
+fn short_query_grams(value: &str) -> Vec<String> {
+    let chars = value.to_lowercase().chars().collect::<Vec<_>>();
+    if chars.is_empty() {
+        return Vec::new();
+    }
+    if chars.len() == 1 {
+        return vec![encode_short_gram(&chars)];
+    }
+    chars.windows(2).map(encode_short_gram).collect::<Vec<_>>()
 }
 
 const TAG_INVENTORY_CTE: &str = "
@@ -2770,14 +3056,42 @@ impl ParsedQuery {
         parsed
     }
     fn matches(&self, view: &ComicMetadataView) -> bool {
-        self.include
-            .iter()
-            .all(|term| query_term_matches(view, term))
+        self.free.iter().all(|term| free_text_matches(view, term))
+            && self
+                .include
+                .iter()
+                .all(|term| query_term_matches(view, term))
             && self
                 .exclude
                 .iter()
                 .all(|term| !query_term_matches(view, term))
     }
+}
+
+fn free_text_matches(view: &ComicMetadataView, value: &str) -> bool {
+    let value = value.to_lowercase();
+    view.title.to_lowercase().contains(&value)
+        || view
+            .series
+            .as_deref()
+            .is_some_and(|item| item.to_lowercase().contains(&value))
+        || view
+            .relative_path
+            .as_deref()
+            .is_some_and(|item| item.to_lowercase().contains(&value))
+        || view
+            .creators
+            .values()
+            .flatten()
+            .any(|item| item.to_lowercase().contains(&value))
+        || view.tags.iter().any(|tag| {
+            tag.namespace.to_lowercase().contains(&value)
+                || tag.value.to_lowercase().contains(&value)
+        })
+        || view
+            .language
+            .as_deref()
+            .is_some_and(|item| item.to_lowercase().contains(&value))
 }
 
 fn query_term_matches(view: &ComicMetadataView, (field, value): &(String, String)) -> bool {
@@ -2853,6 +3167,16 @@ fn ensure_tag(connection: &Connection, tag: &ScopedTag) -> Result<i64, String> {
             |row| row.get(0),
         )
         .map_err(|error| error.to_string())?;
+    let existing_canonical: Option<i64> = connection
+        .query_row(
+            "SELECT canonical_tag_id FROM tags WHERE id=?1",
+            [raw_id],
+            |row| row.get(0),
+        )
+        .map_err(|error| error.to_string())?;
+    if existing_canonical.is_some() {
+        return Ok(raw_id);
+    }
     connection
         .execute(
             "INSERT OR IGNORE INTO canonical_tags(namespace,normalized_value,display_value) VALUES(?1,?2,?3)",
@@ -3558,7 +3882,10 @@ fn is_image(path: &Path) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::sync::{atomic::{AtomicBool, Ordering}, Arc};
+    use std::sync::{
+        atomic::{AtomicBool, Ordering},
+        Arc,
+    };
     use std::time::Instant;
 
     #[test]
@@ -3644,7 +3971,10 @@ mod tests {
                                 .map_err(|error| error.to_string())
                         })
                         .unwrap();
-                    observed_for_progress.lock().unwrap().push((done, total, online));
+                    observed_for_progress
+                        .lock()
+                        .unwrap()
+                        .push((done, total, online));
                 },
                 || true,
             )
@@ -3687,7 +4017,9 @@ mod tests {
     fn sync_cancellation_keeps_previous_online_locations() {
         let store = store("sync_cancel_keeps_online");
         let old = discovery_comics(1, "external:files");
-        store.sync_library_with_progress(&old, true, |_, _| {}, || true).unwrap();
+        store
+            .sync_library_with_progress(&old, true, |_, _| {}, || true)
+            .unwrap();
         let mut incoming = discovery_comics(65, "external:files");
         incoming[0].relative_path = "新的一本.cbz".into();
         let current = Arc::new(AtomicBool::new(true));
@@ -3764,10 +4096,16 @@ mod tests {
         let mut comics = discovery_comics(1, "external:files");
         comics[0].r#type = "external-folder".into();
         comics[0].relative_path = "series/Volume.2".into();
-        store.sync_library_with_progress(&comics, true, |_, _| {}, || true).unwrap();
-        let title: String = store.with_connection(|connection| {
-            connection.query_row("SELECT title FROM comics", [], |row| row.get(0)).map_err(|error| error.to_string())
-        }).unwrap();
+        store
+            .sync_library_with_progress(&comics, true, |_, _| {}, || true)
+            .unwrap();
+        let title: String = store
+            .with_connection(|connection| {
+                connection
+                    .query_row("SELECT title FROM comics", [], |row| row.get(0))
+                    .map_err(|error| error.to_string())
+            })
+            .unwrap();
         assert_eq!(title, "Volume.2");
     }
 
@@ -3818,7 +4156,10 @@ mod tests {
         let metadata = store.get_metadata("runtime-new").unwrap();
         assert_eq!(metadata.comic_id, stable_id);
         assert_eq!(metadata.title, "手動標題");
-        assert_eq!(metadata.relative_path.as_deref(), Some("特殊路徑/同一本.cbz"));
+        assert_eq!(
+            metadata.relative_path.as_deref(),
+            Some("特殊路徑/同一本.cbz")
+        );
         let loaded = store.get_runtime_item("runtime-new").unwrap().unwrap();
         assert_eq!(loaded.progress.current_page, 7);
         store
@@ -3869,7 +4210,10 @@ mod tests {
                                 .map_err(|error| error.to_string())
                         })
                         .unwrap();
-                    callbacks_for_progress.lock().unwrap().push((done, total, online));
+                    callbacks_for_progress
+                        .lock()
+                        .unwrap()
+                        .push((done, total, online));
                 },
                 || true,
             )
@@ -3877,7 +4221,11 @@ mod tests {
         let callbacks = callbacks.lock().unwrap();
         assert_eq!(callbacks.last().copied(), Some((5620, 5620, 5620)));
         assert_eq!(callbacks.len(), 1 + (5620usize + 63) / 64);
-        println!("discovery-only 5620 elapsed: {:?}, callbacks: {}", started.elapsed(), callbacks.len());
+        println!(
+            "discovery-only 5620 elapsed: {:?}, callbacks: {}",
+            started.elapsed(),
+            callbacks.len()
+        );
     }
 
     #[test]
@@ -3909,12 +4257,54 @@ mod tests {
                     .map_err(|error| error.to_string())?
                     .collect::<Result<Vec<_>, _>>()
                     .map_err(|error| error.to_string())?;
-                assert_eq!(versions, vec![1, 2, 3, 4, 5, 6, 7]);
+                assert_eq!(versions, vec![1, 2, 3, 4, 5, 6, 7, 8, 9, 10]);
                 assert_eq!(
                     connection
                         .pragma_query_value(None, "user_version", |row| row.get::<_, i64>(0))
                         .map_err(|error| error.to_string())?,
-                    7
+                    10
+                );
+                let fts_sql: String = connection
+                    .query_row(
+                        "SELECT sql FROM sqlite_master WHERE type='table' AND name='catalog_fts'",
+                        [],
+                        |row| row.get(0),
+                    )
+                    .map_err(|error| error.to_string())?;
+                assert!(fts_sql.contains("trigram"), "{fts_sql}");
+                let mut query = connection
+                    .prepare(
+                        "EXPLAIN QUERY PLAN SELECT id,comic_id,parser_id,source_path,severity,message,created_at
+                         FROM import_diagnostics WHERE comic_id='runtime' ORDER BY id DESC LIMIT 100",
+                    )
+                    .map_err(|error| error.to_string())?;
+                let details = query
+                    .query_map([], |row| row.get::<_, String>(3))
+                    .map_err(|error| error.to_string())?
+                    .collect::<Result<Vec<_>, _>>()
+                    .map_err(|error| error.to_string())?;
+                assert!(
+                    details.iter().any(|detail| detail
+                        .contains("idx_import_diagnostics_comic_id")),
+                    "{details:?}"
+                );
+                let mut short_query = connection
+                    .prepare(
+                        "EXPLAIN QUERY PLAN SELECT DISTINCT base.comic_id
+                         FROM catalog_short_ngrams base
+                         WHERE base.gram IN ('g2006f2b00756b')",
+                    )
+                    .map_err(|error| error.to_string())?;
+                let short_details = short_query
+                    .query_map([], |row| row.get::<_, String>(3))
+                    .map_err(|error| error.to_string())?
+                    .collect::<Result<Vec<_>, _>>()
+                    .map_err(|error| error.to_string())?;
+                assert!(
+                    short_details
+                        .iter()
+                        .any(|detail| detail.contains("idx_catalog_short_ngrams_gram")),
+                    "{short_details:?}"
                 );
                 Ok(())
             })
@@ -3929,11 +4319,17 @@ mod tests {
     fn version_six_upgrade_preserves_books_and_indexes_online_reconciliation() {
         let store = store("location_index_upgrade");
         store.sync_library(&[comic("runtime", "a.zip")]).unwrap();
-        store.with_connection(|connection| {
-            connection.execute_batch("DROP INDEX idx_locations_comic_online;
-                DELETE FROM schema_migrations WHERE version=7;
-                PRAGMA user_version=6;").map_err(|error| error.to_string())
-        }).unwrap();
+        store
+            .with_connection(|connection| {
+                connection
+                    .execute_batch(
+                        "DROP INDEX idx_locations_comic_online;
+                DELETE FROM schema_migrations WHERE version>=7;
+                PRAGMA user_version=6;",
+                    )
+                    .map_err(|error| error.to_string())
+            })
+            .unwrap();
         CatalogStore::new(store.path().to_path_buf()).unwrap();
         assert_eq!(store.get_metadata("runtime").unwrap().title, "a");
         store.with_connection(|connection| {
@@ -4023,7 +4419,10 @@ mod tests {
             })
             .unwrap();
 
-        assert_eq!(store.forget_source_locations("external:removed").unwrap(), 1);
+        assert_eq!(
+            store.forget_source_locations("external:removed").unwrap(),
+            1
+        );
         store
             .with_connection(|connection| {
                 let removed_count: i64 = connection
@@ -4080,7 +4479,10 @@ mod tests {
             )
             .unwrap();
 
-        assert_eq!(store.forget_source_locations("external:removed").unwrap(), 1);
+        assert_eq!(
+            store.forget_source_locations("external:removed").unwrap(),
+            1
+        );
         let metadata = store.get_metadata(&comic_id).unwrap();
         assert!(metadata.offline);
         assert!(metadata.source_id.is_none());
@@ -4168,7 +4570,7 @@ mod tests {
                     .query_row("SELECT COUNT(*) FROM schema_migrations", [], |row| row.get(0))
                     .map_err(|error| error.to_string())?;
                 assert_eq!(tag_aliases_exists, 1);
-                assert_eq!(versions, 7);
+                assert_eq!(versions, 10);
                 Ok(())
             })
             .unwrap();
@@ -4373,6 +4775,175 @@ mod tests {
     }
 
     #[test]
+    fn version_seven_upgrade_rebuilds_cjk_trigram_fts() {
+        let path = std::env::temp_dir().join(format!(
+            "comic_catalog_v7_{}_{}.sqlite3",
+            std::process::id(),
+            uuid::Uuid::new_v4()
+        ));
+        let connection = Connection::open(&path).unwrap();
+        connection
+            .execute_batch(
+                "CREATE TABLE schema_migrations(version INTEGER PRIMARY KEY, applied_at TEXT NOT NULL);",
+            )
+            .unwrap();
+        for (version, sql) in MIGRATIONS.iter().filter(|(version, _)| *version <= 7) {
+            connection.execute_batch(sql).unwrap();
+            connection
+                .execute(
+                    "INSERT INTO schema_migrations(version, applied_at) VALUES(?1, CURRENT_TIMESTAMP)",
+                    [version],
+                )
+                .unwrap();
+        }
+        connection
+            .execute(
+                "INSERT INTO comics(id,title) VALUES('cjk','測試漫畫標題')",
+                [],
+            )
+            .unwrap();
+        connection
+            .execute(
+                "INSERT INTO comic_locations(comic_id,runtime_id,source_id,relative_path,kind,online) VALUES('cjk','cjk','local','測試漫畫標題.zip','archive',1)",
+                [],
+            )
+            .unwrap();
+        connection
+            .execute(
+                "INSERT INTO catalog_fts(comic_id,title,series,path,creators,tags,language) VALUES('cjk','測試漫畫標題','','測試漫畫標題.zip','','','')",
+                [],
+            )
+            .unwrap();
+        drop(connection);
+
+        let store = CatalogStore::new(path).unwrap();
+        let result = store
+            .search(CatalogQuery {
+                query: "漫畫".into(),
+                offset: 0,
+                limit: 20,
+            })
+            .unwrap();
+        assert_eq!(result.total, 1);
+        assert_eq!(result.items[0].comic_id, "cjk");
+    }
+
+    #[test]
+    fn short_gram_index_handles_cjk_latin_punctuation_and_refreshes() {
+        let store = store("short_gram_index");
+        store
+            .sync_library(&[comic("runtime", "short/book.zip")])
+            .unwrap();
+        let comic_id = store.get_metadata("runtime").unwrap().comic_id;
+        store
+            .apply_batch(BatchEditRequest {
+                comic_ids: vec![comic_id.clone()],
+                fields: BTreeMap::from([("title".into(), Some("Ab!漫畫".into()))]),
+                ..Default::default()
+            })
+            .unwrap();
+
+        for query in ["A", "Ab", "漫", "漫畫", "!"] {
+            let result = store
+                .search(CatalogQuery {
+                    query: query.into(),
+                    offset: 0,
+                    limit: 20,
+                })
+                .unwrap();
+            assert_eq!(result.total, 1, "query={query}");
+            assert_eq!(result.items[0].comic_id, comic_id, "query={query}");
+        }
+
+        store
+            .apply_batch(BatchEditRequest {
+                comic_ids: vec![comic_id.clone()],
+                fields: BTreeMap::from([("title".into(), Some("更新後!".into()))]),
+                ..Default::default()
+            })
+            .unwrap();
+        let removed = store
+            .search(CatalogQuery {
+                query: "漫畫".into(),
+                offset: 0,
+                limit: 20,
+            })
+            .unwrap();
+        assert_eq!(removed.total, 0);
+        let refreshed = store
+            .search(CatalogQuery {
+                query: "!".into(),
+                offset: 0,
+                limit: 20,
+            })
+            .unwrap();
+        assert_eq!(refreshed.total, 1);
+    }
+
+    #[test]
+    fn short_search_pagination_follows_catalog_recency_order() {
+        let store = store("short_search_order");
+        store
+            .sync_library(&[
+                comic("runtime-old", "old!.zip"),
+                comic("runtime-new", "new!.zip"),
+                comic("runtime-mid", "mid!.zip"),
+            ])
+            .unwrap();
+        let old_id = store.get_metadata("runtime-old").unwrap().comic_id;
+        let new_id = store.get_metadata("runtime-new").unwrap().comic_id;
+        let mid_id = store.get_metadata("runtime-mid").unwrap().comic_id;
+        store
+            .with_connection(|connection| {
+                for (id, updated_at) in [
+                    (&old_id, "2026-01-01"),
+                    (&new_id, "2026-03-01"),
+                    (&mid_id, "2026-02-01"),
+                ] {
+                    connection
+                        .execute(
+                            "UPDATE comics SET updated_at=?2 WHERE id=?1",
+                            params![id, updated_at],
+                        )
+                        .map_err(|error| error.to_string())?;
+                }
+                Ok(())
+            })
+            .unwrap();
+        let first = store
+            .search(CatalogQuery {
+                query: "!".into(),
+                offset: 0,
+                limit: 2,
+            })
+            .unwrap();
+        let second = store
+            .search(CatalogQuery {
+                query: "!".into(),
+                offset: 2,
+                limit: 2,
+            })
+            .unwrap();
+        assert_eq!(first.total, 3);
+        assert_eq!(
+            first
+                .items
+                .iter()
+                .map(|item| &item.comic_id)
+                .collect::<Vec<_>>(),
+            vec![&new_id, &mid_id]
+        );
+        assert_eq!(
+            second
+                .items
+                .iter()
+                .map(|item| &item.comic_id)
+                .collect::<Vec<_>>(),
+            vec![&old_id]
+        );
+    }
+
+    #[test]
     fn undo_reverts_only_its_own_delta_and_preserves_later_edits() {
         let store = store("delta_safe_undo");
         store.sync_library(&[comic("runtime", "undo.zip")]).unwrap();
@@ -4550,6 +5121,48 @@ mod tests {
                 samples[18]
             );
         }
+    }
+
+    #[test]
+    fn search_finds_short_cjk_substrings_with_cursor_fallback() {
+        let store = store("search_cjk_substring");
+        store
+            .sync_library(&[comic("runtime", "測試漫畫標題.zip")])
+            .unwrap();
+        let result = store
+            .search(CatalogQuery {
+                query: "漫畫".into(),
+                offset: 0,
+                limit: 20,
+            })
+            .unwrap();
+        assert_eq!(result.total, 1);
+        assert_eq!(result.items[0].title, "測試漫畫標題");
+        store
+            .apply_batch(BatchEditRequest {
+                comic_ids: vec!["runtime".into()],
+                fields: BTreeMap::from([("title".into(), Some("手動標題".into()))]),
+                add_tags: vec![],
+                exclude_tags: vec![],
+            })
+            .unwrap();
+        let path_result = store
+            .search(CatalogQuery {
+                query: "漫畫".into(),
+                offset: 0,
+                limit: 20,
+            })
+            .unwrap();
+        assert_eq!(path_result.total, 1);
+        assert_eq!(path_result.items[0].title, "手動標題");
+        let trigram_result = store
+            .search(CatalogQuery {
+                query: "漫畫標".into(),
+                offset: 0,
+                limit: 20,
+            })
+            .unwrap();
+        assert_eq!(trigram_result.total, 1);
     }
 
     #[test]
@@ -4817,6 +5430,66 @@ mod tests {
                     )
                     .map_err(|error| error.to_string())?;
                 assert_eq!(raw_tags, 2);
+                Ok(())
+            })
+            .unwrap();
+    }
+
+    #[test]
+    fn ensure_tag_reuses_raw_tag_canonical_after_rename() {
+        let store = store("tag_canonical_reuse");
+        store
+            .sync_library(&[comic("runtime", "canonical.zip")])
+            .unwrap();
+        let tag = ScopedTag {
+            namespace: "type".into(),
+            value: "原始標籤".into(),
+        };
+        store
+            .apply_batch(BatchEditRequest {
+                comic_ids: vec!["runtime".into()],
+                fields: BTreeMap::new(),
+                add_tags: vec![tag.clone()],
+                exclude_tags: vec![],
+            })
+            .unwrap();
+        let canonical_id: i64 = store
+            .with_connection(|connection| {
+                connection
+                    .query_row(
+                        "SELECT canonical_tag_id FROM tags WHERE namespace='type' AND normalized_value='原始標籤'",
+                        [],
+                        |row| row.get(0),
+                    )
+                    .map_err(|error| error.to_string())
+            })
+            .unwrap();
+        store.rename_tag(canonical_id, "重新命名").unwrap();
+
+        // The raw evidence still has the old spelling and points to the renamed
+        // canonical row. Reusing it must not create an orphan canonical row.
+        store
+            .apply_batch(BatchEditRequest {
+                comic_ids: vec!["runtime".into()],
+                fields: BTreeMap::new(),
+                add_tags: vec![tag],
+                exclude_tags: vec![],
+            })
+            .unwrap();
+        store
+            .with_connection(|connection| {
+                let canonical_count: i64 = connection
+                    .query_row("SELECT COUNT(*) FROM canonical_tags", [], |row| row.get(0))
+                    .map_err(|error| error.to_string())?;
+                let current_canonical: i64 = connection
+                    .query_row(
+                        "SELECT canonical_tag_id FROM tags WHERE namespace='type' AND normalized_value='原始標籤'",
+                        [],
+                        |row| row.get(0),
+                    )
+                    .map_err(|error| error.to_string())?;
+                assert_eq!(canonical_count, 1);
+                assert_eq!(current_canonical, canonical_id);
                 Ok(())
             })
             .unwrap();

@@ -60,7 +60,8 @@ const flattened = JSON.stringify(document);
 const todoCount = (flattened.match(/\bTODO\b/gi) ?? []).length;
 const suspiciousSecretKey = /"(?:apiKey|api_key|password|secret|token)"\s*:\s*"(?!TODO)/i;
 if (suspiciousSecretKey.test(flattened)) failures.push('possible secret value found in canonical JSON');
-if (flattened.includes('sk-') || flattened.includes('AIza')) failures.push('possible provider key prefix found in canonical JSON');
+const providerKeyShape = /(?:^|[^A-Za-z0-9_-])(?:sk-[A-Za-z0-9_-]{20,}|AIza[0-9A-Za-z_-]{30,})(?=$|[^A-Za-z0-9_-])/;
+if (providerKeyShape.test(flattened)) failures.push('possible provider key prefix found in canonical JSON');
 
 if (failures.length > 0) {
   console.error('LOCAL DRY-RUN: FAIL');

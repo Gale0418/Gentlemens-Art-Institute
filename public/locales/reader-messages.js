@@ -1231,6 +1231,10 @@ window.GAIL10n.register({
     "en": "Rotation is unavailable in vertical-scroll mode.",
     "ja": "縦スクロールモードでは回転できません。"
   },
+  "目錄模式不支援旋轉。": {
+    "en": "Rotation is unavailable in catalog mode.",
+    "ja": "カタログモードでは回転できません。"
+  },
   "載入中…": {
     "en": "Loading…",
     "ja": "読み込み中…"
@@ -1242,5 +1246,125 @@ window.GAIL10n.register({
   "下一本": {
     "en": "Next comic",
     "ja": "次のコミック"
+  },
+  "Key 預設只保留本次工作階段；勾選記住後會由本機 Keychain 保管，不會寫入一般設定檔。每次啟用 AI（包含 App 重新啟動後）都要重新同意目前工作階段的資料傳送；重新啟動後請再選擇使用已儲存金鑰。你可以在設定中清除已記住的 Key。": {
+    "en": "Keys stay in this session by default. When remembered, the device Keychain stores them instead of the regular settings file. Each AI activation, including after an app restart, requires fresh consent for data sharing in the current session; after restarting, choose Use saved key again. You can clear the remembered key in Settings.",
+    "ja": "キーは既定でこのセッションだけ保持されます。記憶すると通常の設定ファイルではなくデバイス Keychain に保存されます。AI を有効にするたび（アプリ再起動後を含む）に現在のセッションのデータ共有へ再同意が必要です。再起動後は保存済みキーをもう一度選択してください。保存済みキーは設定から消去できます。"
+  },
+  "使用本機 Keychain 記住這個 Key（只保存一個供應商；儲存另一家會取代既有 Key）": {
+    "en": "Remember this key in the device Keychain (one provider at a time; saving another replaces the existing key)",
+    "ja": "このキーをデバイス Keychain に保存（保存できる供給元は1つだけ；別のキーを保存すると既存のキーを置き換えます）"
+  },
+  "顯示前 {count} 頁": {
+    "en": "Show previous {count} pages",
+    "ja": "前の{count}ページを表示"
+  },
+  "顯示第 {start}–{end} / {total} 頁": {
+    "en": "Showing pages {start}–{end} / {total}",
+    "ja": "{start}～{end} / {total}ページを表示"
+  },
+  "顯示後 {count} 頁": {
+    "en": "Show next {count} pages",
+    "ja": "次の{count}ページを表示"
+  },
+  "使用已儲存金鑰": {
+    "en": "Use saved key",
+    "ja": "保存済みキーを使用"
+  },
+  "尚未設定艦載 AI。Key 預設只保留本次工作階段。": {
+    "en": "Embedded AI is not configured. Keys stay in this session by default.",
+    "ja": "搭載 AI は未設定です。キーは既定でこのセッションだけ保持されます。"
+  },
+  "已啟用 {label} · {model}；暫時無法查詢本機 Keychain，已儲存 Key 狀態未知。": {
+    "en": "Enabled {label} · {model}; the device Keychain is temporarily unavailable, so saved-key status is unknown.",
+    "ja": "{label} · {model} を有効化中。デバイス Keychain を一時的に確認できないため、保存済みキーの状態は不明です。"
+  },
+  "暫時無法查詢本機 Keychain，已儲存 Key 狀態未知。請解鎖裝置後重開設定，或選擇供應商並重試還原。": {
+    "en": "The device Keychain is temporarily unavailable, so saved-key status is unknown. Unlock the device and reopen settings, or select a provider and retry restore.",
+    "ja": "デバイス Keychain を一時的に確認できず、保存済みキーの状態は不明です。デバイスのロックを解除して設定を開き直すか、供給元を選んで復元を再試行してください。"
+  },
+  "已啟用 {label} · {model}{storage}": {
+    "en": "Enabled {label} · {model}{storage}",
+    "ja": "{label} · {model} を有効化{storage}"
+  },
+  "本機 Keychain 已記住 {label} Key；請切換回 {provider}，再勾選本次同意後使用。": {
+    "en": "The device Keychain has a saved {label} key. Switch back to {provider}, then give consent for this session to use it.",
+    "ja": "デバイス Keychain に {label} キーがあります。{provider} に戻り、このセッションへの同意を確認して使用してください。"
+  },
+  "本機 Keychain 已記住 {label} Key；請勾選本次同意後按「使用已儲存金鑰」。": {
+    "en": "The device Keychain has a saved {label} key. Check this session's consent, then select “Use saved key”.",
+    "ja": "デバイス Keychain に {label} キーがあります。このセッションへの同意を確認して「保存済みキーを使用」を選択してください。"
+  },
+  "；Key 已由本機 Keychain 記住": {
+    "en": "; the key is remembered in the device Keychain",
+    "ja": "；キーはデバイス Keychain に保存済み"
+  },
+  "；Key 只保留本次工作階段": {
+    "en": "; the key stays in this session",
+    "ja": "；キーはこのセッションだけ保持"
+  },
+  "艦載 AI 已啟用；Key 已由本機 Keychain 記住": {
+    "en": "Embedded AI enabled; the key is remembered in the device Keychain",
+    "ja": "搭載 AI を有効化しました。キーはデバイス Keychain に保存されます"
+  },
+  "使用已儲存金鑰前，請先勾選本次第三方 AI 資料分享同意。": {
+    "en": "Before using the saved key, check consent for third-party AI data sharing this session.",
+    "ja": "保存済みキーを使用する前に、このセッションの第三者 AI データ共有への同意を確認してください。"
+  },
+  "請先切換回已儲存 Key 所屬的供應商：{provider}": {
+    "en": "Switch back to the provider that owns the saved key first: {provider}",
+    "ja": "保存済みキーの供給元に戻してください：{provider}"
+  },
+  "已從本機 Keychain 還原艦載 AI；本次同意只適用於目前工作階段。": {
+    "en": "Embedded AI restored from the device Keychain; this consent applies only to the current session.",
+    "ja": "搭載 AI をデバイス Keychain から復元しました。この同意は現在のセッションだけに適用されます。"
+  },
+  "還原艦載 AI 失敗：{error}": {
+    "en": "Could not restore embedded AI: {error}",
+    "ja": "搭載 AI の復元に失敗しました：{error}"
+  },
+  "已清除工作階段 API Key 與本機 Keychain 記錄": {
+    "en": "Session API key and device Keychain record cleared",
+    "ja": "セッション API キーとデバイス Keychain の記録を消去しました"
+  },
+  "清除艦載 AI 失敗：{error}": {
+    "en": "Could not clear embedded AI: {error}",
+    "ja": "搭載 AI の消去に失敗しました：{error}"
+  },
+  "本機 Keychain 有已儲存 Key，但目前版本無法確認所屬供應商；請先更新 App。": {
+    "en": "The device Keychain has a saved key, but this app version cannot identify its provider. Update the app first.",
+    "ja": "デバイス Keychain に保存済みキーがありますが、このバージョンでは供給元を確認できません。先にアプリを更新してください。"
+  },
+  "目前版本無法確認已儲存 Key 所屬供應商，請先更新 App。": {
+    "en": "This app version cannot identify the saved key's provider. Update the app first.",
+    "ja": "このバージョンでは保存済みキーの供給元を確認できません。先にアプリを更新してください。"
+  },
+  "正在撤銷上一家供應商的艦載 AI 工作階段…": {
+    "en": "Revoking the previous provider's embedded AI session…",
+    "ja": "前の供給元の搭載 AI セッションを取り消しています…"
+  },
+  "切換供應商失敗：目前版本無法撤銷舊的艦載 AI 工作階段。": {
+    "en": "Provider switch failed: this app version cannot revoke the old embedded AI session.",
+    "ja": "供給元の切り替えに失敗しました。このバージョンでは以前の搭載 AI セッションを取り消せません。"
+  },
+  "切換供應商失敗，已暫停 AI 操作；請先更新 App。": {
+    "en": "Provider switch failed. AI actions are paused; update the app first.",
+    "ja": "供給元の切り替えに失敗したため、AI 操作を停止しました。先にアプリを更新してください。"
+  },
+  "切換供應商失敗：{error} AI 操作已暫停。": {
+    "en": "Provider switch failed: {error}. AI actions are paused.",
+    "ja": "供給元の切り替えに失敗しました：{error}。AI 操作を停止しました。"
+  },
+  "切換供應商失敗，已暫停 AI 操作。": {
+    "en": "Provider switch failed. AI actions are paused.",
+    "ja": "供給元の切り替えに失敗したため、AI 操作を停止しました。"
+  },
+  "目前正在變更艦載 AI 設定，請稍後再切換供應商。": {
+    "en": "Embedded AI settings are changing. Switch providers shortly.",
+    "ja": "搭載 AI の設定を変更中です。少し待ってから供給元を切り替えてください。"
+  },
+  "艦載 AI 工作階段正在切換，請稍後再試。": {
+    "en": "The embedded AI session is switching providers. Try again shortly.",
+    "ja": "搭載 AI セッションの供給元を切り替えています。少し待ってから再試行してください。"
   }
 });

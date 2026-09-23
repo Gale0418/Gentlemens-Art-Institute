@@ -89,10 +89,7 @@ fn cache_control_for_comic(comic: &ComicItem) -> &'static str {
     // become /3, so any WebView cache would serve the wrong image. Archive
     // entry indexes are stable for the current reader session and benefit from
     // a small private cache, especially when a large shelf asks for covers.
-    if comic.r#type.contains("folder")
-        || comic.r#type.contains("image")
-        || comic.ext.is_empty()
-    {
+    if comic.r#type.contains("folder") || comic.r#type.contains("image") || comic.ext.is_empty() {
         MUTABLE_IMAGE_CACHE_CONTROL
     } else {
         ARCHIVE_IMAGE_CACHE_CONTROL
@@ -100,7 +97,9 @@ fn cache_control_for_comic(comic: &ComicItem) -> &'static str {
 }
 
 fn decode_capability_path(id: &str) -> Result<String, ()> {
-    let bytes = general_purpose::URL_SAFE_NO_PAD.decode(id).map_err(|_| ())?;
+    let bytes = general_purpose::URL_SAFE_NO_PAD
+        .decode(id)
+        .map_err(|_| ())?;
     String::from_utf8(bytes).map_err(|_| ())
 }
 
@@ -193,7 +192,10 @@ pub fn handle_comic_request(
     let path_str = uri.strip_prefix("gai://").unwrap_or(&uri);
     let path_str = path_str.strip_prefix("localhost/").unwrap_or(path_str);
 
-    let parts: Vec<&str> = path_str.split('/').filter(|segment| !segment.is_empty()).collect();
+    let parts: Vec<&str> = path_str
+        .split('/')
+        .filter(|segment| !segment.is_empty())
+        .collect();
     if parts.is_empty() {
         return Response::builder()
             .status(StatusCode::BAD_REQUEST)
@@ -310,9 +312,11 @@ pub fn handle_comic_request(
                     .get(folder_id)
                     .and_then(|files| files.get(index).cloned())
             };
-            let image_path = cached_path
-                .map(std::path::PathBuf::from)
-                .or_else(|| crate::utils::get_folder_images(&folder_path).get(index).cloned());
+            let image_path = cached_path.map(std::path::PathBuf::from).or_else(|| {
+                crate::utils::get_folder_images(&folder_path)
+                    .get(index)
+                    .cloned()
+            });
             if let Some(image_path) = image_path {
                 if let Some(canonical_image) = canonical_image_within(&image_path, &folder_path) {
                     let mut file = match File::open(&canonical_image) {
@@ -382,41 +386,40 @@ pub fn handle_comic_request(
                 return Response::builder()
                     .status(StatusCode::NOT_FOUND)
                     .body(b"unknown comic".to_vec())
-                .map_err(Into::into)
+                    .map_err(Into::into)
             }
         };
 
         if comic_info.source_id == "photos" || comic_info.r#type == "photo-album" {
-            let (album_id, asset_id) = match crate::photo_library::page_asset(&state, id, page_index)
-            {
-                Some(value) => value,
-                None => {
-                    return Response::builder()
-                        .status(StatusCode::FORBIDDEN)
-                        .body(b"photo album is unavailable".to_vec())
-                        .map_err(Into::into)
-                }
-            };
+            let (album_id, asset_id) =
+                match crate::photo_library::page_asset(&state, id, page_index) {
+                    Some(value) => value,
+                    None => {
+                        return Response::builder()
+                            .status(StatusCode::FORBIDDEN)
+                            .body(b"photo album is unavailable".to_vec())
+                            .map_err(Into::into)
+                    }
+                };
             let allow_network = state
                 .photo_network_allowed
                 .load(std::sync::atomic::Ordering::Acquire);
-            let (path, mime_type) = match tauri::async_runtime::block_on(
-                crate::photo_library::request_image(
+            let (path, mime_type) =
+                match tauri::async_runtime::block_on(crate::photo_library::request_image(
                     app,
                     album_id,
                     asset_id,
                     host == "cover",
                     allow_network,
-                ),
-            ) {
-                Ok(value) => value,
-                Err(error) => {
-                    return Response::builder()
-                        .status(crate::photo_library::native_image_error_status(&error))
-                        .body(b"photo image unavailable".to_vec())
-                        .map_err(Into::into)
-                }
-            };
+                )) {
+                    Ok(value) => value,
+                    Err(error) => {
+                        return Response::builder()
+                            .status(crate::photo_library::native_image_error_status(&error))
+                            .body(b"photo image unavailable".to_vec())
+                            .map_err(Into::into)
+                    }
+                };
             if mime_type != "image/jpeg" {
                 return Response::builder()
                     .status(StatusCode::UNPROCESSABLE_ENTITY)
@@ -499,8 +502,7 @@ pub fn handle_comic_request(
 
         let cached_buf = {
             let pool = state.ram_cache_pool.lock().unwrap();
-            pool.get(id)
-                .and_then(|book| book.get(&page_index).cloned())
+            pool.get(id).and_then(|book| book.get(&page_index).cloned())
         };
         if let Some(buf) = cached_buf {
             let mime = detect_mime(&buf, &comic_info.ext);
@@ -837,10 +839,7 @@ mod tests {
 
     #[test]
     fn test_detect_mime_unknown_is_not_jpeg() {
-        assert_eq!(
-            detect_mime(b"not an image", ""),
-            "application/octet-stream"
-        );
+        assert_eq!(detect_mime(b"not an image", ""), "application/octet-stream");
     }
 
     #[test]
@@ -875,9 +874,7 @@ mod tests {
         assert!(route_shape_is_valid(&["folder", "id", "0"]));
         assert!(!route_shape_is_valid(&["cover", "id", "ignored"]));
         assert!(!route_shape_is_valid(&["page", "id"]));
-        assert!(!route_shape_is_valid(&[
-            "folder", "id", "0", "ignored"
-        ]));
+        assert!(!route_shape_is_valid(&["folder", "id", "0", "ignored"]));
         assert!(!route_shape_is_valid(&["unknown", "id"]));
     }
 
@@ -885,10 +882,7 @@ mod tests {
     fn capability_paths_fail_closed() {
         assert!(decode_capability_path("not*base64").is_err());
         let valid = general_purpose::URL_SAFE_NO_PAD.encode(b"./series/book.cbz");
-        assert_eq!(
-            decode_capability_path(&valid).unwrap(),
-            "./series/book.cbz"
-        );
+        assert_eq!(decode_capability_path(&valid).unwrap(), "./series/book.cbz");
     }
 
     #[test]

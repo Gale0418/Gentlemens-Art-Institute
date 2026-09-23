@@ -137,114 +137,41 @@ pub async fn preload_comic_window(
     let completion_handle = app_handle.clone();
     let completion_state = state.clone();
     let completion_id = id.clone();
-    let task = tokio::task::spawn_blocking(move || -> Result<Option<PreloadResult>, PreloadError> {
-        let file = File::open(&full_path)
-            .map_err(|error| PreloadError::new(format!("無法讀取預載 ZIP：{error}")))?;
-        let mut archive = zip::ZipArchive::new(file)
-            .map_err(|error| PreloadError::new(format!("預載 ZIP 格式無效：{error}")))?;
-        let entry_names = {
-            let opened = state.opened_comic_files.read().unwrap();
-            opened.get(&id).cloned().unwrap_or_default()
-        };
-
-        let page_sizes = entry_names
-            .iter()
-            .map(|entry_name| {
-                archive
-                    .by_name(entry_name)
-                    .map(|entry| entry.size())
-                    .map_err(|error| {
-                        PreloadError::new(format!("預載找不到 ZIP 頁面 {entry_name}：{error}"))
-                    })
-            })
-            .collect::<Result<Vec<_>, _>>()?;
-        let budget_bytes = state.refresh_cache_budget();
-        let selection = select_pages_for_budget(&page_sizes, current_page, budget_bytes);
-        let selected_indices = selection
-            .indices
-            .iter()
-            .copied()
-            .filter(|index| page_sizes[*index] <= MAX_PRELOAD_PAGE_BYTES as u64)
-            .collect::<Vec<_>>();
-        let selected_pages: HashSet<_> = selected_indices.iter().copied().collect();
-        let preload_count = selected_indices.len();
-        let can_cache_whole_book = selection.whole_book && preload_count == entry_names.len();
-
-        let (mut cached_bytes, mut loaded_count) = {
-            let _lifecycle = state.comic_lifecycle.lock().unwrap();
-            if state
-                .preload_generation
-                .load(std::sync::atomic::Ordering::Acquire)
-                != generation
-            {
-                return Ok(None);
-            }
-            let mut pool = state.ram_cache_pool.lock().unwrap();
-            let book = pool.entry(id.clone()).or_default();
-            book.retain(|page_index, _| selected_pages.contains(page_index));
-            (book.values().map(Vec::len).sum(), book.len())
-        };
-
-        for page_index in selected_indices {
-            let budget_bytes = state.refresh_cache_budget();
-            if budget_bytes == 0 {
-                break;
-            }
-            let target_name = &entry_names[page_index];
-            if state
-                .preload_generation
-                .load(std::sync::atomic::Ordering::Acquire)
-                != generation
-            {
-                return Ok(None);
-            }
-            let already_cached = {
-                let pool = state.ram_cache_pool.lock().unwrap();
-                pool.get(&id)
-                    .is_some_and(|pages| pages.contains_key(&page_index))
+    let task =
+        tokio::task::spawn_blocking(move || -> Result<Option<PreloadResult>, PreloadError> {
+            let file = File::open(&full_path)
+                .map_err(|error| PreloadError::new(format!("無法讀取預載 ZIP：{error}")))?;
+            let mut archive = zip::ZipArchive::new(file)
+                .map_err(|error| PreloadError::new(format!("預載 ZIP 格式無效：{error}")))?;
+            let entry_names = {
+                let opened = state.opened_comic_files.read().unwrap();
+                opened.get(&id).cloned().unwrap_or_default()
             };
-            if already_cached {
-                continue;
-            }
 
-            let mut file = archive.by_name(target_name).map_err(|error| {
-                PreloadError::with_progress(
-                    format!("預載找不到 ZIP 頁面 {target_name}：{error}"),
-                    loaded_count,
-                    preload_count,
-                )
-            })?;
-            let expected_size = usize::try_from(file.size()).unwrap_or(usize::MAX);
-            let remaining = budget_bytes.saturating_sub(cached_bytes);
-            let page_limit = remaining.min(MAX_PRELOAD_PAGE_BYTES);
-            if expected_size > page_limit {
-                continue;
-            }
+            let page_sizes = entry_names
+                .iter()
+                .map(|entry_name| {
+                    archive
+                        .by_name(entry_name)
+                        .map(|entry| entry.size())
+                        .map_err(|error| {
+                            PreloadError::new(format!("預載找不到 ZIP 頁面 {entry_name}：{error}"))
+                        })
+                })
+                .collect::<Result<Vec<_>, _>>()?;
+            let budget_bytes = state.refresh_cache_budget();
+            let selection = select_pages_for_budget(&page_sizes, current_page, budget_bytes);
+            let selected_indices = selection
+                .indices
+                .iter()
+                .copied()
+                .filter(|index| page_sizes[*index] <= MAX_PRELOAD_PAGE_BYTES as u64)
+                .collect::<Vec<_>>();
+            let selected_pages: HashSet<_> = selected_indices.iter().copied().collect();
+            let preload_count = selected_indices.len();
+            let can_cache_whole_book = selection.whole_book && preload_count == entry_names.len();
 
-            let mut buf = Vec::new();
-            file.by_ref()
-                .take(page_limit.saturating_add(1) as u64)
-                .read_to_end(&mut buf)
-                .map_err(|error| {
-                    PreloadError::with_progress(
-                        format!("預載解壓 ZIP 頁面失敗：{error}"),
-                        loaded_count,
-                        preload_count,
-                    )
-                })?;
-            if buf.len() > page_limit {
-                continue;
-            }
-            if state
-                .preload_generation
-                .load(std::sync::atomic::Ordering::Acquire)
-                != generation
-            {
-                return Ok(None);
-            }
-
-            let id_clone = id.clone();
-            {
+            let (mut cached_bytes, mut loaded_count) = {
                 let _lifecycle = state.comic_lifecycle.lock().unwrap();
                 if state
                     .preload_generation
@@ -254,44 +181,118 @@ pub async fn preload_comic_window(
                     return Ok(None);
                 }
                 let mut pool = state.ram_cache_pool.lock().unwrap();
-                let book = pool.entry(id_clone.clone()).or_default();
-                if book.contains_key(&page_index) {
-                    continue;
-                }
-                let current_bytes: usize = book.values().map(Vec::len).sum();
-                let live_budget = state.current_cache_budget_bytes();
-                if buf.len() > live_budget.saturating_sub(current_bytes) {
-                    continue;
-                }
-                cached_bytes = current_bytes.saturating_add(buf.len());
-                book.insert(page_index, buf);
-            }
-            loaded_count += 1;
-            let _ = app_handle.emit(
-                "ram-cache-progress",
-                serde_json::json!({
-                    "id": id_clone,
-                    "generation": generation,
-                    "pageIndex": current_page,
-                    "loaded": loaded_count,
-                    "total": preload_count,
-                    "budgetBytes": budget_bytes,
-                    "cachedBytes": cached_bytes,
-                    "wholeBook": can_cache_whole_book && loaded_count == entry_names.len(),
-                    "finished": false
-                }),
-            );
-        }
+                let book = pool.entry(id.clone()).or_default();
+                book.retain(|page_index, _| selected_pages.contains(page_index));
+                (book.values().map(Vec::len).sum(), book.len())
+            };
 
-        Ok(Some(PreloadResult {
-            loaded: loaded_count,
-            total: preload_count,
-            budget_bytes: state.current_cache_budget_bytes(),
-            cached_bytes,
-            whole_book: can_cache_whole_book && loaded_count == entry_names.len(),
-        }))
-    })
-    .await;
+            for page_index in selected_indices {
+                let budget_bytes = state.refresh_cache_budget();
+                if budget_bytes == 0 {
+                    break;
+                }
+                let target_name = &entry_names[page_index];
+                if state
+                    .preload_generation
+                    .load(std::sync::atomic::Ordering::Acquire)
+                    != generation
+                {
+                    return Ok(None);
+                }
+                let already_cached = {
+                    let pool = state.ram_cache_pool.lock().unwrap();
+                    pool.get(&id)
+                        .is_some_and(|pages| pages.contains_key(&page_index))
+                };
+                if already_cached {
+                    continue;
+                }
+
+                let mut file = archive.by_name(target_name).map_err(|error| {
+                    PreloadError::with_progress(
+                        format!("預載找不到 ZIP 頁面 {target_name}：{error}"),
+                        loaded_count,
+                        preload_count,
+                    )
+                })?;
+                let expected_size = usize::try_from(file.size()).unwrap_or(usize::MAX);
+                let remaining = budget_bytes.saturating_sub(cached_bytes);
+                let page_limit = remaining.min(MAX_PRELOAD_PAGE_BYTES);
+                if expected_size > page_limit {
+                    continue;
+                }
+
+                let mut buf = Vec::new();
+                file.by_ref()
+                    .take(page_limit.saturating_add(1) as u64)
+                    .read_to_end(&mut buf)
+                    .map_err(|error| {
+                        PreloadError::with_progress(
+                            format!("預載解壓 ZIP 頁面失敗：{error}"),
+                            loaded_count,
+                            preload_count,
+                        )
+                    })?;
+                if buf.len() > page_limit {
+                    continue;
+                }
+                if state
+                    .preload_generation
+                    .load(std::sync::atomic::Ordering::Acquire)
+                    != generation
+                {
+                    return Ok(None);
+                }
+
+                let id_clone = id.clone();
+                {
+                    let _lifecycle = state.comic_lifecycle.lock().unwrap();
+                    if state
+                        .preload_generation
+                        .load(std::sync::atomic::Ordering::Acquire)
+                        != generation
+                    {
+                        return Ok(None);
+                    }
+                    let mut pool = state.ram_cache_pool.lock().unwrap();
+                    let book = pool.entry(id_clone.clone()).or_default();
+                    if book.contains_key(&page_index) {
+                        continue;
+                    }
+                    let current_bytes: usize = book.values().map(Vec::len).sum();
+                    let live_budget = state.current_cache_budget_bytes();
+                    if buf.len() > live_budget.saturating_sub(current_bytes) {
+                        continue;
+                    }
+                    cached_bytes = current_bytes.saturating_add(buf.len());
+                    book.insert(page_index, buf);
+                }
+                loaded_count += 1;
+                let _ = app_handle.emit(
+                    "ram-cache-progress",
+                    serde_json::json!({
+                        "id": id_clone,
+                        "generation": generation,
+                        "pageIndex": current_page,
+                        "loaded": loaded_count,
+                        "total": preload_count,
+                        "budgetBytes": budget_bytes,
+                        "cachedBytes": cached_bytes,
+                        "wholeBook": can_cache_whole_book && loaded_count == entry_names.len(),
+                        "finished": false
+                    }),
+                );
+            }
+
+            Ok(Some(PreloadResult {
+                loaded: loaded_count,
+                total: preload_count,
+                budget_bytes: state.current_cache_budget_bytes(),
+                cached_bytes,
+                whole_book: can_cache_whole_book && loaded_count == entry_names.len(),
+            }))
+        })
+        .await;
 
     if completion_state
         .preload_generation

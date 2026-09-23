@@ -77,4 +77,4 @@ Rust 測試與 Clippy 的 npm scripts 透過 `scripts/with-private-cargo-cache.m
 
 第三方 AI 的 **provider-neutral explicit consent** 必須同時在正式 Tauri bridge 與 native command 邊界成立：OpenAI 與 Google 都需要明確同意；切換 provider 會撤銷先前同意並重新確認。現有 wire 欄位仍名為 `googleContentDisclosure`，只是為了避免大前端契約破壞，不代表只有 Google 需要同意。
 
-AI 金鑰只存在工作階段記憶體，不進 SQLite、localStorage、log 或匯出檔。Release CSP 只允許 bundled self scripts；不要新增能繞過 bridge 直接呼叫 AI session command 的遠端或不受信任腳本。
+AI 金鑰預設只存在工作階段記憶體；macOS／iOS／iPadOS 在使用者明確選擇後可存入 Keychain，清除設定時需刪除。金鑰不進 SQLite、localStorage、log 或匯出檔。即使 Keychain 中有金鑰，重新啟用 AI 仍需當次明確同意第三方傳送。Release CSP 只允許 bundled self scripts；不要新增能繞過 bridge 直接呼叫 AI session command 的遠端或不受信任腳本。

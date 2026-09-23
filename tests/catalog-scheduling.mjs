@@ -2,6 +2,12 @@ import assert from 'node:assert/strict';
 import fs from 'node:fs';
 import vm from 'node:vm';
 
+const appSource = fs.readFileSync(new URL('../public/app.js', import.meta.url), 'utf8');
+assert.match(appSource, /await restoreExternalBookmarks\(\)/, 'initial external bookmark restore must use the intent queue');
+assert.match(appSource, /async function restoreExternalBookmarks\(\)[\s\S]{0,260}setBookmarks\(readExternalBookmarks\(\)\)/, 'empty initial bookmark restore must still clear native state');
+assert.match(appSource, /const latestBookmarks = readExternalBookmarks\(\)[\s\S]{0,180}bookmark\.bookmark !== bookmarkIdentity/, 'bookmark deletion must resolve identity inside the queue');
+assert.match(appSource, /async function initApp\(\)[\s\S]{0,180}sanitizeSmbConfig\(\)/, 'SMB legacy secrets must be sanitized during app initialization');
+
 class FakeClock {
   constructor() {
     this.now = 0;
@@ -68,20 +74,30 @@ class FakeElement {
     this.textContent = '';
     this.innerHTML = '';
     this.src = '';
+    this.replaceChildrenCalls = 0;
+    this.appendChildCalls = 0;
   }
 
   appendChild(child) {
+    this.appendChildCalls += 1;
     if (child?.isFragment) {
       for (const item of child.children.slice()) this.appendChild(item);
       child.children = [];
       return child;
     }
+    if (child.parentNode && child.parentNode !== this) {
+      child.parentNode.children = child.parentNode.children.filter(item => item !== child);
+    } else if (child.parentNode === this) {
+      this.children = this.children.filter(item => item !== child);
+    }
     child.parentNode = this;
+    child.isConnected = true;
     this.children.push(child);
     return child;
   }
 
   replaceChildren(...children) {
+    this.replaceChildrenCalls += 1;
     this.children.forEach(child => { child.parentNode = null; child.isConnected = false; });
     this.children = [];
     children.forEach(child => this.appendChild(child));
@@ -121,6 +137,10 @@ class FakeElement {
   }
   querySelectorAll(selector) {
     if (selector === 'img' || selector === '.lazy-cover') return this.children.filter(child => child.tagName === 'IMG');
+    if (selector === 'img[data-src]') {
+      const walk = node => node.children.flatMap(child => [child, ...walk(child)]);
+      return walk(this).filter(child => child.tagName === 'IMG' && child.dataset.src);
+    }
     return [];
   }
   scrollIntoView() {}
@@ -198,6 +218,18 @@ function createHarness({ width = 1000 } = {}) {
     navigator: { userAgent: '' },
     btoa: value => Buffer.from(value, 'binary').toString('base64'),
     unescape,
+  };
+  context.IntersectionObserver = class FakeIntersectionObserver {
+    static instances = [];
+    constructor(callback) {
+      this.callback = callback;
+      this.targets = [];
+      this.disconnectCalls = 0;
+      context.IntersectionObserver.instances.push(this);
+    }
+    observe(target) { this.targets.push(target); }
+    unobserve(target) { this.targets = this.targets.filter(item => item !== target); }
+    disconnect() { this.disconnectCalls += 1; this.targets = []; }
   };
   const RealDate = Date;
   context.Date = class TestDate extends RealDate {
@@ -278,6 +310,50 @@ const makeCover = id => {
   clock.tick(0);
   assert.equal(refreshes, 2);
   hooks.setLibraryRefreshRunner(null);
+}
+
+// 關閉閱讀器後，Continue／Inspector 由 innerHTML 重建時，焦點要回到同一本
+// 的新入口；快照只消費一次，入口消失時則安全放棄。
+{
+  const continueCase = createHarness();
+  const oldCard = new FakeElement('button');
+  oldCard.dataset.comicId = 'continue-book';
+  oldCard.classList.add('continue-card');
+  oldCard.closest = selector => selector === '.continue-card[data-comic-id]' ? oldCard : null;
+  continueCase.hooks.state.readerReturnFocus = oldCard;
+  continueCase.hooks.state.currentComic = { id: 'continue-book' };
+  await continueCase.hooks.closeReader();
+  assert.equal(continueCase.hooks.state.libraryRefreshFocusSnapshot.area, 'continue');
+  assert.equal(continueCase.hooks.state.libraryRefreshFocusSnapshot.comicId, 'continue-book');
+
+  const newCard = new FakeElement('button');
+  newCard.dataset.comicId = 'continue-book';
+  newCard.classList.add('continue-card');
+  continueCase.hooks.elements.continueStrip.children = [newCard];
+  assert.equal(continueCase.hooks.restoreLibraryRefreshFocus(), true);
+  assert.equal(newCard.focusCalls, 1, '重建後恢復 Continue 卡片焦點');
+  assert.equal(continueCase.hooks.state.libraryRefreshFocusSnapshot, null);
+  assert.equal(continueCase.hooks.restoreLibraryRefreshFocus(), false, '同一快照不重複搶焦點');
+
+  const inspectorCase = createHarness();
+  const oldOpen = new FakeElement('button');
+  oldOpen.dataset.comicId = 'inspector-book';
+  oldOpen.dataset.inspectorAction = 'open';
+  oldOpen.closest = selector => selector === '[data-inspector-action="open"][data-comic-id]' ? oldOpen : null;
+  inspectorCase.hooks.state.readerReturnFocus = oldOpen;
+  inspectorCase.hooks.state.currentComic = { id: 'inspector-book' };
+  await inspectorCase.hooks.closeReader();
+  const newOpen = new FakeElement('button');
+  newOpen.dataset.comicId = 'inspector-book';
+  newOpen.dataset.inspectorAction = 'open';
+  inspectorCase.hooks.elements.comicInspector.children = [newOpen];
+  assert.equal(inspectorCase.hooks.restoreLibraryRefreshFocus(), true);
+  assert.equal(newOpen.focusCalls, 1, '重建後恢復 Inspector 開始閱讀焦點');
+
+  const removed = createHarness();
+  removed.hooks.state.libraryRefreshFocusSnapshot = { area: 'continue', comicId: 'removed-book' };
+  assert.equal(removed.hooks.restoreLibraryRefreshFocus(), false, '入口移除時不聚焦 body 以外的節點');
+  assert.equal(removed.hooks.state.libraryRefreshFocusSnapshot, null);
 }
 
 // 單純滑動而沒有任何資料變更，不應重抓整個書庫。
@@ -501,9 +577,163 @@ const makeCover = id => {
   hooks.state.currentPageIndex = 0;
   hooks.state.readingMode = 'webtoon';
   hooks.renderPages();
-  assert.equal(pages.children.length, 3);
+  const firstGrid = pages.children.find(child => child.className === 'reader-catalog-grid');
+  assert.equal(firstGrid, undefined, 'webtoon rendering does not create a catalog grid');
+  assert.equal(pages.children.filter(child => child.className === 'webtoon-img').length, 3);
   hooks.renderPages();
-  assert.equal(pages.children.length, 3);
+  assert.equal(pages.children.filter(child => child.className === 'webtoon-img').length, 3);
+}
+
+// 目錄縮圖只保留固定頁窗，避免大本漫畫一次建立數千個節點。
+{
+  const catalog = createHarness();
+  // 以舊 WKWebView fallback 路徑驗證沒有 IntersectionObserver 時仍受併發上限保護。
+  catalog.context.IntersectionObserver = undefined;
+  catalog.hooks.state.currentComic = { id: 'large-catalog' };
+  catalog.hooks.state.currentComicPages = Array.from({ length: 5000 }, (_, index) => `p${index}`);
+  catalog.hooks.state.currentPageIndex = 2500;
+  catalog.hooks.state.readingMode = 'catalog';
+  catalog.hooks.renderPages();
+  const grid = catalog.hooks.elements.pagesContainer.children.find(child => child.className === 'reader-catalog-grid');
+  assert.ok(grid, 'catalog mode renders a thumbnail grid');
+  assert.ok(grid.children.length <= 160, 'large catalogs keep a bounded thumbnail window');
+  assert.equal(catalog.hooks.state.catalogWindowStart, 2420);
+  const imageLoadState = catalog.hooks.getCatalogThumbnailLoadState();
+  assert.ok(imageLoadState.active <= 8, 'catalog thumbnails cap concurrent image loads');
+  assert.ok(imageLoadState.queued > 0, 'catalog thumbnails queue deferred image loads');
+
+  const focusedThumb = grid.children[4];
+  catalog.document.activeElement = focusedThumb;
+  catalog.hooks.renderCatalogGrid();
+  const rerenderedThumb = catalog.hooks.elements.pagesContainer.children
+    .find(child => child.className === 'reader-catalog-grid')
+    .children.find(child => child.dataset.index === focusedThumb.dataset.index);
+  assert.equal(rerenderedThumb.focusCalls, 1, 'catalog redraw restores focus to the same thumbnail');
+
+  const controls = catalog.hooks.elements.pagesContainer.children.find(child => child.className === 'reader-catalog-window-controls');
+  const nextButton = controls.children.find(child => child.dataset.catalogWindowControl === 'next');
+  catalog.document.activeElement = nextButton;
+  nextButton.dispatch('click');
+  assert.equal(catalog.hooks.state.catalogWindowStart, 2580, 'catalog next control keeps the requested window start');
+  const rerenderedControls = catalog.hooks.elements.pagesContainer.children.find(child => child.className === 'reader-catalog-window-controls');
+  const focusedNextButton = rerenderedControls.children.find(child => child.dataset.catalogWindowControl === 'next');
+  assert.equal(focusedNextButton.focusCalls, 1, 'catalog window navigation restores focus to its replacement control');
+
+  catalog.hooks.state.readingMode = 'catalog';
+  catalog.hooks.updateReaderUiControls();
+  for (const control of [catalog.hooks.elements.btnFitMode, catalog.hooks.elements.btnRotateLeft, catalog.hooks.elements.btnRotateRight]) {
+    assert.equal(control.disabled, true, 'catalog mode disables image transform controls');
+    assert.equal(control.getAttribute('aria-disabled'), 'true', 'catalog mode exposes disabled transform state to assistive technology');
+  }
+}
+
+// 書架重繪使用 keyed patch：排序或背景刷新只移動既有卡片，保留 observer、焦點與捲動位置；
+// 單一卡片內容變更時也只重建該卡片。
+{
+  const shelf = createHarness();
+  const comics = Array.from({ length: 200 }, (_, index) => ({
+    id: `shelf-${index}`,
+    title: `Shelf ${index}`,
+    type: 'archive',
+    pageCount: 12,
+    progress: { currentPage: 0, totalPages: 12 },
+  }));
+  shelf.hooks.state.filteredComics = comics;
+  shelf.hooks.setFavorites([]);
+  shelf.hooks.elements.contentArea = new FakeElement();
+  shelf.hooks.elements.contentArea.scrollTop = 417;
+  shelf.hooks.renderGrid();
+  const firstCards = [...shelf.hooks.elements.comicGrid.children];
+  const firstReplaceCount = shelf.hooks.elements.comicGrid.replaceChildrenCalls;
+  const firstAppendCount = shelf.hooks.elements.comicGrid.appendChildCalls;
+  const firstObserver = shelf.context.IntersectionObserver.instances.at(-1);
+  assert.equal(firstCards.length, 200);
+
+  shelf.hooks.renderGrid();
+  assert.equal(shelf.hooks.elements.comicGrid.appendChildCalls, firstAppendCount, '同順序刷新不重排卡片');
+
+  shelf.document.activeElement = firstCards[25];
+  shelf.hooks.state.filteredComics = [...comics].reverse();
+  shelf.hooks.renderGrid({ background: true });
+  const reorderedCards = [...shelf.hooks.elements.comicGrid.children];
+  assert.equal(reorderedCards[0], firstCards[199], '排序只移動既有卡片節點');
+  assert.equal(reorderedCards[199], firstCards[0], '排序保留所有 keyed card');
+  assert.equal(shelf.hooks.elements.comicGrid.replaceChildrenCalls, firstReplaceCount, '排序不再整批 replaceChildren');
+  assert.equal(firstObserver.disconnectCalls, 0, 'keyed patch 不中斷舊封面 observer');
+  assert.equal(shelf.document.activeElement, firstCards[25], 'keyed patch 保留目前焦點');
+  assert.equal(shelf.hooks.elements.contentArea.scrollTop, 417, 'keyed patch 保留書架捲動位置');
+
+  const changed = [...shelf.hooks.state.filteredComics];
+  changed[25] = { ...changed[25], title: 'Shelf changed' };
+  shelf.hooks.state.filteredComics = changed;
+  shelf.hooks.renderGrid();
+  const changedCards = [...shelf.hooks.elements.comicGrid.children];
+  assert.equal(changedCards.find(card => card.dataset.comicId === 'shelf-25'), firstCards[25], '未變更卡片仍沿用原節點');
+  assert.notEqual(changedCards.find(card => card.dataset.comicId === 'shelf-174'), firstCards[174], '變更卡片重建為新節點');
+}
+
+// 目錄快速切窗時，舊世代仍在解碼的 8 張圖不能占住新世代的併發槽位；
+// 舊 load 回來也不得扣掉新世代計數。
+{
+  const slowCatalog = createHarness();
+  slowCatalog.context.IntersectionObserver = undefined;
+  slowCatalog.hooks.state.currentComic = { id: 'slow-catalog' };
+  slowCatalog.hooks.state.currentComicPages = Array.from({ length: 320 }, (_, index) => `slow-${index}`);
+  slowCatalog.hooks.state.currentPageIndex = 0;
+  slowCatalog.hooks.state.readingMode = 'catalog';
+  slowCatalog.hooks.renderPages();
+  const firstGrid = slowCatalog.hooks.elements.pagesContainer.children.find(child => child.className === 'reader-catalog-grid');
+  const oldActiveImages = firstGrid.children.slice(0, 8).map(thumb => thumb.children[0]);
+  assert.equal(slowCatalog.hooks.getCatalogThumbnailLoadState().active, 8);
+
+  slowCatalog.hooks.state.currentPageIndex = 319;
+  slowCatalog.hooks.state.catalogWindowStart = 0;
+  slowCatalog.hooks.renderCatalogGrid();
+  assert.equal(slowCatalog.hooks.getCatalogThumbnailLoadState().active, 8, '新視窗立即取得完整併發額度');
+  assert.ok(oldActiveImages.every(img => img.src === ''), '切窗會取消舊世代圖片 src');
+  oldActiveImages[0].dispatch('load');
+  assert.equal(slowCatalog.hooks.getCatalogThumbnailLoadState().active, 8, '舊世代 load 不扣新世代槽位');
+}
+
+// 書架重建取消 lazy-cover 載入時，queued/loading 卡片必須回到可重新排程的 idle。
+{
+  const covers = createHarness();
+  const activeA = makeCover('active-reset-a');
+  const activeB = makeCover('active-reset-b');
+  const queued = makeCover('queued-reset');
+  [activeA, activeB, queued].forEach(image => {
+    image.closest('.comic-cover-wrapper').classList.add('cover-pending');
+    covers.hooks.setCoverVisibility(image, true);
+    covers.hooks.enqueueCoverLoad(image);
+  });
+  covers.clock.tick(80);
+  assert.equal(covers.hooks.getCoverQueueState().active, 2);
+  assert.equal(queued.dataset.coverState, 'queued');
+  covers.hooks.resetCoverLoadQueue();
+  for (const image of [activeA, activeB, queued]) {
+    assert.equal(image.dataset.coverState, 'idle');
+    assert.equal(image.dataset.coverQueued, undefined);
+    assert.match(image.dataset.src, /^\/cover\//);
+    assert.equal(image.closest('.comic-cover-wrapper').classList.contains('cover-pending'), true);
+  }
+}
+
+// 舊版 SMB 設定若含 password，開啟設定視窗時必須立即移除並清空密碼欄位。
+{
+  const smb = createHarness();
+  smb.context.localStorage.setItem('gai:smb', JSON.stringify({
+    host: 'nas.local',
+    share: 'comics',
+    username: 'reader',
+    password: 'legacy-secret',
+  }));
+  vm.runInContext('openSmbModal()', smb.context);
+  assert.equal(smb.hooks.elements.smbPass.value, '', 'legacy SMB password never enters the form');
+  assert.deepEqual(JSON.parse(smb.context.localStorage.getItem('gai:smb')), {
+    host: 'nas.local',
+    share: 'comics',
+    username: 'reader',
+  }, 'opening SMB settings scrubs the persisted legacy password');
 }
 
 // 初次 fetch 的 scan-status 查詢失敗後，仍要保留 polling 等待後端回報終態。
@@ -681,8 +911,27 @@ const makeCover = id => {
 
   catalog.hooks.state.activeSeries = 'all';
   catalog.hooks.state.activeFilter = 'favorite';
-  catalog.hooks.state.favorites = ['formal-a'];
+  catalog.hooks.setFavorites(['formal-a']);
   assert.equal(catalog.hooks.getDirectoryItems().some(item => catalog.hooks.isBuiltInDemoComic(item)), false);
+}
+
+// 收藏篩選與書架 render key 必須以 Set 查找，5000 筆收藏不應逐次掃描整個陣列。
+{
+  const catalog = createHarness();
+  const favoriteIds = Array.from({ length: 5000 }, (_, index) => `favorite-${index}`);
+  catalog.hooks.setFavorites(favoriteIds);
+  assert.equal(typeof catalog.hooks.state.favoriteIds?.has, 'function', '收藏索引應提供 Set 查找介面');
+  assert.equal(catalog.hooks.isFavoriteId('favorite-4999'), true, '收藏索引應命中尾端項目');
+  assert.equal(catalog.hooks.isFavoriteId('not-favorite'), false, '收藏索引不應誤判未收藏項目');
+  catalog.hooks.elements.searchInput = { value: '' };
+  catalog.hooks.state.activeFilter = 'favorite';
+  catalog.hooks.state.comics = favoriteIds.map(id => ({
+    id,
+    title: id,
+    relativePath: `${id}.cbz`,
+    pageCount: 1,
+  }));
+  assert.equal(catalog.hooks.getDirectoryItems().length, 5000, '大量收藏篩選應完整保留所有命中項目');
 }
 
 // 空庫與有正式庫都注入相同的 8 組前端衍生資料；不會把示範寫回 native library。
@@ -776,6 +1025,143 @@ console.log('catalog scheduling behavior tests passed');
   malformed.hooks.state.activeFilter = 'all';
   assert.doesNotThrow(() => malformed.hooks.getDirectoryItems(), '缺少相對路徑的舊資料不能使目錄導覽崩潰');
 }
+
+// 外部資料夾新增 intent 必須在 queue 內重讀最新 localStorage；兩個 picker
+// 交錯完成時，後者不能用舊 snapshot 覆蓋前者。
+{
+  const additions = createHarness();
+  const nativeSnapshots = [];
+  let releaseFirst;
+  let pickerCalls = 0;
+  let nativeCalls = 0;
+  additions.context.showLoader = () => {};
+  additions.context.startScanStatusPolling = () => {};
+  additions.context.scheduleLibraryRefresh = () => {};
+  additions.context.window.electronAPI.openExternalFolder = async () => (
+    pickerCalls++ === 0
+      ? { name: '來源 A', bookmark: 'bookmark-a' }
+      : { name: '來源 B', bookmark: 'bookmark-b' }
+  );
+  additions.context.window.electronAPI.setBookmarks = bookmarks => {
+    nativeSnapshots.push(Array.from(bookmarks, item => item.bookmark));
+    nativeCalls += 1;
+    if (nativeCalls === 1) return new Promise(resolve => { releaseFirst = resolve; });
+    return Promise.resolve();
+  };
+  // The picker mock above uses nativeCalls, so both picker results are issued
+  // before the first native commit releases the queue.
+  const addSource = additions.context.addIOSLibrarySource || additions.context.window.__GIA_TEST_HOOKS__.addIOSLibrarySource;
+  assert.equal(typeof addSource, 'function', 'test hook should expose iOS source addition');
+  const firstAdd = addSource();
+  const secondAdd = addSource();
+  await new Promise(resolve => setImmediate(resolve));
+  assert.deepEqual(nativeSnapshots, [['bookmark-a']], 'first add commits its own latest snapshot');
+  releaseFirst();
+  await Promise.all([firstAdd, secondAdd]);
+  const persisted = JSON.parse(additions.context.localStorage.getItem('gai:externalBookmarks'));
+  assert.deepEqual(persisted.map(item => item.bookmark), ['bookmark-a', 'bookmark-b'], 'queued adds preserve both intents');
+  assert.deepEqual(nativeSnapshots, [['bookmark-a'], ['bookmark-a', 'bookmark-b']], 'second add reads first committed snapshot');
+}
+
+// 刪除按 bookmark identity 處理；兩個舊 row 同時操作時，第二個 intent
+// 會在 queue 內讀到第一個刪除後的清單，不依賴 render 當下的 index。
+{
+  const removals = createHarness();
+  const saved = [
+    { name: '來源 A', bookmark: 'bookmark-a' },
+    { name: '來源 B', bookmark: 'bookmark-b' },
+  ];
+  removals.context.localStorage.setItem('gai:externalBookmarks', JSON.stringify(saved));
+  const nativeSnapshots = [];
+  let releaseFirst;
+  let nativeCalls = 0;
+  removals.context.window.electronAPI.setBookmarks = bookmarks => {
+    nativeSnapshots.push(Array.from(bookmarks, item => item.bookmark));
+    nativeCalls += 1;
+    if (nativeCalls === 1) return new Promise(resolve => { releaseFirst = resolve; });
+    return Promise.resolve();
+  };
+  removals.hooks.elements.refreshBtn.click = () => {};
+  vm.runInContext('renderExternalBookmarks()', removals.context);
+  const rows = removals.document.getElementById('external-bookmarks-list').children
+    .filter(item => item.children.some(child => child.tagName === 'BUTTON'));
+  const removeA = rows[0].children.find(child => child.tagName === 'BUTTON');
+  const removeB = rows[1].children.find(child => child.tagName === 'BUTTON');
+  const firstRemoval = removeA.onclick();
+  const secondRemoval = removeB.onclick();
+  await new Promise(resolve => setImmediate(resolve));
+  assert.deepEqual(nativeSnapshots, [['bookmark-b']], 'first delete commits only its bookmark identity removal');
+  releaseFirst();
+  await Promise.all([firstRemoval, secondRemoval]);
+  const persisted = JSON.parse(removals.context.localStorage.getItem('gai:externalBookmarks'));
+  assert.deepEqual(persisted, [], 'queued deletes preserve both removal intents');
+  assert.deepEqual(nativeSnapshots, [['bookmark-b'], []], 'second delete reads first committed snapshot');
+}
+console.log('external bookmark intent queue tests passed');
+
+// 同一 bookmark 改名只更新保存名稱，不應觸發重新掃描；相同名稱才是重複加入。
+{
+  const duplicate = createHarness();
+  duplicate.context.localStorage.setItem('gai:externalBookmarks', JSON.stringify([
+    { name: '舊名稱', bookmark: 'bookmark-same' },
+  ]));
+  duplicate.context.window.electronAPI.openExternalFolder = async () => ({
+    name: '新名稱',
+    bookmark: 'bookmark-same',
+  });
+  let nativeCalls = 0;
+  duplicate.context.window.electronAPI.setBookmarks = async () => { nativeCalls += 1; };
+  duplicate.context.showLoader = () => { throw new Error('rename must not show scan loader'); };
+  duplicate.context.startScanStatusPolling = () => { throw new Error('rename must not start scan polling'); };
+  duplicate.context.scheduleLibraryRefresh = () => { throw new Error('rename must not schedule a scan'); };
+  await duplicate.hooks.addIOSLibrarySource();
+  const persisted = JSON.parse(duplicate.context.localStorage.getItem('gai:externalBookmarks'));
+  assert.deepEqual(persisted, [{ name: '新名稱', bookmark: 'bookmark-same' }], 'same bookmark rename must update the saved name');
+  assert.equal(nativeCalls, 1, 'same bookmark rename must submit one updated native snapshot');
+}
+
+// SMB legacy config is sanitized before the modal opens; a failed rewrite removes
+// the old record so a password cannot remain in localStorage.
+{
+  const smb = createHarness();
+  smb.context.localStorage.setItem('gai:smb', JSON.stringify({
+    host: 'nas.local',
+    share: 'comics',
+    username: 'reader',
+    password: 'legacy-secret',
+  }));
+  vm.runInContext('sanitizeSmbConfig()', smb.context);
+  assert.deepEqual(JSON.parse(smb.context.localStorage.getItem('gai:smb')), {
+    host: 'nas.local',
+    share: 'comics',
+    username: 'reader',
+  }, 'startup SMB sanitizer keeps connection fields and removes password');
+
+  const failedWrite = createHarness();
+  failedWrite.context.localStorage.setItem('gai:smb', JSON.stringify({ host: 'nas.local', password: 'legacy-secret' }));
+  failedWrite.context.localStorage.setItem = () => { throw new Error('storage full'); };
+  vm.runInContext('sanitizeSmbConfig()', failedWrite.context);
+  assert.equal(failedWrite.context.localStorage.getItem('gai:smb'), null, 'failed SMB rewrite removes the legacy record');
+
+  const failedRead = createHarness();
+  failedRead.context.localStorage.setItem('gai:smb', JSON.stringify({ password: 'legacy-secret' }));
+  failedRead.context.localStorage.getItem = () => { throw new Error('storage unavailable'); };
+  vm.runInContext('sanitizeSmbConfig()', failedRead.context);
+  assert.equal(failedRead.context.localStorage.values.has('gai:smb'), false, 'failed SMB read still attempts to remove the legacy record');
+}
+
+// 初始化 restore 即使 localStorage 為空，也要以空全量清單清掉同 process
+// 可能殘留的 native 來源。
+{
+  const restore = createHarness();
+  let restored;
+  restore.context.window.electronAPI.setBookmarks = async bookmarks => {
+    restored = Array.from(bookmarks);
+  };
+  await restore.hooks.restoreExternalBookmarks();
+  assert.deepEqual(restored, [], 'empty restore must submit an empty native bookmark list');
+}
+console.log('external bookmark identity and empty restore tests passed');
 
 // 原生清單已提交但權限釋放失敗時，移除後的清單仍須保存；真正失敗則保留原清單。
 for (const [nativeError, expectedCount] of [

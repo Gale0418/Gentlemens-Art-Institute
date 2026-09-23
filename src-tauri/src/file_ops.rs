@@ -136,7 +136,10 @@ pub async fn capability_with_smb_config(
         return result;
     };
     let Ok(info) = smb_stat_required(&mut client, &mut tree, &before).await else {
-        disable_smb_capability(&mut result, "NAS 漫畫不存在或無法取得位置版本，已停用檔案操作");
+        disable_smb_capability(
+            &mut result,
+            "NAS 漫畫不存在或無法取得位置版本，已停用檔案操作",
+        );
         return result;
     };
     result.expected_fingerprint = Some(smb_location_revision(
@@ -148,10 +151,8 @@ pub async fn capability_with_smb_config(
     result.can_rename = true;
     result.can_move = true;
     result.can_trash = true;
-    result.reason = Some(
-        "NAS 操作會先驗證位置版本；刪除會移到同一共用資料夾的 .gai-quarantine，可撤銷"
-            .into(),
-    );
+    result.reason =
+        Some("NAS 操作會先驗證位置版本；刪除會移到同一共用資料夾的 .gai-quarantine，可撤銷".into());
     result
 }
 
@@ -427,7 +428,8 @@ fn mutate_local(
             .join(&operation.id)
             .join(source.file_name().ok_or("漫畫檔名無效")?);
         let corrected_abs = root.join(&corrected);
-        if let Err(error) = std::fs::create_dir_all(corrected_abs.parent().ok_or("隔離區無效")?) {
+        if let Err(error) = std::fs::create_dir_all(corrected_abs.parent().ok_or("隔離區無效")?)
+        {
             let message = format!("無法建立隔離區：{error}");
             let _ = store.fail_file_operation(&operation.id, &message);
             if let Some(directory) = provisional_trash_dir.as_deref() {
@@ -435,14 +437,8 @@ fn mutate_local(
             }
             return Err(message);
         }
-        let result = execute_local_move(
-            store,
-            location,
-            operation,
-            source,
-            corrected,
-            corrected_abs,
-        );
+        let result =
+            execute_local_move(store, location, operation, source, corrected, corrected_abs);
         if let Some(directory) = provisional_trash_dir.as_deref() {
             let _ = std::fs::remove_dir(directory);
         }
@@ -561,7 +557,8 @@ fn undo_local(store: &CatalogStore, record: &FileOperationRecord) -> Result<(), 
     }
 
     std::fs::rename(&source, &destination).map_err(|error| format!("檔案還原失敗：{error}"))?;
-    let runtime_id = general_purpose::URL_SAFE_NO_PAD.encode(record.before_relative_path.as_bytes());
+    let runtime_id =
+        general_purpose::URL_SAFE_NO_PAD.encode(record.before_relative_path.as_bytes());
     if let Err(error) = store.complete_file_operation_undo(&record.id, Some(&runtime_id)) {
         let rollback = std::fs::rename(&destination, &source);
         return match rollback {
@@ -766,8 +763,8 @@ async fn mutate_smb(
         return Err(error);
     }
 
-    let quarantine_dir = (request.action == "trash")
-        .then(|| format!(".gai-quarantine\\{}", operation.id));
+    let quarantine_dir =
+        (request.action == "trash").then(|| format!(".gai-quarantine\\{}", operation.id));
     if request.action == "trash" {
         if let Err(error) = ensure_smb_directory(&mut client, &mut tree, ".gai-quarantine").await {
             fail_smb_journal(store, &operation.id, &error).await;
@@ -914,7 +911,10 @@ mod tests {
 
     #[test]
     fn smb_wire_paths_reject_cross_platform_traversal() {
-        assert_eq!(smb_wire_path("series/book.cbz", false).unwrap(), "series\\book.cbz");
+        assert_eq!(
+            smb_wire_path("series/book.cbz", false).unwrap(),
+            "series\\book.cbz"
+        );
         assert!(smb_wire_path("series\\..\\book.cbz", false).is_err());
         assert!(smb_wire_path("../book.cbz", false).is_err());
         assert!(smb_wire_path(".gai-quarantine/a/book.cbz", false).is_err());

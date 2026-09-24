@@ -1478,7 +1478,7 @@ fn validate_ai_session(
         return Err("啟用第三方艦載 AI 前，必須明確同意傳送目前頁面影像與提示文字".into());
     }
     let (provider, model) = match provider_name {
-        "openai" => ("openai", "gpt-5.6-luna"),
+        "openai" => ("openai", "gpt-6-luna"),
         "google" => ("google", "gemma-4-26b-a4b-it"),
         _ => return Err("不支援的艦載 AI 供應商".into()),
     };
@@ -3392,7 +3392,7 @@ mod tests {
     fn ai_session_locks_models_and_requires_provider_neutral_disclosure() {
         assert!(validate_ai_session("openai", "not-a-real-api-key-for-tests", false,).is_err());
         let openai = validate_ai_session("openai", "not-a-real-api-key-for-tests", true).unwrap();
-        assert_eq!(openai.model, "gpt-5.6-luna");
+        assert_eq!(openai.model, "gpt-6-luna");
 
         assert!(validate_ai_session("google", "not-a-real-api-key-for-tests", false,).is_err());
         let google = validate_ai_session("google", "not-a-real-api-key-for-tests", true).unwrap();

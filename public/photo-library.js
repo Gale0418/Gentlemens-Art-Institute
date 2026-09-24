@@ -65,7 +65,9 @@
         .filter(album => album && album.id !== undefined && album.id !== null)
         .map(album => ({
           id: String(album.id),
-          title: String(album.title || featureText("未命名相簿")),
+          title: album.id === 'photo-library' ? featureText('所有照片（照片圖庫）')
+            : album.id === 'limited-library' ? featureText('已選照片（有限存取）')
+              : String(album.title || featureText("未命名相簿")),
           count: Number.isFinite(Number(album.count)) ? Math.max(0, Math.trunc(Number(album.count))) : 0,
         }))
       : [];

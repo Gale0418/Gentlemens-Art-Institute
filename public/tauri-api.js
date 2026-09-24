@@ -2,6 +2,202 @@ const bridgeText = (source, vars = {}) => window.GAIL10n
   ? window.GAIL10n.t(source, vars)
   : source.replace(/\{(\w+)\}/g, (token, key) => Object.prototype.hasOwnProperty.call(vars, key) ? String(vars[key]) : token);
 
+// Native plugins return locale-neutral codes. Keep their user-facing copy at
+// this bridge boundary so a manually selected WebView language is authoritative
+// and raw native English/Chinese never reaches the shared UI.
+const nativeErrorMessages = Object.freeze({
+  FOLDER_ROOT_VIEW_CONTROLLER_NOT_FOUND: {
+    'zh-Hant': '找不到 App 根視圖控制器。',
+    en: "Could not find the app's root view controller.",
+    ja: 'App のルートビューコントローラーが見つかりません。',
+  },
+  FOLDER_IOS_VERSION_UNSUPPORTED: {
+    'zh-Hant': '需要 iOS 14 或更新版本。',
+    en: 'iOS 14 or later is required.',
+    ja: 'iOS 14 以降が必要です。',
+  },
+  FOLDER_SELECTION_EMPTY: {
+    'zh-Hant': '沒有選取資料夾。',
+    en: 'No folder was selected.',
+    ja: 'フォルダーが選択されていません。',
+  },
+  FOLDER_SECURITY_SCOPE_ACCESS_FAILED: {
+    'zh-Hant': '無法存取選取的資料夾。',
+    en: 'Could not access the selected folder.',
+    ja: '選択したフォルダーにアクセスできません。',
+  },
+  FOLDER_BOOKMARK_CREATE_FAILED: {
+    'zh-Hant': '無法建立外部資料夾授權。',
+    en: 'Could not create access for the external folder.',
+    ja: '外部フォルダーのアクセス権を作成できません。',
+  },
+  FOLDER_PICKER_CANCELLED: {
+    'zh-Hant': '你已取消資料夾選取。',
+    en: 'Folder selection was cancelled.',
+    ja: 'フォルダーの選択をキャンセルしました。',
+  },
+  FOLDER_BOOKMARK_ACCESS_FAILED: {
+    'zh-Hant': '外部資料夾授權已失效，請重新加入資料夾。',
+    en: 'The external folder access has expired. Add the folder again.',
+    ja: '外部フォルダーのアクセス権が無効です。フォルダーをもう一度追加してください。',
+  },
+  FOLDER_BOOKMARK_INVALID_BASE64: {
+    'zh-Hant': '外部資料夾授權資料格式不正確。',
+    en: 'The external folder access data is invalid.',
+    ja: '外部フォルダーのアクセスデータが正しくありません。',
+  },
+  FOLDER_BOOKMARK_RESOLVE_FAILED: {
+    'zh-Hant': '無法還原外部資料夾授權，請重新加入資料夾。',
+    en: 'Could not restore external folder access. Add the folder again.',
+    ja: '外部フォルダーのアクセス権を復元できません。フォルダーをもう一度追加してください。',
+  },
+  FOLDER_ACCESS_START_FAILED: {
+    'zh-Hant': '無法開啟外部資料夾。',
+    en: 'Could not open the external folder.',
+    ja: '外部フォルダーを開けません。',
+  },
+  AI_KEY_INVALID: {
+    'zh-Hant': 'AI API Key 格式不正確。',
+    en: 'The AI API key format is invalid.',
+    ja: 'AI API Key の形式が正しくありません。',
+  },
+  AI_KEY_SAVE_FAILED: {
+    'zh-Hant': '無法儲存 AI API Key。',
+    en: 'Could not save the AI API key.',
+    ja: 'AI API Key を保存できません。',
+  },
+  AI_PROVIDER_INVALID: {
+    'zh-Hant': 'AI 供應商不受支援。',
+    en: 'The AI provider is not supported.',
+    ja: 'AI プロバイダーはサポートされていません。',
+  },
+  AI_KEY_NOT_FOUND: {
+    'zh-Hant': '找不到此供應商的 AI API Key。',
+    en: 'No AI API key was found for this provider.',
+    ja: 'このプロバイダーの AI API Key が見つかりません。',
+  },
+  AI_KEY_READ_FAILED: {
+    'zh-Hant': '無法讀取 AI API Key。',
+    en: 'Could not read the AI API key.',
+    ja: 'AI API Key を読み込めません。',
+  },
+  AI_KEY_DELETE_FAILED: {
+    'zh-Hant': '無法刪除 AI API Key。',
+    en: 'Could not delete the AI API key.',
+    ja: 'AI API Key を削除できません。',
+  },
+  FOLDER_BOOKMARK_NOT_ACTIVE: {
+    'zh-Hant': '外部資料夾授權尚未啟用。',
+    en: 'The external folder access is not active.',
+    ja: '外部フォルダーのアクセス権が有効になっていません。',
+  },
+  FOLDER_PATH_OUTSIDE_SELECTED_FOLDER: {
+    'zh-Hant': '指定路徑不在選取的資料夾內。',
+    en: 'The requested path is outside the selected folder.',
+    ja: '指定されたパスは選択したフォルダーの外にあります。',
+  },
+  FOLDER_FILE_UNAVAILABLE: {
+    'zh-Hant': '檔案目前無法使用。',
+    en: 'The file is not available.',
+    ja: 'ファイルを利用できません。',
+  },
+  PHOTO_LIBRARY_INVALID_ARGUMENTS: {
+    'zh-Hant': '照片圖庫參數不正確。',
+    en: 'The photo library arguments are invalid.',
+    ja: '写真ライブラリの引数が正しくありません。',
+  },
+  PHOTO_LIBRARY_AUTHORIZATION_REQUIRED: {
+    'zh-Hant': '需要照片圖庫存取權限。',
+    en: 'Photo library access is required.',
+    ja: '写真ライブラリへのアクセスが必要です。',
+  },
+  PHOTO_LIBRARY_UNAVAILABLE: {
+    'zh-Hant': '照片圖庫目前無法使用。',
+    en: 'The photo library is unavailable.',
+    ja: '写真ライブラリを利用できません。',
+  },
+  PHOTO_ALBUM_NOT_LINKED: {
+    'zh-Hant': '照片相簿尚未連結。',
+    en: 'The photo album is not linked.',
+    ja: '写真アルバムがリンクされていません。',
+  },
+  PHOTO_ALBUM_NOT_ACCESSIBLE: {
+    'zh-Hant': '無法存取照片相簿。',
+    en: 'The photo album is not accessible.',
+    ja: '写真アルバムにアクセスできません。',
+  },
+  PHOTO_ASSET_NOT_FOUND: {
+    'zh-Hant': '找不到照片。',
+    en: 'The photo was not found.',
+    ja: '写真が見つかりません。',
+  },
+  PHOTO_ASSET_NOT_IN_ALBUM: {
+    'zh-Hant': '照片不在已連結的相簿中。',
+    en: 'The photo is not in the linked album.',
+    ja: '写真がリンクされたアルバムにありません。',
+  },
+  PHOTO_IMAGE_UNAVAILABLE: {
+    'zh-Hant': '照片目前無法使用。',
+    en: 'The photo image is unavailable.',
+    ja: '写真画像を利用できません。',
+  },
+  PHOTO_IN_ICLOUD: {
+    'zh-Hant': '照片仍在 iCloud 中，請稍後再試。',
+    en: 'The photo is still in iCloud. Try again later.',
+    ja: '写真は iCloud にあります。後でもう一度お試しください。',
+  },
+  PHOTO_IMAGE_TIMEOUT: {
+    'zh-Hant': '讀取照片逾時，請稍後再試。',
+    en: 'Timed out while loading the photo. Try again later.',
+    ja: '写真の読み込みがタイムアウトしました。後でもう一度お試しください。',
+  },
+  PHOTO_IMAGE_CANCELLED: {
+    'zh-Hant': '照片讀取已取消。',
+    en: 'Photo loading was cancelled.',
+    ja: '写真の読み込みをキャンセルしました。',
+  },
+  PHOTO_IMAGE_ENCODING_FAILED: {
+    'zh-Hant': '無法處理照片影像。',
+    en: 'Could not encode the photo image.',
+    ja: '写真画像をエンコードできません。',
+  },
+  PHOTO_LIBRARY_IOS_VERSION_UNSUPPORTED: {
+    'zh-Hant': '照片圖庫需要 iOS 15 或更新版本。',
+    en: 'Photo library access requires iOS 15 or later.',
+    ja: '写真ライブラリには iOS 15 以降が必要です。',
+  },
+  IOS_FOLDER_DESKTOP_UNSUPPORTED: {
+    'zh-Hant': '目前環境不支援外部資料夾與照片圖庫功能。',
+    en: 'External folders and photo library features are unavailable here.',
+    ja: 'この環境では外部フォルダーと写真ライブラリ機能を利用できません。',
+  },
+  NATIVE_OPERATION_FAILED: {
+    'zh-Hant': '操作失敗，請稍後再試。',
+    en: 'The operation failed. Please try again.',
+    ja: '操作に失敗しました。後でもう一度お試しください。',
+  },
+});
+
+function localizedNativeError(error) {
+  const raw = typeof error === 'string' ? error : error?.message;
+  if (typeof raw !== 'string' || /^PRO_REQUIRED\s*:/i.test(raw)) return error;
+  const legacyPhotoCodes = {
+    '找不到照片相簿，請重新整理照片圖庫': 'PHOTO_ALBUM_NOT_LINKED',
+    '照片相簿識別碼無效': 'PHOTO_LIBRARY_INVALID_ARGUMENTS',
+    '照片相簿目前不可用': 'PHOTO_ALBUM_NOT_ACCESSIBLE',
+  };
+  const code = raw.trim().match(/((?:FOLDER|AI|PHOTO|IOS_FOLDER)_[A-Z0-9_]+)$/)?.[1]
+    || legacyPhotoCodes[raw.trim()]
+    || (/\p{Script=Han}/u.test(raw) ? 'NATIVE_OPERATION_FAILED' : '');
+  const messages = nativeErrorMessages[code];
+  if (!messages) return error;
+  const locale = window.GAIL10n?.locale;
+  const localized = new Error(messages[locale] || messages.en);
+  localized.code = code;
+  Object.defineProperty(localized, 'nativeMessage', { value: raw });
+  return localized;
+}
+
 /**
  * Tauri API 橋接層 (Phase 2)
  * 把原本 Electron 的 IPC 呼叫無縫轉換成 Tauri 的 invoke 呼叫。
@@ -9,6 +205,20 @@ const bridgeText = (source, vars = {}) => window.GAIL10n
  */
 
 const authoritativeProgressById = new Map();
+
+const VIRTUAL_PHOTO_TITLES = Object.freeze({
+  'photos:cGhvdG8tbGlicmFyeQ': '所有照片（照片圖庫）',
+  'photos:bGltaXRlZC1saWJyYXJ5': '已選照片（有限存取）',
+});
+
+function localizeVirtualPhotoItem(item) {
+  if (item?.type !== 'photo-album') return item;
+  if (item.title === '相簿目前不可用' || item.title === '相簿目前不可用（有限存取）') {
+    return { ...item, title: bridgeText('相簿目前不可用') };
+  }
+  const title = VIRTUAL_PHOTO_TITLES[item.id];
+  return title ? { ...item, title: bridgeText(title) } : item;
+}
 
 function progressPercent(currentPage, totalPages) {
   return totalPages > 0 && currentPage > 0
@@ -28,7 +238,7 @@ function normalizeReaderData(data) {
   progress.currentPage = currentPage;
   progress.totalPages = pages.length;
   progress.percent = progressPercent(currentPage, pages.length);
-  return { ...data, pages, progress };
+  return localizeVirtualPhotoItem({ ...data, pages, progress });
 }
 
 function normalizeProgressPayload(data) {
@@ -202,10 +412,11 @@ if (window.__TAURI__) {
     try {
       return await nativeInvoke(...args);
     } catch (error) {
-      if (args[0] !== 'explain_page' && String(error).startsWith('PRO_REQUIRED:')) {
-        window.GaiCommerce?.handleError(error);
+      const localizedError = localizedNativeError(error);
+      if (args[0] !== 'explain_page' && String(localizedError).startsWith('PRO_REQUIRED:')) {
+        window.GaiCommerce?.handleError(localizedError);
       }
-      throw error;
+      throw localizedError;
     }
   };
   const { listen } = window.__TAURI__.event;
@@ -220,7 +431,10 @@ if (window.__TAURI__) {
     setPhotoNetworkAllowed: (allowed) => invoke('set_photo_network_allowed', { allowed }),
     purchasePro: () => invoke('purchase_pro'),
     restorePro: () => invoke('restore_pro'),
-    getLibrary: async () => rememberAuthoritativeLibraryProgress(await invoke('get_library')),
+    getLibrary: async () => {
+      const items = rememberAuthoritativeLibraryProgress(await invoke('get_library'));
+      return Array.isArray(items) ? items.map(localizeVirtualPhotoItem) : items;
+    },
     getScanStatus: () => invoke('get_scan_status'),
     openComic: (id) => openComicWithAuthoritativeProgress(invoke, id),
     updateReaderCacheWindow: (comicId, pageIndex) => invoke('update_reader_cache_window', { comicId, pageIndex }),

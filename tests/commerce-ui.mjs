@@ -105,15 +105,36 @@ class FakeDocument {
   }
 }
 
-function harness(api) {
+function harness(api, l10n = null) {
   const document = new FakeDocument(api);
-  const window = { electronAPI: api };
+  const window = { electronAPI: api, GAIL10n: l10n };
   const context = vm.createContext({ window, document, console, setTimeout, clearTimeout });
   vm.runInContext(commerceSource, context, { filename: 'public/commerce.js' });
   return { document, window };
 }
 
 const settle = () => new Promise(resolve => setImmediate(resolve));
+
+{
+  const translations = {
+    '目前無法完成': 'Unable to complete',
+    '交易未完成；現有資料與設定都保留，請稍後再試。': 'Transaction incomplete. Try again later.',
+  };
+  const { document } = harness({ getCommerce: async () => ({
+    supported: true, pro: false, status: 'unavailable', message: '未翻譯的原生錯誤',
+  }) }, {
+    t: source => translations[source] || source,
+    hasTranslation: source => Object.hasOwn(translations, source),
+  });
+  await settle();
+  assert.equal(document.getElementById('commerce-status-message').textContent,
+    translations['交易未完成；現有資料與設定都保留，請稍後再試。'],
+    'untranslated native details must not leak into English UI');
+  assert.equal(document.getElementById('commerce-status-badge').classList.contains('is-error'), true,
+    'an unavailable store must look like an error');
+  assert.equal(document.getElementById('commerce-modal-status').classList.contains('is-error'), true,
+    'the purchase dialog must also show an unavailable store as an error');
+}
 
 {
   const { document, window } = harness({});

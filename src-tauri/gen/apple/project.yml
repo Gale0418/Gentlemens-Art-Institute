@@ -56,8 +56,8 @@ targets:
         CFBundleLocalizations: [zh-Hant, en, ja]
         CFBundleShortVersionString: 1.0.0
         CFBundleVersion: "1.0.0"
-        NSPhotoLibraryUsageDescription: "連結您選擇的相簿，以瀏覽照片並更新相簿內容；不會修改或刪除照片。"
-        NSLocalNetworkUsageDescription: "需要存取您授權的本機網路資料夾，以掃描與閱讀 SMB 漫畫。"
+        NSPhotoLibraryUsageDescription: "Link your selected albums to browse photos and keep album contents up to date. Your photos will not be modified or deleted."
+        NSLocalNetworkUsageDescription: "Access the local network folders you authorize to scan and read comics over SMB."
         LSSupportsOpeningDocumentsInPlace: true
         UIFileSharingEnabled: true
     entitlements:

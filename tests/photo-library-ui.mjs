@@ -176,11 +176,12 @@ function createDocument() {
   return { document, elements };
 }
 
-function boot(api) {
+function boot(api, l10n = null) {
   const { document, elements } = createDocument();
   const events = [];
   const window = {
     electronAPI: api,
+    GAIL10n: l10n,
     CustomEvent: class CustomEvent { constructor(type) { this.type = type; } },
     Event: class Event { constructor(type) { this.type = type; } },
     setTimeout,
@@ -193,6 +194,25 @@ function boot(api) {
 }
 
 const flush = () => new Promise(resolve => setImmediate(() => setImmediate(resolve)));
+
+{
+  const api = {
+    getPhotoLibraryStatus: async () => ({ supported: true, authorization: 'full',
+      albums: [
+        { id: 'photo-library', title: '所有照片（照片圖庫）', count: 2 },
+        { id: 'personal', title: '私人相簿', count: 1 },
+      ], linkedAlbumIds: [], allowNetwork: false }),
+    setLinkedPhotoAlbums: async () => ({ success: true }),
+    setPhotoNetworkAllowed: async allowed => ({ allowed }),
+  };
+  const harness = boot(api, { t: source => source === '所有照片（照片圖庫）' ? 'All photos (Photo Library)' : source });
+  await flush();
+  harness.elements['photo-library-link-btn'].click();
+  await flush();
+  const rows = harness.elements['photo-library-albums'].children;
+  assert.equal(rows[0].children[1].children[0].textContent, 'All photos (Photo Library)');
+  assert.equal(rows[1].children[1].children[0].textContent, '私人相簿', 'personal album names remain untouched');
+}
 
 {
   const calls = [];

@@ -20,7 +20,8 @@
 
   function currentLocale() {
     if (preference !== 'auto') return preference;
-    for (const language of navigator.languages || [navigator.language]) {
+    const languages = navigator.languages?.length ? navigator.languages : [navigator.language];
+    for (const language of languages) {
       const match = resolveLanguage(language);
       if (match) return match;
     }
@@ -43,16 +44,22 @@
     }
   }
 
+  function hasTranslation(source) {
+    const entry = messages[source];
+    return typeof entry?.en === 'string' && typeof entry?.ja === 'string';
+  }
+
   function apply(root = document) {
     document.documentElement.lang = currentLocale();
     for (const element of root.querySelectorAll('[data-i18n]')) {
       element.textContent = t(element.getAttribute('data-i18n'));
     }
-    for (const attribute of ['title', 'placeholder', 'aria-label']) {
+    for (const attribute of ['title', 'placeholder', 'aria-label', 'content']) {
       for (const element of root.querySelectorAll(`[data-i18n-${attribute}]`)) {
         element.setAttribute(attribute, t(element.getAttribute(`data-i18n-${attribute}`)));
       }
     }
+    document.documentElement.dataset.i18nReady = 'true';
   }
 
   function setPreference(next) {
@@ -62,7 +69,7 @@
     return true;
   }
 
-  window.GAIL10n = { t, register, apply, setPreference,
+  window.GAIL10n = { t, register, hasTranslation, apply, setPreference,
     get locale() { return currentLocale(); },
     get preference() { return preference; } };
 

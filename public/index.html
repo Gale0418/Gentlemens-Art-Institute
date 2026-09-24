@@ -1,11 +1,11 @@
 <!DOCTYPE html>
-<html lang="zh-TW">
+<html lang="en">
 <head>
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover">
-  <meta name="description" content="紳士藝術研究所 Gentlemen's Art Institute，專為本機漫畫收藏打造的沉浸式閱讀器。">
+  <meta name="description" content="Gentlemen's Art Institute, an immersive local manga reader for your private collection." data-i18n-content="紳士藝術研究所，專為私人漫畫收藏打造的本機閱讀器。">
   <meta name="theme-color" content="#140508">
-  <title data-i18n="紳士藝術研究所 Gentlemen's Art Institute | 本機漫畫閱讀器">紳士藝術研究所 Gentlemen's Art Institute | 本機漫畫閱讀器</title>
+  <title data-i18n="紳士藝術研究所 Gentlemen's Art Institute | 本機漫畫閱讀器">Gentlemen's Art Institute | Local Manga Reader</title>
   <script>
     try {
       document.documentElement.dataset.theme = localStorage.getItem('gai:theme') || 'midnight';
@@ -418,7 +418,7 @@
         <section class="language-settings" aria-labelledby="language-settings-title">
           <div>
             <h3 id="language-settings-title" data-i18n="介面語言">介面語言</h3>
-            <p data-i18n="切換語言會重新載入介面；系統權限提示依裝置語言顯示。">切換語言會重新載入介面；系統權限提示依裝置語言顯示。</p>
+            <p data-i18n="自動依裝置語言選擇；未支援的語言使用英文。切換會重新載入介面，系統權限提示仍依裝置語言顯示。">自動依裝置語言選擇；未支援的語言使用英文。切換會重新載入介面，系統權限提示仍依裝置語言顯示。</p>
           </div>
           <label for="app-language-select" data-i18n="語言">語言</label>
           <select id="app-language-select" aria-label="介面語言" data-i18n-aria-label="介面語言">
@@ -548,7 +548,7 @@
           <label for="ai-provider" data-i18n="供應商">供應商</label>
           <select id="ai-provider">
             <option value="openai">OpenAI · GPT-5.6 Luna</option>
-            <option value="google">Google · Gemma 4 26B（雲端 BYOK）</option>
+            <option value="google" data-i18n="Google · Gemma 4 26B（雲端 BYOK）">Google · Gemma 4 26B（雲端 BYOK）</option>
           </select>
           <label for="ai-api-key" data-i18n="API Key">API Key</label>
           <input id="ai-api-key" type="password" autocomplete="off" spellcheck="false" placeholder="手動貼上，只保留本次執行階段" data-i18n-placeholder="手動貼上，只保留本次執行階段">

@@ -1,4 +1,32 @@
 window.GAIL10n.register({
+  "購買功能需要 iOS 15 或更新版本": {
+    "en": "Purchases require iOS 15 or later.",
+    "ja": "購入には iOS 15 以降が必要です。"
+  },
+  "桌面版功能可用；此版本不提供 App Store 購買": {
+    "en": "Desktop features are available; this version does not offer App Store purchases.",
+    "ja": "デスクトップ版の機能は利用できます。このバージョンでは App Store での購入に対応していません。"
+  },
+  "所有照片（照片圖庫）": {
+    "en": "All photos (Photo Library)",
+    "ja": "すべての写真（写真ライブラリ）"
+  },
+  "已選照片（有限存取）": {
+    "en": "Selected photos (limited access)",
+    "ja": "選択した写真（制限付きアクセス）"
+  },
+  "恢復失敗，請稍後再試": {
+    "en": "Restore failed. Try again later.",
+    "ja": "復元に失敗しました。後でもう一度お試しください。"
+  },
+  "無法讀取 Pro 權益狀態，請稍後再試。": {
+    "en": "Could not check Pro access. Try again later.",
+    "ja": "Pro の利用権を確認できませんでした。後でもう一度お試しください。"
+  },
+  "操作失敗，請稍後再試。": {
+    "en": "The operation failed. Try again later.",
+    "ja": "操作に失敗しました。後でもう一度お試しください。"
+  },
   "直接 SMB／NAS 連線": {
     "en": "Direct SMB/NAS connections",
     "ja": "SMB／NASへの直接接続"

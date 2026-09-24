@@ -1,4 +1,12 @@
 window.GAIL10n.register({
+  "紳士藝術研究所，專為私人漫畫收藏打造的本機閱讀器。": {
+    "en": "Gentlemen's Art Institute, an immersive local manga reader for your private collection.",
+    "ja": "紳士藝術研究所は、プライベートな漫画コレクションのためのローカル閲覧アプリです。"
+  },
+  "Google · Gemma 4 26B（雲端 BYOK）": {
+    "en": "Google · Gemma 4 26B (cloud BYOK)",
+    "ja": "Google · Gemma 4 26B（クラウド BYOK）"
+  },
   "紳士藝術研究所 Gentlemen's Art Institute | 本機漫畫閱讀器": {
     "en": "Gentlemen's Art Institute | Local Manga Reader",
     "ja": "紳士藝術研究所 Gentlemen's Art Institute | ローカル漫画リーダー"
@@ -591,9 +599,9 @@ window.GAIL10n.register({
     "en": "Interface language",
     "ja": "インターフェース言語"
   },
-  "切換語言會重新載入介面；系統權限提示依裝置語言顯示。": {
-    "en": "Changing the language reloads the interface; system permission prompts follow the device language.",
-    "ja": "言語を変更するとインターフェースを再読み込みします。システムの権限ダイアログは端末の言語で表示されます。"
+  "自動依裝置語言選擇；未支援的語言使用英文。切換會重新載入介面，系統權限提示仍依裝置語言顯示。": {
+    "en": "Automatic mode follows your device language; unsupported languages use English. Switching reloads the interface. System permission prompts still follow the device language.",
+    "ja": "自動設定では端末の言語に従い、未対応の言語では英語を使います。切り替えると画面を再読み込みします。システムの権限ダイアログは端末の言語で表示されます。"
   },
   "書庫畫風": {
     "en": "Library theme",
@@ -838,6 +846,10 @@ window.GAIL10n.register({
   "目前無法存取的相簿": {
     "en": "Albums currently unavailable",
     "ja": "現在アクセスできないアルバム"
+  },
+  "相簿目前不可用": {
+    "en": "Album currently unavailable",
+    "ja": "アルバムを利用できません"
   },
   "這些相簿仍保持連結狀態；取消勾選後儲存即可解除，App 不會刪除原始照片。": {
     "en": "These albums remain linked; uncheck and save to unlink them. The app will not delete the original photos.",

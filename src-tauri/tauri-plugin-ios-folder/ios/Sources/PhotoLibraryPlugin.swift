@@ -28,19 +28,19 @@ private enum PhotoLibraryBridgeError: Error {
 
   var message: String {
     switch self {
-    case .invalidArguments: return "Invalid photo library arguments"
-    case .authorizationRequired: return "Photo library authorization is required"
-    case .authorizationUnavailable: return "Photo library is unavailable"
-    case .albumNotLinked: return "The photo album is not linked"
-    case .albumNotAccessible: return "The photo album is not accessible"
-    case .assetNotFound: return "The photo asset was not found"
-    case .assetNotInAlbum: return "The photo asset is not in the linked album"
-    case .imageUnavailable: return "The photo image is unavailable"
+    case .invalidArguments: return "PHOTO_LIBRARY_INVALID_ARGUMENTS"
+    case .authorizationRequired: return "PHOTO_LIBRARY_AUTHORIZATION_REQUIRED"
+    case .authorizationUnavailable: return "PHOTO_LIBRARY_UNAVAILABLE"
+    case .albumNotLinked: return "PHOTO_ALBUM_NOT_LINKED"
+    case .albumNotAccessible: return "PHOTO_ALBUM_NOT_ACCESSIBLE"
+    case .assetNotFound: return "PHOTO_ASSET_NOT_FOUND"
+    case .assetNotInAlbum: return "PHOTO_ASSET_NOT_IN_ALBUM"
+    case .imageUnavailable: return "PHOTO_IMAGE_UNAVAILABLE"
     case .imageInCloud: return "PHOTO_IN_ICLOUD"
     case .imageTimedOut: return "PHOTO_IMAGE_TIMEOUT"
     case .imageCancelled: return "PHOTO_IMAGE_CANCELLED"
-    case .imageEncodingFailed: return "Failed to encode the photo image"
-    case .unsupported: return "Photo library requires iOS 15.0 or newer"
+    case .imageEncodingFailed: return "PHOTO_IMAGE_ENCODING_FAILED"
+    case .unsupported: return "PHOTO_LIBRARY_IOS_VERSION_UNSUPPORTED"
     }
   }
 }

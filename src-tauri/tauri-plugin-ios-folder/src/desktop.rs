@@ -17,7 +17,7 @@ impl<R: Runtime> TauriPluginIosFolder<R> {
     pub fn pick_folder(&self) -> crate::Result<PickFolderResponse> {
         Err(crate::Error::Io(std::io::Error::new(
             std::io::ErrorKind::Unsupported,
-            "Not supported on desktop",
+            "IOS_FOLDER_DESKTOP_UNSUPPORTED",
         )))
     }
 
@@ -27,14 +27,14 @@ impl<R: Runtime> TauriPluginIosFolder<R> {
     ) -> crate::Result<StartAccessingResponse> {
         Err(crate::Error::Io(std::io::Error::new(
             std::io::ErrorKind::Unsupported,
-            "Not supported on desktop",
+            "IOS_FOLDER_DESKTOP_UNSUPPORTED",
         )))
     }
 
     pub fn stop_accessing(&self, _payload: StopAccessingRequest) -> crate::Result<()> {
         Err(crate::Error::Io(std::io::Error::new(
             std::io::ErrorKind::Unsupported,
-            "Not supported on desktop",
+            "IOS_FOLDER_DESKTOP_UNSUPPORTED",
         )))
     }
 
@@ -44,7 +44,7 @@ impl<R: Runtime> TauriPluginIosFolder<R> {
     ) -> crate::Result<EnsureAvailableResponse> {
         Err(crate::Error::Io(std::io::Error::new(
             std::io::ErrorKind::Unsupported,
-            "Not supported on desktop",
+            "IOS_FOLDER_DESKTOP_UNSUPPORTED",
         )))
     }
 
@@ -54,7 +54,7 @@ impl<R: Runtime> TauriPluginIosFolder<R> {
     ) -> crate::Result<PhotoLibraryStatusResponse> {
         Err(crate::Error::Io(std::io::Error::new(
             std::io::ErrorKind::Unsupported,
-            "Not supported on desktop",
+            "IOS_FOLDER_DESKTOP_UNSUPPORTED",
         )))
     }
 
@@ -64,7 +64,7 @@ impl<R: Runtime> TauriPluginIosFolder<R> {
     ) -> crate::Result<SetLinkedPhotoAlbumsResponse> {
         Err(crate::Error::Io(std::io::Error::new(
             std::io::ErrorKind::Unsupported,
-            "Not supported on desktop",
+            "IOS_FOLDER_DESKTOP_UNSUPPORTED",
         )))
     }
 
@@ -73,7 +73,7 @@ impl<R: Runtime> TauriPluginIosFolder<R> {
     ) -> crate::Result<LinkedPhotoAlbumSnapshotsResponse> {
         Err(crate::Error::Io(std::io::Error::new(
             std::io::ErrorKind::Unsupported,
-            "Not supported on desktop",
+            "IOS_FOLDER_DESKTOP_UNSUPPORTED",
         )))
     }
 
@@ -83,7 +83,7 @@ impl<R: Runtime> TauriPluginIosFolder<R> {
     ) -> crate::Result<PhotoAssetImageResponse> {
         Err(crate::Error::Io(std::io::Error::new(
             std::io::ErrorKind::Unsupported,
-            "Not supported on desktop",
+            "IOS_FOLDER_DESKTOP_UNSUPPORTED",
         )))
     }
 }

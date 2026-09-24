@@ -130,12 +130,12 @@ class ExamplePlugin: Plugin, UIDocumentPickerDelegate {
 
         guard let root = self.presentationController() else {
           self.activePickers.removeValue(forKey: picker)
-          invoke.reject("Cannot find root view controller")
+          invoke.reject("FOLDER_ROOT_VIEW_CONTROLLER_NOT_FOUND")
           return
         }
         root.present(picker, animated: true)
       } else {
-        invoke.reject("Requires iOS 14.0 or newer")
+        invoke.reject("FOLDER_IOS_VERSION_UNSUPPORTED")
       }
     }
   }
@@ -143,13 +143,13 @@ class ExamplePlugin: Plugin, UIDocumentPickerDelegate {
   public func documentPicker(_ controller: UIDocumentPickerViewController, didPickDocumentsAt urls: [URL]) {
     guard let invoke = activePickers.removeValue(forKey: controller) else { return }
     guard let url = urls.first else {
-      invoke.reject("No URL selected")
+      invoke.reject("FOLDER_SELECTION_EMPTY")
       return
     }
 
     let accessed = url.startAccessingSecurityScopedResource()
     if !accessed {
-      invoke.reject("Cannot access security scoped resource")
+      invoke.reject("FOLDER_SECURITY_SCOPE_ACCESS_FAILED")
       return
     }
 
@@ -161,13 +161,13 @@ class ExamplePlugin: Plugin, UIDocumentPickerDelegate {
         "name": url.lastPathComponent
       ])
     } catch {
-      invoke.reject("Failed to create bookmark: \(error)")
+      invoke.reject("FOLDER_BOOKMARK_CREATE_FAILED")
     }
   }
 
   public func documentPickerWasCancelled(_ controller: UIDocumentPickerViewController) {
     if let invoke = activePickers.removeValue(forKey: controller) {
-      invoke.reject("User cancelled")
+      invoke.reject("FOLDER_PICKER_CANCELLED")
     }
   }
 
@@ -184,10 +184,10 @@ class ExamplePlugin: Plugin, UIDocumentPickerDelegate {
         return (existingURL, false, nil)
       }
       let candidates = [bookmarkAlias(for: bookmark), bookmark].compactMap { $0 }
-      var lastError = "外部資料夾授權已失效，請重新加入資料夾"
+      var lastError = "FOLDER_BOOKMARK_ACCESS_FAILED"
       for candidate in candidates {
         guard let data = Data(base64Encoded: candidate) else {
-          lastError = "Invalid bookmark base64"
+          lastError = "FOLDER_BOOKMARK_INVALID_BASE64"
           continue
         }
 
@@ -195,7 +195,7 @@ class ExamplePlugin: Plugin, UIDocumentPickerDelegate {
           var isStale = false
           let url = try URL(resolvingBookmarkData: data, bookmarkDataIsStale: &isStale)
           guard url.startAccessingSecurityScopedResource() else {
-            lastError = "外部資料夾授權已失效，請重新加入資料夾"
+            lastError = "FOLDER_BOOKMARK_ACCESS_FAILED"
             continue
           }
 
@@ -218,7 +218,7 @@ class ExamplePlugin: Plugin, UIDocumentPickerDelegate {
           activeAccesses[bookmark] = url
           return (url, isStale, nil)
         } catch {
-          lastError = "Failed to resolve bookmark: \(error)"
+          lastError = "FOLDER_BOOKMARK_RESOLVE_FAILED"
         }
       }
       return (nil, false, lastError)
@@ -227,7 +227,7 @@ class ExamplePlugin: Plugin, UIDocumentPickerDelegate {
     if let url = resolution.url {
       invoke.resolve(["path": url.path, "stale": resolution.stale])
     } else {
-      invoke.reject(resolution.error ?? "Failed to start accessing")
+      invoke.reject(resolution.error ?? "FOLDER_ACCESS_START_FAILED")
     }
   }
 
@@ -243,10 +243,14 @@ class ExamplePlugin: Plugin, UIDocumentPickerDelegate {
 
   @objc public func saveAiKey(_ invoke: Invoke) throws {
     let args = try invoke.parseArgs(AiKeyArgs.self)
-    guard Self.isAiProvider(args.provider), let apiKey = args.apiKey,
+    guard Self.isAiProvider(args.provider) else {
+      invoke.reject("AI_PROVIDER_INVALID")
+      return
+    }
+    guard let apiKey = args.apiKey,
           apiKey.utf8.count >= 16, apiKey.utf8.count <= 512,
           !apiKey.unicodeScalars.contains(where: { CharacterSet.controlCharacters.contains($0) }) else {
-      invoke.reject("Invalid AI key")
+      invoke.reject("AI_KEY_INVALID")
       return
     }
     let query = aiKeychainQuery(provider: args.provider)
@@ -260,11 +264,11 @@ class ExamplePlugin: Plugin, UIDocumentPickerDelegate {
       item.merge(attributes) { _, new in new }
       let addStatus = SecItemAdd(item as CFDictionary, nil)
       guard addStatus == errSecSuccess else {
-        invoke.reject("Unable to save AI key")
+        invoke.reject("AI_KEY_SAVE_FAILED")
         return
       }
     } else if status != errSecSuccess {
-      invoke.reject("Unable to save AI key")
+      invoke.reject("AI_KEY_SAVE_FAILED")
       return
     }
     invoke.resolve([:])
@@ -273,7 +277,7 @@ class ExamplePlugin: Plugin, UIDocumentPickerDelegate {
   @objc public func loadAiKey(_ invoke: Invoke) throws {
     let args = try invoke.parseArgs(AiKeyArgs.self)
     guard Self.isAiProvider(args.provider) else {
-      invoke.reject("Invalid AI provider")
+      invoke.reject("AI_PROVIDER_INVALID")
       return
     }
     var query = aiKeychainQuery(provider: args.provider)
@@ -283,15 +287,15 @@ class ExamplePlugin: Plugin, UIDocumentPickerDelegate {
     let status = SecItemCopyMatching(query as CFDictionary, &result)
     guard status == errSecSuccess else {
       if status == errSecItemNotFound {
-        invoke.reject("iOS Keychain 沒有此供應商的 API Key")
+        invoke.reject("AI_KEY_NOT_FOUND")
       } else {
-        invoke.reject("Unable to read AI key")
+        invoke.reject("AI_KEY_READ_FAILED")
       }
       return
     }
     guard let data = result as? Data,
           let apiKey = String(data: data, encoding: .utf8), !apiKey.isEmpty else {
-      invoke.reject("iOS Keychain 沒有此供應商的 API Key")
+      invoke.reject("AI_KEY_NOT_FOUND")
       return
     }
     invoke.resolve(["apiKey": apiKey])
@@ -300,7 +304,7 @@ class ExamplePlugin: Plugin, UIDocumentPickerDelegate {
   @objc public func hasAiKey(_ invoke: Invoke) throws {
     let args = try invoke.parseArgs(AiKeyArgs.self)
     guard Self.isAiProvider(args.provider) else {
-      invoke.reject("Invalid AI provider")
+      invoke.reject("AI_PROVIDER_INVALID")
       return
     }
     let status = SecItemCopyMatching(aiKeychainQuery(provider: args.provider) as CFDictionary, nil)
@@ -309,19 +313,19 @@ class ExamplePlugin: Plugin, UIDocumentPickerDelegate {
     } else if status == errSecItemNotFound {
       invoke.resolve(["present": false])
     } else {
-      invoke.reject("Unable to read AI key")
+      invoke.reject("AI_KEY_READ_FAILED")
     }
   }
 
   @objc public func deleteAiKey(_ invoke: Invoke) throws {
     let args = try invoke.parseArgs(AiKeyArgs.self)
     guard Self.isAiProvider(args.provider) else {
-      invoke.reject("Invalid AI provider")
+      invoke.reject("AI_PROVIDER_INVALID")
       return
     }
     let status = SecItemDelete(aiKeychainQuery(provider: args.provider) as CFDictionary)
     guard status == errSecSuccess || status == errSecItemNotFound else {
-      invoke.reject("Unable to delete AI key")
+      invoke.reject("AI_KEY_DELETE_FAILED")
       return
     }
     invoke.resolve([:])
@@ -342,7 +346,7 @@ class ExamplePlugin: Plugin, UIDocumentPickerDelegate {
   @objc public func ensureAvailable(_ invoke: Invoke) throws {
     let args = try invoke.parseArgs(EnsureAvailableArgs.self)
     guard let rootURL = accessQueue.sync(execute: { activeAccesses[args.bookmark] }) else {
-      invoke.reject("Security-scoped bookmark is not active")
+      invoke.reject("FOLDER_BOOKMARK_NOT_ACTIVE")
       return
     }
 
@@ -350,7 +354,7 @@ class ExamplePlugin: Plugin, UIDocumentPickerDelegate {
     let candidate = URL(fileURLWithPath: args.path).standardizedFileURL.resolvingSymlinksInPath()
     let rootPath = root.path.hasSuffix("/") ? root.path : root.path + "/"
     guard candidate.path == root.path || candidate.path.hasPrefix(rootPath) else {
-      invoke.reject("Requested path is outside the selected folder")
+      invoke.reject("FOLDER_PATH_OUTSIDE_SELECTED_FOLDER")
       return
     }
 
@@ -411,7 +415,7 @@ class ExamplePlugin: Plugin, UIDocumentPickerDelegate {
         }
         invoke.resolve(["path": candidate.path])
       } catch {
-        invoke.reject("File is not available: \(error.localizedDescription)")
+        invoke.reject("FOLDER_FILE_UNAVAILABLE")
       }
     }
   }

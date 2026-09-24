@@ -3,6 +3,27 @@ function readerText(sourceZh, vars = {}) {
   return sourceZh.replace(/\{(\w+)\}/g, (_, key) => String(vars[key] ?? `{${key}}`));
 }
 
+function formatPageCount(count) {
+  if (Number(count) === 1) return readerText('1 頁');
+  return `${count}${window.GAIL10n?.locale === 'ja' ? '' : ' '}${readerText('頁')}`;
+}
+
+const FILE_CAPABILITY_REASONS = new Set([
+  '漫畫來源目前離線',
+  '缺少可驗證的檔案版本，已停用檔案操作',
+  'NAS 操作會先驗證位置版本；刪除會移到同一共用資料夾的 .gai-quarantine，可撤銷',
+  '此 Files／外部來源尚未提供可靠的可復原檔案操作',
+  'NAS 漫畫路徑不安全，已停用檔案操作',
+  'NAS 目前無法驗證漫畫位置版本，已停用檔案操作',
+  'NAS 漫畫不存在或無法取得位置版本，已停用檔案操作',
+]);
+
+function localizeFileCapabilityReason(reason) {
+  if (!reason) return '';
+  if (/^PRO_REQUIRED(?:\s*:|$)/i.test(reason)) return readerText('這項功能需要 G.A.I Pro。');
+  return readerText(FILE_CAPABILITY_REASONS.has(reason) ? reason : '檔案操作目前不可用。');
+}
+
 /**
  * 前端核心邏輯 (app.js)
  * 擁有流暢的翻頁機制、非同步雙頁載入、自動預載快取、快捷鍵綁定
@@ -1727,7 +1748,7 @@ function selectTag(tagId, rerender = true) {
   }
   elements.tagLibraryEditor.hidden = false;
   elements.tagEditorName.textContent = `${tag.namespace}:${tag.displayValue}`;
-  elements.tagEditorCount.textContent = `${tag.workCount} ${readerText('作品')}使用`;
+  elements.tagEditorCount.textContent = readerText('{count} 作品使用', { count: tag.workCount });
   elements.tagEditorDisplay.value = tag.displayValue;
   elements.tagEditorColor.value = tag.colorKey || '';
   elements.tagEditorPinned.checked = Boolean(tag.pinned);
@@ -1735,7 +1756,7 @@ function selectTag(tagId, rerender = true) {
   elements.tagEditorUndo.disabled = !state.lastTagUndoToken;
   elements.tagEditorTarget.innerHTML = `<option value="">${readerText('選擇目標標籤')}</option>` + state.tagInventoryItems
     .filter(item => item.id !== tagId && !item.disabled)
-    .map(item => `<option value="${item.id}">${escapeHtml(item.namespace)}:${escapeHtml(item.displayValue)} · ${item.workCount} 部</option>`).join('');
+    .map(item => `<option value="${item.id}">${escapeHtml(item.namespace)}:${escapeHtml(item.displayValue)} · ${readerText('{count} 部', { count: item.workCount })}</option>`).join('');
 }
 
 async function saveSelectedTag(event) {
@@ -1962,7 +1983,7 @@ async function showOrganizerInbox() {
   try {
     const items = await eAPI.listOrganizerInbox(100);
     elements.organizeInsightResults.innerHTML = items.length ? items.map(item => `
-      <article><strong>${escapeHtml(item.title)}</strong><span>${escapeHtml(item.parserId || 'unknown')} · 信心 ${item.confidence ?? '—'}</span><small>${escapeHtml(item.reason)} · ${escapeHtml(item.sourcePath)}</small></article>`).join('') : `<p>${readerText('目前沒有低信心項目。')}</p>`;
+      <article><strong>${escapeHtml(item.title)}</strong><span>${escapeHtml(item.parserId || 'unknown')} · ${readerText('信心 {value}', { value: item.confidence ?? '—' })}</span><small>${escapeHtml(item.reason)} · ${escapeHtml(item.sourcePath)}</small></article>`).join('') : `<p>${readerText('目前沒有低信心項目。')}</p>`;
   } catch (error) {
     elements.organizeInsightResults.textContent = readerText('Inbox 載入失敗：{error}', { error: error?.message || error });
   }
@@ -1974,7 +1995,7 @@ async function showDuplicateCandidates() {
   try {
     const items = await eAPI.listDuplicateCandidates(100);
     elements.organizeInsightResults.innerHTML = items.length ? items.map(item => `
-      <article><strong>${item.comicIds.length} 本候選</strong><span>指紋 ${escapeHtml(item.fingerprint.slice(0, 12))}…</span><small>${item.locations.map(escapeHtml).join('、')}</small></article>`).join('') : `<p>${readerText('目前沒有重複候選；系統不會自動合併或刪檔。')}</p>`;
+      <article><strong>${readerText('{count} 本候選', { count: item.comicIds.length })}</strong><span>${readerText('指紋 {value}', { value: escapeHtml(item.fingerprint.slice(0, 12)) })}…</span><small>${item.locations.map(escapeHtml).join('、')}</small></article>`).join('') : `<p>${readerText('目前沒有重複候選；系統不會自動合併或刪檔。')}</p>`;
   } catch (error) {
     elements.organizeInsightResults.textContent = readerText('重複候選載入失敗：{error}', { error: error?.message || error });
   }
@@ -2693,7 +2714,7 @@ function renderComicInspector(comic, options = {}) {
       <h3 title="${escapeHtml(comic.title)}">${escapeHtml(comic.title)}</h3>
       <div class="inspector-tags">
         <span>${escapeHtml(comic.series || readerText('未分類'))}</span>
-        <span>${progress.totalPages || comic.comicsCount || '---'} ${readerText('頁')}</span>
+        <span>${formatPageCount(progress.totalPages || comic.comicsCount || '---')}</span>
         <span>${builtInDemo ? readerText('不寫入收藏') : sourceOffline ? readerText('來源離線') : progress.isFinished ? readerText('已看完') : progress.hasProgress ? readerText('閱讀中') : readerText('未讀')}</span>
       </div>
       <div class="inspector-progress">
@@ -2810,7 +2831,9 @@ async function prepareInspectorFilePanel(comic, panel) {
     buttons.trash.disabled = !capability.canTrash;
     buttons.undo.disabled = !state.lastFileUndoToken;
     panel.dataset.expectedFingerprint = capability.expectedFingerprint || '';
-    status.textContent = capability.reason || `${capability.sourceKind === 'smb' ? 'NAS' : readerText('本機')}來源可安全修改；${readerText('移除會先進隔離區。')}`;
+    status.textContent = localizeFileCapabilityReason(capability.reason) || readerText('{source}來源可安全修改；移除會先進隔離區。', {
+      source: capability.sourceKind === 'smb' ? 'NAS' : readerText('本機'),
+    });
     for (const [action, button] of Object.entries(buttons)) {
       button.onclick = () => runInspectorFileAction(comic, panel, action);
     }
@@ -3363,7 +3386,7 @@ function renderGrid({ skipUnchanged = false, background = false } = {}) {
           <div class="comic-title" title="${escapeHtml(comic.title)}">${escapeHtml(comic.title)}</div>
           <div class="comic-meta">
             <span><i class="fa-solid fa-mountain-sun" aria-hidden="true"></i> ${readerText('風景插畫')}</span>
-            <span>${comic.pageCount} ${readerText('頁')}</span>
+            <span>${formatPageCount(comic.pageCount)}</span>
           </div>
         </div>
       `;
@@ -5523,7 +5546,8 @@ function toggleSharpen() {
   state.sharpenLevel = (state.sharpenLevel + 1) % 4;
   applySharpenFilter();
 
-  const labels = ['關閉', '✨ 輕度銳利', '✨✨ 中度銳利', '✨✨✨ 強度銳利'];
+  const labels = ['關閉', '✨ 輕度銳利', '✨✨ 中度銳利', '✨✨✨ 強度銳利']
+    .map(label => readerText(label));
   showReaderToast(readerText('🔍 銳利化：{label}', { label: labels[state.sharpenLevel] }));
 }
 
@@ -6543,9 +6567,9 @@ async function testAiSession() {
   elements.aiTestBtn.disabled = true;
   elements.aiSessionStatus.textContent = readerText('正在用合成文字測試，不會送出漫畫內容…');
   try {
-    const response = await eAPI.testAiSession();
+    await eAPI.testAiSession();
     if (mutationGeneration !== state.aiSessionMutationGeneration) return;
-    elements.aiSessionStatus.textContent = response || readerText('艦載 AI 連線成功。');
+    elements.aiSessionStatus.textContent = readerText('艦載 AI 連線成功。');
   } catch (error) {
     if (mutationGeneration !== state.aiSessionMutationGeneration) return;
     elements.aiSessionStatus.textContent = readerText('測試失敗：{error}', { error: error?.message || error });
@@ -6664,7 +6688,7 @@ function scheduleAutoPageExplanation() {
 
 function getAiExplainLocale() {
   const locale = window.GAIL10n?.locale;
-  return ['zh-Hant', 'en', 'ja'].includes(locale) ? locale : 'zh-Hant';
+  return ['zh-Hant', 'en', 'ja'].includes(locale) ? locale : 'en';
 }
 
 function aiExplainCacheKey(comicId, pageIndex, locale = getAiExplainLocale()) {
@@ -6672,7 +6696,7 @@ function aiExplainCacheKey(comicId, pageIndex, locale = getAiExplainLocale()) {
 }
 
 function localizeAiExplainError(error) {
-  const message = error?.message || String(error);
+  const message = error?.nativeMessage || error?.message || String(error);
   if (/請先到設定輸入艦載 AI API Key|API key.*設定|API key.*config|not configured/i.test(message)) {
     return readerText('請先到設定輸入艦載 AI API Key');
   }
@@ -6682,7 +6706,7 @@ function localizeAiExplainError(error) {
   if (/AI.*不可用|AI.*unavailable|service.*unavailable/i.test(message)) {
     return readerText('艦載 AI 目前不可用，請稍後再試。');
   }
-  return message;
+  return error?.message || String(error);
 }
 
 async function requestPageExplanation(pageIndex, automatic = false) {
@@ -6750,7 +6774,7 @@ async function requestPageExplanation(pageIndex, automatic = false) {
     if (state.currentComic?.id === comicId
       && state.currentPageIndex === pageIndex
       && getAiExplainLocale() === locale) {
-      const rawMessage = error?.message || String(error);
+      const rawMessage = error?.nativeMessage || error?.message || String(error);
       const message = localizeAiExplainError(error);
       if (/^PRO_REQUIRED:/i.test(rawMessage)) {
         setAutoPageExplanation(false);
@@ -6968,7 +6992,7 @@ function showGridContextMenu(e, comic) {
   Promise.resolve(eAPI.getFileCapability?.(comic.id)).then(capability => {
     if (!menu.isConnected) return;
     revealButton.disabled = !capability?.canReveal;
-    if (!capability?.canReveal) revealButton.title = capability?.reason || readerText('這個來源沒有可開啟的檔案位置');
+    if (!capability?.canReveal) revealButton.title = localizeFileCapabilityReason(capability?.reason) || readerText('這個來源沒有可開啟的檔案位置');
   }).catch(() => {
     revealButton.title = readerText('目前無法確認檔案位置');
   });

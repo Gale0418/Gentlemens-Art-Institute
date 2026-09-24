@@ -6209,3 +6209,12 @@ select:focus-visible,
 .photo-library-unavailable[hidden] {
   display: none;
 }
+
+html:not([data-i18n-ready]) body {
+  visibility: hidden;
+  animation: gai-i18n-fallback 0s linear 2s forwards;
+}
+
+@keyframes gai-i18n-fallback {
+  to { visibility: visible; }
+}

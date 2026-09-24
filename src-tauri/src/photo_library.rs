@@ -229,6 +229,7 @@ pub async fn mark_unavailable(state: &Arc<AppState>) {
     let mut albums = state.photo_albums.lock().await;
     for album in &mut *albums {
         album.available = false;
+        album.title = "相簿目前不可用".into();
         album.asset_ids.clear();
     }
 }

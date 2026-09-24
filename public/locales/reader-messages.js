@@ -215,6 +215,10 @@ window.GAIL10n.register({
     "en": "pages",
     "ja": "ページ"
   },
+  "1 頁": {
+    "en": "1 page",
+    "ja": "1ページ"
+  },
   "不寫入收藏": {
     "en": "Not saved to favorites",
     "ja": "お気に入りには保存されません"
@@ -1366,5 +1370,93 @@ window.GAIL10n.register({
   "艦載 AI 工作階段正在切換，請稍後再試。": {
     "en": "The embedded AI session is switching providers. Try again shortly.",
     "ja": "搭載 AI セッションの供給元を切り替えています。少し待ってから再試行してください。"
+  },
+  "{count} 作品使用": {
+    "en": "Used by {count} works",
+    "ja": "{count}作品で使用中"
+  },
+  "{count} 部": {
+    "en": "{count} works",
+    "ja": "{count}作品"
+  },
+  "信心 {value}": {
+    "en": "Confidence {value}",
+    "ja": "信頼度 {value}"
+  },
+  "{count} 本候選": {
+    "en": "{count} possible duplicates",
+    "ja": "重複候補 {count}件"
+  },
+  "指紋 {value}": {
+    "en": "Fingerprint {value}",
+    "ja": "指紋 {value}"
+  },
+  "{source}來源可安全修改；移除會先進隔離區。": {
+    "en": "The {source} source can be safely modified; removed files first move to quarantine.",
+    "ja": "{source}のソースは安全に変更できます。削除するファイルは先に隔離領域へ移動します。"
+  },
+  "🎉 已經是該目錄下的最後一本囉！": {
+    "en": "🎉 This is the last book in this folder!",
+    "ja": "🎉 このフォルダーでは最後の作品です！"
+  },
+  "🎉 已經是該目錄下的第一本囉！": {
+    "en": "🎉 This is the first book in this folder!",
+    "ja": "🎉 このフォルダーでは最初の作品です！"
+  },
+  "關閉": {
+    "en": "Off",
+    "ja": "オフ"
+  },
+  "✨ 輕度銳利": {
+    "en": "✨ Light sharpening",
+    "ja": "✨ 弱いシャープ"
+  },
+  "✨✨ 中度銳利": {
+    "en": "✨✨ Medium sharpening",
+    "ja": "✨✨ 中程度のシャープ"
+  },
+  "✨✨✨ 強度銳利": {
+    "en": "✨✨✨ Strong sharpening",
+    "ja": "✨✨✨ 強いシャープ"
+  },
+  "在 Finder 中顯示": {
+    "en": "Show in Finder",
+    "ja": "Finderに表示"
+  },
+  "在檔案總管中顯示": {
+    "en": "Show in File Explorer",
+    "ja": "ファイルエクスプローラーで表示"
+  },
+  "漫畫來源目前離線": {
+    "en": "The manga source is offline.",
+    "ja": "漫画の保存先がオフラインです。"
+  },
+  "缺少可驗證的檔案版本，已停用檔案操作": {
+    "en": "File operations are disabled because the file version cannot be verified.",
+    "ja": "ファイルのバージョンを確認できないため、ファイル操作を無効にしました。"
+  },
+  "NAS 操作會先驗證位置版本；刪除會移到同一共用資料夾的 .gai-quarantine，可撤銷": {
+    "en": "NAS operations verify the file version first; deleted files move to .gai-quarantine in the same share and can be restored.",
+    "ja": "NAS の操作前にファイルのバージョンを確認します。削除したファイルは同じ共有フォルダーの .gai-quarantine に移動し、元に戻せます。"
+  },
+  "此 Files／外部來源尚未提供可靠的可復原檔案操作": {
+    "en": "Recoverable file operations are unavailable for this Files or external source.",
+    "ja": "この Files または外部の保存先では、元に戻せるファイル操作を利用できません。"
+  },
+  "NAS 漫畫路徑不安全，已停用檔案操作": {
+    "en": "File operations are disabled because the NAS manga path is unsafe.",
+    "ja": "NAS の漫画パスが安全でないため、ファイル操作を無効にしました。"
+  },
+  "NAS 目前無法驗證漫畫位置版本，已停用檔案操作": {
+    "en": "File operations are disabled because the NAS file version cannot be verified.",
+    "ja": "NAS 上のファイルのバージョンを確認できないため、ファイル操作を無効にしました。"
+  },
+  "NAS 漫畫不存在或無法取得位置版本，已停用檔案操作": {
+    "en": "File operations are disabled because the NAS manga is missing or its file version is unavailable.",
+    "ja": "NAS 上の漫画が見つからないか、ファイルのバージョンを取得できないため、ファイル操作を無効にしました。"
+  },
+  "檔案操作目前不可用。": {
+    "en": "File operations are currently unavailable.",
+    "ja": "現在、ファイル操作を利用できません。"
   }
 });

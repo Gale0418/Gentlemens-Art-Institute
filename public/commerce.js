@@ -53,7 +53,11 @@
       productId: value.productId == null ? '' : String(value.productId),
       displayPrice,
       status,
-      message: value.message == null ? '' : featureText(String(value.message)),
+      // Native messages are only displayed when every supported UI locale has a translation.
+      message: value.message == null ? '' : !window.GAIL10n
+        ? String(value.message)
+        : window.GAIL10n.hasTranslation(String(value.message))
+          ? featureText(String(value.message)) : '',
     };
   }
 
@@ -65,7 +69,7 @@
     if (snapshot.pro) return featureText("Pro 已啟用");
     if (snapshot.status === 'pending') return featureText("處理中…");
     if (snapshot.status === 'cancelled') return featureText("已取消");
-    if (snapshot.status === 'failed') return featureText("目前無法完成");
+    if (snapshot.status === 'failed' || snapshot.status === 'unavailable') return featureText("目前無法完成");
     if (snapshot.status === 'preview') return featureText("瀏覽器預覽");
     if (!snapshot.supported) return featureText("App 內購買不可用");
     return snapshot.displayPrice ? featureText("可購買") : featureText("價格準備中");
@@ -75,7 +79,7 @@
     if (snapshot.pro) return featureText("G.A.I Pro 權益已由 App 確認，進階功能現在可以使用。");
     if (snapshot.status === 'pending') return snapshot.message || featureText("正在向 App 確認交易，請稍候…");
     if (snapshot.status === 'cancelled') return snapshot.message || featureText("你已取消這次操作，現有資料與設定都保留。");
-    if (snapshot.status === 'failed') return snapshot.message || featureText("交易未完成；現有資料與設定都保留，請稍後再試。");
+    if (snapshot.status === 'failed' || snapshot.status === 'unavailable') return snapshot.message || featureText("交易未完成；現有資料與設定都保留，請稍後再試。");
     if (snapshot.status === 'preview') return snapshot.message || PREVIEW_STATE.message;
     if (!snapshot.supported) return snapshot.message || featureText("目前環境不能進行 App 內購買；瀏覽器預覽不會解鎖 Pro。");
     return snapshot.message || featureText("一次買斷 v1 Pro 後即可使用進階功能。");
@@ -99,7 +103,7 @@
     if (badge) {
       badge.textContent = statusLabel(snapshot);
       badge.classList.toggle('is-pro', snapshot.pro);
-      badge.classList.toggle('is-error', snapshot.status === 'failed');
+      badge.classList.toggle('is-error', snapshot.status === 'failed' || snapshot.status === 'unavailable');
     }
     if (message) message.textContent = transactionMessage(snapshot);
     if (price) {
@@ -129,7 +133,7 @@
     });
     if (modalStatus) {
       modalStatus.textContent = transactionMessage(snapshot);
-      modalStatus.classList.toggle('is-error', snapshot.status === 'failed' || snapshot.status === 'cancelled');
+      modalStatus.classList.toggle('is-error', snapshot.status === 'failed' || snapshot.status === 'unavailable' || snapshot.status === 'cancelled');
       modalStatus.classList.toggle('is-success', snapshot.pro);
     }
   }
@@ -156,7 +160,7 @@
           productId: '',
           displayPrice: null,
           status: 'failed',
-          message: featureText("無法讀取 Pro 權益狀態：{error}", { error: error?.message || String(error) }),
+          message: featureText("無法讀取 Pro 權益狀態，請稍後再試。"),
         };
         state.ready = true;
         renderCommerce();
@@ -207,11 +211,10 @@
     const message = errorMessage(error);
     if (!/^PRO_REQUIRED\s*:/i.test(message)) return false;
     state.snapshot = { ...state.snapshot, pro: false };
-    const reason = message.replace(/^PRO_REQUIRED\s*:\s*/i, '').trim();
-    openProDialog(reason ? Object.keys(FEATURE_LABELS).find((key) => reason.includes(FEATURE_LABELS[key])) || '' : '');
+    openProDialog();
     const modalStatus = byId('commerce-modal-status');
     if (modalStatus) {
-      modalStatus.textContent = reason || featureText("這項功能需要 G.A.I Pro。");
+      modalStatus.textContent = featureText("這項功能需要 G.A.I Pro。");
       modalStatus.classList.add('is-error');
     }
     return true;
@@ -276,10 +279,10 @@
           status: /cancel/i.test(errorMessage(error)) ? 'cancelled' : 'failed',
           message: /cancel/i.test(errorMessage(error))
             ? featureText("你已取消這次操作，現有資料與設定都保留。")
-            : featureText("操作失敗：{error}", { error: errorMessage(error) }),
+            : featureText("操作失敗，請稍後再試。"),
         };
       } else {
-        state.snapshot = { ...state.snapshot, status: 'failed', message: errorMessage(error).replace(/^PRO_REQUIRED\s*:\s*/i, '').trim() || featureText("這項功能需要 G.A.I Pro；現有資料與設定都保留。") };
+        state.snapshot = { ...state.snapshot, status: 'failed', message: featureText("這項功能需要 G.A.I Pro；現有資料與設定都保留。") };
       }
       renderCommerce();
       return false;

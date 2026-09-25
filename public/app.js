@@ -3853,7 +3853,10 @@ async function openReader(comicId, { returnToComicFolder = false } = {}) {
     state.aiExplainPendingPage = null;
     state.aiExplainPendingRequest = null;
 
-    state.currentPageIndex = (data.progress && data.progress.currentPage) ? data.progress.currentPage : 0;
+    const savedPage = Number(data.progress?.currentPage);
+    state.currentPageIndex = Number.isFinite(savedPage)
+      ? Math.max(0, Math.min(data.pages.length - 1, Math.trunc(savedPage)))
+      : 0;
     state.doublePairOffset = state.currentPageIndex > 0 ? state.currentPageIndex % 2 : 1;
     state.readerCacheWindowPage = state.currentPageIndex;
     state.readerCacheReadyPage = null;
@@ -3929,6 +3932,8 @@ async function closeReader({ switchingComic = false } = {}) {
   state.currentComic = null;
   state.currentComicPages = [];
   state.pendingComicId = null;
+  clearTimeout(state.progressSaveTimer);
+  state.progressSaveTimer = null;
   state.webtoonMeasuredPageHeights.clear();
   setAutoPageExplanation(false);
   clearTimeout(state.aiExplainTimer);
@@ -4186,8 +4191,8 @@ function refreshWebtoonPageMetricsForResize() {
   if (isActiveWebtoonAnchor()) state.webtoonAnchor.lastTargetTop = null;
   elements.pagesContainer.querySelectorAll('img.webtoon-img[data-index]').forEach(image => {
     const index = Number(image.dataset.index);
-    if (image.dataset.webtoonMeasuredPlaceholder === 'true') {
-      image.style.height = `${state.webtoonMeasuredPageHeights.get(index)}px`;
+    if (image.dataset.webtoonPlaceholder === 'true') {
+      image.style.height = `${state.webtoonPageHeights[index]}px`;
     } else if (image.complete && image.naturalWidth > 0) {
       updateWebtoonPageHeight(index, image);
     }
@@ -4297,34 +4302,34 @@ function getWebtoonWindowBounds(totalPages, currentIndex = state.currentPageInde
   return { start, end };
 }
 
-function createWebtoonPageImage(src, index, renderGeneration) {
+function createWebtoonPageImage(src, index, currentIndex, renderGeneration) {
   const img = document.createElement('img');
   img.dataset.src = src;
   img.decoding = 'async';
-  img.fetchPriority = index < WEBTOON_EAGER_IMAGES ? 'auto' : 'low';
-  if (index < WEBTOON_EAGER_IMAGES) img.src = src;
-  img.loading = 'lazy';
+  const eager = Math.abs(index - currentIndex) < WEBTOON_EAGER_IMAGES;
+  img.fetchPriority = eager ? 'high' : 'low';
+  img.loading = eager ? 'eager' : 'lazy';
   img.className = 'webtoon-img';
   img.dataset.index = index;
   img.alt = readerText('第 {page} 頁', { page: index + 1 });
   img.style.aspectRatio = 'auto 2 / 3';
-  const measuredHeight = state.webtoonMeasuredPageHeights.get(index);
-  if (Number.isFinite(measuredHeight) && measuredHeight > 0) {
-    img.style.height = `${measuredHeight}px`;
-    img.dataset.webtoonMeasuredPlaceholder = 'true';
-  }
+  // 未載入的圖片也要與 prefix height 使用同一高度；否則 WKWebView 會把
+  // 無 src 的 img 縮成 alt 文字高度，捲動位置與實際可見頁面完全錯開。
+  img.style.height = `${state.webtoonPageHeights[index]}px`;
+  img.dataset.webtoonPlaceholder = 'true';
   const updateMetrics = (measured = true) => {
     if (state.renderGeneration !== renderGeneration) return;
-    if (img.dataset.webtoonMeasuredPlaceholder === 'true') {
+    if (measured && img.dataset.webtoonPlaceholder === 'true') {
       img.style.height = '';
       img.style.aspectRatio = 'auto 2 / 3';
-      delete img.dataset.webtoonMeasuredPlaceholder;
+      delete img.dataset.webtoonPlaceholder;
     }
     updateWebtoonPageHeight(index, img, { measured });
   };
   img.addEventListener('load', () => updateMetrics(true));
   img.addEventListener('error', () => updateMetrics(false));
   applyImageEffects(img);
+  if (eager) img.src = src;
   return img;
 }
 
@@ -4348,7 +4353,7 @@ function renderWebtoonWindow(currentIndex = state.currentPageIndex, renderGenera
   fragment.appendChild(topSpacer);
 
   for (let index = start; index < end; index += 1) {
-    fragment.appendChild(createWebtoonPageImage(state.currentComicPages[index], index, renderGeneration));
+    fragment.appendChild(createWebtoonPageImage(state.currentComicPages[index], index, currentIndex, renderGeneration));
   }
 
   const bottomSpacer = document.createElement('div');

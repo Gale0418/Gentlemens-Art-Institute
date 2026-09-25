@@ -482,6 +482,49 @@ function renderWebtoonPages(hooks, count, currentPageIndex) {
   return hooks.elements.pagesContainer.querySelector(`img[data-index="${currentPageIndex}"]`);
 }
 
+// Continue 從書中後段恢復時，初始頁必須立即有 src；尚未載入的頁面
+// 高度要與虛擬視窗計算相同，避免 iPad 實際看見第 34 頁卻仍停在第 16 頁。
+{
+  const { hooks } = createRuntimeHarness();
+  const target = renderWebtoonPages(hooks, 223, 15);
+  assert.equal(target.src, '/page-15.svg');
+  assert.equal(target.loading, 'eager');
+  const unloaded = hooks.elements.pagesContainer.querySelector('img[data-index="34"]');
+  assert.equal(unloaded.src, undefined);
+  assert.equal(unloaded.style.height, `${hooks.state.webtoonPageHeights[34]}px`);
+}
+
+// 書檔頁數變動後，舊的閱讀進度不能指向不存在的頁面，使條漫視窗全無 src。
+{
+  const runtime = createRuntimeHarness();
+  runtime.hooks.state.comics = [comic('resumed', 'webtoon resumed')];
+  runtime.context.window.electronAPI.openComic = async id => ({
+    ...comic(id, 'webtoon resumed'),
+    pages: Array.from({ length: 40 }, (_, index) => `/resumed-${index}.svg`),
+    progress: { currentPage: 80 },
+  });
+  await runtime.hooks.openReader('resumed', { returnToComicFolder: true });
+  assert.equal(runtime.hooks.state.currentPageIndex, 39);
+  assert.equal(runtime.hooks.elements.pagesContainer.querySelector('img[data-index="39"]').src, '/resumed-39.svg');
+}
+
+// 舊條漫捲動的延遲存檔不可在關閉後寫進下一本漫畫。
+{
+  const runtime = createRuntimeHarness();
+  const saved = [];
+  runtime.context.window.electronAPI.saveProgress = payload => {
+    saved.push(payload.id);
+    return Promise.resolve();
+  };
+  runtime.hooks.state.currentComic = comic('old-webtoon');
+  runtime.hooks.state.progressSaveTimer = runtime.clock.setTimeout(runtime.hooks.saveReadingProgress, 500);
+  await runtime.hooks.closeReader();
+  runtime.hooks.state.currentComic = comic('next-webtoon');
+  runtime.clock.tick(500);
+  await flushMicrotasks();
+  assert.deepEqual(saved, []);
+}
+
 // Programmatic jumps keep the selected page at the reader's top padding even
 // when an image above it finishes loading asynchronously. An initial scroll
 // event must not overwrite the captured page index.

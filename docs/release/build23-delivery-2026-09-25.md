@@ -2,7 +2,7 @@
 
 ## 問題與修正
 
-- 使用者畫面顯示「測試失敗：操作失敗，請稍後再試。」。實際在新版桌面 App 用既有 Google 工作階段 Key 進行合成文字測試，Google 回 HTTP 403，原因為該 API key 已停用。這是 Google 憑證／專案狀態，並非模型名稱或閱讀頁面壞掉。工作區外 `OWO.txt` 的 OpenAI Key 經單次合成文字 Responses API 測試回 HTTP 200、`completed`；該 Key 未寫入專案或交付物。
+- 使用者畫面顯示「測試失敗：操作失敗，請稍後再試。」。新版桌面 App 當時使用本機 Keychain 已記住的舊 Google Key；Google 回 HTTP 403，指出**那把舊 Key**已停用。工作區外 `OWO.txt` 第 14 行另有可用的 Google Key：以 `gemma-4-26b-a4b-it`（App 首選模型）及 `gemini-2.5-flash` 合成文字測試均回 HTTP 200；`gemma-4-31b-it` 一次測試回 HTTP 500。該檔第 11 行的 OpenAI Key 也經合成文字 Responses API 測試回 HTTP 200、`completed`。任何 Key 均未寫入專案或交付物。
 - 前端原本將含中文字的原生錯誤一律替換成泛用訊息，現在保留未辨識的後端錯誤。後端會遮蔽供應商錯誤中出現的使用中 API Key，避免診斷文字洩漏憑證。
 - 閱讀器焦點限制現在容許可見的模態視窗互動；目錄索引完整性檢查調整為每個 store 實例只做一次。原有的可見目錄優先補掃、SMB 掃描及閱讀修正一併納入本版。
 - iOS `bundleVersion` 22 → 23。
@@ -22,4 +22,4 @@
 
 ## 待驗收
 
-- Google Key 已停用，須由憑證持有人在 Google AI Studio／Cloud 處理；OpenAI Key 可用，但 App 工作階段仍需明確選擇 OpenAI。iPad 觸控閱讀、AI 圖像解說及 StoreKit 交易矩陣須以實機操作驗收，不能從建置或啟動推定通過。
+- App 原先在 Keychain 記住的 Google Key 已停用；`OWO.txt` 第 14 行是另一把有效 Key，目前尚未寫入 App 的安全輸入框或 Keychain。iPad 觸控閱讀、AI 圖像解說及 StoreKit 交易矩陣須以實機操作驗收，不能從建置或啟動推定通過。

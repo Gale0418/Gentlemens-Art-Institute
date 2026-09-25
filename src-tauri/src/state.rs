@@ -363,6 +363,8 @@ pub struct AppState {
     /// Monotonically changes whenever the in-memory AI session is revoked or replaced.
     /// Requests waiting on the concurrency gate use this token to reject stale configs.
     pub ai_session_generation: AtomicU64,
+    /// Alternates the first Gemma model so both model-specific quotas can be used.
+    pub ai_gemma_request_number: AtomicU64,
     /// Bounds concurrent cloud AI calls so multiple metadata actions cannot
     /// multiply image buffers and provider requests on low-memory devices.
     pub ai_request_gate: Arc<tokio::sync::Semaphore>,
@@ -420,6 +422,7 @@ impl AppState {
             online_services: std::sync::RwLock::new(OnlineServicesConfig::default()),
             ai_session: std::sync::RwLock::new(None),
             ai_session_generation: AtomicU64::new(0),
+            ai_gemma_request_number: AtomicU64::new(0),
             ai_request_gate: Arc::new(tokio::sync::Semaphore::new(2)),
             photo_albums: Mutex::new(Vec::new()),
             photo_progress: Mutex::new(HashMap::new()),

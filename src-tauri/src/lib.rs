@@ -1488,7 +1488,7 @@ fn validate_ai_session(
     }
     let (provider, model) = match provider_name {
         "openai" => ("openai", "gpt-6-luna"),
-        "google" => ("google", "gemma-4-26b-a4b-it"),
+        "google" => ("google", "gemma-4-26b-a4b-it / gemma-4-31b-it"),
         _ => return Err("不支援的艦載 AI 供應商".into()),
     };
     Ok(crate::state::AiSessionConfig {
@@ -1909,8 +1909,14 @@ fn gemma_response_text(value: &serde_json::Value) -> Option<String> {
         .map(str::to_string)
 }
 
-fn should_try_gemma_fallback(status: reqwest::StatusCode, model: &str) -> bool {
-    status == reqwest::StatusCode::TOO_MANY_REQUESTS && model == "gemma-4-26b-a4b-it"
+fn gemma_model_order(request_number: u64) -> [&'static str; 2] {
+    const MODELS: [&str; 2] = ["gemma-4-26b-a4b-it", "gemma-4-31b-it"];
+    let first = (request_number % MODELS.len() as u64) as usize;
+    [MODELS[first], MODELS[1 - first]]
+}
+
+fn should_try_gemma_fallback(status: reqwest::StatusCode) -> bool {
+    status == reqwest::StatusCode::TOO_MANY_REQUESTS || status.is_server_error()
 }
 
 async fn send_ai_request(
@@ -1946,13 +1952,18 @@ fn redact_ai_error(error: String, api_key: &str) -> String {
     error.replace(api_key, "[REDACTED API KEY]")
 }
 
+struct AiCompletion {
+    text: String,
+    model: String,
+}
+
 async fn call_ai(
     state: &AppState,
     config: crate::state::AiSessionConfig,
     expected_generation: u64,
     image: Option<(&str, &str)>,
     prompt: &str,
-) -> Result<String, String> {
+) -> Result<AiCompletion, String> {
     let api_key = config.api_key.clone();
     call_ai_inner(state, config, expected_generation, image, prompt)
         .await
@@ -1965,7 +1976,7 @@ async fn call_ai_inner(
     expected_generation: u64,
     image: Option<(&str, &str)>,
     prompt: &str,
-) -> Result<String, String> {
+) -> Result<AiCompletion, String> {
     let _permit = state
         .ai_request_gate
         .acquire()
@@ -2003,7 +2014,7 @@ async fn call_ai_inner(
                 .post("https://api.openai.com/v1/responses")
                 .bearer_auth(&config.api_key)
                 .json(&serde_json::json!({
-                    "model": config.model,
+                    "model": &config.model,
                     "reasoning": { "effort": "low" },
                     "input": [{ "role": "user", "content": content }],
                     "max_output_tokens": 700
@@ -2022,14 +2033,22 @@ async fn call_ai_inner(
                     .unwrap_or("未知錯誤")
             ));
         }
-        response_text(&value).ok_or_else(|| "Luna 沒有回傳可顯示文字".to_string())
+        response_text(&value)
+            .map(|text| AiCompletion {
+                text,
+                model: config.model,
+            })
+            .ok_or_else(|| "Luna 沒有回傳可顯示文字".to_string())
     } else {
         let mut parts = Vec::new();
         if let Some((mime, data)) = image {
             parts.push(serde_json::json!({ "inlineData": { "mimeType": mime, "data": data } }));
         }
         parts.push(serde_json::json!({ "text": prompt }));
-        let models = [config.model.as_str(), "gemma-4-31b-it"];
+        let request_number = state
+            .ai_gemma_request_number
+            .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        let models = gemma_model_order(request_number);
         for (index, model) in models.iter().enumerate() {
             let endpoint = format!(
                 "https://generativelanguage.googleapis.com/v1beta/models/{model}:generateContent"
@@ -2053,9 +2072,13 @@ async fn call_ai_inner(
             let (status, value) = limited_ai_json_response(response).await?;
             if status.is_success() {
                 return gemma_response_text(&value)
+                    .map(|text| AiCompletion {
+                        text,
+                        model: model.to_string(),
+                    })
                     .ok_or_else(|| "Gemma 4 沒有回傳可顯示文字".to_string());
             }
-            if index == 0 && should_try_gemma_fallback(status, model) {
+            if index == 0 && should_try_gemma_fallback(status) {
                 continue;
             }
             return Err(format!(
@@ -2106,6 +2129,7 @@ async fn test_ai_session(
         "請只回答：艦載 AI 連線成功。不要補充其他內容。",
     )
     .await
+    .map(|response| response.text)
 }
 
 #[tauri::command]
@@ -2129,6 +2153,7 @@ async fn explain_page(
         prompt,
     )
     .await
+    .map(|response| response.text)
 }
 
 fn validate_page_data_url(data_url: &str) -> Result<(&str, &str), String> {
@@ -2224,7 +2249,6 @@ async fn suggest_comic_metadata(
     }
     let (mime, encoded) = validate_page_data_url(&data.data_url)?;
     let provider = config.provider.clone();
-    let model = config.model.clone();
     let response = call_ai(
         state.inner(),
         config,
@@ -2233,7 +2257,7 @@ async fn suggest_comic_metadata(
         "請只回傳 JSON array，不要 Markdown。從目前這一頁提出可人工審核的漫畫 metadata 候選，格式為 [{\"field\":\"summary\",\"value\":\"繁中摘要\",\"confidence\":0.0},{\"field\":\"tags\",\"value\":[{\"namespace\":\"general\",\"value\":\"標籤\"}],\"confidence\":0.0}]。只可使用 summary 或 tags；看不清楚就不要猜，最多 8 筆。",
     )
     .await?;
-    let suggestions = parse_ai_metadata_suggestions(&response)?;
+    let suggestions = parse_ai_metadata_suggestions(&response.text)?;
     let _lifecycle = state.ai_session_lifecycle.lock().await;
     if state
         .ai_session_generation
@@ -2244,7 +2268,8 @@ async fn suggest_comic_metadata(
     }
     let store = catalog_store(&state)?;
     let comic_id = data.comic_id;
-    let raw = response.clone();
+    let raw = response.text;
+    let model = response.model;
     let suggestions_for_store = suggestions
         .iter()
         .map(|item| (item.field.clone(), item.value.clone(), item.confidence))
@@ -3426,7 +3451,7 @@ mod tests {
 
         assert!(validate_ai_session("google", "not-a-real-api-key-for-tests", false,).is_err());
         let google = validate_ai_session("google", "not-a-real-api-key-for-tests", true).unwrap();
-        assert_eq!(google.model, "gemma-4-26b-a4b-it");
+        assert_eq!(google.model, "gemma-4-26b-a4b-it / gemma-4-31b-it");
     }
 
     #[cfg(target_os = "macos")]
@@ -3587,13 +3612,26 @@ mod tests {
             Some("艦載 AI 連線成功。")
         );
         assert!(should_try_gemma_fallback(
-            reqwest::StatusCode::TOO_MANY_REQUESTS,
-            "gemma-4-26b-a4b-it"
+            reqwest::StatusCode::TOO_MANY_REQUESTS
         ));
-        assert!(!should_try_gemma_fallback(
-            reqwest::StatusCode::BAD_REQUEST,
-            "gemma-4-26b-a4b-it"
+        assert!(should_try_gemma_fallback(
+            reqwest::StatusCode::INTERNAL_SERVER_ERROR
         ));
+        assert!(!should_try_gemma_fallback(reqwest::StatusCode::BAD_REQUEST));
+        assert!(!should_try_gemma_fallback(reqwest::StatusCode::FORBIDDEN));
+    }
+
+    #[test]
+    fn gemma_requests_alternate_models_and_retry_the_other_one() {
+        assert_eq!(
+            gemma_model_order(0),
+            ["gemma-4-26b-a4b-it", "gemma-4-31b-it"]
+        );
+        assert_eq!(
+            gemma_model_order(1),
+            ["gemma-4-31b-it", "gemma-4-26b-a4b-it"]
+        );
+        assert_eq!(gemma_model_order(2), gemma_model_order(0));
     }
 
     #[test]

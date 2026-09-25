@@ -3,9 +3,9 @@ window.GAIL10n.register({
     "en": "Gentlemen's Art Institute, an immersive local manga reader for your private collection.",
     "ja": "紳士藝術研究所は、プライベートな漫画コレクションのためのローカル閲覧アプリです。"
   },
-  "Google · Gemma 4 26B（雲端 BYOK）": {
-    "en": "Google · Gemma 4 26B (cloud BYOK)",
-    "ja": "Google · Gemma 4 26B（クラウド BYOK）"
+  "Google · Gemma 4 26B／31B（雲端 BYOK）": {
+    "en": "Google · Gemma 4 26B / 31B (cloud BYOK)",
+    "ja": "Google · Gemma 4 26B／31B（クラウド BYOK）"
   },
   "紳士藝術研究所 Gentlemen's Art Institute | 本機漫畫閱讀器": {
     "en": "Gentlemen's Art Institute | Local Manga Reader",

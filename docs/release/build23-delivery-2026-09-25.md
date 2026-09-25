@@ -22,4 +22,4 @@
 
 ## 待驗收
 
-- App 原先在 Keychain 記住的 Google Key 已停用；`OWO.txt` 第 14 行是另一把有效 Key，目前尚未寫入 App 的安全輸入框或 Keychain。iPad 觸控閱讀、AI 圖像解說及 StoreKit 交易矩陣須以實機操作驗收，不能從建置或啟動推定通過。
+- App 原先在 Keychain 記住的 Google Key 已停用；`OWO.txt` 第 14 行是另一把有效 Key。使用者自行在桌面 App 啟用 Google 工作階段後，App 設定畫面顯示「艦載 AI 連線成功。」且「用合成文字測試」可用。這確認桌面合成文字連線；iPad 觸控閱讀、AI 圖像解說及 StoreKit 交易矩陣仍須分別以實機操作驗收。

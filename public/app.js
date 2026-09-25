@@ -451,6 +451,7 @@ let state = {
   catalogWindowStart: 0,
   comicsRevision: 0,
   readerReturnFocus: null,
+  readerReturnComicFolder: null,
   libraryRefreshFocusSnapshot: null,
   scanStatusPollTimer: null,
   scanStatusPollWallclockTimer: null,
@@ -2831,7 +2832,7 @@ function renderContinueStrip() {
   }).join('');
 
   elements.continueStrip.querySelectorAll('.continue-card').forEach(card => {
-    card.addEventListener('click', () => openReader(card.dataset.comicId));
+    card.addEventListener('click', () => openReader(card.dataset.comicId, { returnToComicFolder: true }));
   });
 }
 
@@ -3809,7 +3810,7 @@ function renderGrid({ skipUnchanged = false, background = false } = {}) {
 // ==========================================================================
 
 // 開啟閱讀器
-async function openReader(comicId) {
+async function openReader(comicId, { returnToComicFolder = false } = {}) {
   const shelfComic = state.comics.find(comic => comic.id === comicId);
   const previousReadingMode = state.readingMode;
   if (isComicOffline(shelfComic)) {
@@ -3821,10 +3822,14 @@ async function openReader(comicId) {
   }
   await state.readerClosePromise;
   const savedReturnFocus = state.readerReturnFocus;
+  const keepComicFolderReturn = returnToComicFolder || (state.currentComic && state.readerReturnComicFolder !== null);
   if (state.currentComic) {
-    await closeReader();
+    await closeReader({ switchingComic: true });
     if (savedReturnFocus && !state.readerReturnFocus) state.readerReturnFocus = savedReturnFocus;
   }
+  state.readerReturnComicFolder = keepComicFolderReturn && typeof shelfComic?.relativePath === 'string'
+    ? getParentPath(shelfComic.relativePath)
+    : null;
   const operation = ++state.readerOperation;
   state.pendingComicId = comicId;
   showLoader(readerText('正在載入漫畫頁面…'), { progress: null, detail: readerText('正在準備頁面清單...') });
@@ -3893,6 +3898,7 @@ async function openReader(comicId) {
     state.currentComic = null;
     state.currentComicPages = [];
     state.pendingComicId = null;
+    state.readerReturnComicFolder = null;
     elements.readerOverlay.setAttribute('aria-hidden', 'true');
     restoreReaderFocus();
     const message = typeof e === 'string' ? e : (e && e.message) || String(e);
@@ -3909,7 +3915,7 @@ async function openReader(comicId) {
 }
 
 // 關閉閱讀器
-async function closeReader() {
+async function closeReader({ switchingComic = false } = {}) {
   ++state.readerOperation;
   state.renderGeneration += 1;
   cancelWebtoonAnchor();
@@ -3917,6 +3923,8 @@ async function closeReader() {
   state.readerBoundaryDialog = null;
   const closingComic = state.currentComic;
   const closingId = closingComic ? closingComic.id : state.pendingComicId;
+  const returnComicFolder = state.readerReturnComicFolder;
+  if (!switchingComic) state.readerReturnComicFolder = null;
   const libraryFocusSnapshot = captureLibraryFocus(state.readerReturnFocus);
   state.currentComic = null;
   state.currentComicPages = [];
@@ -3962,6 +3970,36 @@ async function closeReader() {
   if (elements.btnAiAutoExplain) elements.btnAiAutoExplain.hidden = false;
   restoreReaderFocus();
   state.libraryRefreshFocusSnapshot = libraryFocusSnapshot;
+
+  if (!switchingComic && returnComicFolder !== null) {
+    // Continue 是跨目錄入口；返回時顯示這本漫畫所在的書架，而非根目錄。
+    state.activeSeries = 'all';
+    state.activeFilter = 'all';
+    if (elements.seriesFilterSelect) elements.seriesFilterSelect.value = 'all';
+    elements.seriesFilterList?.querySelectorAll('li').forEach(item => {
+      item.classList.toggle('active', item.dataset.series === 'all');
+      if (item.dataset.series === 'all') item.setAttribute('aria-current', 'true');
+      else item.removeAttribute('aria-current');
+    });
+    document.querySelectorAll('.filter-btn').forEach(btn => {
+      const selected = btn.dataset.filter === 'all';
+      btn.classList.toggle('active', selected);
+      btn.setAttribute('aria-pressed', String(selected));
+    });
+    if (elements.searchInput?.value) {
+      elements.searchInput.value = '';
+      if (elements.clearSearchBtn) elements.clearSearchBtn.style.display = 'none';
+      clearTimeout(catalogSearchTimer);
+      catalogSearchTimer = null;
+      state.catalogSearchRequest += 1;
+      state.catalogSearchIds = null;
+      state.catalogSearchItems.clear();
+      state.catalogSearchTotal = 0;
+      renderCatalogFacets({});
+    }
+    state.selectedComicId = closingId;
+    navigateLibraryToPath(returnComicFolder);
+  }
 
   // 重新整理書架（更新最近閱讀與進度條）
   scheduleLibraryRefresh();

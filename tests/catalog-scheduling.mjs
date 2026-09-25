@@ -359,6 +359,39 @@ const makeCover = id => {
   assert.equal(removed.hooks.state.libraryRefreshFocusSnapshot, null);
 }
 
+// 從 Continue 進入深層漫畫時，返回應顯示該漫畫所在目錄；
+// 一般書架入口則保留使用者原本的目錄。
+{
+  const continued = createHarness();
+  continued.hooks.state.comics = [{ id: 'nested-book', title: 'Vol.1', relativePath: 'series/arc/Vol.1' }];
+  continued.hooks.state.currentComic = { id: 'nested-book' };
+  continued.hooks.state.readerReturnComicFolder = 'series/arc';
+  continued.hooks.state.currentPath = '';
+  continued.hooks.state.activeSeries = 'another-series';
+  continued.hooks.state.activeFilter = 'unread';
+  continued.hooks.elements.searchInput.value = 'unrelated search';
+  await continued.hooks.closeReader();
+  assert.equal(continued.hooks.state.currentPath, 'series/arc');
+  assert.equal(continued.hooks.state.selectedComicId, 'nested-book');
+  assert.equal(continued.hooks.state.activeSeries, 'all');
+  assert.equal(continued.hooks.state.activeFilter, 'all');
+  assert.equal(continued.hooks.elements.searchInput.value, '');
+  assert.equal(continued.hooks.state.readerReturnComicFolder, null);
+
+  const shelf = createHarness();
+  shelf.hooks.state.currentPath = 'other/folder';
+  shelf.hooks.state.currentComic = { id: 'shelf-book' };
+  await shelf.hooks.closeReader();
+  assert.equal(shelf.hooks.state.currentPath, 'other/folder');
+
+  const switching = createHarness();
+  switching.hooks.state.currentComic = { id: 'first-book' };
+  switching.hooks.state.readerReturnComicFolder = 'series/arc';
+  await switching.hooks.closeReader({ switchingComic: true });
+  assert.equal(switching.hooks.state.readerReturnComicFolder, 'series/arc');
+  assert.equal(switching.hooks.state.currentPath, '');
+}
+
 // 單純滑動而沒有任何資料變更，不應重抓整個書庫。
 {
   let refreshes = 0;

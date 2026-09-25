@@ -713,6 +713,15 @@ async fn scan_visible_directory(
 }
 
 #[tauri::command]
+async fn scan_priority_library(
+    app_handle: AppHandle,
+    state: State<'_, Arc<AppState>>,
+    favorite_ids: Vec<String>,
+) -> Result<(), String> {
+    scanner::scan_priority_library(state.inner().clone(), app_handle, favorite_ids).await
+}
+
+#[tauri::command]
 async fn open_comic(
     id: String,
     state: State<'_, Arc<AppState>>,
@@ -3060,6 +3069,7 @@ pub fn run() {
             get_library,
             get_scan_status,
             scan_visible_directory,
+            scan_priority_library,
             open_comic,
             close_comic,
             update_reader_cache_window,

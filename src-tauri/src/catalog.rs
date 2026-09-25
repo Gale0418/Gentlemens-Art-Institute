@@ -19,6 +19,13 @@ const FINGERPRINT_VERSION: &str = "blake3-sampled-v1";
 const ARCHIVE_SAMPLE_BYTES: usize = 256 * 1024;
 const DIRECTORY_SAMPLE_BYTES: usize = 64 * 1024;
 const PAGE_SIZE_MAX: usize = 200;
+const RUNTIME_ITEM_IDS_MAX: usize = 10_000;
+const RUNTIME_ITEM_QUERY: &str = "SELECT l.runtime_id,c.title,c.series,l.online,l.last_seen_at,l.relative_path,l.actual_path,l.kind,l.source_id,
+        p.current_page,p.total_pages,p.percent,p.updated_at
+ FROM comic_locations l JOIN comics c ON c.id=l.comic_id
+ LEFT JOIN reading_progress p ON p.comic_id=c.id
+ WHERE l.runtime_id=?1 OR l.comic_id=?1
+ ORDER BY l.online DESC,l.last_seen_at DESC LIMIT 1";
 fn runtime_type_for_location(online: bool, kind: &str, _source_id: &str) -> String {
     if !online {
         return "offline".into();
@@ -871,60 +878,63 @@ impl CatalogStore {
 
     pub fn get_runtime_item(&self, identifier: &str) -> Result<Option<ComicItem>, String> {
         self.with_connection(|connection| {
+            let mut statement = connection
+                .prepare(RUNTIME_ITEM_QUERY)
+                .map_err(|error| error.to_string())?;
+            load_runtime_item_from_statement(&mut statement, identifier)
+        })
+    }
+
+    pub fn get_runtime_items_by_ids(&self, ids: &[String]) -> Result<Vec<ComicItem>, String> {
+        if ids.len() > RUNTIME_ITEM_IDS_MAX {
+            return Err(format!(
+                "漫畫批次查詢最多支援 {RUNTIME_ITEM_IDS_MAX} 個識別碼"
+            ));
+        }
+        self.with_connection(|connection| {
+            let mut statement = connection
+                .prepare(RUNTIME_ITEM_QUERY)
+                .map_err(|error| error.to_string())?;
+            let mut seen = HashSet::with_capacity(ids.len());
+            let mut items = Vec::with_capacity(ids.len());
+            for identifier in ids {
+                if !seen.insert(identifier.as_str()) {
+                    continue;
+                }
+                if let Some(item) = load_runtime_item_from_statement(&mut statement, identifier)? {
+                    items.push(item);
+                }
+            }
+            Ok(items)
+        })
+    }
+
+    pub fn get_recent_reading_runtime_item(&self) -> Result<Option<ComicItem>, String> {
+        let runtime_id = self.with_connection(|connection| {
             connection
                 .query_row(
-                    "SELECT l.runtime_id,c.title,c.series,l.online,l.last_seen_at,l.relative_path,l.actual_path,l.kind,l.source_id,
-                            p.current_page,p.total_pages,p.percent,p.updated_at
-                     FROM comic_locations l JOIN comics c ON c.id=l.comic_id
-                     LEFT JOIN reading_progress p ON p.comic_id=c.id
-                     WHERE l.runtime_id=?1 OR l.comic_id=?1
-                     ORDER BY l.online DESC,l.last_seen_at DESC LIMIT 1",
-                    [identifier],
-                    |row| {
-                        let runtime_id = row.get::<_, String>(0)?;
-                        let title = row.get::<_, String>(1)?;
-                        let series = row.get::<_, Option<String>>(2)?;
-                        let online = row.get::<_, i64>(3)? != 0;
-                        let updated_at = row.get::<_, String>(4)?;
-                        let relative_path = row.get::<_, String>(5)?;
-                        let actual_path = row.get::<_, Option<String>>(6)?;
-                        let kind = row.get::<_, String>(7)?;
-                        let source_id = row.get::<_, String>(8)?;
-                        let current_page = row.get::<_, Option<i64>>(9)?.unwrap_or_default();
-                        let total_pages = row.get::<_, Option<i64>>(10)?.unwrap_or_default();
-                        let percent = row.get::<_, Option<f64>>(11)?.unwrap_or_default();
-                        let progress_updated_at = row.get::<_, Option<String>>(12)?;
-                        let ext = actual_path
-                            .as_deref()
-                            .and_then(|path| Path::new(path).extension())
-                            .and_then(|value| value.to_str())
-                            .map(|value| format!(".{value}"))
-                            .unwrap_or_default();
-                        let item_type = runtime_type_for_location(online, &kind, &source_id);
-                        Ok(ComicItem {
-                            id: runtime_id,
-                            r#type: item_type,
-                            relative_path,
-                            ext,
-                            title,
-                            series: series.unwrap_or_else(|| "未分類".into()),
-                            updated_at,
-                            page_count: 0,
-                            progress: crate::state::Progress {
-                                current_page: current_page.max(0) as usize,
-                                total_pages: total_pages.max(0) as usize,
-                                percent,
-                                updated_at: progress_updated_at,
-                            },
-                            source_id,
-                            source_path: actual_path,
-                            external_bookmark: None,
-                        })
-                    },
+                    "SELECT l.runtime_id
+                     FROM reading_progress p
+                     JOIN comic_locations l ON l.comic_id=p.comic_id
+                     WHERE p.current_page > 0
+                       AND p.updated_at IS NOT NULL
+                       AND trim(p.updated_at) <> ''
+                       AND l.runtime_id IS NOT NULL
+                       AND trim(l.runtime_id) <> ''
+                     ORDER BY datetime(p.updated_at) DESC,p.updated_at DESC,
+                              l.online DESC,l.last_seen_at DESC
+                     LIMIT 1",
+                    [],
+                    |row| row.get::<_, String>(0),
                 )
                 .optional()
                 .map_err(|error| error.to_string())
-        })
+        })?;
+        runtime_id
+            .as_deref()
+            .map(|identifier| self.get_runtime_item(identifier))
+            .transpose()
+            .map(|item| item.flatten())
     }
 
     pub fn search(&self, query: CatalogQuery) -> Result<CatalogSearchResult, String> {
@@ -1510,6 +1520,56 @@ impl CatalogStore {
             apply_exchange(connection, &envelope, &request.resolutions)
         })
     }
+}
+
+fn load_runtime_item_from_statement(
+    statement: &mut rusqlite::Statement<'_>,
+    identifier: &str,
+) -> Result<Option<ComicItem>, String> {
+    statement
+        .query_row([identifier], |row| {
+            let runtime_id = row.get::<_, String>(0)?;
+            let title = row.get::<_, String>(1)?;
+            let series = row.get::<_, Option<String>>(2)?;
+            let online = row.get::<_, i64>(3)? != 0;
+            let updated_at = row.get::<_, String>(4)?;
+            let relative_path = row.get::<_, String>(5)?;
+            let actual_path = row.get::<_, Option<String>>(6)?;
+            let kind = row.get::<_, String>(7)?;
+            let source_id = row.get::<_, String>(8)?;
+            let current_page = row.get::<_, Option<i64>>(9)?.unwrap_or_default();
+            let total_pages = row.get::<_, Option<i64>>(10)?.unwrap_or_default();
+            let percent = row.get::<_, Option<f64>>(11)?.unwrap_or_default();
+            let progress_updated_at = row.get::<_, Option<String>>(12)?;
+            let ext = actual_path
+                .as_deref()
+                .and_then(|path| Path::new(path).extension())
+                .and_then(|value| value.to_str())
+                .map(|value| format!(".{value}"))
+                .unwrap_or_default();
+            let item_type = runtime_type_for_location(online, &kind, &source_id);
+            Ok(ComicItem {
+                id: runtime_id,
+                r#type: item_type,
+                relative_path,
+                ext,
+                title,
+                series: series.unwrap_or_else(|| "未分類".into()),
+                updated_at,
+                page_count: 0,
+                progress: crate::state::Progress {
+                    current_page: current_page.max(0) as usize,
+                    total_pages: total_pages.max(0) as usize,
+                    percent,
+                    updated_at: progress_updated_at,
+                },
+                source_id,
+                source_path: actual_path,
+                external_bookmark: None,
+            })
+        })
+        .optional()
+        .map_err(|error| error.to_string())
 }
 
 const MIGRATION_1: &str = "
@@ -4414,6 +4474,66 @@ mod tests {
         assert_eq!(moved.progress.current_page, 12);
         assert_eq!(moved.progress.total_pages, 20);
         assert_eq!(moved.progress.percent, 60.0);
+    }
+
+    #[test]
+    fn recent_reading_runtime_item_orders_progress_and_excludes_unread() {
+        let store = store("recent_reading");
+        let mut older = comic("older-runtime", "older/a.zip");
+        older.progress = crate::state::Progress {
+            current_page: 2,
+            total_pages: 10,
+            percent: 20.0,
+            updated_at: Some("2026-09-01T00:00:00Z".into()),
+        };
+        let mut newer = comic("newer-runtime", "newer/a.zip");
+        newer.progress = crate::state::Progress {
+            current_page: 4,
+            total_pages: 10,
+            percent: 40.0,
+            updated_at: Some("2026-09-02T00:00:00Z".into()),
+        };
+        let mut unread = comic("unread-runtime", "unread/a.zip");
+        unread.progress = crate::state::Progress {
+            current_page: 0,
+            total_pages: 10,
+            percent: 0.0,
+            updated_at: Some("2026-09-03T00:00:00Z".into()),
+        };
+        store.sync_library(&[older, newer, unread]).unwrap();
+
+        let recent = store
+            .get_recent_reading_runtime_item()
+            .unwrap()
+            .expect("已讀項目應可取得");
+        assert_eq!(recent.id, "newer-runtime");
+        assert_eq!(recent.progress.current_page, 4);
+    }
+
+    #[test]
+    fn runtime_items_by_ids_preserves_requested_order_and_deduplicates() {
+        let store = store("runtime_items_batch");
+        store
+            .sync_library(&[
+                comic("first-runtime", "first/a.zip"),
+                comic("second-runtime", "second/a.zip"),
+            ])
+            .unwrap();
+
+        let ids = vec![
+            "second-runtime".to_string(),
+            "missing-runtime".to_string(),
+            "first-runtime".to_string(),
+            "second-runtime".to_string(),
+        ];
+        let items = store.get_runtime_items_by_ids(&ids).unwrap();
+        assert_eq!(
+            items
+                .iter()
+                .map(|item| item.id.as_str())
+                .collect::<Vec<_>>(),
+            vec!["second-runtime", "first-runtime"]
+        );
     }
 
     #[test]

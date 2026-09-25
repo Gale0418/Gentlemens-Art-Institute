@@ -7,6 +7,8 @@ assert.match(appSource, /await restoreExternalBookmarks\(\)/, 'initial external 
 assert.match(appSource, /async function restoreExternalBookmarks\(\)[\s\S]{0,260}setBookmarks\(readExternalBookmarks\(\)\)/, 'empty initial bookmark restore must still clear native state');
 assert.match(appSource, /const latestBookmarks = readExternalBookmarks\(\)[\s\S]{0,180}bookmark\.bookmark !== bookmarkIdentity/, 'bookmark deletion must resolve identity inside the queue');
 assert.match(appSource, /async function initApp\(\)[\s\S]{0,180}sanitizeSmbConfig\(\)/, 'SMB legacy secrets must be sanitized during app initialization');
+assert.match(appSource, /requestPriorityLibraryScan\(state\.scanStatus, state\.favorites\)/, 'scan progress must submit native priority scan hints');
+assert.match(fs.readFileSync(new URL('../public/tauri-api.js', import.meta.url), 'utf8'), /invoke\('scan_priority_library', \{[\s\S]*favoriteIds/, 'native bridge must expose the priority scan command');
 
 class FakeClock {
   constructor() {
@@ -178,6 +180,7 @@ function createHarness({ width = 1000 } = {}) {
   const electronAPI = {
     isElectron: true,
     getScanStatus: () => Promise.resolve({ isScanning: false }),
+    scanPriorityLibrary: async () => {},
     saveProgress: async () => {},
   };
   const window = {
@@ -838,6 +841,13 @@ const makeCover = id => {
     activateGridComic({ id: 'normal-book', title: '測試書' });
   `, selection.context);
   assert.deepEqual(Array.from(selection.context.window.readerOpens), ['normal-book']);
+  vm.runInContext(`
+    const previewComic = createBuiltInDemoComics()[0];
+    activateGridComic(previewComic);
+  `, selection.context);
+  assert.deepEqual(Array.from(selection.context.window.readerOpens), ['normal-book'], '示範卡第一次同樣只顯示詳情');
+  vm.runInContext('activateGridComic(previewComic);', selection.context);
+  assert.deepEqual(Array.from(selection.context.window.readerOpens), ['normal-book', 'builtin:landscape-mountains'], '示範卡第二次才開始試讀');
 }
 
 // 內建風景 catalog 固定為 8 組；page-01 是封面本身，不另加一張重複封面頁。
@@ -863,7 +873,7 @@ const makeCover = id => {
   );
 }
 
-// 根目錄固定排序；正式庫存在時仍顯示，進入正式子目錄則不混入示範。
+// 有正式漫畫時隱藏內建示範；空書架仍可試讀。
 {
   const catalog = createHarness();
   const demos = catalog.hooks.createBuiltInDemoComics();
@@ -879,7 +889,8 @@ const makeCover = id => {
     ...demos,
   ];
   const root = catalog.hooks.getDirectoryItems();
-  assert.deepEqual(Array.from(root.slice(0, 8), item => item.id), Array.from(demos, item => item.id));
+  const formalFolder = root.find(item => item.isDirectory && item.title === '正式系列');
+  assert.deepEqual(Array.from(root, item => item.id), [formalFolder.id, 'formal-a', 'formal-z']);
   assert.equal(root.some(item => item.isDirectory && item.title === '正式系列'), true, '正式庫項目仍留在根目錄折疊結果');
 
   catalog.hooks.state.comics = [{
@@ -909,13 +920,18 @@ const makeCover = id => {
   catalog.hooks.elements.searchInput.value = '宇宙';
   catalog.hooks.state.catalogSearchIds = new Set(['formal-a']);
   const search = catalog.hooks.getDirectoryItems();
-  assert.deepEqual(Array.from(search, item => item.id), ['builtin:landscape-cosmos'], 'local demo search must survive SQLite result filtering');
+  assert.deepEqual(Array.from(search, item => item.id), [], '正式書架搜尋不混入內建示範');
 
   catalog.hooks.elements.searchInput.value = '';
   catalog.hooks.state.catalogSearchIds = null;
   catalog.hooks.state.activeSeries = '風景選集';
+  assert.deepEqual(Array.from(catalog.hooks.getDirectoryItems(), item => item.id), []);
+
+  catalog.hooks.state.comics = demos;
+  catalog.hooks.state.activeSeries = 'all';
   assert.deepEqual(Array.from(catalog.hooks.getDirectoryItems(), item => item.id), Array.from(demos, item => item.id));
 
+  catalog.hooks.state.comics = [{ id: 'formal-a', title: '正式 A', relativePath: '正式 A.cbz' }, ...demos];
   catalog.hooks.state.activeSeries = 'all';
   catalog.hooks.state.activeFilter = 'favorite';
   catalog.hooks.setFavorites(['formal-a']);
@@ -941,7 +957,125 @@ const makeCover = id => {
   assert.equal(catalog.hooks.getDirectoryItems().length, 5000, '大量收藏篩選應完整保留所有命中項目');
 }
 
+// 全庫掃描中的優先查找以 generation + 收藏 ID 去重，且收藏數量受限；
+// 收藏切換只送提示，不等待 native I/O，也不會被目錄導覽重複啟動。
+{
+  const priority = createHarness();
+  const calls = [];
+  priority.context.window.electronAPI.scanPriorityLibrary = favoriteIds => {
+    calls.push([...favoriteIds]);
+    return new Promise(() => {});
+  };
+  priority.hooks.state.scanStatus = { isScanning: true, generation: 41 };
+  const favorites = ['fav-a', 'fav-a', '', 42, ...Array.from({ length: 5000 }, (_, index) => `fav-${index}`)];
+  priority.hooks.setFavorites(favorites);
+  assert.equal(calls.length, 0, 'priority scan must be deferred without blocking the caller');
+  await new Promise(resolve => setImmediate(resolve));
+  assert.equal(calls.length, 1, 'initial favorite snapshot should trigger one priority scan');
+  assert.equal(calls[0].length, 4096, 'priority scan IPC payload must be capped');
+  assert.deepEqual(calls[0].slice(0, 2), ['fav-a', 'fav-0'], 'priority IDs should be filtered and deduplicated');
+
+  priority.hooks.setFavorites(favorites);
+  await new Promise(resolve => setImmediate(resolve));
+  assert.equal(calls.length, 1, 'same generation and IDs must be deduplicated');
+
+  priority.hooks.setFavorites(['new-favorite', ...favorites]);
+  await new Promise(resolve => setImmediate(resolve));
+  assert.equal(calls.length, 2, 'favorite changes must trigger a new priority scan');
+
+  priority.hooks.updateLoaderScanProgress({ generation: 42, isScanning: true });
+  await new Promise(resolve => setImmediate(resolve));
+  assert.equal(calls.length, 3, 'a new full scan generation must get a fresh priority scan');
+
+  priority.context.window.electronAPI.isElectron = false;
+  priority.hooks.updateLoaderScanProgress({ generation: 43, isScanning: true });
+  await new Promise(resolve => setImmediate(resolve));
+  assert.equal(calls.length, 3, 'browser mode must never call the native priority scan');
+}
+
+// 目錄切換只觸發既有可見目錄掃描，不應重送同一個全庫優先查找；
+// IPC 暫時失敗則允許相同 generation + IDs 在下一次狀態更新重試。
+{
+  const retry = createHarness();
+  let attempts = 0;
+  retry.context.console.warn = () => {};
+  retry.context.window.electronAPI.scanPriorityLibrary = () => {
+    attempts += 1;
+    return attempts === 1 ? Promise.reject(new Error('temporary native failure')) : Promise.resolve();
+  };
+  retry.context.window.electronAPI.scanVisibleDirectory = () => Promise.resolve();
+  retry.hooks.state.scanStatus = { isScanning: true, generation: 9 };
+  retry.hooks.setFavorites(['retry-book']);
+  await new Promise(resolve => setImmediate(resolve));
+  assert.equal(attempts, 1, 'priority scan should report one failed native attempt');
+  retry.hooks.updateLoaderScanProgress({ generation: 9, isScanning: true });
+  await new Promise(resolve => setImmediate(resolve));
+  assert.equal(attempts, 2, 'failed priority scans should retry on a later matching status update');
+  retry.context.window.electronAPI.isElectron = true;
+  vm.runInContext('filterAndRenderGrid = () => {}; navigateLibraryToPath("series")', retry.context);
+  await new Promise(resolve => setImmediate(resolve));
+  assert.equal(attempts, 2, 'directory navigation must not restart the full-library priority scan');
+}
+
+// 初始全庫快照很慢時，favorites + scan status 仍應先送出 priority hint。
+{
+  const early = createHarness();
+  const calls = [];
+  let resolveLibrary;
+  early.context.window.electronAPI.getLibrary = () => new Promise(resolve => { resolveLibrary = resolve; });
+  early.context.window.electronAPI.getFavorites = async () => ['early-favorite'];
+  early.context.window.electronAPI.getScanStatus = async () => ({ isScanning: true, generation: 12 });
+  early.context.window.electronAPI.scanPriorityLibrary = ids => {
+    calls.push([...ids]);
+    return Promise.resolve();
+  };
+  vm.runInContext(`
+    showLoader = () => {};
+    hideLoader = () => {};
+    setLoaderProgress = () => {};
+    filterAndRenderGrid = () => {};
+    renderSidebar = () => {};
+    renderContinueStrip = () => {};
+    updateStats = () => {};
+  `, early.context);
+  const loading = early.hooks.performLibraryFetch();
+  await new Promise(resolve => setImmediate(resolve));
+  assert.deepEqual(calls, [['early-favorite']], 'priority hint should precede the slow full-library snapshot');
+  resolveLibrary([]);
+  await loading;
+  early.hooks.stopScanStatusPolling();
+}
+
 // 空庫與有正式庫都注入相同的 8 組前端衍生資料；不會把示範寫回 native library。
+// 優先掃描先於舊 getLibrary 快照回來時，快照提交不能清掉剛找到的漫畫。
+{
+  const raced = createHarness();
+  let resolveLibrary;
+  raced.context.window.electronAPI.getLibrary = () => new Promise(resolve => { resolveLibrary = resolve; });
+  raced.context.window.electronAPI.getFavorites = async () => [];
+  raced.context.window.electronAPI.getScanStatus = async () => ({ isScanning: true, generation: 12 });
+  vm.runInContext(`
+    showLoader = () => {};
+    hideLoader = () => {};
+    setLoaderProgress = () => {};
+    filterAndRenderGrid = () => {};
+    renderSidebar = () => {};
+    renderContinueStrip = () => {};
+    updateStats = () => {};
+  `, raced.context);
+  const loading = vm.runInContext('fetchLibrary()', raced.context);
+  await new Promise(resolve => setImmediate(resolve));
+  raced.hooks.applyIncrementalLibraryBatch({
+    generation: 12,
+    found: 1,
+    items: [{ id: 'priority-book', title: '優先找到', relativePath: 'priority-book.cbz' }],
+  });
+  resolveLibrary([]);
+  await loading;
+  assert.equal(raced.hooks.state.comics.some(comic => comic.id === 'priority-book'), true);
+  raced.hooks.stopScanStatusPolling();
+}
+
 for (const formalLibrary of [
   [],
   [{ id: 'formal-book', title: '正式漫畫', relativePath: 'formal-book.cbz', pageCount: 4 }],

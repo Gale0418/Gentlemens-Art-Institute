@@ -95,9 +95,9 @@ window.GAIL10n.register({
     "en": "Completed",
     "ja": "読了"
   },
-  "小提示：點一下查看詳情，再點同一本開始閱讀。支援 `.cbz` 與圖片資料夾喔！✨": {
-    "en": "Tip: click once to view details, then click the same book to start reading. `.cbz` files and image folders are supported! ✨",
-    "ja": "ヒント：クリックで詳細を確認し、同じ本をもう一度クリックすると読み始められます。`.cbz` と画像フォルダーに対応しています！✨"
+  "點一下查看詳情；再點同一本或按開始閱讀即可開啟。支援 CBZ 與圖片資料夾。": {
+    "en": "Tap once for details, then tap the same book again or choose Start Reading. CBZ files and image folders are supported.",
+    "ja": "1回タップすると詳細を表示します。同じ作品をもう一度タップするか「読み始める」で開けます。CBZ と画像フォルダーに対応しています。"
   },
   "收合漫畫系列側欄": {
     "en": "Collapse series sidebar",

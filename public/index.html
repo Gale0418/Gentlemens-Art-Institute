@@ -124,7 +124,7 @@
         </div>
 
         <div class="sidebar-footer">
-          <p data-i18n="小提示：點一下查看詳情，再點同一本開始閱讀。支援 `.cbz` 與圖片資料夾喔！✨">小提示：點一下查看詳情，再點同一本開始閱讀。支援 `.cbz` 與圖片資料夾喔！✨</p>
+          <p data-i18n="點一下查看詳情；再點同一本或按開始閱讀即可開啟。支援 CBZ 與圖片資料夾。">點一下查看詳情；再點同一本或按開始閱讀即可開啟。支援 CBZ 與圖片資料夾。</p>
         </div>
       </aside>
 
@@ -135,7 +135,27 @@
       <section class="library-workspace">
         <!-- 漫畫書架網格 -->
         <main class="content-area">
-          <section class="continue-panel" aria-labelledby="continue-title">
+          <section class="library-start-panel" id="library-start-panel" aria-labelledby="library-start-title" hidden>
+            <div class="library-start-copy">
+              <h2 id="library-start-title" data-i18n="把你的漫畫放上書架">把你的漫畫放上書架</h2>
+              <p data-i18n="選擇本機、外接磁碟或已連線的 NAS 資料夾；原始檔不會被改動。">選擇本機、外接磁碟或已連線的 NAS 資料夾；原始檔不會被改動。</p>
+            </div>
+            <div class="library-start-actions">
+              <button id="library-start-choose" class="library-start-primary" type="button"><i class="fa-solid fa-folder-plus" aria-hidden="true"></i><span data-i18n="加入漫畫來源…">加入漫畫來源…</span></button>
+              <button id="library-start-demo" class="library-start-secondary" type="button" data-i18n="先試讀內建選集">先試讀內建選集</button>
+            </div>
+          </section>
+
+          <section class="scan-recovery-panel" id="scan-recovery-panel" role="status" aria-live="polite" hidden>
+            <i class="fa-solid fa-circle-exclamation" aria-hidden="true"></i>
+            <p id="scan-recovery-message" data-i18n="漫畫來源暫時無法完成掃描，現有書架仍可使用。">漫畫來源暫時無法完成掃描，現有書架仍可使用。</p>
+            <div class="scan-recovery-actions">
+              <button id="scan-retry-btn" type="button" data-i18n="重試掃描">重試掃描</button>
+              <button id="scan-source-btn" type="button" data-i18n="檢查來源">檢查來源</button>
+            </div>
+          </section>
+
+          <section class="continue-panel" id="continue-panel" aria-labelledby="continue-title">
             <div class="section-title-row">
               <div>
                 <h2 id="continue-title" data-i18n="繼續閱讀">繼續閱讀</h2>
@@ -227,6 +247,7 @@
                 <button type="button" id="organize-select-visible" data-i18n="選取目前結果">選取目前結果</button>
                 <button type="button" id="organize-clear" data-i18n="清除選取">清除選取</button>
               </div>
+              <div class="organize-impact-summary" id="organize-impact-summary" role="status" aria-live="polite" data-i18n="先選取漫畫，再確認要修改的欄位。">先選取漫畫，再確認要修改的欄位。</div>
               <div class="organize-fields">
                 <label><span data-i18n="標籤">標籤</span><input id="organize-tag" type="text" placeholder="namespace:標籤，例如 artist:Akamaru" data-i18n-placeholder="namespace:標籤，例如 artist:Akamaru"></label>
                 <label><span data-i18n="作者">作者</span><input id="organize-author" type="text" placeholder="留空不修改" data-i18n-placeholder="留空不修改"></label>
@@ -238,10 +259,15 @@
               </div>
               <div class="organize-actions">
                 <button type="button" class="organize-primary" id="organize-apply" data-i18n="套用修改">套用修改</button>
-                <button type="button" id="organize-exclude-tag" data-i18n="排除標籤">排除標籤</button>
-                <button type="button" id="organize-folder-rule" data-i18n="設為資料夾規則">設為資料夾規則</button>
-                <button type="button" id="organize-reimport" data-i18n="重新匯入 metadata">重新匯入 metadata</button>
                 <button type="button" id="organize-undo" disabled data-i18n="撤銷批次操作">撤銷批次操作</button>
+                <details class="organize-more-actions">
+                  <summary data-i18n="其他整理操作">其他整理操作</summary>
+                  <div class="organize-more-actions-list">
+                    <button type="button" id="organize-exclude-tag" data-i18n="排除標籤">排除標籤</button>
+                    <button type="button" id="organize-folder-rule" data-i18n="設為資料夾規則">設為資料夾規則</button>
+                    <button type="button" id="organize-reimport" data-i18n="重新匯入 metadata">重新匯入 metadata</button>
+                  </div>
+                </details>
               </div>
             </div>
 
@@ -270,6 +296,8 @@
         </aside>
       </section>
 
+      <button class="library-panel-scrim" id="library-panel-scrim" type="button" aria-label="關閉側欄" data-i18n-aria-label="關閉側欄" hidden></button>
+
       <button type="button" class="inspector-collapse-btn" id="inspector-collapse-btn" aria-controls="comic-inspector" aria-expanded="true" aria-label="收合漫畫詳情側欄" data-i18n-aria-label="收合漫畫詳情側欄" title="收合漫畫詳情側欄" data-i18n-title="收合漫畫詳情側欄">
         <i class="fa-solid fa-chevron-right" aria-hidden="true"></i>
       </button>
@@ -278,6 +306,7 @@
 
   <!-- 全螢幕漫畫閱讀器層 -->
   <div class="reader-overlay" id="reader-overlay" role="dialog" aria-modal="true" aria-labelledby="reader-comic-title" aria-hidden="true" tabindex="-1" style="display: none;">
+    <div class="reader-discovery-hint" id="reader-discovery-hint" role="status" aria-live="polite" hidden data-i18n="點一下畫面可顯示閱讀控制">點一下畫面可顯示閱讀控制</div>
     <!-- 頂部浮動標題列 (滑鼠靠近時顯示) -->
     <div class="reader-top-bar" id="reader-top-bar">
       <button class="back-btn" id="reader-back-btn" aria-label="返回漫畫書架" data-i18n-aria-label="返回漫畫書架">

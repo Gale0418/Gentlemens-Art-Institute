@@ -370,6 +370,21 @@ function normalizeSmbConfig(data) {
   };
 }
 
+const TAURI_MAX_PRIORITY_LIBRARY_IDS = 4096;
+
+function normalizePriorityLibraryIds(favoriteIds) {
+  if (!Array.isArray(favoriteIds)) return [];
+  const seen = new Set();
+  const normalized = [];
+  for (const id of favoriteIds) {
+    if (typeof id !== 'string' || !id || seen.has(id)) continue;
+    seen.add(id);
+    normalized.push(id);
+    if (normalized.length >= TAURI_MAX_PRIORITY_LIBRARY_IDS) break;
+  }
+  return normalized;
+}
+
 // Compatibility guard: the existing checkbox keeps its historical id so the
 // large frontend core does not need a risky rewrite, but its runtime meaning is
 // now provider-neutral. Both OpenAI and Google require explicit consent before
@@ -520,6 +535,9 @@ if (window.__TAURI__) {
     undoComicFileOperation: (token) => invoke('undo_comic_file_operation', { token }),
     trashPage: (comicId, pageIndex) => invoke('trash_page', { comicId, pageIndex }),
     scanLibrary: () => invoke('scan_library'),
+    scanPriorityLibrary: (favoriteIds) => invoke('scan_priority_library', {
+      favoriteIds: normalizePriorityLibraryIds(favoriteIds),
+    }),
     scanVisibleDirectory: (relativePath) => invoke('scan_visible_directory', { relativePath }),
     searchCatalog: (query) => invoke('search_catalog', { query }),
     getComicMetadata: (id) => invoke('get_comic_metadata', { id }),

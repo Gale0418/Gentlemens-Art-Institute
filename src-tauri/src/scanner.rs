@@ -930,6 +930,221 @@ fn safe_visible_relative_path(relative_path: &str) -> Option<&str> {
     }
 }
 
+fn saved_scan_is_current(state: &AppState, generation: u64, saved_generation: u64) -> bool {
+    state.scan_generation.load(Ordering::Acquire) == generation
+        && state.saved_scan_generation.load(Ordering::Acquire) == saved_generation
+}
+
+fn prepare_saved_item(
+    mut item: ComicItem,
+    state: &AppState,
+    _app_handle: &tauri::AppHandle,
+) -> Option<ComicItem> {
+    item = crate::normalize_runtime_item(item);
+    if item.source_id.starts_with("local:") {
+        let root = state.scan_dir.read().ok()?.clone();
+        if root.is_empty() || item.source_id != local_source_id(Path::new(&root)) {
+            return None;
+        }
+        let relative = safe_visible_relative_path(&item.relative_path)?;
+        if relative.is_empty() {
+            return None;
+        }
+        let mut path = std::path::PathBuf::from(&root);
+        for part in relative.split('/') {
+            path.push(part);
+            if std::fs::symlink_metadata(&path)
+                .is_ok_and(|metadata| metadata.file_type().is_symlink())
+            {
+                return None;
+            }
+        }
+        let is_contained = Path::new(&root)
+            .canonicalize()
+            .ok()
+            .zip(path.canonicalize().ok())
+            .is_some_and(|(root, target)| target.starts_with(root));
+        if !is_contained {
+            item.r#type = "offline".into();
+        } else if path.is_dir() {
+            item.r#type = "folder".into();
+        } else if IMAGE_EXTENSIONS.contains(&item.ext.to_ascii_lowercase().as_str()) {
+            item.r#type = "image".into();
+            item.page_count = 1;
+        } else {
+            item.r#type = "archive".into();
+        }
+        item.source_path = Some(path.to_string_lossy().into_owned());
+    } else if item.source_id == "smb" {
+        if state.smb_config.read().ok()?.is_none() {
+            item.r#type = "offline".into();
+        }
+    } else if item.source_id.starts_with("external:") {
+        let bookmarks = state.external_bookmarks.read().ok()?;
+        let source = bookmarks
+            .iter()
+            .find(|entry| external_source_id(&entry.bookmark) == item.source_id)?
+            .clone();
+        drop(bookmarks);
+        let virtual_path = item.relative_path.strip_prefix("📁 外部裝置/")?;
+        let (_, saved_relative) = virtual_path.split_once('/')?;
+        let relative = safe_visible_relative_path(saved_relative)?.to_string();
+        if relative.is_empty() {
+            return None;
+        }
+        item.relative_path = format!("📁 外部裝置/{}/{relative}", source.name);
+        let bookmark = source.bookmark.clone();
+        let active_root = state.active_bookmarks.lock().ok()?.get(&bookmark).cloned();
+        let root = if let Some(root) = active_root {
+            root
+        } else {
+            #[cfg(target_os = "ios")]
+            {
+                use tauri_plugin_ios_folder::{StartAccessingRequest, TauriPluginIosFolderExt};
+                let resolved = match _app_handle.tauri_plugin_ios_folder().start_accessing(
+                    StartAccessingRequest {
+                        bookmark: bookmark.clone(),
+                    },
+                ) {
+                    Ok(resolved) => resolved,
+                    Err(_) => {
+                        item.r#type = "offline".into();
+                        return Some(item);
+                    }
+                };
+                state
+                    .active_bookmarks
+                    .lock()
+                    .ok()?
+                    .insert(bookmark.clone(), resolved.path.clone());
+                resolved.path
+            }
+            #[cfg(not(target_os = "ios"))]
+            {
+                item.r#type = "offline".into();
+                return Some(item);
+            }
+        };
+        item.source_path = Some(
+            Path::new(&root)
+                .join(&relative)
+                .to_string_lossy()
+                .into_owned(),
+        );
+        item.external_bookmark = Some(bookmark);
+    } else {
+        return None;
+    }
+    if item.page_count == 0 {
+        item.page_count = item.progress.total_pages;
+    }
+    Some(item)
+}
+
+fn publish_saved_items(
+    items: Vec<ComicItem>,
+    state: &Arc<AppState>,
+    app_handle: &tauri::AppHandle,
+    generation: u64,
+    saved_generation: u64,
+) {
+    if items.is_empty() {
+        return;
+    }
+    let batch = {
+        let _scan_lifecycle = state.scan_lifecycle.blocking_lock();
+        if !saved_scan_is_current(state, generation, saved_generation)
+            || !state.scan_progress.blocking_lock().is_scanning
+        {
+            return;
+        }
+        let mut comics = state.comics.blocking_lock();
+        merge_discovered_comics(&mut comics, &items);
+        let found = comics.len();
+        LibraryBatch {
+            generation,
+            items,
+            found,
+        }
+    };
+    use tauri::Emitter;
+    let _ = app_handle.emit("library-changed", batch);
+}
+
+pub async fn scan_priority_library(
+    state: Arc<AppState>,
+    app_handle: tauri::AppHandle,
+    favorite_ids: Vec<String>,
+) -> Result<(), String> {
+    if favorite_ids.len() > 4096
+        || favorite_ids
+            .iter()
+            .any(|id| id.is_empty() || id.len() > 1024)
+    {
+        return Err("收藏清單超出掃描上限".into());
+    }
+    if !state.scan_progress.lock().await.is_scanning {
+        return Ok(());
+    }
+    let store = state
+        .catalog
+        .read()
+        .ok()
+        .and_then(|catalog| catalog.clone());
+    let Some(store) = store else {
+        return Ok(());
+    };
+    let generation = state.scan_generation.load(Ordering::Acquire);
+    let saved_generation = state.saved_scan_generation.fetch_add(1, Ordering::SeqCst) + 1;
+
+    let favorite_state = state.clone();
+    let favorite_handle = app_handle.clone();
+    let favorite_store = store.clone();
+    tokio::task::spawn_blocking(move || {
+        let items = match favorite_store.get_runtime_items_by_ids(&favorite_ids) {
+            Ok(items) => items,
+            Err(error) => {
+                eprintln!("⚠️ 收藏優先掃描失敗：{error}");
+                return;
+            }
+        };
+        for chunk in items.chunks(32) {
+            if !saved_scan_is_current(&favorite_state, generation, saved_generation) {
+                break;
+            }
+            let ready = chunk
+                .iter()
+                .cloned()
+                .filter_map(|item| prepare_saved_item(item, &favorite_state, &favorite_handle))
+                .collect();
+            publish_saved_items(
+                ready,
+                &favorite_state,
+                &favorite_handle,
+                generation,
+                saved_generation,
+            );
+        }
+    });
+
+    tokio::task::spawn_blocking(move || match store.get_recent_reading_runtime_item() {
+        Ok(Some(item)) => {
+            if let Some(item) = prepare_saved_item(item, &state, &app_handle) {
+                publish_saved_items(
+                    vec![item],
+                    &state,
+                    &app_handle,
+                    generation,
+                    saved_generation,
+                );
+            }
+        }
+        Ok(None) => {}
+        Err(error) => eprintln!("⚠️ 最近閱讀優先掃描失敗：{error}"),
+    });
+    Ok(())
+}
+
 pub async fn scan_visible_directory(
     state: Arc<AppState>,
     app_handle: tauri::AppHandle,
@@ -1055,6 +1270,9 @@ pub async fn scan_visible_directory(
         return Ok(());
     }
     let root_path = std::path::PathBuf::from(root);
+    // Reading progress is stored under the configured library, including for
+    // comics discovered through an external bookmark.
+    let progress_dir = state.scan_dir.read().unwrap().clone();
     let subpath = subpath.to_string();
     let local_result = tokio::task::spawn_blocking(move || {
         let root_canonical = root_path
@@ -1075,8 +1293,12 @@ pub async fn scan_visible_directory(
         if !target_canonical.starts_with(&root_canonical) || !target_canonical.is_dir() {
             return Err("漫畫目錄超出來源範圍".to_string());
         }
-        let progress_file = root_path.join(".comic_progress.json");
-        let progress = load_progress_file(&progress_file).unwrap_or_default();
+        let progress = if progress_dir.is_empty() {
+            std::collections::HashMap::new()
+        } else {
+            let progress_file = Path::new(&progress_dir).join(".comic_progress.json");
+            load_progress_file(&progress_file).unwrap_or_default()
+        };
         let mut results = Vec::new();
         let mut published = 0;
         let mut published_at = Instant::now();

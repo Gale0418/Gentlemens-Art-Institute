@@ -1,4 +1,48 @@
 window.GAIL10n.register({
+  "關閉側欄": {
+    "en": "Close sidebar",
+    "ja": "サイドバーを閉じる"
+  },
+  "把你的漫畫放上書架": {
+    "en": "Put your comics on the shelf",
+    "ja": "あなたの作品を本棚に並べましょう"
+  },
+  "選擇本機、外接磁碟或已連線的 NAS 資料夾；原始檔不會被改動。": {
+    "en": "Choose a folder on your device, an external drive, or a connected NAS. Original files stay untouched.",
+    "ja": "本体、外付けドライブ、または接続済み NAS のフォルダーを選んでください。元のファイルは変更されません。"
+  },
+  "先試讀內建選集": {
+    "en": "Try the built-in collection",
+    "ja": "内蔵コレクションを試し読み"
+  },
+  "漫畫來源暫時無法完成掃描，現有書架仍可使用。": {
+    "en": "The comic source could not finish scanning. Your current shelf is still available.",
+    "ja": "作品のスキャンを完了できませんでした。現在の本棚は引き続き利用できます。"
+  },
+  "重試掃描": {
+    "en": "Retry scan",
+    "ja": "スキャンを再試行"
+  },
+  "檢查來源": {
+    "en": "Check source",
+    "ja": "保存元を確認"
+  },
+  "先選取漫畫，再確認要修改的欄位。": {
+    "en": "Select comics, then review the fields you will change.",
+    "ja": "作品を選択し、変更する項目を確認してください。"
+  },
+  "其他整理操作": {
+    "en": "More organization actions",
+    "ja": "その他の整理操作"
+  },
+  "點一下畫面可顯示閱讀控制": {
+    "en": "Tap the page to show reading controls",
+    "ja": "画面をタップすると閲覧操作を表示できます"
+  },
+  "小提示：點一下卡片查看詳情，再按「開始閱讀」；再次點同一卡片也能閱讀；也可以用上方「匯入圖片」加入內容。✨": {
+    "en": "Tip: tap a card for details, then choose Start Reading. Tapping the same card again also opens it. You can import images above. ✨",
+    "ja": "ヒント：カードをタップして詳細を表示し、「読み始める」を選びます。同じカードをもう一度タップしても開けます。上から画像も読み込めます。✨"
+  },
   "展開漫畫系列側欄": {
     "en": "Expand series sidebar",
     "ja": "シリーズサイドバーを展開"
@@ -190,6 +234,26 @@ window.GAIL10n.register({
   "已選 {count} 本": {
     "en": "{count} selected",
     "ja": "{count}冊を選択"
+  },
+  "已選 {count} 本（{titles}{more}）": {
+    "en": "{count} selected ({titles}{more})",
+    "ja": "{count}冊を選択（{titles}{more}）"
+  },
+  "等": {
+    "en": " and more",
+    "ja": " ほか"
+  },
+  "{selection}；尚未指定要變更的欄位。": {
+    "en": "{selection}; no changes specified yet.",
+    "ja": "{selection}。変更する項目はまだ指定されていません。"
+  },
+  "{selection}；將變更：{fields}。": {
+    "en": "{selection}; changes: {fields}.",
+    "ja": "{selection}。変更する項目：{fields}。"
+  },
+  "正在重新掃描漫畫來源…": {
+    "en": "Rescanning comic sources…",
+    "ja": "コミックソースを再スキャンしています…"
   },
   "請至少輸入一個欄位或標籤。": {
     "en": "Enter at least one field or tag.",
@@ -711,9 +775,9 @@ window.GAIL10n.register({
     "en": "Landscape art",
     "ja": "風景イラスト"
   },
-  "開啟風景選集：{title}": {
-    "en": "Open landscape collection: {title}",
-    "ja": "風景コレクションを開く：{title}"
+  "查看風景選集：{title}": {
+    "en": "View landscape collection: {title}",
+    "ja": "風景コレクションを見る：{title}"
   },
   "開啟風景選集": {
     "en": "Open landscape collection",

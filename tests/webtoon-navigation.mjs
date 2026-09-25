@@ -55,6 +55,29 @@ assert.equal(focusableCheck({ ...visibleControl, disabled: true }), false, 'disa
 assert.equal(focusableCheck({ ...visibleControl, computedStyle: { ...visibleControl.computedStyle, display: 'none' } }), false, 'CSS hidden reader control is excluded from focus trap');
 const hiddenParent = { hidden: false, disabled: false, parentNode: null, getAttribute: () => null, computedStyle: { display: 'none' } };
 assert.equal(focusableCheck({ ...visibleControl, parentNode: hiddenParent }), false, 'control under a CSS hidden reader bar is excluded from focus trap');
+{
+  const guard = extractFunction('guardReaderFocus');
+  let redirected = 0;
+  const modal = {
+    hidden: false,
+    getAttribute: name => name === 'aria-hidden' ? null : 'true',
+  };
+  const target = { closest: selector => selector === '[aria-modal="true"]' ? modal : null };
+  const context = {
+    state: { readerBoundaryDialog: null },
+    elements: { readerOverlay: { style: { display: 'flex' }, contains: () => false } },
+    getComputedStyle: () => ({ display: 'flex', visibility: 'visible' }),
+    focusReaderEntry: () => { redirected += 1; },
+  };
+  vm.runInNewContext(`${guard}\nguardReaderFocus({ target: target });`, { ...context, target });
+  assert.equal(redirected, 0, 'focus inside a visible aria-modal is allowed while the reader is open');
+  modal.hidden = true;
+  vm.runInNewContext(`${guard}\nguardReaderFocus({ target: target });`, { ...context, target });
+  assert.equal(redirected, 1, 'focus inside a hidden aria-modal still returns to the reader entry');
+  context.state.readerBoundaryDialog = { overlay: { contains: () => true } };
+  vm.runInNewContext(`${guard}\nguardReaderFocus({ target: target });`, { ...context, target });
+  assert.equal(redirected, 1, 'reader boundary dialog remains an explicit focus exception');
+}
 assert.match(extractFunction('trapReaderFocus'), /triggerControlsActive\(\)/, 'empty reader focus trap wakes idle chrome');
 assert.match(css, /\.reader-overlay\.mode-webtoon \.webtoon-nav-button[\s\S]*min-height: 44px/);
 assert.match(css, /\.reader-overlay\.mode-single \.reader-viewport[\s\S]*overflow: auto/);

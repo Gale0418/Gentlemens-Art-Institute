@@ -804,11 +804,18 @@ const makeCover = id => {
 // 回上層逐層返回，不把來源根目錄當作可穿越的檔案系統路徑。
 {
   const navigation = createHarness();
+  const visibleScanPaths = [];
+  navigation.context.window.electronAPI.scanVisibleDirectory = path => {
+    visibleScanPaths.push(path);
+    return Promise.resolve();
+  };
   vm.runInContext('filterAndRenderGrid = () => {}', navigation.context);
   navigation.hooks.state.currentPath = '系列/第一部/第一冊';
   vm.runInContext('navigateLibraryUp()', navigation.context);
   assert.equal(navigation.hooks.state.currentPath, '系列/第一部');
   vm.runInContext('navigateLibraryUp(); navigateLibraryUp(); navigateLibraryUp()', navigation.context);
+  await Promise.resolve();
+  assert.deepEqual(visibleScanPaths, ['系列/第一部', '系列', ''], 'only navigated directories scan, and root cancels the previous priority scan');
   assert.equal(navigation.hooks.state.currentPath, '');
   assert.equal(navigation.hooks.elements.libraryUpBtn.disabled, true);
 }

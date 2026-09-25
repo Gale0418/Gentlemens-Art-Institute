@@ -126,6 +126,7 @@ pub async fn scan_smb(
         base_count,
         &mut published,
         &mut published_at,
+        None,
     )
     .await?;
 
@@ -148,6 +149,112 @@ pub async fn scan_smb(
     Ok(())
 }
 
+pub(crate) async fn scan_visible_smb(
+    config: SmbConfig,
+    state: Arc<AppState>,
+    generation: u64,
+    visible_generation: u64,
+    app_handle: tauri::AppHandle,
+    relative_path: String,
+) -> Result<(), String> {
+    use std::sync::atomic::Ordering;
+
+    if relative_path.is_empty() {
+        return Ok(());
+    }
+    if generation != state.scan_generation.load(Ordering::Acquire)
+        || visible_generation != state.visible_scan_generation.load(Ordering::Acquire)
+    {
+        return Ok(());
+    }
+    if relative_path.starts_with('/') || !relative_path.split('/').all(safe_smb_entry_name) {
+        return Err("SMB 漫畫目錄路徑無效".to_string());
+    }
+
+    crate::commerce::require_pro(&app_handle).await?;
+
+    let addr = format!("{}:445", config.host);
+    let username = config.username.unwrap_or_else(|| "guest".to_string());
+    let password = config.password.unwrap_or_default();
+    let share = config.share;
+    let mut client = tokio::time::timeout(
+        SMB_CONNECT_TIMEOUT,
+        smb2::connect(&addr, &username, &password),
+    )
+    .await
+    .map_err(|_| "SMB 連線逾時（10 秒）".to_string())?
+    .map_err(|error| format!("SMB 連線失敗：{error}"))?;
+    let mut tree = tokio::time::timeout(SMB_CONNECT_TIMEOUT, client.connect_share(&share))
+        .await
+        .map_err(|_| "SMB 共用資料夾連線逾時（10 秒）".to_string())?
+        .map_err(|error| format!("SMB 共用資料夾連線失敗：{error}"))?;
+    if generation != state.scan_generation.load(Ordering::Acquire)
+        || visible_generation != state.visible_scan_generation.load(Ordering::Acquire)
+    {
+        return Ok(());
+    }
+
+    let scan_dir = state
+        .scan_dir
+        .read()
+        .map_err(|_| "漫畫目錄鎖定失敗")?
+        .clone();
+    let progress_map: std::collections::HashMap<String, Progress> = if !scan_dir.is_empty() {
+        let progress_file = Path::new(&scan_dir).join(".comic_progress.json");
+        match tokio::task::spawn_blocking(move || {
+            crate::scanner::load_progress_file(&progress_file)
+        })
+        .await
+        {
+            Ok(Ok(progress)) => progress,
+            Ok(Err(error)) => {
+                eprintln!("⚠️ 忽略漫畫進度檔：{error}");
+                std::collections::HashMap::new()
+            }
+            Err(error) => {
+                eprintln!("⚠️ 進度檔背景工作失敗：{error}");
+                std::collections::HashMap::new()
+            }
+        }
+    } else {
+        std::collections::HashMap::new()
+    };
+
+    let mut results = Vec::new();
+    let mut published = 0usize;
+    let mut published_at = Instant::now();
+    scan_smb_dir(
+        &mut client,
+        &mut tree,
+        &relative_path,
+        &progress_map,
+        &mut results,
+        generation,
+        &state,
+        relative_path.split('/').count(),
+        &app_handle,
+        0,
+        &mut published,
+        &mut published_at,
+        Some(visible_generation),
+    )
+    .await?;
+
+    publish_smb_visible_progress(
+        &state,
+        &app_handle,
+        generation,
+        visible_generation,
+        &results,
+        results.len(),
+        &mut published,
+        &mut published_at,
+        true,
+    )
+    .await;
+    Ok(())
+}
+
 #[allow(clippy::too_many_arguments)]
 async fn scan_smb_dir(
     client: &mut smb2::SmbClient,
@@ -162,7 +269,21 @@ async fn scan_smb_dir(
     base_count: usize,
     published: &mut usize,
     published_at: &mut Instant,
+    visible_generation: Option<u64>,
 ) -> Result<(), String> {
+    if scan_generation
+        != state
+            .scan_generation
+            .load(std::sync::atomic::Ordering::Acquire)
+        || visible_generation.is_some_and(|generation| {
+            generation
+                != state
+                    .visible_scan_generation
+                    .load(std::sync::atomic::Ordering::Acquire)
+        })
+    {
+        return Ok(());
+    }
     if smb_scan_depth_exceeded(depth) {
         return Err(format!(
             "SMB 漫畫目錄超過 {MAX_SMB_SCAN_DEPTH} 層；為避免把未掃到的深層漫畫誤判刪除，本輪掃描已安全中止：{dir_path}"
@@ -179,6 +300,12 @@ async fn scan_smb_dir(
             != state
                 .scan_generation
                 .load(std::sync::atomic::Ordering::Acquire)
+            || visible_generation.is_some_and(|generation| {
+                generation
+                    != state
+                        .visible_scan_generation
+                        .load(std::sync::atomic::Ordering::Acquire)
+            })
         {
             return Ok(());
         }
@@ -208,6 +335,7 @@ async fn scan_smb_dir(
                 base_count,
                 published,
                 published_at,
+                visible_generation,
             ))
             .await?;
             continue;
@@ -259,18 +387,33 @@ async fn scan_smb_dir(
             source_path: None,
             external_bookmark: None,
         });
-        publish_smb_progress(
-            state,
-            app_handle,
-            scan_generation,
-            base_count,
-            results,
-            results.len(),
-            &full_rel_path,
-            published,
-            published_at,
-        )
-        .await;
+        if let Some(visible_generation) = visible_generation {
+            publish_smb_visible_progress(
+                state,
+                app_handle,
+                scan_generation,
+                visible_generation,
+                results,
+                results.len(),
+                published,
+                published_at,
+                false,
+            )
+            .await;
+        } else {
+            publish_smb_progress(
+                state,
+                app_handle,
+                scan_generation,
+                base_count,
+                results,
+                results.len(),
+                &full_rel_path,
+                published,
+                published_at,
+            )
+            .await;
+        }
     }
 
     Ok(())
@@ -327,6 +470,63 @@ async fn publish_smb_progress(
     use tauri::Emitter;
     let (status, batch) = status;
     let _ = app_handle.emit("scan-progress", status);
+    let _ = app_handle.emit("library-changed", batch);
+}
+
+#[allow(clippy::too_many_arguments)]
+async fn publish_smb_visible_progress(
+    state: &Arc<AppState>,
+    app_handle: &tauri::AppHandle,
+    generation: u64,
+    visible_generation: u64,
+    results: &[ComicItem],
+    discovered: usize,
+    published: &mut usize,
+    published_at: &mut Instant,
+    force: bool,
+) {
+    if !force && !should_publish_smb_progress(discovered, *published, published_at.elapsed()) {
+        return;
+    }
+    let batch = {
+        let _scan_lifecycle = state.scan_lifecycle.lock().await;
+        if state
+            .scan_generation
+            .load(std::sync::atomic::Ordering::Acquire)
+            != generation
+            || state
+                .visible_scan_generation
+                .load(std::sync::atomic::Ordering::Acquire)
+                != visible_generation
+        {
+            return;
+        }
+        let newly_discovered = results[*published..].to_vec();
+        if newly_discovered.is_empty() {
+            return;
+        }
+        let mut comics = state.comics.lock().await;
+        merge_discovered_comics(&mut comics, &newly_discovered);
+        *published = discovered;
+        *published_at = Instant::now();
+        LibraryBatch {
+            generation,
+            items: newly_discovered,
+            found: discovered,
+        }
+    };
+    if state
+        .scan_generation
+        .load(std::sync::atomic::Ordering::Acquire)
+        != generation
+        || state
+            .visible_scan_generation
+            .load(std::sync::atomic::Ordering::Acquire)
+            != visible_generation
+    {
+        return;
+    }
+    use tauri::Emitter;
     let _ = app_handle.emit("library-changed", batch);
 }
 

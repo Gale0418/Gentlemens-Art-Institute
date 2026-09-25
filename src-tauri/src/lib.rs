@@ -704,6 +704,15 @@ async fn get_scan_status(state: State<'_, Arc<AppState>>) -> Result<state::ScanP
 }
 
 #[tauri::command]
+async fn scan_visible_directory(
+    app_handle: AppHandle,
+    state: State<'_, Arc<AppState>>,
+    relative_path: String,
+) -> Result<(), String> {
+    scanner::scan_visible_directory(state.inner().clone(), app_handle, relative_path).await
+}
+
+#[tauri::command]
 async fn open_comic(
     id: String,
     state: State<'_, Arc<AppState>>,
@@ -1930,7 +1939,27 @@ async fn send_ai_request(
     }
 }
 
+fn redact_ai_error(error: String, api_key: &str) -> String {
+    if api_key.is_empty() {
+        return error;
+    }
+    error.replace(api_key, "[REDACTED API KEY]")
+}
+
 async fn call_ai(
+    state: &AppState,
+    config: crate::state::AiSessionConfig,
+    expected_generation: u64,
+    image: Option<(&str, &str)>,
+    prompt: &str,
+) -> Result<String, String> {
+    let api_key = config.api_key.clone();
+    call_ai_inner(state, config, expected_generation, image, prompt)
+        .await
+        .map_err(|error| redact_ai_error(error, &api_key))
+}
+
+async fn call_ai_inner(
     state: &AppState,
     config: crate::state::AiSessionConfig,
     expected_generation: u64,
@@ -3005,6 +3034,7 @@ pub fn run() {
             restore_pro,
             get_library,
             get_scan_status,
+            scan_visible_directory,
             open_comic,
             close_comic,
             update_reader_cache_window,
@@ -3564,6 +3594,16 @@ mod tests {
             reqwest::StatusCode::BAD_REQUEST,
             "gemma-4-26b-a4b-it"
         ));
+    }
+
+    #[test]
+    fn ai_provider_errors_never_echo_the_active_key() {
+        let key = "test-google-key-1234567890";
+        let error = format!("Permission denied: Consumer 'api_key:{key}' has been suspended.");
+        let redacted = redact_ai_error(error, key);
+        assert!(!redacted.contains(key));
+        assert!(redacted.contains("has been suspended"));
+        assert!(redacted.contains("[REDACTED API KEY]"));
     }
 
     #[test]

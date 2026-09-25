@@ -111,17 +111,16 @@ console.log(`PASS: locale selection, persistence, private-content boundaries, sa
   );
   assert.equal(localized, 'The file is not available.', 'wrapped native codes should use the selected UI locale');
   const translateNative = raw => vm.runInNewContext(
-    `${mapSource[0]}\n${resolver[0]}\nlocalizedNativeError(${JSON.stringify(raw)}).message`,
+    `${mapSource[0]}\n${resolver[0]}\nlocalizedNativeError(${JSON.stringify(raw)})`,
     { window: { GAIL10n: { locale: 'en' } } },
   );
-  assert.equal(translateNative('照片相簿目前不可用'), 'The photo album is not accessible.');
-  assert.equal(translateNative('未識別的原生錯誤'), 'The operation failed. Please try again.');
+  assert.equal(translateNative('照片相簿目前不可用').message, 'The photo album is not accessible.');
+  assert.equal(translateNative('未識別的原生錯誤'), '未識別的原生錯誤', 'unknown native text must remain available for diagnosis');
   const rateLimit = vm.runInNewContext(
     `${mapSource[0]}\n${resolver[0]}\nlocalizedNativeError('Luna 拒絕請求（HTTP 429）：quota exceeded')`,
     { window: { GAIL10n: { locale: 'en' } } },
   );
-  assert.equal(rateLimit.message, 'The operation failed. Please try again.');
-  assert.match(rateLimit.nativeMessage, /HTTP 429/, 'AI rate limits must remain available to flow control');
+  assert.equal(rateLimit, 'Luna 拒絕請求（HTTP 429）：quota exceeded', 'AI rate limits must remain available to flow control');
   assert.equal(vm.runInNewContext(
     `${mapSource[0]}\n${resolver[0]}\nlocalizedNativeError('PRO_REQUIRED: native detail')`,
     { window: { GAIL10n: { locale: 'en' } } },

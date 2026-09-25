@@ -1007,9 +1007,9 @@ body {
 }
 .reader-overlay.mode-single.fit-width .pages-container {
   height: auto !important;
-  /* 短圖平分上下留白；長圖沒有剩餘空間時，仍從頂端開始捲動。 */
+  /* 短圖在最小視窗高度內置中；長圖撐高容器後仍可從頂端捲動。 */
   margin-block: auto;
-  align-items: flex-start !important;
+  align-items: center !important;
 }
 .reader-overlay.mode-single.fit-width .pages-container img {
   width: 100% !important;
@@ -1021,7 +1021,7 @@ body {
 .reader-overlay.mode-double.fit-width .pages-container {
   height: auto !important;
   margin-block: auto;
-  align-items: flex-start !important;
+  align-items: center !important;
 }
 .reader-overlay.mode-double.fit-width .pages-container img {
   width: 50% !important;

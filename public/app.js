@@ -137,6 +137,7 @@ let lastContinueRenderSignature = '';
 let lastInspectorRenderSignature = '';
 let libraryRefreshRunner = null;
 let incrementalLibraryRenderFrame = null;
+let visibleDirectoryScanRequestId = 0;
 // Native command 排程不保證呼叫者的完成順序；把每筆進度快照排成單一
 // promise chain，避免快速翻頁時較舊頁碼晚於新頁碼落庫。
 let readingProgressSaveQueue = Promise.resolve();
@@ -270,6 +271,8 @@ function scheduleLibraryRefresh(delay = 80) {
 
 function resetLibraryNavigationState() {
   state.currentPath = '';
+  visibleDirectoryScanRequestId += 1;
+  requestVisibleDirectoryScan('');
   state.activeSeries = 'all';
   state.selectedComicId = null;
   state.organizeSelection.clear();
@@ -1627,14 +1630,13 @@ function shortPathLabel(pathValue) {
 
 function applyLibraryFilter(filter) {
   state.activeFilter = filter || 'all';
-  state.currentPath = ""; // 切換狀態過濾時回到根目錄
+  navigateLibraryToPath(''); // 切換狀態過濾時回到根目錄
 
   document.querySelectorAll('.filter-btn').forEach(btn => {
     const selected = btn.dataset.filter === state.activeFilter;
     btn.classList.toggle('active', selected);
     btn.setAttribute('aria-pressed', String(selected));
   });
-  filterAndRenderGrid();
 }
 
 // ==========================================================================
@@ -2490,8 +2492,7 @@ function selectSeries(seriesName) {
     else item.removeAttribute('aria-current');
   });
   // 系列是 metadata 篩選，不保證與實體資料夾同名；切換時回到書庫根層。
-  state.currentPath = '';
-  filterAndRenderGrid();
+  navigateLibraryToPath('');
 }
 
 // 統計資訊更新
@@ -2656,8 +2657,7 @@ function activateGridComic(comic) {
 
   if (state.selectedComicId === comic.id) {
     if (comic.isDirectory) {
-      state.currentPath = comic.relativePath;
-      filterAndRenderGrid();
+      navigateLibraryToPath(comic.relativePath);
     } else {
       openReader(comic.id);
     }
@@ -2770,8 +2770,7 @@ function renderComicInspector(comic, options = {}) {
       } else if (sourceOffline) {
         openSettingsForRecovery();
       } else if (isDirectory) {
-        state.currentPath = comic.relativePath;
-        filterAndRenderGrid();
+        navigateLibraryToPath(comic.relativePath);
       } else {
         openReader(comic.id);
       }
@@ -3131,8 +3130,7 @@ function filterAndRenderGrid(options = {}) {
     homeBtn.style.fontWeight = '600';
     homeBtn.style.color = 'var(--text-light)';
     homeBtn.onclick = () => {
-      state.currentPath = "";
-      filterAndRenderGrid();
+      navigateLibraryToPath('');
     };
     elements.folderBreadcrumbs.appendChild(homeBtn);
 
@@ -3159,8 +3157,7 @@ function filterAndRenderGrid(options = {}) {
         pathBtn.style.color = 'var(--text-light)';
         const targetPath = accumPath; // 閉包保留
         pathBtn.onclick = () => {
-          state.currentPath = targetPath;
-          filterAndRenderGrid();
+          navigateLibraryToPath(targetPath);
         };
       }
       elements.folderBreadcrumbs.appendChild(pathBtn);
@@ -3422,8 +3419,7 @@ function renderGrid({ skipUnchanged = false, background = false } = {}) {
       `;
 
       card.onclick = () => {
-        state.currentPath = comic.relativePath;
-        filterAndRenderGrid();
+        navigateLibraryToPath(comic.relativePath);
       };
       configureInteractiveItem(card, readerText('開啟資料夾：{title}', { title: comic.title }), card.onclick);
       card.oncontextmenu = (e) => showGridContextMenu(e, comic);
@@ -3824,7 +3820,13 @@ function trapReaderFocus(event) {
 function guardReaderFocus(event) {
   if (elements.readerOverlay.style.display === 'none') return;
   if (state.readerBoundaryDialog?.overlay?.contains?.(event.target)) return;
-  if (!elements.readerOverlay.contains(event.target)) focusReaderEntry();
+  if (elements.readerOverlay.contains(event.target)) return;
+  const modal = event.target?.closest?.('[aria-modal="true"]');
+  if (modal && !modal.hidden && modal.getAttribute?.('aria-hidden') !== 'true') {
+    const style = typeof getComputedStyle === 'function' ? getComputedStyle(modal) : null;
+    if (!style || (style.display !== 'none' && style.visibility !== 'hidden')) return;
+  }
+  focusReaderEntry();
 }
 
 function restoreReaderFocus() {
@@ -4600,6 +4602,30 @@ function getParentPath(relPath) {
   return idx === -1 ? '' : relPath.substring(0, idx);
 }
 
+// 進入虛擬資料夾時，請 native 優先補掃目前目錄。掃描結果仍透過既有
+// library-changed 事件回到書架，這裡刻意不等待 Promise，避免導航被磁碟 I/O 卡住。
+function requestVisibleDirectoryScan(relativePath) {
+  const scanVisibleDirectory = eAPI?.scanVisibleDirectory;
+  if (typeof scanVisibleDirectory !== 'function') return;
+
+  const requestId = ++visibleDirectoryScanRequestId;
+  Promise.resolve()
+    .then(() => scanVisibleDirectory(relativePath))
+    .catch(error => {
+      // 快速切換資料夾時，舊請求的錯誤不應覆蓋目前資料夾的狀態。
+      if (requestId !== visibleDirectoryScanRequestId || state.currentPath !== relativePath) return;
+      console.warn('無法優先掃描目前資料夾：', error);
+    });
+}
+
+function navigateLibraryToPath(relativePath) {
+  state.currentPath = typeof relativePath === 'string' ? relativePath : '';
+  // 根目錄或另一個資料夾也會使先前的掃描請求失去 UI 關聯。
+  visibleDirectoryScanRequestId += 1;
+  requestVisibleDirectoryScan(state.currentPath);
+  filterAndRenderGrid();
+}
+
 function syncLibraryUpButton() {
   if (!elements.libraryUpBtn) return;
   const canNavigateUp = Boolean(state.currentPath);
@@ -4612,10 +4638,9 @@ function navigateLibraryUp() {
     syncLibraryUpButton();
     return false;
   }
-  state.currentPath = getParentPath(state.currentPath);
   state.selectedComicId = null;
   lastInspectorRenderSignature = '';
-  filterAndRenderGrid();
+  navigateLibraryToPath(getParentPath(state.currentPath));
   return true;
 }
 

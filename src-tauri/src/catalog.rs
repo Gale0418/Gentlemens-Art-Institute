@@ -11,6 +11,7 @@ use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 use std::fs::File;
 use std::io::{Read, Seek, SeekFrom};
 use std::path::{Path, PathBuf};
+use std::sync::{Arc, OnceLock};
 use std::time::Duration;
 use unicode_normalization::UnicodeNormalization;
 
@@ -42,6 +43,7 @@ struct LocationSignature {
 #[derive(Clone, Debug)]
 pub struct CatalogStore {
     path: PathBuf,
+    fts_checked: Arc<OnceLock<()>>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
@@ -355,7 +357,10 @@ fn default_true() -> bool {
 
 impl CatalogStore {
     pub fn new(path: PathBuf) -> Result<Self, String> {
-        let store = Self { path };
+        let store = Self {
+            path,
+            fts_checked: Arc::new(OnceLock::new()),
+        };
         store.with_connection(|_| Ok(()))?;
         Ok(store)
     }
@@ -383,7 +388,8 @@ impl CatalogStore {
         connection
             .pragma_update(None, "foreign_keys", "ON")
             .map_err(|error| error.to_string())?;
-        migrate(&mut connection)?;
+        migrate(&mut connection, self.fts_checked.get().is_none())?;
+        self.fts_checked.get_or_init(|| ());
         operation(&mut connection)
     }
 
@@ -1705,7 +1711,7 @@ fn load_file_operation(
     ).map_err(|error| error.to_string())
 }
 
-fn migrate(connection: &mut Connection) -> Result<(), String> {
+fn migrate(connection: &mut Connection, check_fts: bool) -> Result<(), String> {
     connection
         .execute_batch(
             "CREATE TABLE IF NOT EXISTS schema_migrations(
@@ -1766,7 +1772,7 @@ fn migrate(connection: &mut Connection) -> Result<(), String> {
         }
     }
     backfill_canonical_tags(connection)?;
-    if fts_rebuild_required || catalog_fts_needs_rebuild(connection)? {
+    if fts_rebuild_required || (check_fts && catalog_fts_needs_rebuild(connection)?) {
         rebuild_catalog_fts(connection)?;
     }
     Ok(())
@@ -4313,6 +4319,31 @@ mod tests {
         let view = store.get_metadata("runtime").unwrap();
         assert!(view.offline);
         assert_eq!(view.title, "a");
+    }
+
+    #[test]
+    fn fts_consistency_is_checked_on_store_open_only() {
+        let store = store("fts_open_check");
+        store
+            .sync_library(&[comic("runtime", "knownbook.zip")])
+            .unwrap();
+        store
+            .with_connection(|connection| {
+                connection
+                    .execute("DELETE FROM catalog_fts", [])
+                    .map_err(|error| error.to_string())?;
+                Ok(())
+            })
+            .unwrap();
+        let query = CatalogQuery {
+            query: "known".into(),
+            offset: 0,
+            limit: 20,
+        };
+        assert_eq!(store.search(query.clone()).unwrap().total, 0);
+
+        let reopened = CatalogStore::new(store.path().to_path_buf()).unwrap();
+        assert_eq!(reopened.search(query).unwrap().total, 1);
     }
 
     #[test]

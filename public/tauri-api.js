@@ -188,7 +188,7 @@ function localizedNativeError(error) {
   };
   const code = raw.trim().match(/((?:FOLDER|AI|PHOTO|IOS_FOLDER)_[A-Z0-9_]+)$/)?.[1]
     || legacyPhotoCodes[raw.trim()]
-    || (/\p{Script=Han}/u.test(raw) ? 'NATIVE_OPERATION_FAILED' : '');
+    || '';
   const messages = nativeErrorMessages[code];
   if (!messages) return error;
   const locale = window.GAIL10n?.locale;
@@ -520,6 +520,7 @@ if (window.__TAURI__) {
     undoComicFileOperation: (token) => invoke('undo_comic_file_operation', { token }),
     trashPage: (comicId, pageIndex) => invoke('trash_page', { comicId, pageIndex }),
     scanLibrary: () => invoke('scan_library'),
+    scanVisibleDirectory: (relativePath) => invoke('scan_visible_directory', { relativePath }),
     searchCatalog: (query) => invoke('search_catalog', { query }),
     getComicMetadata: (id) => invoke('get_comic_metadata', { id }),
     applyBatchMetadata: (request) => invoke('apply_batch_metadata', { request }),

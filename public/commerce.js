@@ -294,6 +294,18 @@
 
   function ensure(feature) {
     if (state.ready && state.snapshot.pro) return true;
+    if (!state.ready) {
+      if (feature === 'ai') {
+        const aiStatus = byId('ai-session-status');
+        if (aiStatus) aiStatus.textContent = featureText('正在確認 G.A.I Pro 權益，請稍候再試。');
+      }
+      void refreshCommerce();
+      return false;
+    }
+    if (feature === 'ai') {
+      const aiStatus = byId('ai-session-status');
+      if (aiStatus) aiStatus.textContent = featureText('艦載 AI 需要 G.A.I Pro；請先確認或恢復購買。');
+    }
     openProDialog(feature);
     return false;
   }

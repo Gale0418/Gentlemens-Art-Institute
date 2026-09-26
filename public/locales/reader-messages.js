@@ -1524,3 +1524,58 @@ window.GAIL10n.register({
     "ja": "現在、ファイル操作を利用できません。"
   }
 });
+
+window.GAIL10n.register({
+  "請先到設定輸入 API Key 並啟用艦載 AI。": {
+    "en": "Open Settings, enter an API key, and enable AI first.",
+    "ja": "先に設定で API キーを入力し、AI を有効にしてください。"
+  },
+  "艦載 AI 設定正在變更，請稍候。": {
+    "en": "AI settings are being updated. Please wait.",
+    "ja": "AI 設定を変更中です。しばらくお待ちください。"
+  },
+  "用合成文字測試艦載 AI": {
+    "en": "Test AI with sample text",
+    "ja": "サンプルテキストで AI をテスト"
+  },
+  "艦載 AI 需要 G.A.I Pro；請先確認或恢復購買。": {
+    "en": "AI requires G.A.I Pro. Check your access or restore your purchase first.",
+    "ja": "AI には G.A.I Pro が必要です。利用権を確認するか、購入を復元してください。"
+  },
+  "正在確認 G.A.I Pro 權益，請稍候再試。": {
+    "en": "Checking G.A.I Pro access. Please try again in a moment.",
+    "ja": "G.A.I Pro の利用権を確認中です。少し待ってから再試行してください。"
+  },
+  "請勾選本次第三方 AI 資料分享同意。": {
+    "en": "Consent to third-party AI data sharing for this session first.",
+    "ja": "このセッションでの第三者 AI へのデータ共有に同意してください。"
+  },
+  "無法使用本機 Keychain；請確認裝置已解鎖後再試。": {
+    "en": "The device Keychain is unavailable. Unlock the device and try again.",
+    "ja": "デバイスの Keychain を利用できません。ロックを解除して再試行してください。"
+  },
+  "請檢查 API Key 是否正確，再試一次。": {
+    "en": "Check the API key and try again.",
+    "ja": "API キーを確認して再試行してください。"
+  },
+  "艦載 AI 啟用失敗；請檢查 Pro 權益、Key 與網路後再試。": {
+    "en": "Could not enable AI. Check Pro access, your key, and the network, then try again.",
+    "ja": "AI を有効にできませんでした。Pro の利用権、キー、ネットワークを確認して再試行してください。"
+  },
+  "請先輸入 API Key，再啟用艦載 AI。": {
+    "en": "Enter an API key before enabling AI.",
+    "ja": "AI を有効にする前に API キーを入力してください。"
+  },
+  "請先輸入 API Key 並啟用艦載 AI，再進行連線測試。": {
+    "en": "Enter an API key and enable AI before testing the connection.",
+    "ja": "接続テストの前に API キーを入力し、AI を有効にしてください。"
+  },
+  "請勾選本次資料分享同意，再按「使用已儲存金鑰」啟用艦載 AI。": {
+    "en": "Consent to data sharing for this session, then tap Use Saved Key to enable AI.",
+    "ja": "このセッションのデータ共有に同意してから、「保存済みのキーを使用」をタップして AI を有効にしてください。"
+  },
+  "還原艦載 AI 失敗，請確認設定後再試。": {
+    "en": "Could not restore AI. Check the settings and try again.",
+    "ja": "AI を復元できませんでした。設定を確認して再試行してください。"
+  }
+});

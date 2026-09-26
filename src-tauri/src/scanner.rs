@@ -935,6 +935,21 @@ fn saved_scan_is_current(state: &AppState, generation: u64, saved_generation: u6
         && state.saved_scan_generation.load(Ordering::Acquire) == saved_generation
 }
 
+fn visible_source_lanes(
+    is_external: bool,
+    local_configured: bool,
+    smb_configured: bool,
+) -> (bool, bool) {
+    if is_external {
+        (false, true)
+    } else {
+        // The in-memory library is a progressively published snapshot. It is
+        // therefore not safe to infer a configured source from whether that
+        // source has already yielded an item during the full scan.
+        (smb_configured, local_configured)
+    }
+}
+
 fn prepare_saved_item(
     mut item: ComicItem,
     state: &AppState,
@@ -1158,30 +1173,17 @@ pub async fn scan_visible_directory(
     if !state.scan_progress.lock().await.is_scanning {
         return Ok(());
     }
-    let (smb_task, run_local) = if relative_path.starts_with("📁 外部裝置/") {
-        (None, true)
-    } else {
-        let prefix = format!("{relative_path}/");
-        let (known_smb, known_local) = {
-            let comics = state.comics.lock().await;
-            let sources = comics
-                .iter()
-                .filter(|comic| {
-                    comic.relative_path == relative_path || comic.relative_path.starts_with(&prefix)
-                })
-                .map(|comic| comic.source_id.as_str())
-                .collect::<Vec<_>>();
-            (
-                sources.contains(&"smb"),
-                sources.iter().any(|source| *source != "smb"),
-            )
-        };
-        let config = state.smb_config.read().unwrap().clone();
-        if let Some(config) = config.filter(|_| known_smb || !known_local) {
+    let is_external = relative_path.starts_with("📁 外部裝置/");
+    let local_configured = !state.scan_dir.read().unwrap().is_empty();
+    let smb_config = state.smb_config.read().unwrap().clone();
+    let smb_configured = smb_config.is_some();
+    let (run_smb, run_local) = visible_source_lanes(is_external, local_configured, smb_configured);
+    let smb_task = if run_smb {
+        if let Some(config) = smb_config {
             let smb_state = state.clone();
             let smb_handle = app_handle.clone();
             let smb_path = relative_path.clone();
-            let task = tokio::spawn(async move {
+            Some(tokio::spawn(async move {
                 crate::smb_scanner::scan_visible_smb(
                     config,
                     smb_state,
@@ -1191,17 +1193,18 @@ pub async fn scan_visible_directory(
                     smb_path,
                 )
                 .await
-            });
-            (Some(task), !known_smb || known_local)
+            }))
         } else {
-            (None, true)
+            None
         }
+    } else {
+        None
     };
     if !run_local {
-        return smb_task
-            .expect("SMB only when no local source")
-            .await
-            .map_err(|error| error.to_string())?;
+        if let Some(task) = smb_task {
+            return task.await.map_err(|error| error.to_string())?;
+        }
+        return Ok(());
     }
     let (root, subpath, virtual_prefix, bookmark) = if let Some(external_path) =
         relative_path.strip_prefix("📁 外部裝置/")
@@ -1791,6 +1794,17 @@ mod tests {
         ] {
             assert_eq!(safe_visible_relative_path(unsafe_path), None);
         }
+    }
+
+    #[test]
+    fn visible_scan_uses_configured_sources_before_snapshot_hydration() {
+        // During a progressive full scan either source may still be absent
+        // from state.comics; configured lanes must nevertheless both run.
+        assert_eq!(visible_source_lanes(false, true, true), (true, true));
+        assert_eq!(visible_source_lanes(false, true, false), (false, true));
+        assert_eq!(visible_source_lanes(false, false, true), (true, false));
+        assert_eq!(visible_source_lanes(false, false, false), (false, false));
+        assert_eq!(visible_source_lanes(true, true, true), (false, true));
     }
 
     fn comic(id: &str, title: &str, source_id: &str) -> ComicItem {

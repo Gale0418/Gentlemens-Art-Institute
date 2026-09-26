@@ -125,7 +125,8 @@ console.log('PASS: provider consent replaces all legacy label text and resets pe
 // A fast second provider switch must supersede the first native revoke while
 // the synchronous pending flag blocks AI actions immediately.
 function extractFunction(source, name) {
-  const start = source.indexOf(`async function ${name}`);
+  let start = source.indexOf(`async function ${name}`);
+  if (start < 0) start = source.indexOf(`function ${name}`);
   assert.ok(start >= 0, `app.js should define ${name}`);
   const bodyStart = source.indexOf('{', start);
   let depth = 0;
@@ -197,6 +198,12 @@ assert.equal(mockContext.state.aiSessionSwitchPending, false, 'stale revoke comp
 assert.equal(mockContext.state.aiSessionMutationPending, false, 'stale revoke completion must not clear latest mutation guard');
 console.log('PASS: provider revoke blocks immediate AI actions and ignores stale rapid-switch completions');
 
+const aiSetupFailureMessage = vm.runInNewContext(`(${extractFunction(app, 'aiSetupFailureMessage')})`, {
+  readerText: message => message,
+});
+assert.match(aiSetupFailureMessage('PRO_REQUIRED: denied'), /G\.A\.I Pro/);
+assert.match(aiSetupFailureMessage('Keychain unavailable'), /Keychain/);
+
 function createAiMutationContext({ status, eAPI }) {
   const elements = {
     aiSessionStatus: { textContent: '', setAttribute() {} },
@@ -252,6 +259,7 @@ function createAiMutationContext({ status, eAPI }) {
     },
     renderAiSessionStatus(nextStatus) { context.state.aiSessionStatus = nextStatus; },
     readerText: message => message,
+    aiSetupFailureMessage,
     showReaderToast: message => { context.lastToast = message; },
     setAutoPageExplanation() {},
     setAiPagePanelVisible() {},

@@ -508,6 +508,22 @@ function renderWebtoonPages(hooks, count, currentPageIndex) {
   assert.equal(runtime.hooks.elements.pagesContainer.querySelector('img[data-index="39"]').src, '/resumed-39.svg');
 }
 
+// 換到頁數相同的另一部條漫時，前一本的實測頁高不得污染新書的 spacer。
+{
+  const runtime = createRuntimeHarness();
+  runtime.hooks.state.currentComic = comic('webtoon-a', 'webtoon A');
+  runtime.hooks.state.currentComicPages = ['/a-0.svg', '/a-1.svg', '/a-2.svg'];
+  runtime.hooks.state.readingMode = 'webtoon';
+  runtime.hooks.renderPages();
+  runtime.hooks.state.webtoonPageHeights[0] = 999;
+  runtime.hooks.state.webtoonMeasuredPageHeights.set(0, 999);
+  runtime.hooks.state.currentComic = comic('webtoon-b', 'webtoon B');
+  runtime.hooks.state.currentComicPages = ['/b-0.svg', '/b-1.svg', '/b-2.svg'];
+  runtime.hooks.renderPages();
+  assert.notEqual(runtime.hooks.state.webtoonPageHeights[0], 999, 'same-page-count book gets fresh webtoon estimates');
+  assert.equal(runtime.hooks.state.webtoonMeasuredPageHeights.has(0), false, 'same-page-count book drops prior measurements');
+}
+
 // 舊條漫捲動的延遲存檔不可在關閉後寫進下一本漫畫。
 {
   const runtime = createRuntimeHarness();

@@ -444,6 +444,8 @@ let state = {
   webtoonPageHeights: [],
   webtoonMetricsViewportWidth: 0,
   webtoonMeasuredPageHeights: new Map(),
+  // 條漫頁高只可在同一本漫畫內沿用；換到同頁數的另一部作品時也要失效。
+  webtoonMetricsComicId: null,
   webtoonPagePrefixHeights: [],
   webtoonPendingPageHeights: new Map(),
   webtoonHeightUpdateFrame: null,
@@ -452,6 +454,7 @@ let state = {
   comicsRevision: 0,
   readerReturnFocus: null,
   readerReturnComicFolder: null,
+  readerReturnLibraryContext: null,
   libraryRefreshFocusSnapshot: null,
   scanStatusPollTimer: null,
   scanStatusPollWallclockTimer: null,
@@ -475,6 +478,8 @@ let state = {
   pendingComicId: null,
   readerBoundaryDialog: null,
   dialogReturnFocus: null,
+  libraryModal: null,
+  libraryModalBackgroundSnapshot: null,
   aiSessionStatus: null,
   aiSessionSwitchPending: false,
   aiSessionRevocationFailed: false,
@@ -1302,7 +1307,9 @@ function bindEvents() {
   // 監聽鍵盤快捷鍵
   document.addEventListener('keydown', handleKeyDown);
   document.addEventListener('keydown', handleLibraryPanelKeyDown);
+  document.addEventListener('keydown', handleLibraryModalKeyDown);
   document.addEventListener('focusin', guardReaderFocus);
+  document.addEventListener('focusin', guardLibraryModalFocus);
   elements.readerOverlay.addEventListener('keydown', trapReaderFocus);
 
   // 閱讀器滑鼠活動觸發顯示控制列，邊緣 12% 才觸發，靜止後自動隱藏
@@ -2622,7 +2629,7 @@ async function performLibraryFetch({ background = false } = {}) {
       setScanRecoveryVisible(true, readerText('漫畫來源暫時無法完成掃描，現有書架仍可使用。'));
       showLoader(readerText('漫畫庫讀取失敗'), {
         progress: null,
-        detail: e?.message || String(e)
+        detail: readerText('漫畫來源暫時無法完成掃描，現有書架仍可使用。')
       });
     }
   } finally {
@@ -2796,12 +2803,19 @@ function renderContinueStrip() {
 
   const renderSignature = candidates.map(comic => {
     const progress = getProgressInfo(comic);
+    const favorite = isFavoriteId(comic.id);
+    const displayPercent = progress.percent;
     return [
       comic.id,
       comic.title,
       progress.currentPage,
       progress.totalPages,
-      isFavoriteId(comic.id) ? 'favorite' : ''
+      progress.percent,
+      progress.hasProgress ? 'started' : 'unread',
+      progress.isFinished ? 'finished' : '',
+      displayPercent,
+      comic.progress?.updatedAt || comic.updatedAt || '',
+      favorite ? 'favorite' : ''
     ].join(':');
   }).join('|') || 'empty';
   if (renderSignature === lastContinueRenderSignature) return;
@@ -2818,13 +2832,14 @@ function renderContinueStrip() {
   elements.continueStrip.innerHTML = candidates.map(comic => {
     const progress = getProgressInfo(comic);
     const favorite = isFavoriteId(comic.id);
+    const displayPercent = progress.percent;
     return `
       <button class="continue-card" data-comic-id="${comic.id}">
         <img src="${escapeHtml(getCoverUrl(comic.id))}" loading="lazy" decoding="async" fetchpriority="low" alt="${escapeHtml(comic.title)}" onerror="this.style.display='none';">
         <span class="continue-body">
           <strong>${escapeHtml(comic.title)}</strong>
           <small>${progress.hasProgress ? readerText('第 {page} 頁', { page: progress.currentPage + 1 }) : readerText('已收藏')}</small>
-          <span class="continue-progress"><span style="width: ${progress.percent || (favorite ? 12 : 0)}%"></span></span>
+          <span class="continue-progress"><span style="width: ${displayPercent}%"></span></span>
         </span>
         <i class="fa-solid ${favorite ? 'fa-heart' : 'fa-play'}"></i>
       </button>
@@ -3481,6 +3496,57 @@ function captureLibraryFocus(target = document.activeElement) {
   return null;
 }
 
+function captureLibraryViewContext() {
+  return {
+    currentPath: state.currentPath,
+    activeSeries: state.activeSeries,
+    activeFilter: state.activeFilter,
+    searchQuery: elements.searchInput?.value || '',
+    selectedComicId: state.selectedComicId,
+    scrollTop: Number.isFinite(elements.contentArea?.scrollTop) ? elements.contentArea.scrollTop : null,
+    catalogSearchIds: state.catalogSearchIds ? new Set(state.catalogSearchIds) : null,
+    catalogSearchItems: new Map(state.catalogSearchItems),
+    catalogSearchTotal: state.catalogSearchTotal,
+  };
+}
+
+function syncLibraryFilterControls() {
+  if (elements.seriesFilterSelect) elements.seriesFilterSelect.value = state.activeSeries;
+  elements.seriesFilterList?.querySelectorAll('li').forEach(item => {
+    const selected = item.dataset.series === state.activeSeries;
+    item.classList.toggle('active', selected);
+    if (selected) item.setAttribute('aria-current', 'true');
+    else item.removeAttribute('aria-current');
+  });
+  document.querySelectorAll('.filter-btn').forEach(btn => {
+    const selected = btn.dataset.filter === state.activeFilter;
+    btn.classList.toggle('active', selected);
+    btn.setAttribute('aria-pressed', String(selected));
+  });
+}
+
+function restoreLibraryViewContext(context) {
+  if (!context) return false;
+  state.currentPath = typeof context.currentPath === 'string' ? context.currentPath : '';
+  state.activeSeries = context.activeSeries || 'all';
+  state.activeFilter = context.activeFilter || 'all';
+  state.selectedComicId = context.selectedComicId || null;
+  if (elements.searchInput) elements.searchInput.value = context.searchQuery || '';
+  if (elements.clearSearchBtn) elements.clearSearchBtn.style.display = context.searchQuery ? 'block' : 'none';
+  clearTimeout(catalogSearchTimer);
+  catalogSearchTimer = null;
+  state.catalogSearchRequest += 1;
+  state.catalogSearchIds = context.catalogSearchIds ? new Set(context.catalogSearchIds) : null;
+  state.catalogSearchItems = new Map(context.catalogSearchItems || []);
+  state.catalogSearchTotal = Number(context.catalogSearchTotal) || 0;
+  syncLibraryFilterControls();
+  filterAndRenderGrid();
+  if (Number.isFinite(context.scrollTop) && elements.contentArea) {
+    elements.contentArea.scrollTop = context.scrollTop;
+  }
+  return true;
+}
+
 function findLibraryFocusTarget(root, snapshot) {
   if (!root || !snapshot) return null;
   const visit = node => {
@@ -3820,6 +3886,11 @@ async function openReader(comicId, { returnToComicFolder = false } = {}) {
   if (!state.readerReturnFocus && !elements.readerOverlay.contains(document.activeElement)) {
     state.readerReturnFocus = document.activeElement;
   }
+  // 一般書架入口恢復原視圖；Continue 是跨目錄入口，返回漫畫所在資料夾。
+  // 相鄰換本時沿用第一次進入閱讀器時的返回策略。
+  if (!state.currentComic && !returnToComicFolder && !state.readerReturnLibraryContext) {
+    state.readerReturnLibraryContext = captureLibraryViewContext();
+  }
   await state.readerClosePromise;
   const savedReturnFocus = state.readerReturnFocus;
   const keepComicFolderReturn = returnToComicFolder || (state.currentComic && state.readerReturnComicFolder !== null);
@@ -3902,6 +3973,7 @@ async function openReader(comicId, { returnToComicFolder = false } = {}) {
     state.currentComicPages = [];
     state.pendingComicId = null;
     state.readerReturnComicFolder = null;
+    state.readerReturnLibraryContext = null;
     elements.readerOverlay.setAttribute('aria-hidden', 'true');
     restoreReaderFocus();
     const message = typeof e === 'string' ? e : (e && e.message) || String(e);
@@ -3927,7 +3999,9 @@ async function closeReader({ switchingComic = false } = {}) {
   const closingComic = state.currentComic;
   const closingId = closingComic ? closingComic.id : state.pendingComicId;
   const returnComicFolder = state.readerReturnComicFolder;
+  const returnLibraryContext = state.readerReturnLibraryContext;
   if (!switchingComic) state.readerReturnComicFolder = null;
+  if (!switchingComic) state.readerReturnLibraryContext = null;
   const libraryFocusSnapshot = captureLibraryFocus(state.readerReturnFocus);
   state.currentComic = null;
   state.currentComicPages = [];
@@ -3935,6 +4009,7 @@ async function closeReader({ switchingComic = false } = {}) {
   clearTimeout(state.progressSaveTimer);
   state.progressSaveTimer = null;
   state.webtoonMeasuredPageHeights.clear();
+  state.webtoonMetricsComicId = null;
   setAutoPageExplanation(false);
   clearTimeout(state.aiExplainTimer);
   state.aiExplainTimer = null;
@@ -3976,7 +4051,9 @@ async function closeReader({ switchingComic = false } = {}) {
   restoreReaderFocus();
   state.libraryRefreshFocusSnapshot = libraryFocusSnapshot;
 
-  if (!switchingComic && returnComicFolder !== null) {
+  if (!switchingComic && returnLibraryContext) {
+    restoreLibraryViewContext(returnLibraryContext);
+  } else if (!switchingComic && returnComicFolder !== null) {
     // Continue 是跨目錄入口；返回時顯示這本漫畫所在的書架，而非根目錄。
     state.activeSeries = 'all';
     state.activeFilter = 'all';
@@ -4140,7 +4217,10 @@ function rebuildWebtoonPagePrefixHeights() {
 function resetWebtoonPageMetrics(totalPages) {
   const estimate = webtoonEstimatedPageHeight();
   state.webtoonMetricsViewportWidth = Number(elements.readerViewport?.clientWidth) || 800;
-  const previousMeasured = state.webtoonMeasuredPageHeights;
+  const comicId = state.currentComic?.id || null;
+  const previousMeasured = state.webtoonMetricsComicId === comicId
+    ? state.webtoonMeasuredPageHeights
+    : new Map();
   const nextMeasured = new Map();
   state.webtoonPageHeights = Array.from({ length: totalPages }, (_, index) => {
     const measured = previousMeasured.get(index);
@@ -4150,6 +4230,7 @@ function resetWebtoonPageMetrics(totalPages) {
     }
     return estimate;
   });
+  state.webtoonMetricsComicId = comicId;
   state.webtoonMeasuredPageHeights = nextMeasured;
   state.webtoonPendingPageHeights.clear();
   rebuildWebtoonPagePrefixHeights();
@@ -6293,6 +6374,120 @@ function handleWheelScroll(e) {
   }
 }
 
+function isLibraryModalVisible(modal) {
+  if (!modal || modal.hidden || modal.getAttribute?.('aria-hidden') === 'true') return false;
+  const style = typeof getComputedStyle === 'function' ? getComputedStyle(modal) : null;
+  return modal.style?.display !== 'none' && (!style || (style.display !== 'none' && style.visibility !== 'hidden'));
+}
+
+function getLibraryModalFocusables(modal) {
+  const selectors = 'button:not([disabled]), input:not([disabled]), select:not([disabled]), textarea:not([disabled]), a[href], [tabindex]:not([tabindex="-1"])';
+  return [...(modal?.querySelectorAll?.(selectors) || [])].filter(isLibraryModalElementFocusable);
+}
+
+function isLibraryModalElementFocusable(element) {
+  if (!element || element.hidden || element.disabled || element.getAttribute?.('aria-hidden') === 'true') return false;
+  let current = element;
+  while (current) {
+    if (current.hidden || current.disabled || current.getAttribute?.('aria-hidden') === 'true') return false;
+    if (typeof getComputedStyle === 'function') {
+      const style = getComputedStyle(current);
+      if (style.display === 'none' || style.visibility === 'hidden') return false;
+    }
+    current = current.parentElement || current.parentNode;
+  }
+  return true;
+}
+
+function getActiveLibraryModal() {
+  const candidates = [elements.smbModal, elements.settingsModal];
+  return candidates.find(isLibraryModalVisible) || null;
+}
+
+function openLibraryModal(modal) {
+  if (!modal) return;
+  state.libraryModal = modal;
+  modal.tabIndex = -1;
+  modal.setAttribute('aria-hidden', 'false');
+  if (!state.libraryModalBackgroundSnapshot) {
+    state.libraryModalBackgroundSnapshot = [...(document.body?.children || [])]
+      // Commerce opens above Settings when a Pro feature is tapped. Keep its
+      // dialog interactive while the rest of the library stays inert.
+      .filter(child => child !== modal && child.id !== 'commerce-pro-modal')
+      .map(element => ({
+        element,
+        inert: Boolean(element.inert),
+        ariaHidden: element.getAttribute?.('aria-hidden'),
+      }));
+  }
+  state.libraryModalBackgroundSnapshot.forEach(({ element }) => {
+    element.inert = true;
+    element.setAttribute?.('aria-hidden', 'true');
+  });
+}
+
+function closeLibraryModal(modal) {
+  if (!modal) return;
+  modal.setAttribute('aria-hidden', 'true');
+  if (state.libraryModal === modal) state.libraryModal = null;
+  if (!getActiveLibraryModal()) {
+    state.libraryModalBackgroundSnapshot?.forEach(({ element, inert, ariaHidden }) => {
+      element.inert = inert;
+      if (ariaHidden === null || ariaHidden === undefined) element.removeAttribute?.('aria-hidden');
+      else element.setAttribute?.('aria-hidden', ariaHidden);
+    });
+    state.libraryModalBackgroundSnapshot = null;
+    const returnFocus = state.dialogReturnFocus;
+    state.dialogReturnFocus = null;
+    returnFocus?.focus?.({ preventScroll: true });
+  }
+}
+
+function focusLibraryModalEntry(modal, preferred) {
+  const focusables = getLibraryModalFocusables(modal);
+  (preferred && focusables.includes(preferred) ? preferred : focusables[0] || modal)?.focus?.({ preventScroll: true });
+}
+
+function handleLibraryModalKeyDown(event) {
+  const proModal = document.getElementById('commerce-pro-modal');
+  if (proModal && !proModal.hidden) return;
+  const modal = getActiveLibraryModal();
+  if (!modal) return;
+  if (event.key === 'Escape') {
+    event.preventDefault();
+    if (modal === elements.smbModal) closeSmbModal();
+    else closeSettingsModal();
+    return;
+  }
+  if (event.key !== 'Tab') return;
+  const focusables = getLibraryModalFocusables(modal);
+  if (!focusables.length) {
+    event.preventDefault();
+    focusLibraryModalEntry(modal);
+    return;
+  }
+  const first = focusables[0];
+  const last = focusables[focusables.length - 1];
+  if (!modal.contains(document.activeElement)) {
+    event.preventDefault();
+    first.focus({ preventScroll: true });
+  } else if (event.shiftKey && document.activeElement === first) {
+    event.preventDefault();
+    last.focus({ preventScroll: true });
+  } else if (!event.shiftKey && document.activeElement === last) {
+    event.preventDefault();
+    first.focus({ preventScroll: true });
+  }
+}
+
+function guardLibraryModalFocus(event) {
+  const proModal = document.getElementById('commerce-pro-modal');
+  if (proModal && !proModal.hidden) return;
+  const modal = getActiveLibraryModal();
+  if (!modal || modal.contains(event.target)) return;
+  focusLibraryModalEntry(modal);
+}
+
 // ==========================================================================
 // ⚙️ 漫畫庫目錄路徑設定邏輯
 // ==========================================================================
@@ -6300,9 +6495,12 @@ function handleWheelScroll(e) {
 // 打開設定視窗
 async function openSettingsModal() {
   state.dialogReturnFocus = document.activeElement;
+  openLibraryModal(elements.settingsModal);
   elements.settingsModal.style.display = 'flex';
-  elements.closeSettingsBtn.focus();
+  focusLibraryModalEntry(elements.settingsModal, elements.closeSettingsBtn);
   renderExternalBookmarks();
+  void refreshAiSessionStatus();
+  void window.GaiCommerce?.refresh?.();
 
   try {
     const config = await eAPI.getConfig();
@@ -6470,7 +6668,7 @@ function renderExternalBookmarks() {
 // 關閉設定視窗
 function closeSettingsModal() {
   elements.settingsModal.style.display = 'none';
-  state.dialogReturnFocus?.focus?.();
+  closeLibraryModal(elements.settingsModal);
 }
 
 function openSmbModal() {
@@ -6480,14 +6678,15 @@ function openSmbModal() {
   elements.smbShare.value = smbConfig.share || '';
   elements.smbUser.value = smbConfig.username || '';
   elements.smbPass.value = '';
+  openLibraryModal(elements.smbModal);
   elements.smbModal.style.display = 'flex';
   state.dialogReturnFocus = document.activeElement;
-  elements.closeSmbBtn.focus();
+  focusLibraryModalEntry(elements.smbModal, elements.closeSmbBtn);
 }
 
 function closeSmbModal() {
   elements.smbModal.style.display = 'none';
-  state.dialogReturnFocus?.focus?.();
+  closeLibraryModal(elements.smbModal);
 }
 
 async function saveSmbConfig() {
@@ -6625,15 +6824,31 @@ function isCurrentAiSessionMutation(generation) {
 }
 
 function setAiSessionActionAvailability() {
-  const blocked = state.aiSessionSwitchPending
+  const mutationBlocked = state.aiSessionSwitchPending
     || state.aiSessionMutationPending
-    || state.aiSessionRevocationFailed
-    || !state.aiSessionStatus?.configured;
-  [elements.btnAiExplain, elements.btnAiAutoExplain, elements.aiTestBtn].forEach(button => {
+    || state.aiSessionRevocationFailed;
+  const configured = Boolean(state.aiSessionStatus?.configured);
+  [elements.btnAiExplain, elements.btnAiAutoExplain].forEach(button => {
     if (!button) return;
-    button.disabled = blocked;
-    button.setAttribute('aria-disabled', String(blocked));
+    button.disabled = mutationBlocked;
+    button.setAttribute('aria-disabled', String(mutationBlocked));
+    const hint = readerText('請先到設定輸入 API Key 並啟用艦載 AI。');
+    const defaultTitle = button === elements.btnAiAutoExplain
+      ? readerText('開啟全書隨讀翻譯；只分析實際翻到的頁面')
+      : readerText('請艦載 AI 說明目前頁面');
+    button.title = mutationBlocked ? hint : (configured ? defaultTitle : `${defaultTitle} · ${hint}`);
+    button.dataset.aiDisabledHint = configured ? '' : hint;
   });
+  if (elements.aiTestBtn) {
+    // Keep setup guidance reachable on touch devices, where a disabled
+    // button's title is never shown.
+    const testBlocked = mutationBlocked;
+    elements.aiTestBtn.disabled = testBlocked;
+    elements.aiTestBtn.setAttribute('aria-disabled', String(testBlocked));
+    elements.aiTestBtn.title = testBlocked
+      ? readerText('艦載 AI 設定正在變更，請稍候。')
+      : readerText('用合成文字測試艦載 AI');
+  }
   if (elements.aiSaveBtn) {
     elements.aiSaveBtn.disabled = Boolean(state.aiSessionMutationPending);
     elements.aiSaveBtn.setAttribute('aria-disabled', String(Boolean(state.aiSessionMutationPending)));
@@ -6647,8 +6862,9 @@ function setAiSessionActionAvailability() {
   }
   const metadataButton = elements.comicInspector?.querySelector('[data-inspector-action="ai-suggest"]');
   if (metadataButton) {
-    metadataButton.disabled = Boolean(blocked);
-    metadataButton.setAttribute('aria-disabled', String(Boolean(blocked)));
+    metadataButton.disabled = Boolean(mutationBlocked || !configured);
+    metadataButton.setAttribute('aria-disabled', String(Boolean(mutationBlocked || !configured)));
+    metadataButton.title = configured ? '' : readerText('請先到設定輸入 API Key 並啟用艦載 AI。');
   }
 }
 
@@ -6783,12 +6999,28 @@ async function refreshAiSessionStatus() {
   }
 }
 
+function aiSetupFailureMessage(error) {
+  const detail = String(error?.nativeMessage || error?.message || error || '');
+  if (/^PRO_REQUIRED\s*:/i.test(detail)) return readerText('艦載 AI 需要 G.A.I Pro；請先確認或恢復購買。');
+  if (/consent|資料分享同意|資料傳送同意/i.test(detail)) return readerText('請勾選本次第三方 AI 資料分享同意。');
+  if (/keychain|鑰匙圈|金鑰鏈/i.test(detail)) return readerText('無法使用本機 Keychain；請確認裝置已解鎖後再試。');
+  if (/api.?key|金鑰/i.test(detail)) return readerText('請檢查 API Key 是否正確，再試一次。');
+  return readerText('艦載 AI 啟用失敗；請檢查 Pro 權益、Key 與網路後再試。');
+}
+
+function aiActivationGuidance() {
+  if (state.aiSessionStatus?.remembered) {
+    return readerText('請勾選本次資料分享同意，再按「使用已儲存金鑰」啟用艦載 AI。');
+  }
+  return readerText('請先輸入 API Key 並啟用艦載 AI，再進行連線測試。');
+}
+
 async function saveAiSession() {
   if (!eAPI?.setAiSessionConfig) return;
   if (state.aiSessionMutationPending) return;
   const apiKey = elements.aiApiKey?.value.trim() || '';
   if (!apiKey) {
-    showReaderToast(readerText('請先手動輸入 API Key'));
+    if (elements.aiSessionStatus) elements.aiSessionStatus.textContent = aiActivationGuidance();
     return;
   }
   const mutationGeneration = beginAiSessionMutation('save');
@@ -6825,7 +7057,7 @@ async function saveAiSession() {
       setAutoPageExplanation(false);
       setAiPagePanelVisible(false);
       renderAiSessionStatus(failedStatus);
-      showReaderToast(readerText('艦載 AI 設定失敗：{error}', { error: error?.message || error }));
+      if (elements.aiSessionStatus) elements.aiSessionStatus.textContent = aiSetupFailureMessage(error);
     }
   } finally {
     finishAiSessionMutation(mutationGeneration);
@@ -6865,8 +7097,8 @@ async function restoreAiSession() {
     showReaderToast(readerText('已從本機 Keychain 還原艦載 AI；本次同意只適用於目前工作階段。'));
   } catch (error) {
     if (isCurrentAiSessionMutation(mutationGeneration)) {
-      showReaderToast(readerText('還原艦載 AI 失敗：{error}', { error: error?.message || error }));
-      renderAiSessionStatus(state.aiSessionStatus);
+      if (elements.aiSessionStatus) elements.aiSessionStatus.textContent = aiSetupFailureMessage(error);
+      showReaderToast(readerText('還原艦載 AI 失敗，請確認設定後再試。'));
     }
   } finally {
     finishAiSessionMutation(mutationGeneration);
@@ -6875,7 +7107,11 @@ async function restoreAiSession() {
 
 async function testAiSession() {
   if (!eAPI?.testAiSession) return;
-  if (state.aiSessionSwitchPending || state.aiSessionMutationPending || state.aiSessionRevocationFailed || !state.aiSessionStatus?.configured) return;
+  if (state.aiSessionSwitchPending || state.aiSessionMutationPending || state.aiSessionRevocationFailed) return;
+  if (!state.aiSessionStatus?.configured) {
+    if (elements.aiSessionStatus) elements.aiSessionStatus.textContent = aiActivationGuidance();
+    return;
+  }
   const mutationGeneration = state.aiSessionMutationGeneration;
   elements.aiTestBtn.disabled = true;
   elements.aiSessionStatus.textContent = readerText('正在用合成文字測試，不會送出漫畫內容…');
@@ -6975,7 +7211,14 @@ function setAutoPageExplanation(enabled) {
 }
 
 function toggleAutoPageExplanation() {
-  if (state.aiSessionSwitchPending || state.aiSessionMutationPending || state.aiSessionRevocationFailed || !state.aiSessionStatus?.configured) return;
+  if (state.aiSessionSwitchPending || state.aiSessionMutationPending || state.aiSessionRevocationFailed) {
+    showReaderToast(readerText('艦載 AI 工作階段正在切換，請稍後再試。'));
+    return;
+  }
+  if (!state.aiSessionStatus?.configured) {
+    showReaderToast(readerText('請先到設定輸入 API Key 並啟用艦載 AI。'));
+    return;
+  }
   if (isBuiltInDemoComic(state.currentComic)) {
     showReaderToast(readerText('風景選集不會送出頁面內容給 AI。'));
     return;
@@ -7023,8 +7266,12 @@ function localizeAiExplainError(error) {
 }
 
 async function requestPageExplanation(pageIndex, automatic = false) {
-  if (state.aiSessionSwitchPending || state.aiSessionMutationPending || state.aiSessionRevocationFailed || !state.aiSessionStatus?.configured) {
+  if (state.aiSessionSwitchPending || state.aiSessionMutationPending || state.aiSessionRevocationFailed) {
     if (!automatic) showReaderToast(readerText('艦載 AI 工作階段正在切換，請稍後再試。'));
+    return;
+  }
+  if (!state.aiSessionStatus?.configured) {
+    if (!automatic) showReaderToast(readerText('請先到設定輸入 API Key 並啟用艦載 AI。'));
     return;
   }
   if (isBuiltInDemoComic(state.currentComic)) {

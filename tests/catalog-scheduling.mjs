@@ -251,6 +251,26 @@ const makeCover = id => {
   return img;
 };
 
+// Continue 卡片的實際欄寬與排序欄位都必須進入簽名；未讀收藏不可偽裝成閱讀進度。
+{
+  const favorite = {
+    id: 'favorite-unread',
+    title: 'Favorite unread',
+    relativePath: 'series/Favorite unread.cbz',
+    type: 'archive',
+    pageCount: 20,
+    progress: { currentPage: 0, totalPages: 20, percent: 0, updatedAt: '2026-09-27T00:00:00Z' },
+  };
+  hooks.state.comics = [favorite];
+  hooks.setFavorites(['favorite-unread']);
+  hooks.renderContinueStrip();
+  assert.match(hooks.elements.continueStrip.innerHTML, /width: 0%/, 'unread favorite does not claim fake reading progress');
+  const firstMarkup = hooks.elements.continueStrip.innerHTML;
+  favorite.progress.percent = 37;
+  hooks.renderContinueStrip();
+  assert.notEqual(hooks.elements.continueStrip.innerHTML, firstMarkup, 'progress changes invalidate the Continue render signature');
+}
+
 // 舊世代封面取消後不應釋放新世代名額，也不應把取消事件算成失敗。
 {
   const first = makeCover('first');

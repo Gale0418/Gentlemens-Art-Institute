@@ -77,6 +77,7 @@ class FakeDocument {
     this.add('commerce-status-message');
     this.add('commerce-price');
     this.add('commerce-modal-status');
+    this.add('ai-session-status');
     this.add('commerce-pro-description');
     this.add('commerce-pro-close');
     this.add('commerce-more-btn');
@@ -114,6 +115,21 @@ function harness(api, l10n = null) {
 }
 
 const settle = () => new Promise(resolve => setImmediate(resolve));
+
+{
+  let resolveStatus;
+  const { document, window } = harness({
+    getCommerce: () => new Promise(resolve => { resolveStatus = resolve; }),
+  });
+  const modal = document.getElementById('commerce-pro-modal');
+  modal.hidden = true;
+  assert.equal(window.GaiCommerce.ensure('ai'), false, 'AI waits for native entitlement readback');
+  assert.equal(modal.hidden, true, 'unknown entitlement must not show a premature paywall');
+  assert.match(document.getElementById('ai-session-status').textContent, /正在確認/);
+  resolveStatus({ supported: true, pro: true, status: 'purchased' });
+  await settle();
+  assert.equal(window.GaiCommerce.ensure('ai'), true, 'confirmed Pro access enables AI entry');
+}
 
 {
   const translations = {
@@ -189,6 +205,8 @@ const settle = () => new Promise(resolve => setImmediate(resolve));
   assert.match(state.message, /取消/, 'cancelled purchase explains recovery');
   assert.equal(window.GaiCommerce.handleError(new Error('PRO_REQUIRED: AI 解說與整理工具')), true, 'PRO_REQUIRED is handled by the commerce dialog');
   assert.equal(document.getElementById('commerce-pro-modal').hidden, false, 'handled Pro error opens the dialog');
+  window.GaiCommerce.ensure('ai');
+  assert.match(document.getElementById('ai-session-status').textContent, /需要 G\.A\.I Pro/, 'denied AI setup explains the entitlement in the AI section');
 }
 
 console.log('PASS: commerce settings, preview lock, native purchase authority, cancellation, and busy guard are covered');

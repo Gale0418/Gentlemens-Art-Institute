@@ -24,4 +24,4 @@
 - **系統權限破壞性矩陣**：未撤銷現有照片／Files 權限，未移除使用者已連結來源；有限照片權限、離線 NAS、失效書籤與 iCloud 按需下載仍需隔離測試資料。
 - **其他裝置／角度**：本輪沒有 iPhone、雙頁換向後繼續翻頁或全書隨讀 AI 翻譯的實機結果。COMIC-L22、COMIC-W25、COMIC-R27 與 COMIC-PQ22 仍不應標 Done。
 
-安全示範截圖（本機 release artifact，未納入 Git）：`output/release/latest/ipad-qa29/reader-single.png`、`reader-webtoon.png`、`reader-after-rotation.png`、`settings-english.png`、`ai-needs-setup.png`。含私人漫畫內容的驗收畫面沒有保存或上傳。
+實機截圖保存在本機 release artifact，未納入 Git：`output/release/latest/ipad-qa29/reader-single.png`、`reader-webtoon.png`、`reader-after-rotation.png`、`settings-english.png`、`ai-needs-setup.png`。含私人漫畫內容的驗收畫面沒有上傳。

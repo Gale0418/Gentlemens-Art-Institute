@@ -803,6 +803,9 @@ console.log('PASS: webtoon navigation buttons, mode preservation, boundary absen
   hooks.prevPage();
   assert.equal(hooks.state.currentPageIndex, 2, 'previous page returns by two pages after a shift');
   hooks.prevPage();
+  assert.equal(hooks.state.currentPageIndex, 1, 'shifted pair steps back to page 2 before the cover');
+  assert.equal(hooks.state.doublePairOffset, 1, 'returning to page 2 restores the normal pair phase');
+  hooks.prevPage();
   assert.equal(hooks.state.currentPageIndex, 0, 'previous page reaches the cover boundary');
   hooks.nextPage();
   assert.equal(hooks.state.currentPageIndex, 1, 'leaving the cover restores the normal pair phase');

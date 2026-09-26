@@ -5821,6 +5821,8 @@ select:focus-visible,
   border-radius: 999px;
 }
 .ai-page-panel .ai-candidate-apply { pointer-events: auto; }
+#ai-page-result,
+.ai-candidate-list { pointer-events: auto; }
 .ai-page-panel p { white-space: pre-wrap; line-height: 1.7; }
 .ai-candidate-note { display: block; color: var(--text-muted); margin-top: .25rem; }
 .ai-candidate-list { display: grid; gap: .6rem; margin-top: .7rem; }

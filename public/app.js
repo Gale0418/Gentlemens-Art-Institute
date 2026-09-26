@@ -5218,6 +5218,11 @@ function prevPage() {
       // 第一頁跳回封面 (0)
       state.currentPageIndex = 0;
       renderPages();
+    } else if (state.currentPageIndex === 2 && state.doublePairOffset === 0) {
+      // The shifted 2–3 pair still has the normal 1–2 pair before the cover.
+      state.currentPageIndex = 1;
+      state.doublePairOffset = 1;
+      renderPages();
     } else if (state.currentPageIndex > 1) {
       // 其餘每次退 2 頁
       state.currentPageIndex -= 2;

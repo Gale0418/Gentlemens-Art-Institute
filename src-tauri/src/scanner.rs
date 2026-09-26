@@ -991,9 +991,9 @@ fn prepare_saved_item(
         }
         item.source_path = Some(path.to_string_lossy().into_owned());
     } else if item.source_id == "smb" {
-        if state.smb_config.read().ok()?.is_none() {
-            item.r#type = "offline".into();
-        }
+        // A configured SMB source is not necessarily reachable. Only scan_smb
+        // may promote a saved entry back to a live comic.
+        item.r#type = "offline".into();
     } else if item.source_id.starts_with("external:") {
         let bookmarks = state.external_bookmarks.read().ok()?;
         let source = bookmarks
@@ -1098,9 +1098,6 @@ pub async fn scan_priority_library(
     {
         return Err("收藏清單超出掃描上限".into());
     }
-    if !state.scan_progress.lock().await.is_scanning {
-        return Ok(());
-    }
     let store = state
         .catalog
         .read()
@@ -1109,8 +1106,17 @@ pub async fn scan_priority_library(
     let Some(store) = store else {
         return Ok(());
     };
-    let generation = state.scan_generation.load(Ordering::Acquire);
-    let saved_generation = state.saved_scan_generation.fetch_add(1, Ordering::SeqCst) + 1;
+    let (generation, saved_generation) = {
+        let _scan_lifecycle = state.scan_lifecycle.lock().await;
+        let generation = state.scan_generation.load(Ordering::Acquire);
+        if !state.scan_progress.lock().await.is_scanning
+            || state.saved_scan_closed_generation.load(Ordering::Acquire) == generation
+        {
+            return Ok(());
+        }
+        let saved_generation = state.saved_scan_generation.fetch_add(1, Ordering::SeqCst) + 1;
+        (generation, saved_generation)
+    };
 
     let favorite_state = state.clone();
     let favorite_handle = app_handle.clone();
@@ -1605,6 +1611,10 @@ pub async fn start_background_scan(state: Arc<AppState>, app_handle: tauri::AppH
             let local_source_id = outcome.local_source_id.clone();
             let external_source_ids = outcome.external_source_ids.clone();
             let discovered = outcome.comics.clone();
+            state
+                .saved_scan_closed_generation
+                .store(my_gen, Ordering::Release);
+            state.saved_scan_generation.fetch_add(1, Ordering::SeqCst);
             let mut state_comics = state.comics.lock().await;
             apply_scan_outcome(&mut state_comics, &outcome);
             let local_count = state_comics.len();

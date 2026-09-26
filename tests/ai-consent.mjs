@@ -24,7 +24,7 @@ assert.match(
 );
 assert.match(
   bridge,
-  /目前頁面影像與提示文字才會傳送至 \{provider\}/,
+  /選定的頁面影像（AI 掃描最多六頁）與提示文字才會傳送至 \{provider\}/,
   'disclosure must identify what data leaves the device and the selected provider'
 );
 assert.match(
@@ -484,6 +484,7 @@ console.log('PASS: stale AI status refresh cannot overwrite a newer mutation');
 
 {
   let resolveMetadata;
+  let metadataPayload;
   let renderedCandidates = 0;
   const resultContainer = { hidden: true, textContent: '' };
   const metadataContext = {
@@ -495,8 +496,12 @@ console.log('PASS: stale AI status refresh cannot overwrite a newer mutation');
       aiSessionSwitchGeneration: 0,
       aiSessionMutationGeneration: 0,
     },
-    eAPI: { suggestComicMetadata: () => new Promise(resolve => { resolveMetadata = resolve; }) },
-    comicPreviewDataUrl: async () => 'data:image/png;base64,cover',
+    eAPI: { suggestComicMetadata: (payload) => {
+      metadataPayload = payload;
+      return new Promise(resolve => { resolveMetadata = resolve; });
+    } },
+    sampleComicForAiMetadata: async () => ({ dataUrls: ['data:image/png;base64,cover'], indexes: [0] }),
+    getAiExplainLocale: () => 'zh-Hant',
     isComicOffline: () => false,
     renderAiMetadataCandidates() { renderedCandidates += 1; },
     readerText: message => message,
@@ -505,6 +510,8 @@ console.log('PASS: stale AI status refresh cannot overwrite a newer mutation');
   const button = { disabled: false, isConnected: true, setAttribute() {} };
   const suggesting = suggest({ id: 'comic-1' }, button, resultContainer);
   await new Promise(resolve => setImmediate(resolve));
+  assert.deepEqual(Array.from(metadataPayload.dataUrls), ['data:image/png;base64,cover']);
+  assert.equal(metadataPayload.targetLocale, 'zh-Hant');
   metadataContext.state.aiSessionMutationGeneration = 1;
   metadataContext.state.aiSessionMutationPending = true;
   resolveMetadata([{ field: 'summary', value: 'stale metadata' }]);
@@ -513,4 +520,40 @@ console.log('PASS: stale AI status refresh cannot overwrite a newer mutation');
   assert.doesNotMatch(resultContainer.textContent, /stale metadata/);
   assert.equal(button.disabled, true, 'stale metadata completion cannot re-enable a mutation-blocked action');
 }
+
+{
+  let finishSampling;
+  let providerCalls = 0;
+  const resultContainer = { hidden: true, textContent: '' };
+  const button = { disabled: false, isConnected: true, setAttribute() {} };
+  const context = {
+    state: {
+      aiSessionSwitchPending: false,
+      aiSessionMutationPending: false,
+      aiSessionRevocationFailed: false,
+      aiSessionStatus: { configured: true },
+      aiSessionSwitchGeneration: 0,
+      aiSessionMutationGeneration: 0,
+    },
+    eAPI: { suggestComicMetadata: async () => { providerCalls += 1; return []; } },
+    sampleComicForAiMetadata: () => new Promise(resolve => { finishSampling = resolve; }),
+    getAiExplainLocale: () => 'zh-Hant',
+    isComicOffline: () => false,
+    readerText: message => message,
+  };
+  const suggest = vm.runInNewContext(`(${extractFunction(app, 'suggestInspectorMetadata')})`, context);
+  const pending = suggest({ id: 'comic-1' }, button, resultContainer);
+  button.isConnected = false;
+  finishSampling({ dataUrls: ['data:image/png;base64,cover'], indexes: [0] });
+  await pending;
+  assert.equal(providerCalls, 0, 'leaving the inspector before sampling completes must not spend an AI request');
+}
 console.log('PASS: stale test, explanation, and metadata responses cannot write UI or cache');
+
+{
+  const sampleIndices = vm.runInNewContext(`(${extractFunction(app, 'metadataSamplePageIndices')})`);
+  assert.deepEqual(Array.from(sampleIndices(1)), [0], 'one-page books have one distinct sample');
+  assert.deepEqual(Array.from(sampleIndices(3)), [0, 1, 2], 'short books de-duplicate overlapping positions');
+  assert.deepEqual(Array.from(sampleIndices(10)), [0, 1, 2, 3, 4, 5], 'sample the opening and three middle positions');
+  assert.deepEqual(Array.from(sampleIndices(100)), [0, 1, 2, 39, 49, 59]);
+}

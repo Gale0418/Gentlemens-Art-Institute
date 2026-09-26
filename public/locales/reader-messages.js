@@ -379,6 +379,14 @@ window.GAIL10n.register({
     "en": "AI summary and tag suggestions",
     "ja": "AIによる概要とタグの提案"
   },
+  "AI 掃描": {
+    "en": "AI Scan",
+    "ja": "AI スキャン"
+  },
+  "取樣開頭三頁與 40%、50%、60% 位置；建議需人工確認": {
+    "en": "Samples the first 3 pages and the 40%, 50%, and 60% positions; review suggestions before applying",
+    "ja": "冒頭3ページと40%、50%、60%地点を抽出し、提案を確認してから適用"
+  },
   "讀取封面／第一頁，只產生待確認建議": {
     "en": "Reads the cover/first page and creates suggestions for review",
     "ja": "表紙または1ページ目を読み、確認用の提案だけを作成"
@@ -1059,9 +1067,9 @@ window.GAIL10n.register({
     "en": "Saved as a user override",
     "ja": "ユーザーによる上書きとして保存しました"
   },
-  "請在桌面 App 中使用艦載 AI 整理建議。": {
-    "en": "Use the desktop app for cloud AI organizing suggestions.",
-    "ja": "クラウドAIの整理提案はデスクトップアプリで使用してください。"
+  "目前環境無法使用艦載 AI 整理建議。": {
+    "en": "AI organization suggestions are unavailable in this environment.",
+    "ja": "この環境ではクラウド AI の整理提案を利用できません。"
   },
   "漫畫來源目前離線，重新掛載後才能讀取封面。": {
     "en": "The comic source is offline; remount it to read the cover.",
@@ -1070,6 +1078,38 @@ window.GAIL10n.register({
   "艦載 AI 正在讀取封面／第一頁，提出可審核的摘要與標籤…": {
     "en": "Cloud AI is reading the cover/first page and preparing summaries and tags for review…",
     "ja": "クラウドAIが表紙または1ページ目を読み、確認用の概要とタグを作成しています…"
+  },
+  "艦載 AI 正在準備取樣頁面…": {
+    "en": "Preparing sample pages for AI analysis…",
+    "ja": "AI 分析用のページを準備しています…"
+  },
+  "正在更新目前資料夾…": {
+    "en": "Updating this folder…",
+    "ja": "現在のフォルダーを更新しています…"
+  },
+  "目前資料夾已更新": {
+    "en": "This folder is up to date",
+    "ja": "現在のフォルダーを更新しました"
+  },
+  "目前資料夾更新失敗：{error}": {
+    "en": "Could not update this folder: {error}",
+    "ja": "現在のフォルダーを更新できませんでした：{error}"
+  },
+  "請先在設定中啟用艦載 AI，並同意本次頁面傳送。": {
+    "en": "Enable cloud AI in Settings and consent to sending this session's selected pages.",
+    "ja": "設定でクラウド AI を有効にし、今回の選択ページの送信に同意してください。"
+  },
+  "正在準備第 {page} 頁（{ready}/{total}）…": {
+    "en": "Preparing page {page} ({ready}/{total})…",
+    "ja": "{page}ページ目を準備中（{ready}/{total}）…"
+  },
+  "正在分析第 {pages} 頁，產生待確認的摘要與標籤…": {
+    "en": "Analyzing pages {pages} for summary and tag suggestions to review…",
+    "ja": "{pages}ページを分析し、確認用の概要とタグを作成しています…"
+  },
+  "取樣圖片仍過大，請使用較小的圖片再試。": {
+    "en": "A sample image is still too large. Try smaller images.",
+    "ja": "抽出画像がまだ大きすぎます。小さい画像で再試行してください。"
   },
   "艦載 AI 建議失敗：{error}": {
     "en": "Cloud AI suggestions failed: {error}",

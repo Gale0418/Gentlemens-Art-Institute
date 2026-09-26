@@ -58,4 +58,4 @@ OPDS 2.0 只作唯讀目錄交換：標題、作者、語言、修改時間、�
 
 線上來源比對、翻譯、同步與 OPDS server 各自預設關閉。啟用前要顯示實際 endpoint、將傳送的 metadata 欄位與撤銷方式，並記錄明確同意；停用後立即停止送出新請求。服務回傳只進 `metadata_candidates`／建議 Inbox，絕不直接寫 `user_field_overrides` 或 tag override。
 
-艦載 AI 也是選用功能：API key 只保留本次 App session；正式 UI 在啟用 OpenAI 或 Google 前必須明確指出所選 provider，說明目前頁面影像與 prompt 可能離開裝置，取得 explicit consent 後才建立 AI session。切換 provider 會撤銷先前同意並要求重新確認。AI 只能提案或說明，不能直接覆寫人工 metadata。
+艦載 AI 也是選用功能：API key 只保留本次 App session；正式 UI 在啟用 OpenAI 或 Google 前必須明確指出所選 provider，說明選定頁面影像（AI 掃描最多六頁）與 prompt 可能離開裝置，取得 explicit consent 後才建立 AI session。切換 provider 會撤銷先前同意並要求重新確認。AI 只能提案或說明，不能直接覆寫人工 metadata。

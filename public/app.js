@@ -206,6 +206,7 @@ function queueIncrementalLibraryRender() {
 
 function applyIncrementalLibraryBatch(payload) {
   if (!payload || !Array.isArray(payload.items)) return false;
+  const visibleBatch = payload.visible === true;
   const generation = Number(payload.generation);
   if (!Number.isSafeInteger(generation) || generation <= 0) return false;
   const currentGeneration = Number(state.scanStatus?.generation);
@@ -219,7 +220,8 @@ function applyIncrementalLibraryBatch(payload) {
   if (Number.isSafeInteger(currentGeneration)
     && currentGeneration === generation
     && state.scanStatus?.isScanning === false
-    && state.scanStatus?.completedAt) {
+    && state.scanStatus?.completedAt
+    && !visibleBatch) {
     // A completed scan may still have a queued progress event behind it.
     return true;
   }
@@ -243,13 +245,24 @@ function applyIncrementalLibraryBatch(payload) {
       state.comics[index] = comic;
     }
   });
+  if (visibleBatch && typeof payload.visiblePath === 'string' && Array.isArray(payload.directories)) {
+    if (state.visibleDirectoryGeneration !== generation) {
+      state.visibleDirectories.clear();
+      state.visibleDirectoryGeneration = generation;
+    }
+    const existing = state.visibleDirectories.get(payload.visiblePath) || [];
+    const next = payload.directories.filter(path => typeof path === 'string' && path);
+    state.visibleDirectories.set(payload.visiblePath, [...new Set([...existing, ...next])]);
+  }
   invalidateComicNavigationCache();
-  state.scanStatus = {
-    ...(state.scanStatus || {}),
-    generation,
-    isScanning: true,
-    found: Math.max(Number(state.scanStatus?.found) || 0, Number(payload.found) || 0),
-  };
+  if (!visibleBatch) {
+    state.scanStatus = {
+      ...(state.scanStatus || {}),
+      generation,
+      isScanning: true,
+      found: Math.max(Number(state.scanStatus?.found) || 0, Number(payload.found) || 0),
+    };
+  }
   state.libraryRefreshPending = true;
   queueIncrementalLibraryRender();
   return true;
@@ -459,6 +472,8 @@ let state = {
   scanStatusPollTimer: null,
   scanStatusPollWallclockTimer: null,
   scanStatus: null,
+  visibleDirectoryGeneration: 0,
+  visibleDirectories: new Map(),
   libraryRefreshPending: false,
   renderGeneration: 0,
   sharpenLevel: 0, // 0=關閉, 1=輕度, 2=中度, 3=強度
@@ -570,6 +585,7 @@ const elements = {
   inspectorCollapseBtn: document.getElementById('inspector-collapse-btn'),
   libraryPanelScrim: document.getElementById('library-panel-scrim'),
   libraryUpBtn: document.getElementById('library-up-btn'),
+  visibleScanStatus: document.getElementById('visible-scan-status'),
   libraryWorkspace: document.querySelector('.library-workspace'),
   comicGrid: document.getElementById('comic-grid'),
   contentArea: document.querySelector('.content-area'),
@@ -3008,7 +3024,7 @@ function renderComicInspector(comic, options = {}) {
       ${isDirectory || builtInDemo || photoAlbum ? '' : `
         <button class="inspector-ai-action" type="button" data-inspector-action="ai-suggest" aria-expanded="false">
           <i class="fa-solid fa-tags" aria-hidden="true"></i>
-          <span><strong>${readerText('AI 建議摘要與標籤')}</strong><small>${readerText('讀取封面／第一頁，只產生待確認建議')}</small></span>
+          <span><strong>${readerText('AI 掃描')}</strong><small>${readerText('取樣開頭三頁與 40%、50%、60% 位置；建議需人工確認')}</small></span>
         </button>
         <div class="inspector-ai-results" role="status" aria-live="polite" hidden></div>
       `}
@@ -3303,6 +3319,23 @@ function getDirectoryItems() {
     }).sort(compareShelfItems);
   }
 
+  if (state.activeSeries === 'all' && state.activeFilter === 'all'
+    && state.visibleDirectoryGeneration === Number(state.scanStatus?.generation)) {
+    for (const folderPath of state.visibleDirectories.get(curPath) || []) {
+      const folderName = folderPath.split('/').pop();
+      if (!folderName) continue;
+      itemsMap.set(folderName, {
+        id: 'folder-' + btoa(unescape(encodeURIComponent(folderPath))),
+        title: folderName,
+        type: 'folder',
+        relativePath: folderPath,
+        isDirectory: true,
+        coverComicId: null,
+        comicsCount: 0,
+      });
+    }
+  }
+
   // 3. 一般目錄導航模式：對漫畫相對路徑相對當前層進行折疊與過濾
   baseFiltered.forEach(comic => {
     const rel = typeof comic.relativePath === 'string' ? comic.relativePath : '';
@@ -3341,7 +3374,9 @@ function getDirectoryItems() {
             comicsCount: 1
           });
         } else {
-          itemsMap.get(folderName).comicsCount++;
+          const folder = itemsMap.get(folderName);
+          if (!folder.coverComicId) folder.coverComicId = comic.id;
+          folder.comicsCount++;
         }
       }
     }
@@ -3703,13 +3738,13 @@ function renderGrid({ skipUnchanged = false, background = false } = {}) {
       // ==========================================
       card.innerHTML = `
         <div class="comic-cover-wrapper cover-pending">
-          <img class="comic-cover lazy-cover"
+          ${comic.coverComicId ? `<img class="comic-cover lazy-cover"
                data-cover-id="${escapeHtml(comic.coverComicId || '')}"
                data-src="${escapeHtml(getCoverUrl(comic.coverComicId))}"
                loading="lazy"
                decoding="async"
                fetchpriority="low"
-               alt="${escapeHtml(comic.title)}">
+               alt="${escapeHtml(comic.title)}">` : ''}
           <div class="comic-cover-placeholder" style="background: var(--bg-hover);">
             <div class="placeholder-icon" style="font-size: 40px;">📁</div>
             <div class="placeholder-text" style="margin-top: 10px;">${escapeHtml(comic.title)}</div>
@@ -3719,7 +3754,7 @@ function renderGrid({ skipUnchanged = false, background = false } = {}) {
         <div class="comic-info">
           <div class="comic-title" title="${escapeHtml(comic.title)}">${escapeHtml(comic.title)}</div>
           <div class="comic-meta">
-            <span style="color: var(--accent); font-weight: 500;"><i class="fa-solid fa-book-open"></i> ${comic.comicsCount} ${readerText('本漫畫')}</span>
+            ${comic.comicsCount ? `<span style="color: var(--accent); font-weight: 500;"><i class="fa-solid fa-book-open"></i> ${comic.comicsCount} ${readerText('本漫畫')}</span>` : ''}
             <span>${readerText('點擊點入')}</span>
           </div>
         </div>
@@ -4972,14 +5007,34 @@ function getParentPath(relPath) {
 // library-changed 事件回到書架，這裡刻意不等待 Promise，避免導航被磁碟 I/O 卡住。
 function requestVisibleDirectoryScan(relativePath) {
   const scanVisibleDirectory = eAPI?.scanVisibleDirectory;
-  if (typeof scanVisibleDirectory !== 'function') return;
+  const status = elements.visibleScanStatus;
+  const showStatus = message => {
+    if (!status) return;
+    status.hidden = !message;
+    status.textContent = message;
+  };
+  if (typeof scanVisibleDirectory !== 'function') {
+    showStatus('');
+    return;
+  }
 
   const requestId = ++visibleDirectoryScanRequestId;
+  const scanTarget = relativePath !== '📁 外部裝置';
+  state.visibleDirectories.delete(relativePath);
+  showStatus(scanTarget ? readerText('正在更新目前資料夾…') : '');
   Promise.resolve()
     .then(() => scanVisibleDirectory(relativePath))
+    .then(() => {
+      if (!scanTarget || requestId !== visibleDirectoryScanRequestId || state.currentPath !== relativePath) return;
+      showStatus(readerText('目前資料夾已更新'));
+      window.setTimeout(() => {
+        if (requestId === visibleDirectoryScanRequestId && state.currentPath === relativePath) showStatus('');
+      }, 2500);
+    })
     .catch(error => {
       // 快速切換資料夾時，舊請求的錯誤不應覆蓋目前資料夾的狀態。
       if (requestId !== visibleDirectoryScanRequestId || state.currentPath !== relativePath) return;
+      showStatus(readerText('目前資料夾更新失敗：{error}', { error: error?.message || error }));
       console.warn('無法優先掃描目前資料夾：', error);
     });
 }
@@ -7372,11 +7427,69 @@ async function requestPageExplanation(pageIndex, automatic = false) {
   }
 }
 
-async function comicPreviewDataUrl(comicId) {
+function metadataSamplePageIndices(pageCount) {
+  if (!Number.isSafeInteger(pageCount) || pageCount < 1) return [];
+  const candidates = [0, 1, 2, ...[0.4, 0.5, 0.6].map(ratio => Math.ceil(pageCount * ratio) - 1)];
+  return [...new Set(candidates.filter(index => index >= 0 && index < pageCount))];
+}
+
+async function metadataSampleDataUrl(source) {
+  const response = await fetch(source);
+  if (!response.ok) throw new Error(readerText('頁面讀取失敗（HTTP {status}）', { status: response.status }));
+  const sourceBlob = await response.blob();
+  if (sourceBlob.size > 20 * 1024 * 1024) throw new Error(readerText('目前頁面超過 20 MiB 上限'));
+
+  let image;
+  let objectUrl;
+  try {
+    if (typeof createImageBitmap === 'function') {
+      try {
+        image = await createImageBitmap(sourceBlob);
+      } catch {
+        // Some WebKit builds expose createImageBitmap but cannot decode this format.
+      }
+    }
+    if (!image) {
+      objectUrl = URL.createObjectURL(sourceBlob);
+      image = new Image();
+      image.src = objectUrl;
+      await image.decode();
+    }
+    const width = image.width || image.naturalWidth;
+    const height = image.height || image.naturalHeight;
+    if (!width || !height) throw new Error(readerText('無法讀取目前頁面'));
+    const scale = Math.min(1, 2000 / Math.max(width, height));
+    const canvas = document.createElement('canvas');
+    canvas.width = Math.max(1, Math.round(width * scale));
+    canvas.height = Math.max(1, Math.round(height * scale));
+    const context = canvas.getContext('2d');
+    if (!context) throw new Error(readerText('無法讀取目前頁面'));
+    context.fillStyle = '#fff';
+    context.fillRect(0, 0, canvas.width, canvas.height);
+    context.drawImage(image, 0, 0, canvas.width, canvas.height);
+    for (const quality of [0.84, 0.72, 0.6]) {
+      const sample = await new Promise(resolve => canvas.toBlob(resolve, 'image/jpeg', quality));
+      if (sample && sample.size <= 1.5 * 1024 * 1024) return blobAsDataUrl(sample);
+    }
+    throw new Error(readerText('取樣圖片仍過大，請使用較小的圖片再試。'));
+  } finally {
+    image?.close?.();
+    if (objectUrl) URL.revokeObjectURL(objectUrl);
+  }
+}
+
+async function sampleComicForAiMetadata(comicId, onProgress = () => {}) {
   if (!eAPI?.openComic) throw new Error(readerText('目前環境無法讀取漫畫頁面'));
   const comic = await eAPI.openComic(comicId);
-  if (!comic?.pages?.length) throw new Error(readerText('這本漫畫沒有可供分析的封面或第一頁'));
-  return pageDataUrl(comic.pages[0]);
+  const pages = comic?.pages || [];
+  const indexes = metadataSamplePageIndices(pages.length);
+  if (!indexes.length) throw new Error(readerText('這本漫畫沒有可供分析的封面或第一頁'));
+  const dataUrls = [];
+  for (const index of indexes) {
+    onProgress(indexes, dataUrls.length);
+    dataUrls.push(await metadataSampleDataUrl(pages[index]));
+  }
+  return { dataUrls, indexes };
 }
 
 async function explainCurrentPage() {
@@ -7422,7 +7535,12 @@ function renderAiMetadataCandidates(candidates, comicId, resultContainer = eleme
 }
 
 async function suggestInspectorMetadata(comic, button, resultContainer) {
-  if (state.aiSessionSwitchPending || state.aiSessionMutationPending || state.aiSessionRevocationFailed || !state.aiSessionStatus?.configured) {
+  if (!state.aiSessionStatus?.configured && !state.aiSessionSwitchPending && !state.aiSessionMutationPending) {
+    resultContainer.hidden = false;
+    resultContainer.textContent = readerText('請先在設定中啟用艦載 AI，並同意本次頁面傳送。');
+    return;
+  }
+  if (state.aiSessionSwitchPending || state.aiSessionMutationPending || state.aiSessionRevocationFailed) {
     resultContainer.hidden = false;
     resultContainer.textContent = readerText('艦載 AI 工作階段正在切換，請稍後再試。');
     return;
@@ -7430,27 +7548,46 @@ async function suggestInspectorMetadata(comic, button, resultContainer) {
   resultContainer.hidden = false;
   button.setAttribute('aria-expanded', 'true');
   if (!eAPI?.suggestComicMetadata || !comic?.id) {
-    resultContainer.textContent = readerText('請在桌面 App 中使用艦載 AI 整理建議。');
+    resultContainer.textContent = readerText('目前環境無法使用艦載 AI 整理建議。');
     return;
   }
   if (isComicOffline(comic)) {
     resultContainer.textContent = readerText('漫畫來源目前離線，重新掛載後才能讀取封面。');
     return;
   }
-  resultContainer.textContent = readerText('艦載 AI 正在讀取封面／第一頁，提出可審核的摘要與標籤…');
+  resultContainer.textContent = readerText('艦載 AI 正在準備取樣頁面…');
   const sessionGeneration = state.aiSessionSwitchGeneration;
   const mutationGeneration = state.aiSessionMutationGeneration;
   button.disabled = true;
   try {
-    const dataUrl = await comicPreviewDataUrl(comic.id);
-    if (sessionGeneration !== state.aiSessionSwitchGeneration
+    const { dataUrls, indexes } = await sampleComicForAiMetadata(comic.id, (pages, ready) => {
+      if (!button.isConnected
+        || sessionGeneration !== state.aiSessionSwitchGeneration
+        || mutationGeneration !== state.aiSessionMutationGeneration) throw new Error('AI session changed');
+      resultContainer.textContent = readerText('正在準備第 {page} 頁（{ready}/{total}）…', {
+        page: pages[ready] + 1,
+        ready,
+        total: pages.length,
+      });
+    });
+    if (!button.isConnected
+      || sessionGeneration !== state.aiSessionSwitchGeneration
       || mutationGeneration !== state.aiSessionMutationGeneration) return;
-    const candidates = await eAPI.suggestComicMetadata({ comicId: comic.id, dataUrl });
-    if (sessionGeneration !== state.aiSessionSwitchGeneration
+    resultContainer.textContent = readerText('正在分析第 {pages} 頁，產生待確認的摘要與標籤…', {
+      pages: indexes.map(index => index + 1).join(', '),
+    });
+    const candidates = await eAPI.suggestComicMetadata({
+      comicId: comic.id,
+      dataUrls,
+      targetLocale: getAiExplainLocale(),
+    });
+    if (!button.isConnected
+      || sessionGeneration !== state.aiSessionSwitchGeneration
       || mutationGeneration !== state.aiSessionMutationGeneration) return;
     renderAiMetadataCandidates(candidates, comic.id, resultContainer);
   } catch (error) {
-    if (sessionGeneration !== state.aiSessionSwitchGeneration
+    if (!button.isConnected
+      || sessionGeneration !== state.aiSessionSwitchGeneration
       || mutationGeneration !== state.aiSessionMutationGeneration) return;
     resultContainer.textContent = readerText('艦載 AI 建議失敗：{error}', { error: error?.message || error });
   } finally {

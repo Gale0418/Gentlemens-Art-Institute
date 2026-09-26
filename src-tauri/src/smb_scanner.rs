@@ -111,6 +111,7 @@ pub async fn scan_smb(
             .count()
     };
     let mut new_comics = Vec::new();
+    let mut directories = Vec::new();
     let mut published = 0usize;
     let mut published_at = Instant::now();
     scan_smb_dir(
@@ -119,6 +120,7 @@ pub async fn scan_smb(
         "",
         &progress_map,
         &mut new_comics,
+        &mut directories,
         scan_generation,
         &state,
         0,
@@ -159,15 +161,14 @@ pub(crate) async fn scan_visible_smb(
 ) -> Result<(), String> {
     use std::sync::atomic::Ordering;
 
-    if relative_path.is_empty() {
-        return Ok(());
-    }
     if generation != state.scan_generation.load(Ordering::Acquire)
         || visible_generation != state.visible_scan_generation.load(Ordering::Acquire)
     {
         return Ok(());
     }
-    if relative_path.starts_with('/') || !relative_path.split('/').all(safe_smb_entry_name) {
+    if relative_path.starts_with('/')
+        || (!relative_path.is_empty() && !relative_path.split('/').all(safe_smb_entry_name))
+    {
         return Err("SMB 漫畫目錄路徑無效".to_string());
     }
 
@@ -221,6 +222,7 @@ pub(crate) async fn scan_visible_smb(
     };
 
     let mut results = Vec::new();
+    let mut directories = Vec::new();
     let mut published = 0usize;
     let mut published_at = Instant::now();
     scan_smb_dir(
@@ -229,6 +231,7 @@ pub(crate) async fn scan_visible_smb(
         &relative_path,
         &progress_map,
         &mut results,
+        &mut directories,
         generation,
         &state,
         relative_path.split('/').count(),
@@ -252,6 +255,23 @@ pub(crate) async fn scan_visible_smb(
         true,
     )
     .await;
+    let _scan_lifecycle = state.scan_lifecycle.lock().await;
+    if generation == state.scan_generation.load(Ordering::Acquire)
+        && visible_generation == state.visible_scan_generation.load(Ordering::Acquire)
+    {
+        use tauri::Emitter;
+        let _ = app_handle.emit(
+            "library-changed",
+            LibraryBatch {
+                generation,
+                items: Vec::new(),
+                found: 0,
+                visible: true,
+                visible_path: Some(relative_path),
+                directories: Some(directories),
+            },
+        );
+    }
     Ok(())
 }
 
@@ -262,6 +282,7 @@ async fn scan_smb_dir(
     dir_path: &str,
     progress_map: &std::collections::HashMap<String, Progress>,
     results: &mut Vec<ComicItem>,
+    directories: &mut Vec<String>,
     scan_generation: u64,
     state: &Arc<AppState>,
     depth: usize,
@@ -322,12 +343,17 @@ async fn scan_smb_dir(
         };
 
         if entry.is_directory {
+            if visible_generation.is_some() {
+                directories.push(full_rel_path);
+                continue;
+            }
             Box::pin(scan_smb_dir(
                 client,
                 tree,
                 &full_rel_path,
                 progress_map,
                 results,
+                directories,
                 scan_generation,
                 state,
                 depth + 1,
@@ -457,6 +483,9 @@ async fn publish_smb_progress(
                 generation,
                 items: newly_discovered,
                 found: base_count.saturating_add(discovered),
+                visible: false,
+                visible_path: None,
+                directories: None,
             },
         )
     };
@@ -513,6 +542,9 @@ async fn publish_smb_visible_progress(
             generation,
             items: newly_discovered,
             found: discovered,
+            visible: true,
+            visible_path: None,
+            directories: None,
         }
     };
     if state

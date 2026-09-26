@@ -22,7 +22,11 @@ const SCAN_DIRECTORY_SETTINGS_FILE: &str = "scan-directory.txt";
 const MAX_IMPORTED_PHOTO_BYTES: usize = 64 * 1024 * 1024;
 const MAX_CATALOG_EXPORT_BYTES: usize = 64 * 1024 * 1024;
 const MAX_AI_IMAGE_BYTES: usize = 20 * 1024 * 1024;
+#[cfg(test)]
 const MAX_AI_BASE64_BYTES: usize = MAX_AI_IMAGE_BYTES.div_ceil(3) * 4;
+const MAX_AI_METADATA_IMAGE_COUNT: usize = 6;
+const MAX_AI_METADATA_IMAGE_BYTES: usize = 2 * 1024 * 1024;
+const MAX_AI_METADATA_TOTAL_IMAGE_BYTES: usize = 10 * 1024 * 1024;
 const MAX_AI_RESPONSE_BYTES: usize = 1024 * 1024;
 
 static AI_HTTP_CLIENT: OnceLock<Result<reqwest::Client, String>> = OnceLock::new();
@@ -1442,7 +1446,28 @@ fn explain_page_prompt(target_locale: &str) -> Result<&'static str, String> {
 #[serde(rename_all = "camelCase")]
 struct SuggestMetadataRequest {
     comic_id: String,
-    data_url: String,
+    data_urls: Vec<String>,
+    #[serde(default = "default_metadata_locale")]
+    target_locale: String,
+}
+
+fn default_metadata_locale() -> String {
+    "zh-Hant".to_string()
+}
+
+fn metadata_prompt(target_locale: &str) -> Result<&'static str, String> {
+    match target_locale {
+        "zh-Hant" => Ok(
+            "請只回傳 JSON array，不要 Markdown。請共同分析依序提供的最多六張漫畫取樣頁面，圖片順序是閱讀順序：通常依序代表第 1、2、3 頁，以及全書約 40%、50%、60% 的位置；若是短書而前端已去除重複位置，請依收到的去重順序判讀。請提出一組待人工確認的 metadata 候選，格式為 [{\"field\":\"summary\",\"value\":\"繁體中文摘要\",\"confidence\":0.0},{\"field\":\"tags\",\"value\":[{\"namespace\":\"general\",\"value\":\"標籤\"}],\"confidence\":0.0}]。摘要與介面語言一致，使用自然的繁體中文（台灣用語）；標籤可以保留原語或翻譯，但整組標籤必須一致地使用同一種語言策略。只可使用 summary 或 tags；只根據清楚看見的內容，不要猜測或杜撰，看不清楚就不要提出該候選，最多 8 筆。若完全無法辨識或必須拒絕，請改以一句話說明具體原因，不要回傳空陣列。",
+        ),
+        "en" => Ok(
+            "Return only a JSON array, with no Markdown. Analyze the up to six comic sample pages together in the order provided. The sequence usually represents pages 1, 2, and 3, followed by approximately 40%, 50%, and 60% through the book; if the book is short and the frontend removed duplicate positions, interpret the remaining images in their deduplicated order. Produce metadata candidates for human review, using [{\"field\":\"summary\",\"value\":\"English summary\",\"confidence\":0.0},{\"field\":\"tags\",\"value\":[{\"namespace\":\"general\",\"value\":\"tag\"}],\"confidence\":0.0}]. Keep the summary in the interface language, English; tags may preserve the source language or be translated, but use one consistent language strategy across the whole tag set. Use only summary or tags; rely only on clearly visible content, do not guess or invent, omit a candidate when the content is unclear, and return at most 8 candidates. If nothing can be read reliably or you must refuse, instead give one short sentence with the specific reason rather than an empty array.",
+        ),
+        "ja" => Ok(
+            "Markdownを使わず、JSON arrayだけを返してください。提供された最大6枚の漫画サンプルを、受け取った順序でまとめて分析してください。通常は1、2、3ページ、その後に本全体のおよそ40%、50%、60%の位置を表します。短い本でフロントエンドが重複する位置を除去した場合は、残った画像の順序で判断してください。人が確認するためのmetadata候補を [{\"field\":\"summary\",\"value\":\"日本語の要約\",\"confidence\":0.0},{\"field\":\"tags\",\"value\":[{\"namespace\":\"general\",\"value\":\"タグ\"}],\"confidence\":0.0}] の形式で返してください。要約はインターフェースの言語である日本語にしてください。タグは原語のままでも翻訳しても構いませんが、タグ全体で同じ言語方針を一貫して使ってください。summaryまたはtagsだけを使用し、明確に見える内容だけに基づいてください。推測や創作はせず、不明瞭な場合は候補を出さず、最大8件までにしてください。全く判読できない場合や拒否が必要な場合は、空の配列ではなく、具体的な理由を短い一文で返してください。",
+        ),
+        unknown => Err(format!("不支援的 AI 輸出語言：{unknown}")),
+    }
 }
 
 #[derive(Debug, serde::Serialize, serde::Deserialize)]
@@ -1902,8 +1927,17 @@ fn response_text(value: &serde_json::Value) -> Option<String> {
                 .into_iter()
                 .flatten()
         })
-        .find(|item| item.get("type").and_then(serde_json::Value::as_str) == Some("output_text"))
-        .and_then(|item| item.get("text").and_then(serde_json::Value::as_str))
+        .find(|item| {
+            matches!(
+                item.get("type").and_then(serde_json::Value::as_str),
+                Some("output_text" | "refusal")
+            )
+        })
+        .and_then(|item| {
+            item.get("text")
+                .or_else(|| item.get("refusal"))
+                .and_then(serde_json::Value::as_str)
+        })
         .map(str::to_string)
 }
 
@@ -1966,15 +2000,34 @@ struct AiCompletion {
     model: String,
 }
 
+fn openai_image_content(images: &[(&str, &str)]) -> Vec<serde_json::Value> {
+    images
+        .iter()
+        .map(|(mime, data)| {
+            serde_json::json!({
+                "type": "input_image",
+                "image_url": format!("data:{mime};base64,{data}")
+            })
+        })
+        .collect()
+}
+
+fn gemma_image_parts(images: &[(&str, &str)]) -> Vec<serde_json::Value> {
+    images
+        .iter()
+        .map(|(mime, data)| serde_json::json!({ "inlineData": { "mimeType": mime, "data": data } }))
+        .collect()
+}
+
 async fn call_ai(
     state: &AppState,
     config: crate::state::AiSessionConfig,
     expected_generation: u64,
-    image: Option<(&str, &str)>,
+    images: &[(&str, &str)],
     prompt: &str,
 ) -> Result<AiCompletion, String> {
     let api_key = config.api_key.clone();
-    call_ai_inner(state, config, expected_generation, image, prompt)
+    call_ai_inner(state, config, expected_generation, images, prompt)
         .await
         .map_err(|error| redact_ai_error(error, &api_key))
 }
@@ -1983,7 +2036,7 @@ async fn call_ai_inner(
     state: &AppState,
     config: crate::state::AiSessionConfig,
     expected_generation: u64,
-    image: Option<(&str, &str)>,
+    images: &[(&str, &str)],
     prompt: &str,
 ) -> Result<AiCompletion, String> {
     let _permit = state
@@ -2008,13 +2061,7 @@ async fn call_ai_inner(
         .as_ref()
         .map_err(Clone::clone)?;
     if config.provider == "openai" {
-        let mut content = Vec::new();
-        if let Some((mime, data)) = image {
-            content.push(serde_json::json!({
-                "type": "input_image",
-                "image_url": format!("data:{mime};base64,{data}")
-            }));
-        }
+        let mut content = openai_image_content(images);
         content.push(serde_json::json!({ "type": "input_text", "text": prompt }));
         let response = send_ai_request(
             state,
@@ -2049,10 +2096,7 @@ async fn call_ai_inner(
             })
             .ok_or_else(|| "Luna 沒有回傳可顯示文字".to_string())
     } else {
-        let mut parts = Vec::new();
-        if let Some((mime, data)) = image {
-            parts.push(serde_json::json!({ "inlineData": { "mimeType": mime, "data": data } }));
-        }
+        let mut parts = gemma_image_parts(images);
         parts.push(serde_json::json!({ "text": prompt }));
         let request_number = state
             .ai_gemma_request_number
@@ -2085,7 +2129,16 @@ async fn call_ai_inner(
                         text,
                         model: model.to_string(),
                     })
-                    .ok_or_else(|| "Gemma 4 沒有回傳可顯示文字".to_string());
+                    .ok_or_else(|| {
+                        let reason = value
+                            .pointer("/candidates/0/finishReason")
+                            .or_else(|| value.pointer("/promptFeedback/blockReason"))
+                            .and_then(serde_json::Value::as_str);
+                        reason.map_or_else(
+                            || "Gemma 4 沒有回傳可顯示文字".to_string(),
+                            |reason| format!("Gemma 4 沒有回傳可顯示文字（原因：{reason}）"),
+                        )
+                    });
             }
             if index == 0 && should_try_gemma_fallback(status) {
                 continue;
@@ -2134,7 +2187,7 @@ async fn test_ai_session(
         state.inner(),
         config,
         generation,
-        None,
+        &[],
         "請只回答：艦載 AI 連線成功。不要補充其他內容。",
     )
     .await
@@ -2154,18 +2207,22 @@ async fn explain_page(
         return Err("尚未同意第三方 AI 資料分享".into());
     }
     let prompt = explain_page_prompt(&data.target_locale)?;
-    call_ai(
-        state.inner(),
-        config,
-        generation,
-        Some((mime, encoded)),
-        prompt,
-    )
-    .await
-    .map(|response| response.text)
+    let images = [(mime, encoded)];
+    call_ai(state.inner(), config, generation, &images, prompt)
+        .await
+        .map(|response| response.text)
 }
 
 fn validate_page_data_url(data_url: &str) -> Result<(&str, &str), String> {
+    validate_page_data_url_with_limit(data_url, MAX_AI_IMAGE_BYTES, "20 MiB")
+        .map(|(mime, encoded, _)| (mime, encoded))
+}
+
+fn validate_page_data_url_with_limit<'a>(
+    data_url: &'a str,
+    max_decoded_bytes: usize,
+    max_size_label: &str,
+) -> Result<(&'a str, &'a str, usize), String> {
     use base64::Engine as _;
     let (header, encoded) = data_url
         .split_once(',')
@@ -2180,16 +2237,17 @@ fn validate_page_data_url(data_url: &str) -> Result<(&str, &str), String> {
     ) {
         return Err("艦載 AI 目前只接受 JPEG、PNG、WebP 或 GIF".into());
     }
-    if encoded.len() > MAX_AI_BASE64_BYTES {
-        return Err("頁面圖片超過 20 MiB 安全上限".into());
+    let max_base64_bytes = max_decoded_bytes.div_ceil(3) * 4;
+    if encoded.len() > max_base64_bytes {
+        return Err(format!("頁面圖片超過 {max_size_label} 安全上限"));
     }
     let decoded = base64::engine::general_purpose::STANDARD
         .decode(encoded)
         .map_err(|_| "頁面圖片 base64 損壞".to_string())?;
-    if decoded.is_empty() || decoded.len() > MAX_AI_IMAGE_BYTES {
-        return Err("頁面圖片必須介於 1 byte 與 20 MiB".into());
+    if decoded.is_empty() || decoded.len() > max_decoded_bytes {
+        return Err(format!("頁面圖片必須介於 1 byte 與 {max_size_label}"));
     }
-    Ok((mime, encoded))
+    Ok((mime, encoded, decoded.len()))
 }
 
 fn parse_ai_metadata_suggestions(text: &str) -> Result<Vec<AiMetadataSuggestion>, String> {
@@ -2206,8 +2264,25 @@ fn parse_ai_metadata_suggestions(text: &str) -> Result<Vec<AiMetadataSuggestion>
                 .unwrap_or(text.trim())
         })
         .trim();
-    let values: Vec<AiMetadataSuggestion> =
-        serde_json::from_str(cleaned).map_err(|_| "艦載 AI 回傳的候選格式無法解析".to_string())?;
+    let values: Vec<AiMetadataSuggestion> = serde_json::from_str(cleaned).map_err(|_| {
+        if let Some(reason) = metadata_refusal_reason(cleaned) {
+            let message = cleaned
+                .chars()
+                .filter(|character| !character.is_control() || *character == '\t')
+                .take(240)
+                .collect::<String>();
+            format!("艦載 AI 無法產生 metadata 候選：{reason}（模型訊息：{message}）")
+        } else if !cleaned.is_empty() {
+            let message = cleaned
+                .chars()
+                .filter(|character| !character.is_control() || *character == '\t')
+                .take(240)
+                .collect::<String>();
+            format!("艦載 AI 未回傳 JSON 候選，模型訊息：{message}")
+        } else {
+            "艦載 AI 回傳的候選格式無法解析".to_string()
+        }
+    })?;
     if values.len() > 8 {
         return Err("艦載 AI 候選數量超過 8 筆上限".into());
     }
@@ -2245,6 +2320,73 @@ fn parse_ai_metadata_suggestions(text: &str) -> Result<Vec<AiMetadataSuggestion>
     Ok(values)
 }
 
+fn metadata_refusal_reason(text: &str) -> Option<&'static str> {
+    let lower = text.to_ascii_lowercase();
+    if [
+        "blurry",
+        "unclear",
+        "illegible",
+        "low quality",
+        "看不清",
+        "模糊",
+        "無法辨識",
+        "読み取れません",
+        "判読できません",
+    ]
+    .iter()
+    .any(|marker| lower.contains(marker))
+    {
+        Some("圖片品質不足或文字無法可靠辨識，請改用較清晰的取樣頁面")
+    } else if [
+        "cannot",
+        "can't",
+        "unable",
+        "refuse",
+        "拒絕",
+        "お断り",
+        "できません",
+    ]
+    .iter()
+    .any(|marker| lower.contains(marker))
+    {
+        Some("模型拒絕根據目前圖片提出候選，請確認頁面內容清楚且適合分析")
+    } else {
+        None
+    }
+}
+
+fn metadata_ai_error(error: String) -> String {
+    const MAX_REASON_CHARS: usize = 240;
+    let reason = error.replace(['\r', '\n'], " ");
+    let bounded = reason.chars().take(MAX_REASON_CHARS).collect::<String>();
+    if reason.chars().count() > MAX_REASON_CHARS {
+        format!("艦載 AI metadata 請求失敗：{bounded}…")
+    } else {
+        format!("艦載 AI metadata 請求失敗：{bounded}")
+    }
+}
+
+fn validate_metadata_images(data_urls: &[String]) -> Result<Vec<(&str, &str)>, String> {
+    if data_urls.is_empty() {
+        return Err("至少需要一張漫畫取樣頁面".into());
+    }
+    if data_urls.len() > MAX_AI_METADATA_IMAGE_COUNT {
+        return Err("漫畫 metadata 最多只能分析 6 張取樣頁面".into());
+    }
+    let mut total_decoded_bytes = 0usize;
+    let mut images = Vec::with_capacity(data_urls.len());
+    for data_url in data_urls {
+        let (mime, encoded, decoded_bytes) =
+            validate_page_data_url_with_limit(data_url, MAX_AI_METADATA_IMAGE_BYTES, "2 MiB")?;
+        total_decoded_bytes = total_decoded_bytes.saturating_add(decoded_bytes);
+        if total_decoded_bytes > MAX_AI_METADATA_TOTAL_IMAGE_BYTES {
+            return Err("漫畫 metadata 取樣圖片總大小不得超過 10 MiB".into());
+        }
+        images.push((mime, encoded));
+    }
+    Ok(images)
+}
+
 #[tauri::command]
 async fn suggest_comic_metadata(
     app_handle: AppHandle,
@@ -2256,16 +2398,12 @@ async fn suggest_comic_metadata(
     if !config.google_content_disclosure {
         return Err("尚未同意第三方 AI 資料分享".into());
     }
-    let (mime, encoded) = validate_page_data_url(&data.data_url)?;
+    let images = validate_metadata_images(&data.data_urls)?;
+    let prompt = metadata_prompt(&data.target_locale)?;
     let provider = config.provider.clone();
-    let response = call_ai(
-        state.inner(),
-        config,
-        generation,
-        Some((mime, encoded)),
-        "請只回傳 JSON array，不要 Markdown。從目前這一頁提出可人工審核的漫畫 metadata 候選，格式為 [{\"field\":\"summary\",\"value\":\"繁中摘要\",\"confidence\":0.0},{\"field\":\"tags\",\"value\":[{\"namespace\":\"general\",\"value\":\"標籤\"}],\"confidence\":0.0}]。只可使用 summary 或 tags；看不清楚就不要猜，最多 8 筆。",
-    )
-    .await?;
+    let response = call_ai(state.inner(), config, generation, &images, prompt)
+        .await
+        .map_err(metadata_ai_error)?;
     let suggestions = parse_ai_metadata_suggestions(&response.text)?;
     let _lifecycle = state.ai_session_lifecycle.lock().await;
     if state
@@ -3666,6 +3804,13 @@ mod tests {
             response_text(&payload).as_deref(),
             Some("艦載 AI 連線成功。")
         );
+        let refusal = serde_json::json!({
+            "output": [{"content": [{"type": "refusal", "refusal": "The sample is too blurry to read."}]}]
+        });
+        assert_eq!(
+            response_text(&refusal).as_deref(),
+            Some("The sample is too blurry to read.")
+        );
     }
 
     #[test]
@@ -3680,6 +3825,84 @@ mod tests {
             "[{\"field\":\"title\",\"value\":\"不允許\",\"confidence\":1.0}]"
         )
         .is_err());
+    }
+
+    #[test]
+    fn metadata_request_defaults_to_traditional_chinese_and_limits_locale() {
+        let request: SuggestMetadataRequest = serde_json::from_value(serde_json::json!({
+            "comicId": "comic",
+            "dataUrls": ["data:image/png;base64,AA=="]
+        }))
+        .unwrap();
+        assert_eq!(request.target_locale, "zh-Hant");
+        assert!(metadata_prompt("zh-Hant").is_ok());
+        assert!(metadata_prompt("en").is_ok());
+        assert!(metadata_prompt("ja").is_ok());
+        assert!(metadata_prompt("fr").is_err());
+    }
+
+    #[test]
+    fn provider_image_parts_keep_page_order_before_text() {
+        let images = [("image/png", "first"), ("image/jpeg", "second")];
+        assert!(openai_image_content(&[]).is_empty());
+        assert!(gemma_image_parts(&[]).is_empty());
+        let openai = openai_image_content(&images);
+        assert_eq!(openai.len(), 2);
+        assert_eq!(openai[0]["type"], "input_image");
+        assert!(openai[0]["image_url"].as_str().unwrap().contains("first"));
+        assert!(openai[1]["image_url"].as_str().unwrap().contains("second"));
+
+        let gemma = gemma_image_parts(&images);
+        assert_eq!(gemma.len(), 2);
+        assert_eq!(gemma[0]["inlineData"]["mimeType"], "image/png");
+        assert_eq!(gemma[1]["inlineData"]["data"], "second");
+    }
+
+    #[test]
+    fn metadata_image_limits_enforce_six_pages_two_mib_each_and_ten_mib_total() {
+        use base64::Engine as _;
+        let small = format!(
+            "data:image/png;base64,{}",
+            base64::engine::general_purpose::STANDARD.encode([0u8; 1])
+        );
+        assert_eq!(
+            validate_metadata_images(&vec![small.clone(); 6])
+                .unwrap()
+                .len(),
+            6
+        );
+        assert!(validate_metadata_images(&vec![small.clone(); 7]).is_err());
+        assert!(validate_metadata_images(&[]).is_err());
+
+        let too_large = format!(
+            "data:image/png;base64,{}",
+            base64::engine::general_purpose::STANDARD
+                .encode(vec![0u8; MAX_AI_METADATA_IMAGE_BYTES + 1])
+        );
+        assert!(validate_metadata_images(&[too_large]).is_err());
+
+        let two_mib = format!(
+            "data:image/png;base64,{}",
+            base64::engine::general_purpose::STANDARD
+                .encode(vec![0u8; MAX_AI_METADATA_IMAGE_BYTES])
+        );
+        assert_eq!(
+            validate_metadata_images(&vec![two_mib; 5]).unwrap().len(),
+            5
+        );
+        let six_mib = format!(
+            "data:image/png;base64,{}",
+            base64::engine::general_purpose::STANDARD
+                .encode(vec![0u8; MAX_AI_METADATA_IMAGE_BYTES])
+        );
+        assert!(validate_metadata_images(&vec![six_mib; 6]).is_err());
+    }
+
+    #[test]
+    fn metadata_refusal_is_specific_and_bounded() {
+        let error = parse_ai_metadata_suggestions("I cannot read the blurry pages").unwrap_err();
+        assert!(error.contains("圖片品質不足"));
+        assert!(metadata_ai_error("x\n".repeat(500)).chars().count() < 300);
     }
 
     #[test]

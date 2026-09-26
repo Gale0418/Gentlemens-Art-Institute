@@ -398,7 +398,7 @@ function installThirdPartyAiConsentGuard() {
   disclosure.id = 'ai-third-party-disclosure-wrap';
   const renderDisclosure = () => {
     const providerName = provider.value === 'google' ? 'Google' : 'OpenAI';
-    const message = bridgeText(" 我了解：只有在我主動使用 AI 功能時，目前頁面影像與提示文字才會傳送至 {provider}；我明確同意本次工作階段的第三方 AI 資料分享。", { provider: providerName });
+    const message = bridgeText(" 我了解：只有在我主動使用 AI 功能時，選定的頁面影像（AI 掃描最多六頁）與提示文字才會傳送至 {provider}；我明確同意本次工作階段的第三方 AI 資料分享。", { provider: providerName });
     const policyNote = provider.value === 'google' ? bridgeText(" 若使用 Google 免費層，提交內容可能用於改善產品；請確認自己的雲端 BYOK 方案。") : '';
     const textNodes = Array.from(disclosure.childNodes).filter(node => node.nodeType === 3);
     for (const node of textNodes) node.textContent = '';
@@ -469,7 +469,7 @@ if (window.__TAURI__) {
     setAiSessionConfig: (data) => {
       const providerName = data?.provider === 'google' ? 'Google' : 'OpenAI';
       if (!data?.googleContentDisclosure) {
-        return Promise.reject(new Error(bridgeText("啟用 {provider} 前，請先明確同意將目前頁面影像與提示文字傳送至該第三方 AI 供應商。", { provider: providerName })));
+        return Promise.reject(new Error(bridgeText("啟用 {provider} 前，請先明確同意將選定的頁面影像（AI 掃描最多六頁）與提示文字傳送至該第三方 AI 供應商。", { provider: providerName })));
       }
       return invoke('set_ai_session_config', {
         data: {
@@ -481,7 +481,7 @@ if (window.__TAURI__) {
     restoreAiSessionConfig: (data) => {
       const providerName = data?.provider === 'google' ? 'Google' : 'OpenAI';
       if (!data?.googleContentDisclosure) {
-        return Promise.reject(new Error(bridgeText("使用已儲存 {provider} Key 前，請先明確同意將目前頁面影像與提示文字傳送至該第三方 AI 供應商。", { provider: providerName })));
+        return Promise.reject(new Error(bridgeText("使用已儲存 {provider} Key 前，請先明確同意將選定的頁面影像（AI 掃描最多六頁）與提示文字傳送至該第三方 AI 供應商。", { provider: providerName })));
       }
       return invoke('restore_ai_session_config', { data });
     },

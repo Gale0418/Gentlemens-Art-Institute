@@ -481,11 +481,43 @@ const makeCover = id => {
   assert.equal(incremental.hooks.state.scanStatus.isScanning, false);
   assert.equal(incremental.hooks.state.comics.some(item => item.id === 'late-book'), false);
   assert.equal(incremental.hooks.applyIncrementalLibraryBatch({
+    generation: 13,
+    visible: true,
+    found: 1,
+    items: [{ id: 'visible-book', title: 'Visible', relativePath: 'folder/visible.cbz', sourceId: 'local:test' }],
+  }), true);
+  assert.equal(incremental.hooks.state.scanStatus.isScanning, false, 'visible updates must not revive the global scan');
+  assert.equal(incremental.hooks.state.comics.some(item => item.id === 'visible-book'), true, 'current folder must update after global completion');
+  incremental.hooks.state.currentPath = 'folder';
+  assert.equal(incremental.hooks.applyIncrementalLibraryBatch({
+    generation: 13,
+    visible: true,
+    visiblePath: 'folder',
+    directories: ['folder/deeper'],
+    found: 0,
+    items: [],
+  }), true);
+  incremental.hooks.elements.searchInput.value = '';
+  assert.equal(incremental.hooks.getDirectoryItems().some(item => item.isDirectory && item.relativePath === 'folder/deeper'), true,
+    'current-level child folders must appear before recursive discovery');
+  incremental.hooks.applyIncrementalLibraryBatch({
+    generation: 13,
+    visible: true,
+    visiblePath: 'folder',
+    directories: ['folder/other', 'folder/deeper'],
+    found: 0,
+    items: [],
+  });
+  assert.deepEqual(Array.from(incremental.hooks.getDirectoryItems().filter(item => item.isDirectory), item => item.relativePath),
+    ['folder/deeper', 'folder/other'], 'local and SMB child directories merge without duplicates');
+  assert.equal(incremental.hooks.state.comics.some(item => item.relativePath === 'folder/deeper'), false,
+    'navigation folders must stay out of the comic catalog');
+  assert.equal(incremental.hooks.applyIncrementalLibraryBatch({
     generation: 11,
     found: 99,
     items: [{ id: 'stale-book', title: 'Stale', relativePath: 'stale.cbz', sourceId: 'local:old' }],
   }), true);
-  assert.deepEqual(incremental.hooks.state.comics.map(item => item.id), ['book-a', 'book-b', 'book-c', 'book-d']);
+  assert.deepEqual(incremental.hooks.state.comics.map(item => item.id), ['book-a', 'book-b', 'book-c', 'book-d', 'visible-book']);
 }
 
 // Poll 不重疊，舊世代回覆也不能覆蓋新一輪 scan 狀態；暫時故障不能假報完成。
@@ -871,7 +903,7 @@ const makeCover = id => {
   assert.equal(navigation.hooks.state.currentPath, '系列/第一部');
   vm.runInContext('navigateLibraryUp(); navigateLibraryUp(); navigateLibraryUp()', navigation.context);
   await Promise.resolve();
-  assert.deepEqual(visibleScanPaths, ['系列/第一部', '系列', ''], 'only navigated directories scan, and root cancels the previous priority scan');
+  assert.deepEqual(visibleScanPaths, ['系列/第一部', '系列', ''], 'each navigated directory, including root, requests a shallow scan');
   assert.equal(navigation.hooks.state.currentPath, '');
   assert.equal(navigation.hooks.elements.libraryUpBtn.disabled, true);
 }

@@ -29,6 +29,9 @@ pub(crate) struct LibraryBatch {
     pub(crate) generation: u64,
     pub(crate) items: Vec<ComicItem>,
     pub(crate) found: usize,
+    pub(crate) visible: bool,
+    pub(crate) visible_path: Option<String>,
+    pub(crate) directories: Option<Vec<String>>,
 }
 
 fn should_publish_partial(discovered: usize, published: usize, elapsed: Duration) -> bool {
@@ -142,6 +145,9 @@ fn publish_partial_library(
             generation,
             items: newly_discovered.to_vec(),
             found: results.len(),
+            visible: false,
+            visible_path: None,
+            directories: None,
         };
         *published = results.len();
         *published_at = Instant::now();
@@ -183,10 +189,41 @@ fn publish_visible_library(
             generation,
             items,
             found: results.len(),
+            visible: true,
+            visible_path: None,
+            directories: None,
         }
     };
     use tauri::Emitter;
     let _ = app_handle.emit("library-changed", batch);
+}
+
+pub(crate) fn publish_visible_directories(
+    state: &Arc<AppState>,
+    app_handle: &tauri::AppHandle,
+    generation: u64,
+    visible_generation: u64,
+    visible_path: String,
+    directories: Vec<String>,
+) {
+    let _scan_lifecycle = state.scan_lifecycle.blocking_lock();
+    if state.scan_generation.load(Ordering::Acquire) != generation
+        || state.visible_scan_generation.load(Ordering::Acquire) != visible_generation
+    {
+        return;
+    }
+    use tauri::Emitter;
+    let _ = app_handle.emit(
+        "library-changed",
+        LibraryBatch {
+            generation,
+            items: Vec::new(),
+            found: 0,
+            visible: true,
+            visible_path: Some(visible_path),
+            directories: Some(directories),
+        },
+    );
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -896,6 +933,9 @@ fn scan_recursive(
         }
     }
 
+    if visible_generation.is_some() {
+        return;
+    }
     for subdir in subdirs {
         scan_recursive(
             &subdir,
@@ -1080,6 +1120,9 @@ fn publish_saved_items(
             generation,
             items,
             found,
+            visible: false,
+            visible_path: None,
+            directories: None,
         }
     };
     use tauri::Emitter;
@@ -1172,13 +1215,10 @@ pub async fn scan_visible_directory(
     relative_path: String,
 ) -> Result<(), String> {
     let visible_generation = state.visible_scan_generation.fetch_add(1, Ordering::SeqCst) + 1;
-    if relative_path.is_empty() || relative_path == "📁 外部裝置" {
+    if relative_path == "📁 外部裝置" {
         return Ok(());
     }
     let generation = state.scan_generation.load(Ordering::Acquire);
-    if !state.scan_progress.lock().await.is_scanning {
-        return Ok(());
-    }
     let is_external = relative_path.starts_with("📁 外部裝置/");
     let local_configured = !state.scan_dir.read().unwrap().is_empty();
     let smb_config = state.smb_config.read().unwrap().clone();
@@ -1212,6 +1252,7 @@ pub async fn scan_visible_directory(
         }
         return Ok(());
     }
+    let visible_path = relative_path.clone();
     let (root, subpath, virtual_prefix, bookmark) = if let Some(external_path) =
         relative_path.strip_prefix("📁 外部裝置/")
     {
@@ -1302,6 +1343,36 @@ pub async fn scan_visible_directory(
         if !target_canonical.starts_with(&root_canonical) || !target_canonical.is_dir() {
             return Err("漫畫目錄超出來源範圍".to_string());
         }
+        let mut directories = Vec::new();
+        for entry in std::fs::read_dir(&target).map_err(|error| error.to_string())? {
+            let entry = match entry {
+                Ok(entry) => entry,
+                Err(error) => {
+                    eprintln!("⚠️ 無法讀取目前目錄項目 {}：{error}", target.display());
+                    continue;
+                }
+            };
+            let name = entry.file_name();
+            let Some(name) = name.to_str() else { continue };
+            if name.starts_with('.') || name == "__MACOSX" || name == "node_modules" {
+                continue;
+            }
+            if !entry.file_type().is_ok_and(|kind| kind.is_dir()) {
+                continue;
+            }
+            let path = entry.path();
+            let Ok(relative) = path.strip_prefix(&root_path) else {
+                continue;
+            };
+            let relative = relative
+                .to_string_lossy()
+                .replace(std::path::MAIN_SEPARATOR, "/");
+            directories.push(if let Some(prefix) = virtual_prefix.as_deref() {
+                format!("📁 外部裝置/{prefix}/{relative}")
+            } else {
+                relative
+            });
+        }
         let progress = if progress_dir.is_empty() {
             std::collections::HashMap::new()
         } else {
@@ -1340,6 +1411,14 @@ pub async fn scan_visible_directory(
             visible_generation,
             &mut published,
             &mut published_at,
+        );
+        publish_visible_directories(
+            &state,
+            &app_handle,
+            generation,
+            visible_generation,
+            visible_path,
+            directories,
         );
         Ok(())
     })

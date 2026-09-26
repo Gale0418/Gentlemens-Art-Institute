@@ -74,6 +74,7 @@ G.A.I 是讀取使用者自行提供內容的漫畫閱讀工具，不提供漫�
 
 ### Source lifecycle
 
+- 進入目錄時只即時掃描該層的漫畫檔與子資料夾；全域掃描、收藏與最近閱讀各自維持背景優先通道。子資料夾可先導航，點入後再掃下一層。
 - Local source ID 使用**使用者已配置的 root 字串**衍生，刻意保持來源拔除後仍可重現；不要在每次掃描時動態 canonicalize，否則同一 removable/NAS-backed source 可能在 online/offline 狀態得到不同 ID。若未來要改成 canonical identity，必須先把 resolved identity 持久化再做 migration。
 - iOS external folder 使用 security-scoped bookmark；symlink 不可逃出使用者選擇的 root。
 - 專案目前只支援**一組 SMB/NAS 設定**。要換 NAS 就更新設定並重新掃描，不維護多 NAS namespace。
@@ -140,9 +141,9 @@ iOS/iPadOS 有額外的本機檔案系統、Xcode、簽名與實機驗證要求�
 - 原始漫畫、sidecar 與 NAS 內容預設不由 catalog organizer 自動覆寫。
 - 使用者人工 metadata 永遠高於 importer / AI candidate。
 - API key 預設只保留目前 App session；macOS／iOS／iPadOS 可經使用者明確選擇存入本機 Keychain。不寫入 SQLite、localStorage、log 或 metadata export。
-- OpenAI 與 Google AI 都是選用功能；正式 Tauri UI 在建立 session 前會指出目前頁面影像與 prompt 可能送往所選第三方 provider，並要求 explicit consent。
+- OpenAI 與 Google AI 都是選用功能；正式 Tauri UI 在建立 session 前會指出選定頁面影像與 prompt 可能送往所選第三方 provider，並要求 explicit consent。
 - 切換 AI provider 會撤銷前一次同意並要求重新確認。
-- AI 回傳只做頁面說明或可人工審核的 metadata candidate，不直接覆寫人工資料。
+- 書本外的「AI 掃描」最多取樣開頭三頁與全書 40%、50%、60% 位置，合併成一次請求；短篇會去除重複頁。摘要跟隨介面語言，AI 回傳只做頁面說明或可人工審核的 metadata candidate，不直接覆寫人工資料。
 
 ## Impeccable design state
 

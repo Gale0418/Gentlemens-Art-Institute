@@ -407,6 +407,12 @@ body {
   font-weight: 700;
 }
 
+.visible-scan-status {
+  margin: -14px 0 0;
+  color: var(--text-light);
+  font-size: 13px;
+}
+
 .filter-options {
   display: flex;
   background: rgba(255, 255, 255, 0.03);

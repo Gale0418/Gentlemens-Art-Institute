@@ -383,16 +383,16 @@ window.GAIL10n.register({
     "en": "No Pro purchase to restore on the current Apple Account.",
     "ja": "現在のApple Accountに復元できるProの購入はありません。"
   },
-  " 我了解：只有在我主動使用 AI 功能時，目前頁面影像與提示文字才會傳送至 {provider}；我明確同意本次工作階段的第三方 AI 資料分享。": {
-    "en": " I understand that the current page image and prompt are sent to {provider} only when I use AI features. I explicitly consent to sharing this data with the third-party AI provider for this session.",
-    "ja": " AI機能を自分で使用したときに限り、現在のページ画像とプロンプトが{provider}に送信されることを理解し、このセッションでの第三者AIへのデータ共有に明示的に同意します。"
+  " 我了解：只有在我主動使用 AI 功能時，選定的頁面影像（AI 掃描最多六頁）與提示文字才會傳送至 {provider}；我明確同意本次工作階段的第三方 AI 資料分享。": {
+    "en": " I understand that selected page images (up to six for AI Scan) and the prompt are sent to {provider} only when I use AI features. I explicitly consent to sharing this data with the third-party AI provider for this session.",
+    "ja": " AI機能を自分で使用したときに限り、選択したページ画像（AIスキャンでは最大6ページ）とプロンプトが{provider}に送信されることを理解し、このセッションでの第三者AIへのデータ共有に明示的に同意します。"
   },
-  "啟用 {provider} 前，請先明確同意將目前頁面影像與提示文字傳送至該第三方 AI 供應商。": {
-    "en": "Before enabling {provider}, explicitly consent to sending the current page image and prompt to this third-party AI provider.",
-    "ja": "{provider}を有効にする前に、現在のページ画像とプロンプトをこの第三者AIに送信することに明示的に同意してください。"
+  "啟用 {provider} 前，請先明確同意將選定的頁面影像（AI 掃描最多六頁）與提示文字傳送至該第三方 AI 供應商。": {
+    "en": "Before enabling {provider}, explicitly consent to sending selected page images (up to six for AI Scan) and the prompt to this third-party AI provider.",
+    "ja": "{provider}を有効にする前に、選択したページ画像（AIスキャンでは最大6ページ）とプロンプトをこの第三者AIに送信することに明示的に同意してください。"
   },
-  "使用已儲存 {provider} Key 前，請先明確同意將目前頁面影像與提示文字傳送至該第三方 AI 供應商。": {
-    "en": "Before using the saved {provider} key, explicitly consent to sending the current page image and prompt to this third-party AI provider.",
-    "ja": "保存済みの{provider}キーを使用する前に、現在のページ画像とプロンプトをこの第三者AIに送信することに明示的に同意してください。"
+  "使用已儲存 {provider} Key 前，請先明確同意將選定的頁面影像（AI 掃描最多六頁）與提示文字傳送至該第三方 AI 供應商。": {
+    "en": "Before using the saved {provider} key, explicitly consent to sending selected page images (up to six for AI Scan) and the prompt to this third-party AI provider.",
+    "ja": "保存済みの{provider}キーを使用する前に、選択したページ画像（AIスキャンでは最大6ページ）とプロンプトをこの第三者AIに送信することに明示的に同意してください。"
   }
 });

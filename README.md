@@ -27,7 +27,7 @@ G.A.I 適用於 macOS、iPhone 與 iPad；不提供漫畫下載、來源爬取�
 - SQLite catalog 是 metadata / location / progress 的主要本機 authority；來源離線不等於資料刪除。
 - 本機、iOS security-scoped folder 與單一 SMB/NAS 是獨立來源；其中一個來源離線不應清除其他來源或 catalog 紀錄。
 - 內建全年齡原創 demo 可在乾淨安裝、沒有 NAS／帳號／第三方下載的情況下直接驗證核心 reader。
-- iOS 1.0.0（build 36）已由 App Store Connect 處理為 `VALID`；隱私政策及支援頁面已公開，正式截圖、App Privacy 與加密聲明仍待完成；**尚未送審或上架**。
+- iOS 1.0.0（build 37）已由 App Store Connect 處理為 `VALID` 並掛到待審版本；隱私政策與支援頁面已公開，實際介面的 iPad 商店截圖及 Pro 內購審查截圖已上傳。App Privacy 與加密聲明仍待完成；**尚未送審或上架**。
 - `src-tauri/vendor/wry/` 是**刻意保留的 iOS WebKit startup patch**，目前仍由 Cargo `[patch.crates-io]` 使用；不要因為它看起來像 vendor 目錄就清掉。
 
 ## 隱私政策

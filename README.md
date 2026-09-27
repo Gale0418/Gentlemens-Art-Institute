@@ -27,7 +27,7 @@ G.A.I 適用於 macOS、iPhone 與 iPad；不提供漫畫下載、來源爬取�
 - SQLite catalog 是 metadata / location / progress 的主要本機 authority；來源離線不等於資料刪除。
 - 本機、iOS security-scoped folder 與單一 SMB/NAS 是獨立來源；其中一個來源離線不應清除其他來源或 catalog 紀錄。
 - 內建全年齡原創 demo 可在乾淨安裝、沒有 NAS／帳號／第三方下載的情況下直接驗證核心 reader。
-- iOS 1.0.0（build 36）已由 App Store Connect 處理為 `VALID`，但截圖、公開 Privacy Policy / Support URL、App Privacy 等欄位仍待完成；**尚未送審或上架**。本 repository 目前仍是私有，公開前須完成舊歷史的私人資料確認。
+- iOS 1.0.0（build 36）已由 App Store Connect 處理為 `VALID`；隱私政策及支援頁面已公開，正式截圖、App Privacy 與加密聲明仍待完成；**尚未送審或上架**。
 - `src-tauri/vendor/wry/` 是**刻意保留的 iOS WebKit startup patch**，目前仍由 Cargo `[patch.crates-io]` 使用；不要因為它看起來像 vendor 目錄就清掉。
 
 ## 隱私政策
@@ -55,7 +55,7 @@ G.A.I 不要求建立自有帳號，也未整合廣告或第三方行為分析�
 
 ## 原始碼授權與內容聲明
 
-本 repository 目前為私有；日後若公開，將供檢視，**不採開源授權**。G.A.I 原創程式碼、文件與專案資產保留所有權利；除適用法律或託管平台條款允許的範圍外，未經書面許可，不授權使用、修改、再散布或販售。完整條款見 [LICENSE](LICENSE)。第三方元件仍依各自授權提供，包含 `src-tauri/vendor/wry/` 中保留的授權文件。
+本 repository 已公開供檢視，**不採開源授權**。G.A.I 原創程式碼、文件與專案資產保留所有權利；除適用法律或託管平台條款允許的範圍外，未經書面許可，不授權使用、修改、再散布或販售。完整條款見 [LICENSE](LICENSE)。第三方元件仍依各自授權提供，包含 `src-tauri/vendor/wry/` 中保留的授權文件。
 
 G.A.I 是讀取使用者自行提供內容的漫畫閱讀工具，不提供漫畫下載、來源站或任何第三方漫畫的使用權。請僅匯入你有權使用的內容。公開原始碼不代表 App 已上架；目前版本與商店驗收狀態請見上方 Current status。
 

@@ -78,7 +78,7 @@
         "ja"
       ]
     },
-    "metadataSyncStatus": "Three revised locales uploaded to App Store Connect 2026-09-27; privacy/support URLs and review assets remain pending"
+    "metadataSyncStatus": "Three revised locales and public privacy/support URLs uploaded to App Store Connect 2026-09-27; authentic screenshots and App Privacy remain pending"
   },
   "reviewInformation": {
     "sevenRequiredCategories": {
@@ -133,13 +133,13 @@
     ]
   },
   "privacyAndCompliance": {
-    "privacyPolicyURL": "Pending public verification: https://github.com/Gale0418/Gentlemens-Art-Institute/blob/main/README.md#隱私政策",
-    "supportURL": "Pending public verification: https://github.com/Gale0418/Gentlemens-Art-Institute/blob/main/SUPPORT.md",
+    "privacyPolicyURL": "https://github.com/Gale0418/Gentlemens-Art-Institute/blob/main/README.md#隱私政策",
+    "supportURL": "https://github.com/Gale0418/Gentlemens-Art-Institute/blob/main/SUPPORT.md",
     "supportContact": "coderb0418@gmail.com",
     "appPrivacyQuestionnaire": "TODO: complete from the processed release build. Explicitly assess local catalog data, selected page images/prompts sent to optional AI providers, SMB connection data, diagnostics, and whether any data is linked to the user or used for tracking.",
     "ageRating": "App Store Connect questionnaire completed 2026-09-27: FOUR_PLUS for bundled all-ages demo and reader features",
     "copyrightAndContentReview": "App Store Connect declaration DOES_NOT_USE_THIRD_PARTY_CONTENT; bundled reviewer demo is original all-ages landscape artwork. User-provided files remain user responsibility.",
-    "exportCompliance": "TODO: confirm encryption/export answers from the final archive and App Store Connect questions",
+    "exportCompliance": "App Store Connect declaration d6b66a68-a11c-4fd9-93cc-0ee6b994a6b0 created 2026-09-27 for third-party standard cryptography and France; still CREATED and build validation still reports missing declaration. Resolve documentation/approval before submission.",
     "openSourceNotices": "TODO: verify all bundled Rust/Tauri/vendor notices are shipped or linked from a public notices page",
     "supportContactEvidence": "Public support address approved for this project."
   },

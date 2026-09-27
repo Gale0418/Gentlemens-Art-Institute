@@ -1,7 +1,7 @@
 {
   "schemaVersion": 1,
   "status": "draft-blocked",
-  "lastReviewed": "2026-09-09",
+  "lastReviewed": "2026-09-27",
   "sourceOfTruth": "docs/release/gai-app-store-connect-metadata.json",
   "release": {
     "platform": "IOS",
@@ -9,14 +9,13 @@
     "appStoreConnectAppId": "6809937717",
     "bundleId": "com.windsheep.gai",
     "version": "1.0.0",
-    "build": "TODO: confirm processed build number",
+    "build": "36; processed VALID by App Store Connect 2026-09-27",
     "minimumOS": "15.0",
     "rustToolchain": "1.98.1",
     "supportedDevices": [
-      "iPhone: TODO: verify from the processed build",
-      "iPad: TODO: verify from the processed build"
+      "iPhone and iPad in the processed iOS build; physical final-package checks pending"
     ],
-    "signingAndArtifactEvidence": "TODO: attach the signed IPA/archive evidence and SHA-256 after the release build exists",
+    "signingAndArtifactEvidence": "App Store build 667ce7d0-0319-490e-bde2-cf8af78a0d5d processed VALID; signed IPA SHA-256 2b4432ed679b523cfb7e68150724365436e313d15d2ce35fe253dd4850ca333f; private signing material stays outside repository",
     "launchLocales": [
       "zh-Hant",
       "en-US",
@@ -59,8 +58,8 @@
   },
   "storeListing": {
     "appName": "紳士藝術研究所",
-    "subtitle": "圖片轉條漫，往下滑就能看",
-    "promotionalText": "圖片資料夾、ZIP／CBZ，依閱讀順序直接連續閱讀。原圖不需合併，免費使用條漫、單頁與雙頁模式，並保存進度、搜尋作品與整理收藏。",
+    "subtitle": "漫畫太多？滑成條漫就好",
+    "promotionalText": "漫畫多到像在考古？圖片資料夾、ZIP／CBZ 直接開，條漫一路滑，單頁、雙頁也免費。進度、收藏、搜尋都在同一個書架，原圖不用合併。",
     "keywords": [
       "漫畫",
       "閱讀器",
@@ -71,7 +70,7 @@
       "SMB",
       "收藏"
     ],
-    "description": "把整本漫畫接成條漫，往下滑就能一路閱讀。\n\nG.A.I 會把圖片資料夾或 ZIP／CBZ 依閱讀順序排好，開啟後即可連續閱讀，不需要先合併原圖。原始檔案維持不變。\n\n三種模式，免費使用。\n\n條漫模式適合連續閱讀；單頁與雙頁模式可依作品切換。閱讀進度會保存，下一次可從上次位置繼續。收藏、搜尋、基本標籤、資料匯出、撤銷與基本復原也都免費。透過系統檔案選擇器開啟已掛載的 NAS 資料夾，同樣屬於免費閱讀範圍。\n\n需要進階整理時，v1 Pro 一次買斷，不做訂閱。\n\nPro 解鎖直接 SMB／NAS、批次標籤、進階整理、重複作品候選，以及 AI 解說／整理工具。Pro 不含 API 額度；AI 使用 BYOK，自備 OpenAI 或 Google API Key，選擇頁面並同意後才會傳送，API 費用另計。\n\n已購買的 v1 Pro 權益會在支援的後續版本保留；未來大版本新增功能可能另外販售。\n\nG.A.I 不提供漫畫下載、來源爬取或內容訂閱。請使用自己有權使用的檔案。",
+    "description": "漫畫堆成山，找一本像在考古？你的收藏值得一個真正好用的書架。\n\nG.A.I 直接讀取圖片資料夾與 ZIP／CBZ，照順序排好頁面。想一路滑，就用條漫；想慢慢翻，就切單頁或雙頁。不必事先把原圖合併成巨圖。\n\n點進資料夾，先看眼前這一層；整個書庫在背景繼續掃。搜尋、收藏、閱讀進度與基本標籤幫你找回「上次看到哪本」。NAS 暫時離線，已整理的書庫紀錄也會留著。\n\n基本閱讀免費：本機檔案、三種閱讀模式、進度、收藏、搜尋、基本標籤、資料匯出與基本復原都能用。透過系統檔案選擇器開啟已掛載的 NAS 資料夾，也在免費範圍。\n\n想整理得更痛快？v1 Pro 一次買斷，沒有訂閱。解鎖直接 SMB／NAS 連線、批次標籤、進階整理、重複作品候選與 AI 解說／整理工具。\n\nAI 是選用功能，須自備 OpenAI 或 Google API Key，確認供應商與傳送內容並同意後才會送出選取頁面與提示文字。Pro 不附 API 額度，供應商費用另計；AI 建議由你審核，不會直接蓋掉人工整理。\n\nG.A.I 不提供漫畫下載、來源爬取或內容訂閱。請使用自己有權使用的檔案。",
     "locales": {
       "primary": "zh-Hant",
       "additional": [
@@ -79,7 +78,7 @@
         "ja"
       ]
     },
-    "metadataSyncStatus": "Three locales uploaded and read back 2026-09-09; privacy/support URLs and review assets remain pending"
+    "metadataSyncStatus": "Three revised locales uploaded to App Store Connect 2026-09-27; privacy/support URLs and review assets remain pending"
   },
   "reviewInformation": {
     "sevenRequiredCategories": {
@@ -90,8 +89,8 @@
       },
       "deviceAndOperatingSystem": {
         "status": "partially-known",
-        "value": "Minimum deployment target is iOS 15.0. Physical review device model, OS version, and processed build are TODO.",
-        "evidence": "src-tauri/gen/apple/project.yml and processed-build readback TODO"
+        "value": "Processed App Store Connect build 1.0.0 (36) reports minimum iOS 15.0. Physical review device model and OS evidence remain pending.",
+        "evidence": "App Store Connect build 667ce7d0-0319-490e-bde2-cf8af78a0d5d; physical-device checks pending"
       },
       "purposeAndTargetAudience": {
         "status": "drafted",
@@ -138,8 +137,8 @@
     "supportURL": "Pending public verification: https://github.com/Gale0418/Gentlemens-Art-Institute/blob/main/SUPPORT.md",
     "supportContact": "coderb0418@gmail.com",
     "appPrivacyQuestionnaire": "TODO: complete from the processed release build. Explicitly assess local catalog data, selected page images/prompts sent to optional AI providers, SMB connection data, diagnostics, and whether any data is linked to the user or used for tracking.",
-    "ageRating": "TODO: owner must complete Apple's questionnaire using the actual reviewer/distribution content; do not infer from the reader label alone",
-    "copyrightAndContentReview": "TODO: owner approval required for the authorized reviewer sample, rights posture, age rating, and any content that can be downloaded or bundled into the distribution artifact",
+    "ageRating": "App Store Connect questionnaire completed 2026-09-27: FOUR_PLUS for bundled all-ages demo and reader features",
+    "copyrightAndContentReview": "App Store Connect declaration DOES_NOT_USE_THIRD_PARTY_CONTENT; bundled reviewer demo is original all-ages landscape artwork. User-provided files remain user responsibility.",
     "exportCompliance": "TODO: confirm encryption/export answers from the final archive and App Store Connect questions",
     "openSourceNotices": "TODO: verify all bundled Rust/Tauri/vendor notices are shipped or linked from a public notices page",
     "supportContactEvidence": "Public support address approved for this project."
@@ -148,8 +147,8 @@
     {
       "id": "artifact",
       "check": "Signed IPA is built from the intended commit with Rust 1.98.1 and processed by Apple",
-      "status": "TODO",
-      "evidence": "TODO: archive, IPA SHA-256, processing result, version/build readback"
+      "status": "processed-valid",
+      "evidence": "App Store Connect 1.0.0 (36), build 667ce7d0-0319-490e-bde2-cf8af78a0d5d, VALID; signed IPA SHA-256 2b4432ed679b523cfb7e68150724365436e313d15d2ce35fe253dd4850ca333f"
     },
     {
       "id": "physical-device",
@@ -195,7 +194,6 @@
     }
   ],
   "unknowns": [
-    "TODO: processed build number and build ID",
     "TODO: physical recording filename, device model, OS, and capture evidence",
     "TODO: public G.A.I privacy policy URL and support URL",
     "TODO: final App Privacy answers, age rating, export compliance, and rights/content approval",

@@ -6556,8 +6556,12 @@ html:not([data-i18n-ready]) body {
 
 .folder-tree-label > i {
   flex: 0 0 auto;
-  color: var(--accent-color);
-  font-size: 13px;
+  font-size: 16px;
+}
+
+.folder-tree-label > .fa-folder::before,
+.folder-tree-label > .fa-folder-open::before {
+  content: "📁";
 }
 
 .folder-tree-enter {

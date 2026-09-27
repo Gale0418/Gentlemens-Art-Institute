@@ -704,6 +704,22 @@ body {
   font-family: monospace;
 }
 
+.empty-state.is-filtered {
+  align-items: flex-start;
+  justify-content: flex-start;
+  text-align: left;
+  padding: 12px 4px 20px;
+}
+
+.empty-state.is-filtered .empty-icon {
+  display: none;
+}
+
+.empty-state.is-filtered h3,
+.empty-state.is-filtered p {
+  margin: 0;
+}
+
 /* ==========================================================================
    全螢幕漫畫閱讀器面版 (Overlay & Viewport)
    ========================================================================== */
@@ -1998,6 +2014,18 @@ body {
 
 .folder-browser-item:hover .folder-select-action-btn {
   opacity: 1;
+}
+
+.folder-browser-item:focus-within .folder-select-action-btn {
+  opacity: 1;
+}
+
+@media (hover: none), (pointer: coarse) {
+  .folder-select-action-btn {
+    opacity: 1;
+    min-height: 44px;
+    min-width: 44px;
+  }
 }
 
 .folder-select-action-btn:hover {

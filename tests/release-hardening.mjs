@@ -107,6 +107,14 @@ const staleRefresh = sandbox.rememberAuthoritativeLibraryProgress([
 ]);
 assert.equal(staleRefresh[0].progress.currentPage, 119, 'an older background refresh must not rewind a successful save');
 assert.equal(staleRefresh[0].progress.percent, 100);
+const scannerBatch = sandbox.overlayAuthoritativeLibraryProgress([
+  { id: 'smb-book', progress: { currentPage: 0, totalPages: 120, percent: 0 } },
+]);
+assert.equal(scannerBatch[0].progress.currentPage, 119, 'scanner batches must not rewind SQLite progress');
+assert.equal(sandbox.overlayAuthoritativeLibraryProgress([{ id: 'other-book' }])[0].id, 'other-book');
+assert.equal(sandbox.overlayAuthoritativeLibraryProgress([
+  { id: 'smb-book', progress: { currentPage: 0, totalPages: 120, percent: 0 } },
+])[0].progress.currentPage, 119, 'a partial scanner batch must not clear other remembered progress');
 
 sandbox.rememberAuthoritativeLibraryProgress([
   { id: 'resume-book', progress: { currentPage: 7, totalPages: 10, percent: 80, updatedAt: '2026-09-04T01:00:00Z' } },

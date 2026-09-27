@@ -923,6 +923,22 @@ window.GAIL10n.register({
     "en": "No comics in your library",
     "ja": "ライブラリに漫画がありません"
   },
+  "這裡沒有符合的漫畫": {
+    "en": "No matching comics here",
+    "ja": "ここに一致する漫画はありません"
+  },
+  "試著清除搜尋、切換篩選，或回上一層資料夾。": {
+    "en": "Clear the search, change the filter, or go up one folder.",
+    "ja": "検索を消すか、絞り込みを変えるか、一つ上のフォルダーに戻ってください。"
+  },
+  "漫畫庫暫時無法載入，請按「重試掃描」。": {
+    "en": "The library could not load. Select Retry scan.",
+    "ja": "ライブラリを読み込めませんでした。「再スキャン」を選んでください。"
+  },
+  "無法讀取資料夾，請返回上一層或稍後重試。": {
+    "en": "Could not open this folder. Go back or try again later.",
+    "ja": "フォルダーを開けませんでした。戻るか、後でもう一度お試しください。"
+  },
   "正在載入漫畫…": {
     "en": "Loading comics…",
     "ja": "漫画を読み込み中…"

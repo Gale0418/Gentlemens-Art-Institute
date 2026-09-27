@@ -213,6 +213,14 @@
           </div>
           <p class="visible-scan-status" id="visible-scan-status" role="status" aria-live="polite" hidden></p>
 
+          <!-- 空狀態緊接篩選列；搜尋無結果時不必捲過整個書架區。 -->
+          <div class="empty-state" id="empty-state" style="display: none;">
+            <div class="empty-icon">📂</div>
+            <h3 data-i18n="書架尚無漫畫">書架尚無漫畫</h3>
+            <p id="empty-library-hint"><span data-i18n="請把漫畫圖片資料夾或">請把漫畫圖片資料夾或</span> <code>.cbz</code>/<code>.zip</code> <span data-i18n="壓縮檔放入掃描目錄，然後點擊右上角的「重新整理」按鈕吧！">壓縮檔放入掃描目錄，然後點擊右上角的「重新整理」按鈕吧！</span><br><small data-i18n="您可在設定中查看或變更掃描路徑。">您可在設定中查看或變更掃描路徑。</small></p>
+            <p id="empty-filter-hint" data-i18n="試著清除搜尋、切換篩選，或回上一層資料夾。" hidden>試著清除搜尋、切換篩選，或回上一層資料夾。</p>
+          </div>
+
           <div class="comic-grid" id="comic-grid" tabindex="-1">
             <!-- 漫畫卡片動態載入 -->
           </div>
@@ -294,12 +302,6 @@
             <p class="organize-status" id="organize-status" role="status"></p>
           </section>
 
-          <!-- 漫畫庫為空時的顯示狀態 -->
-          <div class="empty-state" id="empty-state" style="display: none;">
-            <div class="empty-icon">📂</div>
-            <h3 data-i18n="書架尚無漫畫">書架尚無漫畫</h3>
-            <p><span data-i18n="請把漫畫圖片資料夾或">請把漫畫圖片資料夾或</span> <code>.cbz</code>/<code>.zip</code> <span data-i18n="壓縮檔放入掃描目錄，然後點擊右上角的「重新整理」按鈕吧！">壓縮檔放入掃描目錄，然後點擊右上角的「重新整理」按鈕吧！</span><br><small data-i18n="您可在設定中查看或變更掃描路徑。">您可在設定中查看或變更掃描路徑。</small></p>
-          </div>
         </main>
 
         <aside class="comic-inspector" id="comic-inspector">

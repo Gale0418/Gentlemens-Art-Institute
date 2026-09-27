@@ -288,6 +288,15 @@ function rememberAuthoritativeLibraryProgress(items) {
   return mergedItems;
 }
 
+function overlayAuthoritativeLibraryProgress(items) {
+  if (!Array.isArray(items)) return items;
+  return items.map(item => {
+    const remembered = item && authoritativeProgressById.get(item.id);
+    if (!remembered || progressTimestamp(remembered) <= progressTimestamp(item.progress)) return item;
+    return { ...item, progress: { ...remembered } };
+  });
+}
+
 function readerDataWithAuthoritativeProgress(id, data) {
   if (!data || typeof data !== 'object') return data;
   const authoritative = authoritativeProgressById.get(id);
@@ -450,6 +459,7 @@ if (window.__TAURI__) {
       const items = rememberAuthoritativeLibraryProgress(await invoke('get_library'));
       return Array.isArray(items) ? items.map(localizeVirtualPhotoItem) : items;
     },
+    overlayLibraryProgress: overlayAuthoritativeLibraryProgress,
     getScanStatus: () => invoke('get_scan_status'),
     openComic: (id) => openComicWithAuthoritativeProgress(invoke, id),
     updateReaderCacheWindow: (comicId, pageIndex) => invoke('update_reader_cache_window', { comicId, pageIndex }),

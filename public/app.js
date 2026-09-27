@@ -228,7 +228,8 @@ function applyIncrementalLibraryBatch(payload) {
   }
 
   const positions = new Map(state.comics.map((comic, index) => [comic.id, index]));
-  const validItems = payload.items.filter(comic => comic && comic.id && !isBuiltInDemoComic(comic));
+  const batchItems = payload.items.filter(comic => comic && comic.id && !isBuiltInDemoComic(comic));
+  const validItems = eAPI?.overlayLibraryProgress?.(batchItems) || batchItems;
   if (activeLibraryFetch) {
     let received = incrementalItemsDuringFetch.get(generation);
     if (!received) {
@@ -477,7 +478,7 @@ let state = {
   // 雙頁配對相位：1 代表既有封面後的 2-3、4-5…；0 代表單頁錯開後的 3-4、5-6…。
   doublePairOffset: 1,
   zoomPercentage: 100,
-  fitMode: localStorage.getItem('readerFitMode') || 'contain', // 'contain', 'width', 'height'
+  fitMode: readStoredSetting('readerFitMode') || 'contain', // 'contain', 'width', 'height'
   rotationAngle: 0, // 0, 90, 180, 270
   favorites: [],
   favoriteIds: new Set(),
@@ -491,7 +492,7 @@ let state = {
   readerCacheWindowPage: null,
   readerCacheReadyPage: null,
   readerIdleTimer: null,
-  readerDiscoveryHintSeen: localStorage.getItem('gai:readerDiscoveryHintSeen') === 'true',
+  readerDiscoveryHintSeen: readStoredSetting('gai:readerDiscoveryHintSeen') === 'true',
   readerContextMenuOpen: false,
   webtoonScrollFrame: null,
   webtoonAnchor: null,
@@ -521,8 +522,8 @@ let state = {
   libraryRefreshPending: false,
   renderGeneration: 0,
   sharpenLevel: 0, // 0=關閉, 1=輕度, 2=中度, 3=強度
-  cropEdges: localStorage.getItem('readerCropEdges') === 'true',
-  brightness: Number(localStorage.getItem('readerBrightness')) || 100,
+  cropEdges: readStoredSetting('readerCropEdges') === 'true',
+  brightness: Number(readStoredSetting('readerBrightness')) || 100,
   aiAutoExplain: false,
   aiExplainCache: new Map(),
   aiExplainInFlight: false,
@@ -797,12 +798,20 @@ const elements = {
 // ==========================================================================
 
 document.addEventListener('DOMContentLoaded', () => {
-  applyTheme(localStorage.getItem(THEME_STORAGE_KEY) || 'midnight', { persist: false });
-  applyLibraryCardSize(localStorage.getItem(LIBRARY_CARD_SIZE_STORAGE_KEY), { persist: false });
+  applyTheme(readStoredSetting(THEME_STORAGE_KEY) || 'midnight', { persist: false });
+  applyLibraryCardSize(readStoredSetting(LIBRARY_CARD_SIZE_STORAGE_KEY), { persist: false });
   syncLibraryPanelsForViewport({ initial: true });
-  initApp();
+  initApp().catch(error => {
+    console.error('漫畫庫初始化失敗：', error);
+    hideLoader();
+    setScanRecoveryVisible(true, readerText('漫畫庫暫時無法載入，請按「重試掃描」。'));
+  });
   bindEvents();
 });
+
+function readStoredSetting(key) {
+  try { return localStorage.getItem(key); } catch (_) { return null; }
+}
 
 function isNarrowLibraryViewport() {
   const width = Number(window.innerWidth) || document.documentElement.clientWidth || 1024;
@@ -916,8 +925,8 @@ function syncLibraryPanelsForViewport({ initial = false } = {}) {
   }
 
   // 回到寬畫面時恢復各自最後一次的桌面偏好，不觸發書架重繪或封面載入。
-  applySidebarCollapsed(localStorage.getItem(SIDEBAR_COLLAPSED_STORAGE_KEY) === 'true', { persist: false, exclusive: false });
-  applyInspectorCollapsed(localStorage.getItem(INSPECTOR_COLLAPSED_STORAGE_KEY) === 'true', { persist: false, exclusive: false });
+  applySidebarCollapsed(readStoredSetting(SIDEBAR_COLLAPSED_STORAGE_KEY) === 'true', { persist: false, exclusive: false });
+  applyInspectorCollapsed(readStoredSetting(INSPECTOR_COLLAPSED_STORAGE_KEY) === 'true', { persist: false, exclusive: false });
   syncLibraryPanelScrim();
 }
 
@@ -987,7 +996,7 @@ async function initApp() {
 
     const tip = document.querySelector('.sidebar-footer p');
     if (tip) tip.innerHTML = readerText('小提示：點一下卡片查看詳情，再按「開始閱讀」；再次點同一卡片也能閱讀；也可以用上方「匯入圖片」加入內容。✨');
-    const emptyTip = document.querySelector('#empty-state p');
+    const emptyTip = document.getElementById('empty-library-hint');
     if (emptyTip) emptyTip.innerHTML = readerText('請點擊上方的「匯入圖片」按鈕，或透過檔案 App 匯入漫畫！✨');
   }
 
@@ -996,13 +1005,15 @@ async function initApp() {
   if (eAPI && eAPI.getFavorites) {
     try { setFavorites(await eAPI.getFavorites()); } catch(e) {}
   }
-  const savedScanDir = localStorage.getItem('gai:scanDir');
+  const savedScanDir = readStoredSetting('gai:scanDir');
   if (savedScanDir) {
     try {
       const restored = await eAPI.setConfig({ scanDir: savedScanDir });
-      if (restored?.scanDir) localStorage.setItem('gai:scanDir', restored.scanDir);
+      if (restored?.scanDir) {
+        try { localStorage.setItem('gai:scanDir', restored.scanDir); } catch (_) { /* Native config remains authoritative. */ }
+      }
     } catch(e) {
-      localStorage.removeItem('gai:scanDir');
+      try { localStorage.removeItem('gai:scanDir'); } catch (_) { /* Continue with native settings. */ }
       console.warn('已清除無效的舊漫畫目錄設定：', e);
     }
   }
@@ -2657,6 +2668,7 @@ async function performLibraryFetch({ background = false } = {}) {
         else nextComics[index] = comic;
       });
     }
+    nextComics = eAPI?.overlayLibraryProgress?.(nextComics) || nextComics;
     state.comics = nextComics;
     invalidateComicNavigationCache();
     setFavorites(nextFavorites);
@@ -3910,6 +3922,23 @@ function restoreShelfFocus(snapshot) {
 // 繪製漫畫卡片網格
 function renderGrid({ skipUnchanged = false, background = false } = {}) {
   if (state.filteredComics.length === 0) {
+    const contextEmpty = Boolean(elements.searchInput?.value.trim()
+      || state.activeFilter !== 'all'
+      || state.activeSeries !== 'all'
+      || state.currentPath);
+    elements.emptyState.classList.toggle('is-filtered', contextEmpty);
+    const title = elements.emptyState.querySelector('h3');
+    const icon = elements.emptyState.querySelector('.empty-icon');
+    if (title) {
+      const label = contextEmpty ? '這裡沒有符合的漫畫' : '書架尚無漫畫';
+      title.dataset.i18n = label;
+      title.textContent = readerText(label);
+    }
+    if (icon) icon.textContent = contextEmpty ? '🔎' : '📂';
+    const libraryHint = document.getElementById('empty-library-hint');
+    const filterHint = document.getElementById('empty-filter-hint');
+    if (libraryHint) libraryHint.hidden = contextEmpty;
+    if (filterHint) filterHint.hidden = !contextEmpty;
     lastGridRenderSignature = 'empty';
     coverObserver?.disconnect();
     coverObserver = null;
@@ -3921,6 +3950,7 @@ function renderGrid({ skipUnchanged = false, background = false } = {}) {
   }
 
   elements.emptyState.style.display = 'none';
+  elements.emptyState.classList.remove('is-filtered');
 
   const visibleComics = state.filteredComics.slice(0, state.renderLimit);
   if (elements.catalogLoadMore) {
@@ -6395,6 +6425,9 @@ function showReaderToast(message) {
   if (!toast) {
     toast = document.createElement('div');
     toast.id = 'reader-toast';
+    toast.setAttribute('role', 'status');
+    toast.setAttribute('aria-live', 'polite');
+    toast.setAttribute('aria-atomic', 'true');
     toast.style.cssText = `
       position: absolute;
       top: 50%;
@@ -7198,6 +7231,7 @@ async function fetchBrowserFolders(dirPath) {
     });
   } catch (e) {
     console.error('讀取目錄失敗：', e);
+    elements.browserFoldersList.textContent = readerText('無法讀取資料夾，請返回上一層或稍後重試。');
   }
 }
 

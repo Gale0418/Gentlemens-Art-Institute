@@ -154,7 +154,7 @@ class FakeDocumentFragment extends FakeElement {
   constructor() { super('#fragment'); this.isFragment = true; }
 }
 
-function createHarness({ width = 1000 } = {}) {
+function createHarness({ width = 1000, storageFails = false } = {}) {
   const clock = new FakeClock();
   const elements = new Map();
   const document = {
@@ -173,7 +173,10 @@ function createHarness({ width = 1000 } = {}) {
   };
   const localStorage = {
     values: new Map(),
-    getItem(key) { return this.values.get(key) ?? null; },
+    getItem(key) {
+      if (storageFails) throw new Error('storage unavailable');
+      return this.values.get(key) ?? null;
+    },
     setItem(key, value) { this.values.set(key, String(value)); },
     removeItem(key) { this.values.delete(key); },
   };
@@ -244,6 +247,7 @@ function createHarness({ width = 1000 } = {}) {
 }
 
 const { clock, context, hooks } = createHarness();
+assert.doesNotThrow(() => createHarness({ storageFails: true }), 'a blocked settings store must not prevent app script startup');
 const makeCover = id => {
   const img = new FakeElement('img');
   img.dataset.coverId = id;

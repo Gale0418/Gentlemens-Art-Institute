@@ -2414,6 +2414,8 @@ async fn suggest_comic_metadata(
     {
         return Err("艦載 AI 工作階段已撤銷或切換，候選未寫入目錄".into());
     }
+    // 背景掃描也會寫入 catalog；候選必須等同一把鎖，避免 SQLite writer 互搶。
+    let _catalog_sync = state.catalog_sync.lock().await;
     let store = catalog_store(&state)?;
     let comic_id = data.comic_id;
     let raw = response.text;

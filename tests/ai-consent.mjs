@@ -254,7 +254,7 @@ function createAiMutationContext({ status, eAPI }) {
       elements.aiRestoreBtn.disabled = busy;
       elements.aiClearBtn.disabled = busy;
       elements.metadataButton.disabled = Boolean(
-        busy || context.state.aiSessionRevocationFailed || !context.state.aiSessionStatus?.configured
+        busy || context.state.aiSessionRevocationFailed
       );
     },
     renderAiSessionStatus(nextStatus) { context.state.aiSessionStatus = nextStatus; },
@@ -345,7 +345,7 @@ console.log('PASS: clear failure preserves configured UI and blocks stale sessio
 console.log('PASS: save failure fails closed while keeping a recoverable retry path');
 
 // 成功的 save／restore 完成後，先前因 stale request 暫時停用的 Inspector
-// 建議按鈕可以再次使用；clear 成功後則必須依 configured=false 保持停用。
+// 建議按鈕可以再次使用；clear 後仍可點按，並導向 AI 設定。
 {
   const saveContext = createAiMutationContext({
     status: { configured: false },
@@ -385,9 +385,46 @@ console.log('PASS: save failure fails closed while keeping a recoverable retry p
   });
   const clear = vm.runInNewContext(`(${extractFunction(app, 'clearAiSession')})`, clearContext);
   await clear();
-  assert.equal(clearContext.elements.metadataButton.disabled, true, 'successful clear disables metadata suggestion');
+  assert.equal(clearContext.elements.metadataButton.disabled, false, 'successful clear keeps metadata setup entry reachable');
 }
-console.log('PASS: metadata suggestion availability follows save, restore, and clear lifecycle');
+console.log('PASS: metadata suggestion stays reachable after clear and blocks only mutations');
+
+{
+  let opened = 0;
+  let scrolled = 0;
+  let focused = 0;
+  const setupContext = {
+    elements: {
+      aiProvider: { closest: () => ({ scrollIntoView: () => { scrolled += 1; } }) },
+      aiRestoreBtn: { hidden: true },
+      aiApiKey: { focus: () => { focused += 1; } },
+    },
+    openSettingsModal: async () => { opened += 1; },
+    console,
+  };
+  const openAiSettings = vm.runInNewContext(`(${extractFunction(app, 'openAiSettings')})`, setupContext);
+  openAiSettings();
+  assert.equal(opened, 1, 'AI setup opens Settings');
+  assert.equal(scrolled, 1, 'AI setup reveals its section');
+  assert.equal(focused, 1, 'AI setup focuses the key field');
+
+  const readerContext = {
+    state: { aiSessionStatus: { configured: false }, aiSessionSwitchPending: false, aiSessionMutationPending: false, aiSessionRevocationFailed: false },
+    openAiSettings: () => { opened += 1; },
+    showReaderToast() {},
+  };
+  vm.runInNewContext(`(${extractFunction(app, 'toggleAutoPageExplanation')})`, readerContext)();
+  vm.runInNewContext(`(${extractFunction(app, 'requestPageExplanation')})`, readerContext)(0, false);
+  assert.equal(opened, 3, 'both reader AI buttons lead to setup while disabled');
+
+  const inspectorResults = { hidden: true, textContent: '' };
+  vm.runInNewContext(`(${extractFunction(app, 'suggestInspectorMetadata')})`, {
+    ...readerContext, readerText: text => text,
+  })({ id: 'test' }, {}, inspectorResults);
+  assert.equal(opened, 4, 'book AI scan leads to setup while disabled');
+  assert.equal(inspectorResults.hidden, false, 'book AI scan keeps a visible explanation');
+}
+console.log('PASS: inactive AI controls open Settings at the AI section');
 
 // 初始 status 查詢若晚於新的 mutation 回覆，不得把舊 configured 狀態寫回畫面。
 {

@@ -392,6 +392,33 @@ function isReadableImageFolder(comic) {
   ));
 }
 
+// 圖片漫畫的子目錄尚未掃完時不能推定它是葉節點；確認淺掃完成後，
+// 才隱藏會把人帶進空書架的重複導航入口。
+function getLeafReadableImageFolderPaths(requireScanComplete = true) {
+  const readablePaths = new Set();
+  const pathsWithChildren = new Set();
+  const markParents = path => {
+    let parent = getParentPath(path);
+    while (parent) {
+      pathsWithChildren.add(parent);
+      parent = getParentPath(parent);
+    }
+  };
+  state.comics.forEach(comic => {
+    const path = typeof comic?.relativePath === 'string' ? comic.relativePath : '';
+    if (!path) return;
+    if (isReadableImageFolder(comic)) readablePaths.add(path);
+    markParents(path);
+  });
+  state.visibleDirectories.forEach(paths => {
+    if (Array.isArray(paths)) paths.forEach(markParents);
+  });
+  return new Set([...readablePaths].filter(path => (
+    !pathsWithChildren.has(path)
+    && (!requireScanComplete || state.visibleDirectoryScanCompleted?.has(path))
+  )));
+}
+
 function isLooseImage(comic) {
   return Boolean(comic && !comic.isDirectory && (
     comic.type === 'image' || comic.type === 'external-image'
@@ -2768,9 +2795,11 @@ function collectFolderTreeNodes() {
   // visibleDirectories intentionally has no source identity in its current
   // contract. Keep one path row with merged navigation semantics; entries
   // derived from comics retain source labels for collision visibility.
+  const leafImageFolders = getLeafReadableImageFolderPaths();
   state.visibleDirectories.forEach(paths => {
     if (!Array.isArray(paths)) return;
     paths.forEach(path => {
+      if (leafImageFolders.has(path)) return;
       rememberVisibleDirectoryPath(path);
       addPath(path);
     });
@@ -2825,7 +2854,8 @@ function renderFolderTree(nodes, formalComicCount) {
   const focusedPath = focusedControl?.closest('li[data-folder-path]')?.dataset.folderPath;
   const focusedSelector = focusedControl?.classList.contains('folder-tree-toggle')
     ? '.folder-tree-toggle'
-    : focusedControl?.classList.contains('folder-tree-enter') ? '.folder-tree-enter' : null;
+    : focusedControl?.classList.contains('folder-tree-label') ? '.folder-tree-label'
+      : focusedControl?.classList.contains('folder-tree-enter') ? '.folder-tree-enter' : null;
   const rootExpanded = state.expandedFolderPaths.has('root');
   const rootChildren = root.querySelector('.folder-tree-children');
   const childrenByParent = new Map();
@@ -2869,9 +2899,11 @@ function renderFolderTree(nodes, formalComicCount) {
       toggle.setAttribute('aria-expanded', String(canExpand && expanded));
       toggle.setAttribute('aria-label', readerText(expanded ? '收合資料夾：{name}' : '展開資料夾：{name}', { name: node.name }));
       toggle.innerHTML = `<i class="fa-solid ${canExpand && expanded ? 'fa-chevron-down' : 'fa-chevron-right'}" aria-hidden="true"></i>`;
-      toggle.addEventListener('click', event => {
-        event.stopPropagation();
-        if (!canExpand) return;
+      const toggleFolder = () => {
+        if (!canExpand) {
+          navigateLibraryToPath(node.path);
+          return;
+        }
         if (expanded) state.expandedFolderPaths.delete(node.key);
         else state.expandedFolderPaths.add(node.key);
         if (!hasChildren && canScanChildren) {
@@ -2880,34 +2912,49 @@ function renderFolderTree(nodes, formalComicCount) {
         renderSidebar();
         [...tree.querySelectorAll('.folder-tree-node')]
           .find(item => item.dataset.folderPath === node.path)
-          ?.querySelector('.folder-tree-toggle')
+          ?.querySelector('.folder-tree-label')
           ?.focus({ preventScroll: true });
+      };
+      toggle.addEventListener('click', event => {
+        event.stopPropagation();
+        toggleFolder();
       });
 
-      const enter = document.createElement('button');
-      enter.type = 'button';
-      enter.className = 'folder-tree-enter';
-      enter.setAttribute('aria-label', readerText('開啟資料夾：{title}', { title: node.name }));
-      enter.setAttribute('aria-current', state.currentPath === node.path ? 'true' : 'false');
-      enter.innerHTML = '<i class="fa-solid fa-folder" aria-hidden="true"></i>';
+      const label = document.createElement('button');
+      label.type = 'button';
+      label.className = 'folder-tree-label';
+      label.setAttribute('aria-label', readerText(canExpand
+        ? expanded ? '收合資料夾：{name}' : '展開資料夾：{name}'
+        : '開啟資料夾：{title}', { name: node.name, title: node.name }));
+      if (canExpand) label.setAttribute('aria-expanded', String(expanded));
+      label.innerHTML = `<i class="fa-solid ${expanded ? 'fa-folder-open' : 'fa-folder'}" aria-hidden="true"></i>`;
       const name = document.createElement('span');
       name.className = 'folder-tree-name';
       name.textContent = node.name;
-      enter.appendChild(name);
+      label.appendChild(name);
       if (node.hasSourceCollision) {
         const source = document.createElement('span');
         source.className = 'folder-tree-source';
         source.textContent = node.sourceLabel || readerText('來源未提供');
-        enter.appendChild(source);
+        label.appendChild(source);
       }
       if (node.comicsCount > 0) {
         const badge = document.createElement('span');
         badge.className = 'badge';
         badge.textContent = String(node.comicsCount);
-        enter.appendChild(badge);
+        label.appendChild(badge);
       }
+      label.addEventListener('click', toggleFolder);
+
+      const enter = document.createElement('button');
+      enter.type = 'button';
+      enter.className = 'folder-tree-enter';
+      enter.setAttribute('aria-label', readerText('開啟資料夾：{title}', { title: node.name }));
+      enter.setAttribute('title', readerText('開啟資料夾：{title}', { title: node.name }));
+      enter.setAttribute('aria-current', state.currentPath === node.path ? 'true' : 'false');
+      enter.innerHTML = '<i class="fa-solid fa-arrow-right" aria-hidden="true"></i>';
       enter.addEventListener('click', () => navigateLibraryToPath(node.path));
-      row.append(toggle, enter);
+      row.append(toggle, label, enter);
       child.appendChild(row);
       if (hasChildren && expanded) {
         const group = document.createElement('ul');
@@ -2924,6 +2971,7 @@ function renderFolderTree(nodes, formalComicCount) {
   root.classList.toggle('active', state.currentPath === '');
   root.setAttribute('aria-expanded', String(rootExpanded));
   const rootToggle = root.querySelector('.folder-tree-toggle');
+  const rootLabel = root.querySelector('.folder-tree-label');
   const rootEnter = root.querySelector('.folder-tree-enter');
   const rootBadge = root.querySelector('#total-count-badge');
   if (rootToggle) {
@@ -2935,6 +2983,11 @@ function renderFolderTree(nodes, formalComicCount) {
       else state.expandedFolderPaths.add('root');
       renderSidebar();
     };
+  }
+  if (rootLabel) {
+    rootLabel.setAttribute('aria-expanded', String(rootExpanded));
+    rootLabel.setAttribute('aria-label', readerText(rootExpanded ? '收合書庫根目錄' : '展開書庫根目錄'));
+    rootLabel.onclick = () => rootToggle?.click();
   }
   if (rootEnter) {
     rootEnter.setAttribute('aria-label', readerText('開啟資料夾：{title}', { title: readerText('書庫根目錄') }));
@@ -3554,7 +3607,9 @@ function getDirectoryItems() {
 
   if (state.activeSeries === 'all' && state.activeFilter === 'all'
     && state.visibleDirectoryGeneration === Number(state.scanStatus?.generation)) {
+    const leafImageFolders = getLeafReadableImageFolderPaths(false);
     for (const folderPath of state.visibleDirectories.get(curPath) || []) {
+      if (leafImageFolders.has(folderPath)) continue;
       const folderName = folderPath.split('/').pop();
       if (!folderName) continue;
       itemsMap.set(folderName, {
@@ -5266,6 +5321,8 @@ function requestVisibleDirectoryScan(relativePath, { force = true, announce = tr
     .then(() => {
       if (state.visibleDirectoryGeneration === generation) {
         state.visibleDirectoryScanCompleted.add(relativePath);
+        filterAndRenderGrid({ skipUnchanged: true, background: true });
+        renderSidebar();
       }
       if (!announce || !scanTarget || requestId !== visibleDirectoryScanRequestId || state.currentPath !== relativePath) return;
       showStatus(readerText('目前資料夾已更新'));
@@ -6069,6 +6126,13 @@ function toggleFullscreen() {
 function handleKeyDown(e) {
   // 只有當閱讀器打開時，才觸發閱讀器快捷鍵
   if (elements.readerOverlay.style.display === 'none') return;
+  // 設定視窗與文字輸入擁有鍵盤事件；不能在輸入 Key 時翻頁或旋轉。
+  if (typeof getActiveLibraryModal === 'function' && getActiveLibraryModal()) return;
+  const target = e.target;
+  if (target !== elements.progressSlider && (
+    target?.isContentEditable
+    || ['INPUT', 'TEXTAREA', 'SELECT'].includes(String(target?.tagName || '').toUpperCase())
+  )) return;
   // 進度 range 的方向／跳格鍵交給原生控制與 input handler，避免 document
   // 快捷鍵再翻一次頁；Escape、F 等 reader shortcut 仍要能正常作用。
   if (e.target && (e.target === elements.progressSlider || e.target?.id === 'progress-slider')
@@ -6844,6 +6908,15 @@ async function openSettingsModal() {
   }
 }
 
+function openAiSettings() {
+  // openSettingsModal 在第一個 await 前就會顯示視窗；直接把焦點帶到 AI 設定。
+  void openSettingsModal().catch(error => console.warn('無法開啟 AI 設定：', error));
+  elements.aiProvider?.closest('.ai-settings')?.scrollIntoView({ block: 'start' });
+  const target = elements.aiRestoreBtn && !elements.aiRestoreBtn.hidden && !elements.aiRestoreBtn.disabled
+    ? elements.aiRestoreBtn : elements.aiApiKey;
+  target?.focus?.({ preventScroll: true });
+}
+
 async function exportCatalogMetadataFile() {
   if (!eAPI?.exportCatalogMetadata) return;
   try {
@@ -7195,8 +7268,8 @@ function setAiSessionActionAvailability() {
   }
   const metadataButton = elements.comicInspector?.querySelector('[data-inspector-action="ai-suggest"]');
   if (metadataButton) {
-    metadataButton.disabled = Boolean(mutationBlocked || !configured);
-    metadataButton.setAttribute('aria-disabled', String(Boolean(mutationBlocked || !configured)));
+    metadataButton.disabled = Boolean(mutationBlocked);
+    metadataButton.setAttribute('aria-disabled', String(Boolean(mutationBlocked)));
     metadataButton.title = configured ? '' : readerText('請先到設定輸入 API Key 並啟用艦載 AI。');
   }
 }
@@ -7549,7 +7622,7 @@ function toggleAutoPageExplanation() {
     return;
   }
   if (!state.aiSessionStatus?.configured) {
-    showReaderToast(readerText('請先到設定輸入 API Key 並啟用艦載 AI。'));
+    openAiSettings();
     return;
   }
   if (isBuiltInDemoComic(state.currentComic)) {
@@ -7604,7 +7677,7 @@ async function requestPageExplanation(pageIndex, automatic = false) {
     return;
   }
   if (!state.aiSessionStatus?.configured) {
-    if (!automatic) showReaderToast(readerText('請先到設定輸入 API Key 並啟用艦載 AI。'));
+    if (!automatic) openAiSettings();
     return;
   }
   if (isBuiltInDemoComic(state.currentComic)) {
@@ -7811,6 +7884,7 @@ async function suggestInspectorMetadata(comic, button, resultContainer) {
   if (!state.aiSessionStatus?.configured && !state.aiSessionSwitchPending && !state.aiSessionMutationPending) {
     resultContainer.hidden = false;
     resultContainer.textContent = readerText('請先在設定中啟用艦載 AI，並同意本次頁面傳送。');
+    openAiSettings();
     return;
   }
   if (state.aiSessionSwitchPending || state.aiSessionMutationPending || state.aiSessionRevocationFailed) {

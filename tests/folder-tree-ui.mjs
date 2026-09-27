@@ -20,6 +20,9 @@ function extractFunction(source, name) {
 
 const helperSource = [
   'const BUILT_IN_DEMO_SOURCE_ID = "builtin:demo";',
+  extractFunction(app, 'getParentPath'),
+  extractFunction(app, 'isReadableImageFolder'),
+  extractFunction(app, 'getLeafReadableImageFolderPaths'),
   extractFunction(app, 'getFolderTreeSourceId'),
   extractFunction(app, 'normalizeFolderTreePath'),
   extractFunction(app, 'getFolderTreeNodeKey'),
@@ -56,13 +59,50 @@ const emptyVisibleFolderNodes = collect({
 });
 assert.equal(emptyVisibleFolderNodes.get('unknown\u0000尚未載入漫畫')?.fromVisibleDirectories, true, 'empty visible folders remain scan-capable');
 
+const leafImageFolderNodes = collect({
+  visibleDirectories: new Map([['', ['圖片漫畫']], ['圖片漫畫', []]]),
+  visibleDirectoryScanCompleted: new Set(['圖片漫畫']),
+  comics: [{ id: 'image-book', relativePath: '圖片漫畫', type: 'folder', sourceId: 'local:library' }],
+});
+assert.equal([...leafImageFolderNodes.values()].some(node => node.path === '圖片漫畫'), false, 'readable leaf folder does not open an empty shelf');
+
+const pendingImageFolderNodes = collect({
+  visibleDirectories: new Map([['', ['圖片漫畫']]]),
+  visibleDirectoryScanCompleted: new Set(),
+  comics: [{ id: 'image-book', relativePath: '圖片漫畫', type: 'folder', sourceId: 'local:library' }],
+});
+assert.ok([...pendingImageFolderNodes.values()].some(node => node.path === '圖片漫畫'), 'readable folder stays navigable until its child scan completes');
+const pendingShelfLeaves = new Function('state', [
+  extractFunction(app, 'getParentPath'),
+  extractFunction(app, 'isReadableImageFolder'),
+  extractFunction(app, 'getLeafReadableImageFolderPaths'),
+  'return getLeafReadableImageFolderPaths(false);',
+].join('\n'))({
+  visibleDirectories: new Map([['', ['圖片漫畫']]]),
+  visibleDirectoryScanCompleted: new Set(),
+  comics: [{ id: 'image-book', relativePath: '圖片漫畫', type: 'folder', sourceId: 'local:library' }],
+});
+assert.ok(pendingShelfLeaves.has('圖片漫畫'), 'shelf hides the redundant directory card while its child scan is pending');
+
+const nestedImageFolderNodes = collect({
+  visibleDirectories: new Map([['', ['圖片漫畫']], ['圖片漫畫', ['圖片漫畫/番外']]]),
+  visibleDirectoryScanCompleted: new Set(['圖片漫畫']),
+  comics: [{ id: 'image-book', relativePath: '圖片漫畫', type: 'folder', sourceId: 'local:library' }],
+});
+assert.ok([...nestedImageFolderNodes.values()].some(node => node.path === '圖片漫畫'), 'image folder with a child stays navigable');
+
 assert.match(html, /class="series-list folder-tree"[^>]*role="tree"/, 'sidebar uses an accessible tree');
+assert.match(html, /class="folder-tree-label"[^>]*aria-expanded="true"/, 'root folder name is a disclosure control');
 assert.match(html, /id="folder-tree-current-path"[^>]*aria-live="polite"/, 'sidebar exposes the current path');
 assert.match(app, /if \(hasChildren && expanded\) \{[\s\S]*renderChildren\(group, node\.path/, 'collapsed descendants are not rendered');
 assert.match(app, /canScanChildren = node\.fromVisibleDirectories[\s\S]*requestVisibleDirectoryScan\(node\.path, \{ force: false, announce: false \}\)/, 'visible-only folders trigger a shallow scan on first expand');
 assert.match(app, /visibleDirectoryScanInFlight\.get\(relativePath\)/, 'repeated folder expands reuse an in-flight scan');
 assert.match(app, /state\.visibleDirectories\.forEach\(paths =>/, 'tree uses the existing visible directory cache');
+assert.match(app, /if \(leafImageFolders\.has\(folderPath\)\) continue;/, 'shelf omits duplicate leaf image folder card');
+assert.match(app, /getLeafReadableImageFolderPaths\(false\)/, 'shelf removes a redundant readable-folder card before child scan completes');
 assert.match(app, /requestVisibleDirectoryScan\(state\.currentPath\)/, 'navigation keeps shallow visible directory scans');
+assert.match(app, /label\.addEventListener\('click', toggleFolder\)/, 'folder name expands and collapses');
+assert.match(app, /enter\.addEventListener\('click', \(\) => navigateLibraryToPath\(node\.path\)\)/, 'separate enter button navigates into the folder');
 assert.match(css, /\.folder-tree-toggle[\s\S]*min-height: 44px/, 'tree disclosure controls meet touch target size');
 assert.match(css, /\.folder-tree-enter[\s\S]*min-height: 44px/, 'tree navigation controls meet touch target size');
 

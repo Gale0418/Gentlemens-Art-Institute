@@ -1006,3 +1006,30 @@ console.log('PASS: progress range arrows have a single native input path');
   assert.equal(prevented, true, 'reader Escape keeps its default prevention');
 }
 console.log('PASS: progress range keeps reader shortcuts available');
+
+// Opening AI settings over the reader must leave typing and modal keys alone.
+for (const target of [{ tagName: 'INPUT' }, { tagName: 'TEXTAREA' }, { tagName: 'DIV', isContentEditable: true }]) {
+  const calls = [];
+  const handle = vm.runInNewContext(`(${extractFunction('handleKeyDown')})`, {
+    elements: { readerOverlay: { style: { display: 'flex' } } },
+    state: { readingMode: 'single' },
+    getActiveLibraryModal: () => null,
+    toggleFitMode: () => calls.push('fit'),
+  });
+  let prevented = false;
+  handle({ target, key: 'm', preventDefault() { prevented = true; } });
+  assert.deepEqual(calls, [], `${target.tagName} input keeps reader shortcuts inactive`);
+  assert.equal(prevented, false, `${target.tagName} input keeps its native keyboard behavior`);
+}
+{
+  const calls = [];
+  const handle = vm.runInNewContext(`(${extractFunction('handleKeyDown')})`, {
+    elements: { readerOverlay: { style: { display: 'flex' } } },
+    state: { readingMode: 'single' },
+    getActiveLibraryModal: () => ({}),
+    toggleFitMode: () => calls.push('fit'),
+  });
+  handle({ key: 'm', preventDefault() {} });
+  assert.deepEqual(calls, [], 'an open settings modal owns keyboard shortcuts');
+}
+console.log('PASS: AI settings and text inputs do not trigger reader shortcuts');

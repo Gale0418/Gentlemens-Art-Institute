@@ -6481,6 +6481,7 @@ html:not([data-i18n-ready]) body {
 }
 
 .folder-tree-toggle,
+.folder-tree-label,
 .folder-tree-enter {
   min-height: 44px;
   border: 0;
@@ -6506,7 +6507,7 @@ html:not([data-i18n-ready]) body {
   background: rgba(255, 255, 255, 0.05);
 }
 
-.folder-tree-enter {
+.folder-tree-label {
   display: flex;
   align-items: center;
   gap: 8px;
@@ -6517,16 +6518,24 @@ html:not([data-i18n-ready]) body {
   font: inherit;
 }
 
+.folder-tree-label:hover,
+.folder-tree-label:focus-visible,
 .folder-tree-enter:hover,
 .folder-tree-enter:focus-visible {
   color: var(--text-main);
   background: rgba(255, 255, 255, 0.04);
 }
 
-.folder-tree-enter > i {
+.folder-tree-label > i {
   flex: 0 0 auto;
   color: var(--accent-color);
   font-size: 13px;
+}
+
+.folder-tree-enter {
+  flex: 0 0 44px;
+  padding: 0;
+  color: var(--accent-color);
 }
 
 .folder-tree-name {

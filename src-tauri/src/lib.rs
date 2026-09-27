@@ -112,11 +112,12 @@ fn validate_scan_directory(input: &str) -> Result<String, String> {
 
     let resolved = path.canonicalize().unwrap_or_else(|_| path.to_path_buf());
     let volumes_root = Path::new("/Volumes");
-    let is_volume_root = resolved.parent() == Some(volumes_root);
     let is_home = std::env::var_os("HOME")
         .map(std::path::PathBuf::from)
         .is_some_and(|home| resolved == home);
-    if resolved.parent().is_none() || resolved == volumes_root || is_volume_root || is_home {
+    // /Volumes/<name> is a mounted share or disk root, not the computer root.
+    // Canonicalization still rejects aliases that resolve to / or HOME.
+    if resolved.parent().is_none() || resolved == volumes_root || is_home {
         return Err("為避免掃描整台電腦，請選擇磁碟內實際存放漫畫的子資料夾".into());
     }
     Ok(trimmed.to_string())
@@ -3443,6 +3444,7 @@ mod tests {
         if let Some(home) = std::env::var_os("HOME") {
             assert!(validate_scan_directory(&home.to_string_lossy()).is_err());
         }
+        assert!(validate_scan_directory("/Volumes/ExampleNAS").is_ok());
         assert!(validate_scan_directory("/Volumes/ExampleNAS/Comics").is_ok());
     }
 

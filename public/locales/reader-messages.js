@@ -43,13 +43,13 @@ window.GAIL10n.register({
     "en": "Tip: tap a card for details, then choose Start Reading. Tapping the same card again also opens it. You can import images above. ✨",
     "ja": "ヒント：カードをタップして詳細を表示し、「読み始める」を選びます。同じカードをもう一度タップしても開けます。上から画像も読み込めます。✨"
   },
-  "展開漫畫系列側欄": {
-    "en": "Expand series sidebar",
-    "ja": "シリーズサイドバーを展開"
+  "展開漫畫資料夾側欄": {
+    "en": "Expand comic folders sidebar",
+    "ja": "作品フォルダーのサイドバーを展開"
   },
-  "收合漫畫系列側欄": {
-    "en": "Collapse series sidebar",
-    "ja": "シリーズサイドバーを折りたたむ"
+  "收合漫畫資料夾側欄": {
+    "en": "Collapse comic folders sidebar",
+    "ja": "作品フォルダーのサイドバーを折りたたむ"
   },
   "展開漫畫詳情側欄": {
     "en": "Expand comic details sidebar",
@@ -1115,6 +1115,10 @@ window.GAIL10n.register({
     "en": "Cloud AI suggestions failed: {error}",
     "ja": "クラウドAIの提案に失敗しました：{error}"
   },
+  "漫畫庫正在寫入資料，AI 建議暫時存不進去。等掃描完成後再試一次喔。": {
+    "en": "The comic library is busy saving data, so this AI suggestion could not be saved. Please try again after scanning finishes.",
+    "ja": "コミックライブラリがデータを保存中のため、AI の提案を保存できませんでした。スキャン完了後にもう一度お試しください。"
+  },
   "為避免掃描整台電腦，請選擇磁碟內實際存放漫畫的子資料夾。": {
     "en": "To avoid scanning the entire computer, choose the subfolder that actually stores your comics.",
     "ja": "コンピューター全体のスキャンを避けるため、コミックを保存しているディスク内のサブフォルダーを選択してください。"
@@ -1617,5 +1621,41 @@ window.GAIL10n.register({
   "還原艦載 AI 失敗，請確認設定後再試。": {
     "en": "Could not restore AI. Check the settings and try again.",
     "ja": "AI を復元できませんでした。設定を確認して再試行してください。"
+  },
+  "目前路徑": {
+    "en": "Current path",
+    "ja": "現在のパス"
+  },
+  "漫畫資料夾": {
+    "en": "Comic folders",
+    "ja": "コミックフォルダー"
+  },
+  "SMB": {
+    "en": "SMB",
+    "ja": "SMB"
+  },
+  "Files": {
+    "en": "Files",
+    "ja": "ファイル"
+  },
+  "來源未提供": {
+    "en": "Source unavailable",
+    "ja": "ソース不明"
+  },
+  "收合資料夾：{name}": {
+    "en": "Collapse folder: {name}",
+    "ja": "フォルダーを閉じる：{name}"
+  },
+  "展開資料夾：{name}": {
+    "en": "Expand folder: {name}",
+    "ja": "フォルダーを開く：{name}"
+  },
+  "收合書庫根目錄": {
+    "en": "Collapse library root",
+    "ja": "ライブラリのルートを閉じる"
+  },
+  "展開書庫根目錄": {
+    "en": "Expand library root",
+    "ja": "ライブラリのルートを開く"
   }
 });

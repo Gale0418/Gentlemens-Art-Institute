@@ -94,13 +94,26 @@
     <!-- 主要內容區 -->
     <div class="main-layout">
       <!-- 側邊欄 -->
-      <aside class="sidebar" id="library-sidebar" aria-label="漫畫系列與閱讀統計" data-i18n-aria-label="漫畫系列與閱讀統計">
+      <aside class="sidebar" id="library-sidebar" aria-label="漫畫資料夾" data-i18n-aria-label="漫畫資料夾">
         <div class="sidebar-section">
-          <h3><i class="fa-solid fa-folder-tree" aria-hidden="true"></i><span data-i18n="漫畫系列">漫畫系列</span></h3>
-          <ul class="series-list" id="series-filter-list" aria-label="漫畫系列" data-i18n-aria-label="漫畫系列">
-            <li class="active" data-series="all" aria-current="true">
-              <span class="series-name" data-i18n="全部系列">全部系列</span>
-              <span class="badge" id="total-count-badge">0</span>
+          <h3><i class="fa-solid fa-folder-tree" aria-hidden="true"></i><span data-i18n="漫畫資料夾">漫畫資料夾</span></h3>
+          <div class="folder-tree-current-path" id="folder-tree-current-path" aria-live="polite">
+            <span class="folder-tree-current-path-label" data-i18n="目前路徑">目前路徑</span>
+            <span class="folder-tree-current-path-value" data-i18n="書庫根目錄">書庫根目錄</span>
+          </div>
+          <ul class="series-list folder-tree" id="series-filter-list" role="tree" aria-label="漫畫資料夾" data-i18n-aria-label="漫畫資料夾">
+            <li class="folder-tree-node active" role="treeitem" aria-level="1" aria-expanded="true" data-folder-path="" data-folder-source="">
+              <div class="folder-tree-row">
+                <button class="folder-tree-toggle" type="button" aria-label="收合書庫根目錄" data-i18n-aria-label="收合書庫根目錄" aria-expanded="true">
+                  <i class="fa-solid fa-chevron-down" aria-hidden="true"></i>
+                </button>
+                <button class="folder-tree-enter" type="button" aria-current="true">
+                  <i class="fa-solid fa-folder-open" aria-hidden="true"></i>
+                  <span class="folder-tree-name" data-i18n="書庫根目錄">書庫根目錄</span>
+                  <span class="badge" id="total-count-badge">0</span>
+                </button>
+              </div>
+              <ul class="folder-tree-children" role="group"></ul>
             </li>
           </ul>
         </div>
@@ -128,7 +141,7 @@
         </div>
       </aside>
 
-      <button type="button" class="sidebar-collapse-btn" id="sidebar-collapse-btn" aria-controls="library-sidebar" aria-expanded="true" aria-label="收合漫畫系列側欄" data-i18n-aria-label="收合漫畫系列側欄" title="收合漫畫系列側欄" data-i18n-title="收合漫畫系列側欄">
+      <button type="button" class="sidebar-collapse-btn" id="sidebar-collapse-btn" aria-controls="library-sidebar" aria-expanded="true" aria-label="收合漫畫資料夾側欄" data-i18n-aria-label="收合漫畫資料夾側欄" title="收合漫畫資料夾側欄" data-i18n-title="收合漫畫資料夾側欄">
         <i class="fa-solid fa-chevron-left" aria-hidden="true"></i>
       </button>
 

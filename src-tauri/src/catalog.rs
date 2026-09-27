@@ -50,7 +50,7 @@ struct LocationSignature {
 #[derive(Clone, Debug)]
 pub struct CatalogStore {
     path: PathBuf,
-    fts_checked: Arc<OnceLock<()>>,
+    schema_ready: Arc<OnceLock<()>>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
@@ -366,7 +366,7 @@ impl CatalogStore {
     pub fn new(path: PathBuf) -> Result<Self, String> {
         let store = Self {
             path,
-            fts_checked: Arc::new(OnceLock::new()),
+            schema_ready: Arc::new(OnceLock::new()),
         };
         store.with_connection(|_| Ok(()))?;
         Ok(store)
@@ -390,13 +390,18 @@ impl CatalogStore {
             .busy_timeout(Duration::from_secs(5))
             .map_err(|error| error.to_string())?;
         connection
-            .pragma_update(None, "journal_mode", "WAL")
-            .map_err(|error| error.to_string())?;
-        connection
             .pragma_update(None, "foreign_keys", "ON")
             .map_err(|error| error.to_string())?;
-        migrate(&mut connection, self.fts_checked.get().is_none())?;
-        self.fts_checked.get_or_init(|| ());
+        // new() initializes the schema before sharing this store. WAL and
+        // migrations are database-wide; repeating them on every connection can
+        // race with an active library scan and fail without waiting for its writer.
+        if self.schema_ready.get().is_none() {
+            connection
+                .pragma_update(None, "journal_mode", "WAL")
+                .map_err(|error| error.to_string())?;
+            migrate(&mut connection, true)?;
+            self.schema_ready.get_or_init(|| ());
+        }
         operation(&mut connection)
     }
 
@@ -1362,6 +1367,33 @@ impl CatalogStore {
         if candidates.is_empty() {
             return Ok(());
         }
+        // A library scan writes batches in separate transactions. Keep the already
+        // paid-for AI result and retry its short metadata write across a busy batch.
+        let started = std::time::Instant::now();
+        loop {
+            let result =
+                self.store_ai_candidates_once(comic_id, provider, model, raw_response, &candidates);
+            match result {
+                Err(error)
+                    if started.elapsed() < Duration::from_secs(20)
+                        && (error.contains("database is locked")
+                            || error.contains("database table is locked")) =>
+                {
+                    std::thread::sleep(Duration::from_millis(500));
+                }
+                other => return other,
+            }
+        }
+    }
+
+    fn store_ai_candidates_once(
+        &self,
+        comic_id: &str,
+        provider: &str,
+        model: &str,
+        raw_response: &str,
+        candidates: &[(String, Value, f64)],
+    ) -> Result<(), String> {
         let raw_digest = blake3::hash(raw_response.as_bytes()).to_hex().to_string();
         let source_path = format!("ai://{provider}/session/{raw_digest}");
         self.with_connection(|connection| {
@@ -1380,7 +1412,7 @@ impl CatalogStore {
             for (field, value, confidence) in candidates {
                 tx.execute(
                     "INSERT INTO metadata_candidates(comic_id, source_id, field_key, value_json, priority, confidence) VALUES(?1, ?2, ?3, ?4, ?5, ?6)",
-                    params![resolved, source_id, &field, value.to_string(), 5_i64, confidence],
+                    params![resolved, source_id, field, value.to_string(), 5_i64, confidence],
                 ).map_err(|error| error.to_string())?;
                 if field == "tags" {
                     if let Some(tags) = value.as_array() {
@@ -5707,6 +5739,41 @@ mod tests {
             .tags
             .iter()
             .any(|tag| tag.value == "百合"));
+    }
+
+    #[test]
+    fn ai_candidates_wait_for_a_busy_scan_writer() {
+        let store = store("ai_busy_scan_writer");
+        store.sync_library(&[comic("runtime", "ai.zip")]).unwrap();
+        let mut scan_connection = Connection::open(store.path()).unwrap();
+        let scan_tx = scan_connection
+            .transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)
+            .unwrap();
+        scan_tx
+            .execute("UPDATE comics SET title=title WHERE id='runtime'", [])
+            .unwrap();
+
+        let ai_store = store.clone();
+        let started = Instant::now();
+        let ai_write = std::thread::spawn(move || {
+            ai_store.store_ai_candidates(
+                "runtime",
+                "openai",
+                "test-model",
+                "busy-writer-response",
+                vec![("summary".into(), json!("等待後的摘要"), 0.8)],
+            )
+        });
+        std::thread::sleep(Duration::from_millis(5_500));
+        scan_tx.commit().unwrap();
+        ai_write.join().unwrap().unwrap();
+        assert!(started.elapsed() >= Duration::from_secs(5));
+        assert!(store
+            .get_metadata("runtime")
+            .unwrap()
+            .candidates
+            .iter()
+            .any(|candidate| candidate.parser_id == "ai:openai"));
     }
 
     #[test]

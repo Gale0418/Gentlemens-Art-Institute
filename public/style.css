@@ -6365,7 +6365,7 @@ select:focus-visible,
   }
 
   .reader-overlay.reader-idle .reader-top-bar {
-    transform: translateY(0) !important;
+    transform: translateY(-100%) !important;
   }
 
   .reader-overlay.reader-idle .reader-bottom-bar {
@@ -6406,4 +6406,156 @@ html:not([data-i18n-ready]) body {
 
 @keyframes gai-i18n-fallback {
   to { visibility: visible; }
+}
+
+/* 側欄資料夾樹：只建立目前展開節點的直接子項目。 */
+.folder-tree-current-path {
+  display: flex;
+  align-items: baseline;
+  gap: 6px;
+  margin: -3px 0 8px;
+  color: var(--text-dark);
+  font-size: 11px;
+  line-height: 1.35;
+  overflow: hidden;
+}
+
+.folder-tree-current-path-label {
+  flex: 0 0 auto;
+  text-transform: uppercase;
+  letter-spacing: 0.08em;
+}
+
+.folder-tree-current-path-value {
+  min-width: 0;
+  overflow: hidden;
+  color: var(--text-light);
+  font-weight: 600;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.folder-tree {
+  display: block;
+  min-width: 0;
+  width: calc(100% + 8px);
+  margin-left: -8px;
+  max-height: min(58dvh, 720px);
+  overflow-y: auto;
+  overscroll-behavior: contain;
+  scrollbar-width: thin;
+}
+
+.folder-tree li.folder-tree-node {
+  display: block;
+  min-width: 0;
+  padding: 0;
+  border: 0;
+  color: var(--text-muted);
+  background: transparent;
+  cursor: default;
+}
+
+.folder-tree li.folder-tree-node:hover,
+.folder-tree li.folder-tree-node.active {
+  padding: 0;
+  border: 0;
+  background: transparent;
+}
+
+.folder-tree-node.active > .folder-tree-row {
+  background: rgba(99, 102, 241, 0.1);
+  color: var(--text-main);
+}
+
+.folder-tree-row {
+  display: flex;
+  align-items: stretch;
+  min-height: 44px;
+  border-left: 2px solid transparent;
+  border-radius: var(--radius-sm);
+}
+
+.folder-tree-node.active > .folder-tree-row {
+  border-left-color: var(--accent-color);
+}
+
+.folder-tree-toggle,
+.folder-tree-enter {
+  min-height: 44px;
+  border: 0;
+  background: transparent;
+  color: inherit;
+  cursor: pointer;
+}
+
+.folder-tree-toggle {
+  flex: 0 0 44px;
+  padding: 0;
+  color: var(--text-dark);
+}
+
+.folder-tree-toggle:disabled {
+  cursor: default;
+  opacity: 0.35;
+}
+
+.folder-tree-toggle:not(:disabled):hover,
+.folder-tree-toggle:not(:disabled):focus-visible {
+  color: var(--text-main);
+  background: rgba(255, 255, 255, 0.05);
+}
+
+.folder-tree-enter {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex: 1 1 auto;
+  min-width: 0;
+  padding: 6px 10px 6px 4px;
+  text-align: left;
+  font: inherit;
+}
+
+.folder-tree-enter:hover,
+.folder-tree-enter:focus-visible {
+  color: var(--text-main);
+  background: rgba(255, 255, 255, 0.04);
+}
+
+.folder-tree-enter > i {
+  flex: 0 0 auto;
+  color: var(--accent-color);
+  font-size: 13px;
+}
+
+.folder-tree-name {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.folder-tree-source {
+  flex: 0 0 auto;
+  color: var(--text-dark);
+  font-size: 10px;
+  white-space: nowrap;
+}
+
+.folder-tree-children {
+  display: block;
+  margin: 0;
+  padding: 0 0 0 8px;
+  list-style: none;
+}
+
+@media (max-width: 900px) {
+  .folder-tree {
+    max-height: 48dvh;
+  }
+
+  .folder-tree-current-path {
+    margin-top: -1px;
+  }
 }

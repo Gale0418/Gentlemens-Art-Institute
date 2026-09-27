@@ -99,9 +99,9 @@ window.GAIL10n.register({
     "en": "Tap once for details, then tap the same book again or choose Start Reading. CBZ files and image folders are supported.",
     "ja": "1回タップすると詳細を表示します。同じ作品をもう一度タップするか「読み始める」で開けます。CBZ と画像フォルダーに対応しています。"
   },
-  "收合漫畫系列側欄": {
-    "en": "Collapse series sidebar",
-    "ja": "シリーズサイドバーを折りたたむ"
+  "收合漫畫資料夾側欄": {
+    "en": "Collapse comic folders sidebar",
+    "ja": "作品フォルダーのサイドバーを折りたたむ"
   },
   "繼續閱讀": {
     "en": "Continue reading",

@@ -5963,14 +5963,14 @@ select:focus-visible,
 @media (min-width: 901px) and (max-width: 1180px) {
   .sidebar {
     display: flex;
-    width: 220px;
-    flex-basis: 220px;
+    width: 252px;
+    flex-basis: 252px;
     padding-right: 14px;
     padding-left: 14px;
   }
 
   .sidebar-collapse-btn {
-    left: 198px;
+    left: 230px;
   }
 
   .main-layout.sidebar-collapsed .sidebar-collapse-btn {
@@ -6124,7 +6124,7 @@ select:focus-visible,
 
 @media (min-width: 901px) and (max-width: 1180px) {
   .main-layout {
-    --library-sidebar-width: 220px;
+    --library-sidebar-width: 252px;
   }
 }
 
@@ -6466,8 +6466,8 @@ html:not([data-i18n-ready]) body {
 .folder-tree {
   display: block;
   min-width: 0;
-  width: calc(100% + 8px);
-  margin-left: -8px;
+  width: calc(100% + 12px);
+  margin-left: -12px;
   max-height: min(58dvh, 720px);
   overflow-y: auto;
   overscroll-behavior: contain;
@@ -6519,7 +6519,7 @@ html:not([data-i18n-ready]) body {
 }
 
 .folder-tree-toggle {
-  flex: 0 0 44px;
+  flex: 0 0 32px;
   padding: 0;
   color: var(--text-dark);
 }
@@ -6538,10 +6538,10 @@ html:not([data-i18n-ready]) body {
 .folder-tree-label {
   display: flex;
   align-items: center;
-  gap: 8px;
+  gap: 5px;
   flex: 1 1 auto;
   min-width: 0;
-  padding: 6px 10px 6px 4px;
+  padding: 6px 4px 6px 0;
   text-align: left;
   font: inherit;
 }
@@ -6565,9 +6565,15 @@ html:not([data-i18n-ready]) body {
 }
 
 .folder-tree-enter {
-  flex: 0 0 44px;
+  flex: 0 0 32px;
   padding: 0;
   color: var(--accent-color);
+}
+
+.folder-tree-label > .badge {
+  flex: 0 0 auto;
+  margin-left: auto;
+  padding-inline: 5px;
 }
 
 .folder-tree-name {
@@ -6587,7 +6593,7 @@ html:not([data-i18n-ready]) body {
 .folder-tree-children {
   display: block;
   margin: 0;
-  padding: 0 0 0 8px;
+  padding: 0 0 0 4px;
   list-style: none;
 }
 

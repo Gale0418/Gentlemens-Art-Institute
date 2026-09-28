@@ -56,6 +56,7 @@ targets:
         CFBundleLocalizations: [zh-Hant, en, ja]
         CFBundleShortVersionString: 1.0.0
         CFBundleVersion: "1.0.0"
+        ITSAppUsesNonExemptEncryption: false
         NSPhotoLibraryUsageDescription: "Link your selected albums to browse photos and keep album contents up to date. Your photos will not be modified or deleted."
         NSLocalNetworkUsageDescription: "Access the local network folders you authorize to scan and read comics over SMB."
         LSSupportsOpeningDocumentsInPlace: true
@@ -71,6 +72,7 @@ targets:
         ENABLE_BITCODE: false
         ARCHS: [arm64]
         VALID_ARCHS: arm64 
+        OTHER_LDFLAGS: $(inherited) -lz -liconv -lxml2
         LIBRARY_SEARCH_PATHS[arch=x86_64]: $(inherited) $(PROJECT_DIR)/Externals/x86_64/$(CONFIGURATION) $(SDKROOT)/usr/lib/swift $(DEVELOPER_DIR)/Toolchains/XcodeDefault.xctoolchain/usr/lib/swift/$(PLATFORM_NAME) $(DEVELOPER_DIR)/Toolchains/XcodeDefault.xctoolchain/usr/lib/swift-5.0/$(PLATFORM_NAME)
         LIBRARY_SEARCH_PATHS[arch=arm64]: $(inherited) $(PROJECT_DIR)/Externals/arm64/$(CONFIGURATION) $(SDKROOT)/usr/lib/swift $(DEVELOPER_DIR)/Toolchains/XcodeDefault.xctoolchain/usr/lib/swift/$(PLATFORM_NAME) $(DEVELOPER_DIR)/Toolchains/XcodeDefault.xctoolchain/usr/lib/swift-5.0/$(PLATFORM_NAME)
         ALWAYS_EMBED_SWIFT_STANDARD_LIBRARIES: true

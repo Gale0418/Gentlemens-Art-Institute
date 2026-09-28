@@ -6128,7 +6128,7 @@ select:focus-visible,
   }
 }
 
-@media (max-width: 900px) {
+@media (max-width: 1100px) {
   .main-layout {
     --library-drawer-width: min(86vw, 320px);
     --inspector-drawer-width: min(92vw, 360px);
@@ -6262,7 +6262,7 @@ select:focus-visible,
   display: none;
 }
 
-@media (max-width: 900px) {
+@media (max-width: 1100px) {
   .main-layout.library-panels-narrow .library-panel-scrim:not([hidden]) {
     position: absolute;
     z-index: 25;
@@ -6270,8 +6270,9 @@ select:focus-visible,
     display: block;
     width: 100%;
     border: 0;
-    background: rgba(0, 0, 0, 0.46);
-    cursor: pointer;
+    /* The folder drawer is non-modal: keep the shelf scrollable while it is open. */
+    background: transparent;
+    pointer-events: none;
   }
 }
 
@@ -6465,13 +6466,26 @@ html:not([data-i18n-ready]) body {
 
 .folder-tree {
   display: block;
+  flex: 1 1 auto;
   min-width: 0;
+  min-height: 0;
   width: calc(100% + 12px);
   margin-left: -12px;
-  max-height: min(58dvh, 720px);
   overflow-y: auto;
   overscroll-behavior: contain;
   scrollbar-width: thin;
+}
+
+.sidebar > .sidebar-section:first-child {
+  display: flex;
+  flex: 1 1 auto;
+  flex-direction: column;
+  min-height: 0;
+}
+
+.sidebar > .progress-summary-box {
+  flex: 0 0 auto;
+  margin-top: 0;
 }
 
 .folder-tree li.folder-tree-node {
@@ -6598,11 +6612,17 @@ html:not([data-i18n-ready]) body {
 }
 
 @media (max-width: 900px) {
-  .folder-tree {
-    max-height: 48dvh;
-  }
-
   .folder-tree-current-path {
     margin-top: -1px;
+  }
+}
+
+/* 手機上的抽屜把手固定在下緣，避免壓住書架篩選列。 */
+@media (max-width: 620px) {
+  .sidebar-collapse-btn,
+  .inspector-collapse-btn {
+    top: auto;
+    bottom: max(12px, env(safe-area-inset-bottom));
+    transform: none;
   }
 }

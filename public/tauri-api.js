@@ -56,6 +56,16 @@ const nativeErrorMessages = Object.freeze({
     en: 'Could not open the external folder.',
     ja: '外部フォルダーを開けません。',
   },
+  FOLDER_ACCESS_STOP_FAILED: {
+    'zh-Hant': '無法關閉外部資料夾的存取權。',
+    en: 'Could not close access to the external folder.',
+    ja: '外部フォルダーへのアクセスを終了できません。',
+  },
+  FOLDER_MAIN_THREAD_UNAVAILABLE: {
+    'zh-Hant': '暫時無法開啟資料夾選擇器，請再試一次。',
+    en: 'The folder picker is temporarily unavailable. Try again.',
+    ja: 'フォルダーピッカーを開けません。もう一度お試しください。',
+  },
   AI_KEY_INVALID: {
     'zh-Hant': 'AI API Key 格式不正確。',
     en: 'The AI API key format is invalid.',
@@ -548,7 +558,10 @@ if (window.__TAURI__) {
     scanPriorityLibrary: (favoriteIds) => invoke('scan_priority_library', {
       favoriteIds: normalizePriorityLibraryIds(favoriteIds),
     }),
-    scanVisibleDirectory: (relativePath) => invoke('scan_visible_directory', { relativePath }),
+    scanVisibleDirectory: (relativePath, sourceId) => invoke('scan_visible_directory', {
+      relativePath,
+      ...(sourceId ? { sourceId } : {}),
+    }),
     searchCatalog: (query) => invoke('search_catalog', { query }),
     getComicMetadata: (id) => invoke('get_comic_metadata', { id }),
     applyBatchMetadata: (request) => invoke('apply_batch_metadata', { request }),

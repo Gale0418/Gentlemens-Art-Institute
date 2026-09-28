@@ -6,6 +6,7 @@ pub enum ArchiveError {
     FileAccess(String),
     InvalidZip(String),
     UnsupportedZip(String),
+    InvalidArchive(String),
     NoSupportedImages,
 }
 
@@ -17,7 +18,8 @@ impl std::fmt::Display for ArchiveError {
             Self::UnsupportedZip(error) => {
                 write!(f, "ZIP 使用了目前不支援的格式或加密方式：{error}")
             }
-            Self::NoSupportedImages => write!(f, "ZIP 裡沒有支援的圖片檔案"),
+            Self::InvalidArchive(error) => write!(f, "封存檔無法閱讀：{error}"),
+            Self::NoSupportedImages => write!(f, "封存檔裡沒有支援的圖片檔案"),
         }
     }
 }
@@ -76,6 +78,30 @@ pub fn get_folder_images(folder_path: &Path) -> Vec<PathBuf> {
 }
 
 pub fn get_archive_images(zip_path: &Path) -> Result<Vec<String>, ArchiveError> {
+    let extension = zip_path
+        .extension()
+        .and_then(|value| value.to_str())
+        .unwrap_or_default()
+        .to_ascii_lowercase();
+    if matches!(extension.as_str(), "7z" | "cb7" | "rar" | "cbr") {
+        let entries = crate::archive_reader::list_entries(zip_path)
+            .map_err(|error| ArchiveError::InvalidArchive(error.to_string()))?;
+        let mut names = entries
+            .into_iter()
+            .filter(|entry| !entry.is_directory && entry.size > 0)
+            .map(|entry| entry.name)
+            .filter(|name| {
+                visible_archive_page_name(name) && supported_image_extension(Path::new(name))
+            })
+            .collect::<Vec<_>>();
+        names.sort_by(|a, b| natord::compare(a, b).then_with(|| a.cmp(b)));
+        names.dedup();
+        return if names.is_empty() {
+            Err(ArchiveError::NoSupportedImages)
+        } else {
+            Ok(names)
+        };
+    }
     let file = std::fs::File::open(zip_path)
         .map_err(|error| ArchiveError::FileAccess(error.to_string()))?;
     let mut archive = zip::ZipArchive::new(file).map_err(|error| match error {

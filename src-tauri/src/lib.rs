@@ -1,3 +1,4 @@
+pub mod archive_reader;
 pub mod cache;
 pub mod cache_policy;
 pub mod catalog;
@@ -6,6 +7,7 @@ pub mod file_ops;
 pub mod metadata;
 pub mod photo_library;
 pub mod protocol;
+pub mod rar_reader;
 pub mod scanner;
 pub mod smb_scanner;
 pub mod state;
@@ -19,6 +21,7 @@ use std::sync::{Arc, OnceLock};
 use tauri::{AppHandle, Manager, State};
 
 const SCAN_DIRECTORY_SETTINGS_FILE: &str = "scan-directory.txt";
+const EXTERNAL_BOOKMARKS_SETTINGS_FILE: &str = "external-bookmarks.json";
 const MAX_IMPORTED_PHOTO_BYTES: usize = 64 * 1024 * 1024;
 const MAX_CATALOG_EXPORT_BYTES: usize = 64 * 1024 * 1024;
 const MAX_AI_IMAGE_BYTES: usize = 20 * 1024 * 1024;
@@ -234,6 +237,29 @@ fn persist_scan_directory(app_handle: &AppHandle, scan_dir: &str) -> Result<(), 
 fn load_persisted_scan_directory(settings_dir: &Path) -> Option<String> {
     let saved = std::fs::read_to_string(settings_dir.join(SCAN_DIRECTORY_SETTINGS_FILE)).ok()?;
     validate_scan_directory(&saved).ok()
+}
+
+fn persist_external_bookmarks(
+    app_handle: &AppHandle,
+    bookmarks: &[state::ExternalBookmark],
+) -> Result<(), String> {
+    let settings_dir = app_handle
+        .path()
+        .app_local_data_dir()
+        .map_err(|error| format!("無法取得 App 設定目錄：{error}"))?;
+    std::fs::create_dir_all(&settings_dir)
+        .map_err(|error| format!("無法建立 App 設定目錄：{error}"))?;
+    let data =
+        serde_json::to_vec(bookmarks).map_err(|error| format!("外部來源格式錯誤：{error}"))?;
+    std::fs::write(settings_dir.join(EXTERNAL_BOOKMARKS_SETTINGS_FILE), data)
+        .map_err(|error| format!("無法儲存外部資料夾授權：{error}"))
+}
+
+fn load_persisted_external_bookmarks(settings_dir: &Path) -> Vec<state::ExternalBookmark> {
+    std::fs::read(settings_dir.join(EXTERNAL_BOOKMARKS_SETTINGS_FILE))
+        .ok()
+        .and_then(|data| serde_json::from_slice(&data).ok())
+        .unwrap_or_default()
 }
 
 // iOS 更新 App 後容器 UUID 可能改變；只重定位內建 Documents，不改外部來源。
@@ -713,8 +739,10 @@ async fn scan_visible_directory(
     app_handle: AppHandle,
     state: State<'_, Arc<AppState>>,
     relative_path: String,
+    source_id: Option<String>,
 ) -> Result<(), String> {
-    scanner::scan_visible_directory(state.inner().clone(), app_handle, relative_path).await
+    scanner::scan_visible_directory(state.inner().clone(), app_handle, relative_path, source_id)
+        .await
 }
 
 #[tauri::command]
@@ -1051,8 +1079,13 @@ async fn open_comic(
         pages.push(format!("gai://page/{id}/0"));
         vec![full_path.to_string_lossy().into_owned()]
     } else {
-        let entry_names =
-            crate::utils::get_archive_images(&full_path).map_err(|error| error.to_string())?;
+        let archive_path = full_path.clone();
+        let entry_names = tauri::async_runtime::spawn_blocking(move || {
+            crate::utils::get_archive_images(&archive_path)
+        })
+        .await
+        .map_err(|error| format!("讀取漫畫封存檔的背景工作失敗：{error}"))?
+        .map_err(|error| error.to_string())?;
         for index in 0..entry_names.len() {
             pages.push(format!("gai://page/{}/{}", id, index));
         }
@@ -2438,7 +2471,17 @@ async fn set_bookmarks(
     state: State<'_, Arc<AppState>>,
     app_handle: tauri::AppHandle,
 ) -> Result<(), String> {
+    // Serialize disk persistence with the matching in-memory update. Otherwise
+    // an older request can finish writing after a newer request has applied.
     let _bookmark_lifecycle = state.bookmark_lifecycle.lock().await;
+    let bookmarks_to_persist = data.clone();
+    let settings_handle = app_handle.clone();
+    tokio::task::spawn_blocking(move || {
+        persist_external_bookmarks(&settings_handle, &bookmarks_to_persist)
+    })
+    .await
+    .map_err(|error| format!("外部來源設定工作失敗：{error}"))??;
+
     let old_bookmarks = state.external_bookmarks.read().unwrap().clone();
     let removed_bookmarks: Vec<_> = old_bookmarks
         .into_iter()
@@ -2452,12 +2495,12 @@ async fn set_bookmarks(
         .iter()
         .map(|bookmark| scanner::external_source_id(&bookmark.bookmark))
         .collect::<BTreeSet<_>>();
-    #[cfg(target_os = "ios")]
+    #[cfg(any(target_os = "ios", target_os = "macos"))]
     let mut stop_accessing_errors: Vec<String> = Vec::new();
-    #[cfg(not(target_os = "ios"))]
+    #[cfg(not(any(target_os = "ios", target_os = "macos")))]
     let stop_accessing_errors: Vec<String> = Vec::new();
 
-    #[cfg(target_os = "ios")]
+    #[cfg(any(target_os = "ios", target_os = "macos"))]
     for removed in &removed_bookmarks {
         use tauri_plugin_ios_folder::StopAccessingRequest;
         use tauri_plugin_ios_folder::TauriPluginIosFolderExt;
@@ -3178,6 +3221,11 @@ pub fn run() {
                     .write()
                     .map_err(|_| std::io::Error::other("無法載入漫畫目錄設定"))? = scan_dir;
             }
+            *app_state
+                .external_bookmarks
+                .write()
+                .map_err(|_| std::io::Error::other("無法載入外部資料夾授權"))? =
+                load_persisted_external_bookmarks(&catalog_dir);
             #[cfg(target_os = "ios")]
             {
                 if let Ok(document_dir) = app.path().document_dir() {

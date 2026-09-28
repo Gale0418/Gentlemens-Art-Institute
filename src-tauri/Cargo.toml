@@ -44,6 +44,8 @@ chardetng = "0.1"
 unicode-normalization = "0.1.24"
 reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls"] }
 rayon = "1.11"
+sevenz-rust2 = { version = "0.23.0", default-features = false, features = ["ppmd", "util"] }
+libarchive2 = { path = "vendor/libarchive2" }
 
 [target.'cfg(not(target_os = "ios"))'.dependencies]
 trash = "5.2.3"

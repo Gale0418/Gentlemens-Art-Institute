@@ -8,7 +8,9 @@ assert.match(appSource, /async function restoreExternalBookmarks\(\)[\s\S]{0,260
 assert.match(appSource, /const latestBookmarks = readExternalBookmarks\(\)[\s\S]{0,180}bookmark\.bookmark !== bookmarkIdentity/, 'bookmark deletion must resolve identity inside the queue');
 assert.match(appSource, /async function initApp\(\)[\s\S]{0,180}sanitizeSmbConfig\(\)/, 'SMB legacy secrets must be sanitized during app initialization');
 assert.match(appSource, /requestPriorityLibraryScan\(state\.scanStatus, state\.favorites\)/, 'scan progress must submit native priority scan hints');
-assert.match(fs.readFileSync(new URL('../public/tauri-api.js', import.meta.url), 'utf8'), /invoke\('scan_priority_library', \{[\s\S]*favoriteIds/, 'native bridge must expose the priority scan command');
+const tauriBridgeSource = fs.readFileSync(new URL('../public/tauri-api.js', import.meta.url), 'utf8');
+assert.match(tauriBridgeSource, /invoke\('scan_priority_library', \{[\s\S]*favoriteIds/, 'native bridge must expose the priority scan command');
+assert.match(tauriBridgeSource, /scanVisibleDirectory: \(relativePath, sourceId\) => invoke\('scan_visible_directory', \{[\s\S]*\.\.\.\(sourceId \? \{ sourceId \} : \{\}\)/, 'visible directory bridge must accept an optional source id');
 
 class FakeClock {
   constructor() {
@@ -1392,6 +1394,115 @@ console.log('external bookmark intent queue tests passed');
   assert.deepEqual(restored, [], 'empty restore must submit an empty native bookmark list');
 }
 console.log('external bookmark identity and empty restore tests passed');
+
+// 同一路徑的不同來源必須各自導覽；root 才能合併展示來源候選，避免在
+// 外部 H/HCG 中混入另一個 H/H漫畫/Alpha 的幽靈卡片。
+{
+  const isolated = createHarness();
+  isolated.hooks.state.activeSeries = 'all';
+  isolated.hooks.state.activeFilter = 'all';
+  isolated.hooks.elements.searchInput.value = '';
+  isolated.hooks.state.comics = [
+    { id: 'h-alpha', title: 'Alpha H', relativePath: 'H/HCG/Alpha.cbz', sourceId: 'external:h' },
+    { id: 'h-manga-alpha', title: 'Alpha H漫畫', relativePath: 'H/H漫畫/Alpha.cbz', sourceId: 'external:h' },
+    { id: 'hcg-alpha', title: 'Alpha HCG', relativePath: 'H/HCG/Alpha.cbz', sourceId: 'external:hcg' },
+  ];
+  isolated.hooks.state.currentPath = 'H/HCG';
+  isolated.hooks.state.currentSourceId = 'external:h';
+  assert.deepEqual(Array.from(isolated.hooks.getDirectoryItems(), item => item.id), ['h-alpha'], 'selected source isolates same-path shelf items');
+  isolated.hooks.state.currentSourceId = 'external:hcg';
+  assert.deepEqual(Array.from(isolated.hooks.getDirectoryItems(), item => item.id), ['hcg-alpha'], 'second source keeps the same relative path independent');
+  isolated.hooks.state.currentSourceId = '';
+  isolated.hooks.state.currentPath = 'H/HCG';
+  assert.deepEqual(Array.from(isolated.hooks.getDirectoryItems(), item => item.id), ['h-alpha', 'hcg-alpha'], 'merged root navigation may show both source candidates');
+}
+console.log('source-aware directory isolation tests passed');
+
+// 新事件帶 visibleSourceId 時，另一來源即使使用同一 visiblePath 也不能
+// 看到對方的目錄候選；缺少欄位的舊事件只進 legacy root lane。
+{
+  const visible = createHarness();
+  visible.hooks.elements.searchInput = { value: '' };
+  visible.hooks.state.visibleDirectoryGeneration = 7;
+  visible.hooks.state.scanStatus = { generation: 7, isScanning: true };
+  visible.hooks.state.currentPath = 'shared';
+  visible.hooks.state.currentSourceId = 'external:a';
+  visible.hooks.applyIncrementalLibraryBatch({
+    generation: 7,
+    visible: true,
+    visiblePath: 'shared',
+    visibleSourceId: 'external:b',
+    directories: ['shared/only-b'],
+    items: [],
+  });
+  assert.equal(visible.hooks.getDirectoryItems().some(item => item.relativePath === 'shared/only-b'), false,
+    'source-specific visible directories never cross into the current source');
+  visible.hooks.state.currentSourceId = '';
+  assert.equal(visible.hooks.getDirectoryItems().some(item => item.relativePath === 'shared/only-b'), true,
+    'merged root can present a source-qualified directory candidate');
+}
+console.log('visible source payload isolation tests passed');
+
+// 同一來源的舊 catalog 路徑，也不能在當層淺掃後復活成別處的目錄。
+{
+  const visible = createHarness();
+  visible.hooks.elements.searchInput = { value: '' };
+  visible.hooks.state.scanStatus = { generation: 9, isScanning: true };
+  visible.hooks.state.visibleDirectoryGeneration = 9;
+  visible.hooks.state.currentPath = 'H/HCG';
+  visible.hooks.state.currentSourceId = 'external:h';
+  visible.hooks.state.comics = [
+    { id: 'stale', title: 'Old', relativePath: 'H/HCG/Ghost/old.cbz', sourceId: 'external:h' },
+    { id: 'real', title: 'New', relativePath: 'H/HCG/Real/new.cbz', sourceId: 'external:h' },
+  ];
+  assert.equal(visible.hooks.getDirectoryItems().length, 2, 'before a shallow scan the catalog remains available');
+  visible.hooks.applyIncrementalLibraryBatch({
+    generation: 9, visible: true, visiblePath: 'H/HCG', visibleSourceId: 'external:h',
+    directories: ['H/HCG/Real', 'H/H漫畫/Other'], items: [],
+  });
+  assert.deepEqual(Array.from(visible.hooks.getDirectoryItems(), item => item.title), ['Real'],
+    'the physical one-level snapshot removes old and sibling directory cards');
+  const nodes = vm.runInContext('collectFolderTreeNodes()', visible.context);
+  assert.equal(nodes.has('external:h\u0000H/HCG/Ghost'), false, 'the tree also drops a stale direct child');
+  assert.equal(nodes.has('external:h\u0000H/HCG/Real'), true, 'the tree keeps a real direct child');
+  visible.hooks.applyIncrementalLibraryBatch({
+    generation: 9, visible: true, visiblePath: 'H/HCG', visibleSourceId: 'external:h',
+    directories: [], items: [],
+  });
+  assert.deepEqual(Array.from(visible.hooks.getDirectoryItems()), [],
+    'a later empty snapshot replaces instead of merging the previous visit');
+}
+console.log('authoritative shallow directory snapshot tests passed');
+
+// A→B→A 必須建立 A 的新請求；舊 A promise 不能因為 Map key 相同而被重用。
+{
+  const rapid = createHarness();
+  const calls = [];
+  const resolvers = [];
+  rapid.context.window.electronAPI.scanVisibleDirectory = (relativePath, sourceId) => {
+    calls.push({ relativePath, sourceId });
+    return new Promise(resolve => resolvers.push(resolve));
+  };
+  rapid.hooks.elements.searchInput = { value: '' };
+  rapid.hooks.state.visibleDirectoryGeneration = 1;
+  rapid.hooks.state.scanStatus = { generation: 1, isScanning: true };
+  const cachedA = rapid.hooks.getVisibleDirectoryMapKey('external:a', 'shared');
+  rapid.hooks.state.visibleDirectories.set(cachedA, ['shared/verified']);
+  rapid.hooks.navigateLibraryToPath('shared', 'external:a');
+  rapid.hooks.navigateLibraryToPath('shared', 'external:b');
+  rapid.hooks.navigateLibraryToPath('shared', 'external:a');
+  assert.deepEqual(Array.from(rapid.hooks.state.visibleDirectories.get(cachedA)), ['shared/verified'],
+    'returning to A keeps its verified directory snapshot until the new scan arrives');
+  await Promise.resolve();
+  assert.deepEqual(JSON.parse(JSON.stringify(calls)), [
+    { relativePath: 'shared', sourceId: 'external:a' },
+    { relativePath: 'shared', sourceId: 'external:b' },
+    { relativePath: 'shared', sourceId: 'external:a' },
+  ], 'returning to a source/path starts a fresh visible scan');
+  resolvers.forEach(resolve => resolve());
+  await Promise.resolve();
+}
+console.log('rapid source navigation tests passed');
 
 // 原生清單已提交但權限釋放失敗時，移除後的清單仍須保存；真正失敗則保留原清單。
 for (const [nativeError, expectedCount] of [

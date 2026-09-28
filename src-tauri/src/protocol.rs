@@ -40,11 +40,11 @@ impl ArchivePageError {
 impl std::fmt::Display for ArchivePageError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
-            Self::FileAccess(error) => write!(f, "無法讀取 ZIP 檔案：{error}"),
-            Self::InvalidZip(error) => write!(f, "ZIP 格式無效或不受支援：{error}"),
-            Self::MissingEntry(name) => write!(f, "ZIP 找不到頁面：{name}"),
+            Self::FileAccess(error) => write!(f, "無法讀取封存檔：{error}"),
+            Self::InvalidZip(error) => write!(f, "封存檔格式無效或不受支援：{error}"),
+            Self::MissingEntry(name) => write!(f, "封存檔找不到頁面：{name}"),
             Self::ImageTooLarge => write!(f, "圖片超過 64 MiB 安全上限"),
-            Self::ReadFailed(error) => write!(f, "ZIP 頁面解壓失敗：{error}"),
+            Self::ReadFailed(error) => write!(f, "封存檔頁面解壓失敗：{error}"),
         }
     }
 }
@@ -139,21 +139,43 @@ fn read_archive_page(
             "archive entry path escapes the archive root".to_string(),
         ));
     }
-    let file = File::open(zip_path).map_err(ArchivePageError::FileAccess)?;
-    let mut archive = zip::ZipArchive::new(file)
-        .map_err(|error| ArchivePageError::InvalidZip(error.to_string()))?;
-    let mut entry = archive
-        .by_name(target_name)
-        .map_err(|_| ArchivePageError::MissingEntry(target_name.to_string()))?;
-    let buf = read_image_limited(&mut entry).map_err(|error| {
-        if error.kind() == io::ErrorKind::InvalidData
-            && error.to_string() == "image exceeds size limit"
-        {
-            ArchivePageError::ImageTooLarge
-        } else {
-            ArchivePageError::ReadFailed(error.to_string())
-        }
-    })?;
+    let extension = zip_path
+        .extension()
+        .and_then(|value| value.to_str())
+        .unwrap_or_default();
+    let buf = if matches!(
+        extension.to_ascii_lowercase().as_str(),
+        "7z" | "cb7" | "rar" | "cbr"
+    ) {
+        crate::archive_reader::read_entry(zip_path, target_name, MAX_IMAGE_BYTES as usize).map_err(
+            |error| match error {
+                crate::archive_reader::ArchiveError::EntryNotFound(_) => {
+                    ArchivePageError::MissingEntry(target_name.to_string())
+                }
+                crate::archive_reader::ArchiveError::EntryTooLarge { .. }
+                | crate::archive_reader::ArchiveError::ReadLimitExceeded { .. } => {
+                    ArchivePageError::ImageTooLarge
+                }
+                other => ArchivePageError::ReadFailed(other.to_string()),
+            },
+        )?
+    } else {
+        let file = File::open(zip_path).map_err(ArchivePageError::FileAccess)?;
+        let mut archive = zip::ZipArchive::new(file)
+            .map_err(|error| ArchivePageError::InvalidZip(error.to_string()))?;
+        let mut entry = archive
+            .by_name(target_name)
+            .map_err(|_| ArchivePageError::MissingEntry(target_name.to_string()))?;
+        read_image_limited(&mut entry).map_err(|error| {
+            if error.kind() == io::ErrorKind::InvalidData
+                && error.to_string() == "image exceeds size limit"
+            {
+                ArchivePageError::ImageTooLarge
+            } else {
+                ArchivePageError::ReadFailed(error.to_string())
+            }
+        })?
+    };
     let extension = Path::new(target_name)
         .extension()
         .and_then(|value| value.to_str())

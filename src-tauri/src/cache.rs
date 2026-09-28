@@ -134,6 +134,27 @@ pub async fn preload_comic_window(
         return;
     }
 
+    // RAR/7z readers are sequential. A ZIP-style random-access preload would
+    // repeatedly decode solid blocks and stall reading, so page requests load
+    // them on demand until they have a dedicated streaming preload worker.
+    let extension = full_path
+        .extension()
+        .and_then(|value| value.to_str())
+        .unwrap_or_default();
+    if matches!(
+        extension.to_ascii_lowercase().as_str(),
+        "rar" | "cbr" | "7z" | "cb7"
+    ) {
+        let _ = app_handle.emit(
+            "ram-cache-progress",
+            serde_json::json!({
+                "id": id, "generation": generation, "pageIndex": current_page,
+                "loaded": 0, "total": 0, "finished": true
+            }),
+        );
+        return;
+    }
+
     let completion_handle = app_handle.clone();
     let completion_state = state.clone();
     let completion_id = id.clone();

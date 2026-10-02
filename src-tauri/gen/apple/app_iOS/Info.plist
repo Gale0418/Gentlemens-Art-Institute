@@ -48,6 +48,8 @@
 		<string>UIInterfaceOrientationLandscapeLeft</string>
 		<string>UIInterfaceOrientationLandscapeRight</string>
 	</array>
+	<key>NSCameraUsageDescription</key>
+	<string>Take a photo to import it into your local comic library. Photos are stored on this device.</string>
 	<key>NSPhotoLibraryUsageDescription</key>
 	<string>Link your selected albums to browse photos and keep album contents up to date. Your photos will not be modified or deleted.</string>
 </dict>

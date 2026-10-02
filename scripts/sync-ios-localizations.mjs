@@ -25,6 +25,11 @@ const infoFile = path.join(appleDir, infoRelative);
 let info = fs.readFileSync(infoFile, 'utf8');
 const localizedKeys = '<key>CFBundleLocalizations</key>\n\t<array><string>zh-Hant</string><string>en</string><string>ja</string></array>';
 if (!info.includes('<key>CFBundleLocalizations</key>')) info = info.replace('<dict>', `<dict>\n\t${localizedKeys}`);
+// WebKit's image file picker offers Take Photo; every regenerated target needs this key.
+const cameraKey = '<key>NSCameraUsageDescription</key>';
+if (!info.includes(cameraKey)) {
+  info = info.replace('</dict>', `\t${cameraKey}\n\t<string>Take a photo to import it into your local comic library. Photos are stored on this device.</string>\n</dict>`);
+}
 fs.writeFileSync(infoFile, info);
 
 const variant = '6A110C000000000000000001';

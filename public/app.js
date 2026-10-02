@@ -987,9 +987,9 @@ async function initApp() {
   document.getElementById('zoom-value').textContent = '100%';
   sanitizeSmbConfig();
 
-  // 如果是 iOS，顯示相簿匯入按鈕
+  // 僅在具備原生照片儲存能力的 iOS 環境顯示匯入入口
   const isIOS = /iPad|iPhone|iPod/.test(navigator.userAgent) || (navigator.platform === 'MacIntel' && navigator.maxTouchPoints > 1);
-  if (isIOS) {
+  if (isIOS && typeof eAPI.saveImportedPhoto === 'function') {
     // if (elements.settingsBtn) elements.settingsBtn.style.display = 'none';
     const importBtn = document.getElementById('import-photo-btn');
     if (importBtn) importBtn.style.display = 'inline-block';

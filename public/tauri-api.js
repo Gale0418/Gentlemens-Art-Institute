@@ -503,6 +503,7 @@ if (window.__TAURI__) {
     getCatalogExportPath: (filename) => invoke('default_catalog_export_path', { filename }),
     getBookmarks: () => invoke('get_bookmarks'),
     setBookmarks: (data) => invoke('set_bookmarks', { data }),
+    saveImportedPhoto: (filename, data) => invoke('save_imported_photo', { filename, data }),
     openExternalFolder: () => invoke('plugin:ios-folder|pick_folder'),
     openFolderDialog: async (defaultPath) => {
       const selected = await invoke('plugin:dialog|open', {

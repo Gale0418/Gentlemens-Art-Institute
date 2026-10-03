@@ -611,6 +611,7 @@ if (window.__TAURI__) {
       ...(sourceId ? { sourceId } : {}),
     }),
     searchCatalog: (query) => invoke('search_catalog', { query }),
+    getDiscoveryTags: (runtimeIds) => invoke('get_discovery_tags', { runtimeIds }),
     getComicMetadata: (id) => invoke('get_comic_metadata', { id }),
     applyBatchMetadata: (request) => invoke('apply_batch_metadata', { request }),
     undoBatchMetadata: (token) => invoke('undo_batch_metadata', { token }),

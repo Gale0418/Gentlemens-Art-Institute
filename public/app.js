@@ -903,6 +903,15 @@ const elements = {
   libraryStartPanel: document.getElementById('library-start-panel'),
   libraryStartChoose: document.getElementById('library-start-choose'),
   libraryStartDemo: document.getElementById('library-start-demo'),
+  libraryDiscoveryBtn: document.getElementById('library-discovery-btn'),
+  libraryDiscoveryStatus: document.getElementById('library-discovery-status'),
+  libraryTagDiscoveryBtn: document.getElementById('library-tag-discovery-btn'),
+  libraryTagDiscoveryPanel: document.getElementById('library-tag-discovery-panel'),
+  discoveryTagSelect: document.getElementById('library-discovery-tag'),
+  discoveryTagPick: document.getElementById('library-discovery-tag-pick'),
+  discoveryTagRandom: document.getElementById('library-discovery-tag-random'),
+  discoveryTagSetup: document.getElementById('library-discovery-tag-setup'),
+  discoveryTagStatus: document.getElementById('library-discovery-tag-status'),
   scanRecoveryPanel: document.getElementById('scan-recovery-panel'),
   scanRecoveryMessage: document.getElementById('scan-recovery-message'),
   scanRetryBtn: document.getElementById('scan-retry-btn'),
@@ -1496,6 +1505,18 @@ function bindEvents() {
   elements.libraryPanelScrim?.addEventListener('click', closeLibraryPanelScrim);
 
   elements.libraryStartChoose?.addEventListener('click', chooseLibrarySource);
+  elements.libraryDiscoveryBtn?.addEventListener('click', () => openDiscoveryComic());
+  elements.libraryTagDiscoveryBtn?.addEventListener('click', toggleDiscoveryTags);
+  elements.discoveryTagPick?.addEventListener('click', () => openDiscoveryTag(false));
+  elements.discoveryTagRandom?.addEventListener('click', () => openDiscoveryTag(true));
+  elements.discoveryTagSetup?.addEventListener('click', () => {
+    closeDiscoveryTags();
+    setOrganizeMode(true);
+    switchOrganizerPanel('batch');
+    elements.organizeBar?.scrollIntoView({ block: 'nearest' });
+    elements.organizeTag?.focus();
+    updateOrganizerUi(readerText('先選取漫畫，再輸入標籤；例如 general:冒險，套用後就能依 TAG 探索。'));
+  });
   elements.libraryStartDemo?.addEventListener('click', () => {
     const firstDemo = createBuiltInDemoComics()[0];
     if (!state.comics.some(comic => comic.id === firstDemo.id)) {
@@ -4173,16 +4194,10 @@ function compareShelfItems(left, right) {
   return comicTitleCollator.compare(String(left.title || ''), String(right.title || ''));
 }
 
-// 計算目前目錄樹路徑下的項目 (由姬米妮為主人傾力打造的 YACReader 級目錄折疊算法 ✨)
-function getDirectoryItems() {
-  const curPath = state.currentPath;
+function getLibraryFilteredComics() {
   const curSourceId = normalizeDirectorySourceId(state.currentSourceId);
-  const itemsMap = new Map(); // 子目錄折疊
-  const filesList = []; // 直屬此目錄的漫畫
   const hasFormalComic = state.comics.some(comic => comic && !isBuiltInDemoComic(comic));
-
-  // 1. 先進行基礎的系列與狀態過濾
-  const baseFiltered = state.comics.filter(comic => {
+  return state.comics.filter(comic => {
     if (hasFormalComic && isBuiltInDemoComic(comic)) return false;
     if (curSourceId && getComicSourceKey(comic) !== curSourceId) return false;
     if (isBuiltInDemoComic(comic) && state.activeFilter === 'favorite') return false;
@@ -4208,26 +4223,185 @@ function getDirectoryItems() {
 
     return true;
   });
+}
+
+function comicMatchesLibrarySearch(comic, query) {
+  const matches = [comic.title, comic.relativePath, comic.series]
+    .some(value => String(value || '').toLowerCase().includes(query));
+  if (isBuiltInDemoComic(comic)) return matches;
+  const metadata = state.catalogSearchItems.get(comic.id);
+  const matchMetadata = metadata ? JSON.stringify(metadata).toLowerCase().includes(query) : false;
+  return (!state.catalogSearchIds || state.catalogSearchIds.has(comic.id)) && (matches || matchMetadata);
+}
+
+function getDiscoveryCandidates() {
+  const query = elements.searchInput.value.toLowerCase().trim();
+  const path = normalizeDirectoryPath(state.currentPath);
+  return getLibraryFilteredComics().filter(comic => {
+    if (!comic.id || comic.isDirectory || isComicOffline(comic)) return false;
+    if (query) return !state.catalogSearchItems.get(comic.id)?.offline && comicMatchesLibrarySearch(comic, query);
+    const relativePath = normalizeDirectoryPath(comic.relativePath);
+    return !path || relativePath === path || relativePath.startsWith(path + '/');
+  });
+}
+
+function pickDiscoveryComic(candidates, previousId, random = Math.random) {
+  if (!candidates.length) return null;
+  const different = candidates.filter(comic => comic.id !== previousId);
+  const choices = different.length ? different : candidates;
+  return choices[Math.floor(random() * choices.length)];
+}
+
+let discoveryOpening = false;
+let lastDiscoveryComicId = null;
+let discoveryTagGroups = [];
+let discoveryTagScope = '';
+let discoveryTagRequest = 0;
+let discoveryTagsLoading = false;
+let lastDiscoveryTagKey = '';
+
+function discoveryScopeKey(candidates = getDiscoveryCandidates()) {
+  return JSON.stringify(candidates.map(comic => comic.id).sort());
+}
+
+function closeDiscoveryTags() {
+  discoveryTagRequest++;
+  discoveryTagsLoading = false;
+  if (elements.libraryTagDiscoveryPanel) elements.libraryTagDiscoveryPanel.hidden = true;
+  elements.libraryTagDiscoveryBtn?.setAttribute('aria-expanded', 'false');
+}
+
+function syncDiscoveryTagButtons() {
+  const disabled = discoveryOpening || discoveryTagsLoading || !discoveryTagGroups.length;
+  for (const element of [elements.discoveryTagSelect, elements.discoveryTagPick, elements.discoveryTagRandom]) {
+    if (element) element.disabled = disabled;
+  }
+}
+
+function normalizeDiscoveryTagGroups(groups, candidates) {
+  const allowed = new Set(candidates.map(comic => comic.id));
+  const merged = new Map();
+  for (const group of groups) {
+    if (!group || typeof group.namespace !== 'string' || typeof group.value !== 'string') continue;
+    const key = JSON.stringify([group.namespace, group.value]);
+    if (!merged.has(key)) merged.set(key, { namespace: group.namespace, value: group.value, comicIds: new Set() });
+    for (const id of group.comicIds || []) if (allowed.has(id)) merged.get(key).comicIds.add(id);
+  }
+  return [...merged.values()].filter(group => group.comicIds.size)
+    .map(group => ({ ...group, comicIds: [...group.comicIds] }))
+    .sort((a, b) => comicTitleCollator.compare(`${a.namespace}:${a.value}`, `${b.namespace}:${b.value}`));
+}
+
+async function toggleDiscoveryTags() {
+  if (!elements.libraryTagDiscoveryPanel || discoveryOpening) return;
+  if (!elements.libraryTagDiscoveryPanel.hidden) { closeDiscoveryTags(); return; }
+  elements.libraryTagDiscoveryPanel.hidden = false;
+  elements.libraryTagDiscoveryBtn?.setAttribute('aria-expanded', 'true');
+  const request = ++discoveryTagRequest;
+  const candidates = getDiscoveryCandidates().filter(comic => !isBuiltInDemoComic(comic));
+  discoveryTagScope = discoveryScopeKey();
+  discoveryTagGroups = [];
+  discoveryTagsLoading = true;
+  syncDiscoveryTagButtons();
+  elements.discoveryTagStatus.textContent = readerText('正在找目前範圍的標籤…');
+  try {
+    if (!eAPI?.getDiscoveryTags) throw new Error('Discovery tags require the current native backend');
+    const groups = [];
+    // Bound each IPC payload; the native worker reads indexed tags without
+    // touching comic files or hydrating a full metadata object per book.
+    for (let offset = 0; offset < candidates.length; offset += 1000) {
+      if (request !== discoveryTagRequest) return;
+      groups.push(...await eAPI.getDiscoveryTags(candidates.slice(offset, offset + 1000).map(comic => comic.id)));
+    }
+    if (request !== discoveryTagRequest || discoveryTagScope !== discoveryScopeKey()) return;
+    discoveryTagGroups = normalizeDiscoveryTagGroups(groups, candidates);
+    elements.discoveryTagSelect.innerHTML = discoveryTagGroups.map((group, index) => (
+      `<option value="${index}">${escapeHtml(group.namespace)}:${escapeHtml(group.value)} · ${group.comicIds.length}</option>`
+    )).join('');
+    elements.discoveryTagStatus.textContent = readerText(discoveryTagGroups.length
+      ? '選一個 TAG 抽一本，或讓運氣替你選類型。'
+      : '目前範圍還沒有可用標籤。開啟標籤工具，先幫漫畫加一個吧！');
+  } catch (error) {
+    if (request !== discoveryTagRequest) return;
+    console.warn('探索標籤暫不可用：', error);
+    elements.discoveryTagStatus.textContent = readerText('標籤暫時讀不到，請稍後重試；仍可使用隨手翻一本。');
+  } finally {
+    if (request === discoveryTagRequest) {
+      discoveryTagsLoading = false;
+      syncDiscoveryTagButtons();
+    }
+  }
+}
+
+function pickDiscoveryTag(groups, previousKey, random = Math.random) {
+  const other = groups.filter(group => JSON.stringify([group.namespace, group.value]) !== previousKey);
+  const pool = other.length ? other : groups;
+  return pool.length ? pool[Math.floor(random() * pool.length)] : null;
+}
+
+async function openDiscoveryTag(randomTag, random = Math.random) {
+  if (discoveryOpening || discoveryTagsLoading || elements.libraryTagDiscoveryPanel?.hidden) return;
+  if (discoveryTagScope !== discoveryScopeKey()) { closeDiscoveryTags(); return; }
+  const group = randomTag ? pickDiscoveryTag(discoveryTagGroups, lastDiscoveryTagKey, random)
+    : discoveryTagGroups[Number(elements.discoveryTagSelect.value)];
+  if (!group) return;
+  const ids = new Set(group.comicIds);
+  const candidates = getDiscoveryCandidates().filter(comic => ids.has(comic.id));
+  elements.discoveryTagStatus.textContent = readerText('本次抽到：{tag}', { tag: `${group.namespace}:${group.value}` });
+  if (await openDiscoveryComic(random, candidates)) lastDiscoveryTagKey = JSON.stringify([group.namespace, group.value]);
+}
+
+function syncDiscoveryButton() {
+  if (!elements.libraryDiscoveryBtn) return;
+  elements.libraryDiscoveryBtn.disabled = discoveryOpening || !state.filteredComics.some(comic => (
+    !isComicOffline(comic) && (!comic.isDirectory || comic.comicsCount > 0)
+  ));
+  syncDiscoveryTagButtons();
+}
+
+function setDiscoveryStatus(message = '') {
+  if (!elements.libraryDiscoveryStatus) return;
+  elements.libraryDiscoveryStatus.textContent = message;
+  elements.libraryDiscoveryStatus.hidden = !message;
+}
+
+async function openDiscoveryComic(random = Math.random, candidates = getDiscoveryCandidates()) {
+  if (discoveryOpening || state.currentComic || state.pendingComicId) return false;
+  setDiscoveryStatus();
+  const chosen = pickDiscoveryComic(candidates, lastDiscoveryComicId, random);
+  if (!chosen) {
+    setDiscoveryStatus(readerText('目前範圍沒有可讀漫畫，試著換個資料夾或清除篩選。'));
+    return false;
+  }
+  discoveryOpening = true;
+  syncDiscoveryButton();
+  try {
+    await openReader(chosen.id);
+    if (state.currentComic?.id === chosen.id) lastDiscoveryComicId = chosen.id;
+    else setDiscoveryStatus(readerText('這本暫時打不開，請換一本或檢查來源。'));
+    return state.currentComic?.id === chosen.id;
+  } catch (error) {
+    console.warn('隨機試讀無法開啟：', error);
+    setDiscoveryStatus(readerText('這本暫時打不開，請換一本或檢查來源。'));
+    return false;
+  } finally {
+    discoveryOpening = false;
+    syncDiscoveryButton();
+  }
+}
+
+// 一般導航仍只顯示目前目錄這一層；隨機試讀可選取其下已載入的作品。
+function getDirectoryItems() {
+  const curPath = state.currentPath;
+  const curSourceId = normalizeDirectorySourceId(state.currentSourceId);
+  const itemsMap = new Map();
+  const filesList = [];
+  const baseFiltered = getLibraryFilteredComics();
 
   // 2. 如果使用者正在使用關鍵字搜尋，則退化為「扁平全庫搜尋」，體驗最佳！
   const query = elements.searchInput.value.toLowerCase().trim();
   if (query) {
-    return baseFiltered.filter(comic => {
-      // SQLite 搜尋結果只代表正式資料庫內容；內建示範沒有 catalog row，
-      // 但仍應以本地標題／系列／slug 判斷，不能因 catalogSearchIds 存在就消失。
-      const matchTitle = String(comic.title || '').toLowerCase().includes(query);
-      const matchPath = String(comic.relativePath || '').toLowerCase().includes(query);
-      const matchSeries = String(comic.series || '').toLowerCase().includes(query);
-      const metadata = state.catalogSearchItems.get(comic.id);
-      const matchMetadata = metadata
-        ? JSON.stringify(metadata).toLowerCase().includes(query)
-        : false;
-      if (isBuiltInDemoComic(comic)) return matchTitle || matchPath || matchSeries;
-      if (state.catalogSearchIds) {
-        return state.catalogSearchIds.has(comic.id) && (matchTitle || matchPath || matchSeries || matchMetadata);
-      }
-      return matchTitle || matchPath || matchSeries || matchMetadata;
-    }).map(c => {
+    return baseFiltered.filter(comic => comicMatchesLibrarySearch(comic, query)).map(c => {
       const metadata = state.catalogSearchItems.get(c.id);
       return { ...c, title: metadata?.title || c.title, series: metadata?.series || c.series, metadataTags: metadata?.tags || [], offline: metadata?.offline || false, isDirectory: false };
     }).sort(compareShelfItems);
@@ -4357,6 +4531,10 @@ function filterAndRenderGrid(options = {}) {
   syncLibraryUpButton();
   // 1. 取得目前路徑下的項目
   state.filteredComics = getDirectoryItems();
+  if (elements.libraryTagDiscoveryPanel && !elements.libraryTagDiscoveryPanel.hidden
+    && discoveryTagScope !== discoveryScopeKey()) closeDiscoveryTags();
+  setDiscoveryStatus();
+  syncDiscoveryButton();
 
   // 2. 渲染麵包屑路徑導航列 (由青梅竹馬姬米妮為主人貼心打造 ✨)
   if (state.currentPath === "") {
@@ -9317,6 +9495,16 @@ if (typeof window !== 'undefined' && window.__GIA_TEST_HOOKS__) {
     getCoverUrl,
     catalogThumbnailURL,
     getDirectoryItems,
+    getLibraryFilteredComics,
+    getDiscoveryCandidates,
+    normalizeDiscoveryTagGroups,
+    pickDiscoveryTag,
+    toggleDiscoveryTags,
+    closeDiscoveryTags,
+    openDiscoveryTag,
+    pickDiscoveryComic,
+    openDiscoveryComic,
+    syncDiscoveryButton,
     getDirectoryLocationKey,
     getVisibleDirectoryMapKey,
     getVisibleDirectoryEntries,

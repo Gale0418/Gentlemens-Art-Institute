@@ -2167,4 +2167,165 @@ console.log('bookmark removal persistence tests passed');
 }
 console.log('Finder platform boundary tests passed');
 
+// 探索入口共用書架篩選；不跨來源、不抽到離線作品，不另外發起掃描。
+{
+  const discovery = createHarness();
+  const { state, elements } = discovery.hooks;
+  const book = (id, path, extra = {}) => ({ id, title: id, relativePath: path, sourceId: 'local:A', series: 'Series', ...extra });
+  state.comics = [
+    book('one', 'Shelf/One'), book('two', 'Shelf/Sub/Two'), book('outside', 'Other/Outside'),
+    book('foreign', 'Shelf/Foreign', { sourceId: 'local:B' }),
+    book('offline', 'Shelf/Offline', { offline: true }),
+    book('folder', 'Shelf/Folder', { isDirectory: true }),
+  ];
+  state.currentPath = 'Shelf';
+  state.currentSourceId = 'local:A';
+  elements.searchInput.value = '';
+  assert.deepEqual(Array.from(discovery.hooks.getDiscoveryCandidates(), comic => comic.id), ['one', 'two']);
+  state.activeSeries = 'Other';
+  assert.equal(discovery.hooks.getDiscoveryCandidates().length, 0);
+  state.activeSeries = 'all';
+  discovery.hooks.setFavorites(['two']);
+  state.activeFilter = 'favorite';
+  assert.deepEqual(Array.from(discovery.hooks.getDiscoveryCandidates(), comic => comic.id), ['two']);
+  state.activeFilter = 'all';
+  elements.searchInput.value = 'outside';
+  assert.deepEqual(Array.from(discovery.hooks.getDiscoveryCandidates(), comic => comic.id), ['outside'], '搜尋沿用書架的目前來源全庫範圍');
+  state.catalogSearchItems.set('outside', { offline: true });
+  assert.equal(discovery.hooks.getDiscoveryCandidates().length, 0, '搜尋結果的離線 metadata 不能被忽略');
+  state.catalogSearchItems.clear();
+  elements.searchInput.value = '';
+  const candidates = discovery.hooks.getDiscoveryCandidates();
+  assert.equal(discovery.hooks.pickDiscoveryComic(candidates, 'one', () => 0).id, 'two');
+  assert.equal(discovery.hooks.pickDiscoveryComic([candidates[0]], 'one', () => 0).id, 'one');
+  assert.equal(discovery.hooks.pickDiscoveryComic([], null, () => 0), null);
+  assert.equal(discovery.hooks.pickDiscoveryComic(candidates, null, () => 0.999).id, 'two');
+  state.filteredComics = [{ isDirectory: true, comicsCount: 2 }];
+  discovery.hooks.syncDiscoveryButton();
+  assert.equal(elements.libraryDiscoveryBtn.disabled, false, '目前資料夾的子資料夾有已載入作品也可探索');
+  vm.runInContext(`
+    window.discoveryOpens = [];
+    openReader = async id => {
+      window.discoveryOpens.push(id);
+      await new Promise(resolve => { window.finishDiscovery = () => {
+        state.currentComic = state.comics.find(comic => comic.id === id);
+        resolve();
+      }; });
+    };
+  `, discovery.context);
+  const opening = discovery.hooks.openDiscoveryComic(() => 0);
+  assert.equal(elements.libraryDiscoveryBtn.disabled, true);
+  await discovery.hooks.openDiscoveryComic(() => 0);
+  assert.equal(discovery.context.window.discoveryOpens.length, 1, '快速連點只能發起一次開書');
+  discovery.context.window.finishDiscovery();
+  await opening;
+  state.currentComic = null;
+  vm.runInContext('openReader = async id => { window.discoveryOpens.push(id); state.currentComic = state.comics.find(comic => comic.id === id); };', discovery.context);
+  await discovery.hooks.openDiscoveryComic(() => 0);
+  assert.deepEqual(Array.from(discovery.context.window.discoveryOpens), ['one', 'two'], '成功開書後下一次避開上一本');
+  state.currentComic = null;
+  vm.runInContext('openReader = async () => { throw new Error("temporary source loss"); };', discovery.context);
+  await discovery.hooks.openDiscoveryComic(() => 0);
+  assert.equal(elements.libraryDiscoveryBtn.disabled, false, '開書失敗不能永久鎖住探索按鈕');
+  assert.match(elements.libraryDiscoveryStatus.textContent, /這本暫時打不開/);
+  assert.equal(elements.libraryDiscoveryStatus.hidden, false);
+  state.activeSeries = 'missing';
+  await discovery.hooks.openDiscoveryComic(() => 0);
+  assert.match(elements.libraryDiscoveryStatus.textContent, /目前範圍沒有可讀漫畫/);
+  state.filteredComics = [];
+  discovery.hooks.syncDiscoveryButton();
+  assert.equal(elements.libraryDiscoveryBtn.disabled, true);
+}
+
+{
+  const html = fs.readFileSync(new URL('../public/index.html', import.meta.url), 'utf8');
+  const startPanel = html.slice(html.indexOf('id="library-start-panel"'), html.indexOf('class="scan-recovery-panel"'));
+  assert.ok(startPanel.indexOf('id="library-start-demo"') < startPanel.indexOf('id="library-start-choose"'), '原創風景試讀是首次入口的第一個操作');
+  assert.match(startPanel, /id="library-start-demo" class="library-start-primary"/);
+  const dictionary = {};
+  vm.runInNewContext(fs.readFileSync(new URL('../public/locales/reader-messages.js', import.meta.url), 'utf8'), {
+    window: { GAIL10n: { register: entries => Object.assign(dictionary, entries) } },
+  });
+  for (const message of ['找漫畫像考古？先翻一本。', '試讀原創風景', '加入漫畫資料夾', '隨手翻一本', '從目前資料夾與篩選結果挑一本，再點會盡量換一本。', '目前範圍沒有可讀漫畫，試著換個資料夾或清除篩選。']) {
+    assert.ok(dictionary[message]?.en && dictionary[message]?.ja, `新增入口缺少翻譯：${message}`);
+  }
+}
+console.log('discovery scope, repeat, rapid activation and first-use copy tests passed');
+
+{
+  const h = createHarness();
+  const { state, elements } = h.hooks;
+  state.comics = ['one', 'two'].map(id => ({ id, title: id, relativePath: id, series: 'Series' }));
+  elements.searchInput.value = '';
+  const groups = [
+    { namespace: 'general', value: 'Adventure', comicIds: ['one', 'foreign', 'one'] },
+    { namespace: 'general', value: 'Adventure', comicIds: ['two'] },
+    { namespace: 'genre', value: 'Comedy', comicIds: ['two'] },
+    { namespace: 'general', value: 'Empty', comicIds: ['foreign'] },
+  ];
+  const normalized = h.hooks.normalizeDiscoveryTagGroups(groups, state.comics);
+  assert.equal(normalized.length, 2);
+  assert.deepEqual(Array.from(normalized.find(group => group.value === 'Adventure').comicIds), ['one', 'two']);
+  const previous = JSON.stringify(['general', 'Adventure']);
+  assert.equal(h.hooks.pickDiscoveryTag(normalized, previous, () => 0).value, 'Comedy');
+  assert.equal(h.hooks.pickDiscoveryTag([], '', () => 0), null);
+  h.context.window.electronAPI.getDiscoveryTags = async ids => {
+    assert.deepEqual(Array.from(ids), ['one', 'two']);
+    return groups;
+  };
+  elements.libraryTagDiscoveryPanel.hidden = true;
+  await h.hooks.toggleDiscoveryTags();
+  assert.equal(elements.libraryTagDiscoveryPanel.hidden, false);
+  assert.equal(elements.discoveryTagPick.disabled, false);
+  assert.match(elements.discoveryTagSelect.innerHTML, /Adventure/);
+  vm.runInContext('openReader = async id => { state.currentComic = state.comics.find(comic => comic.id === id); };', h.context);
+  elements.discoveryTagSelect.value = String(normalized.findIndex(group => group.value === 'Comedy'));
+  await h.hooks.openDiscoveryTag(false, () => 0);
+  assert.equal(state.currentComic.id, 'two', '自選 TAG 只能抽該 TAG 內作品');
+  state.currentComic = null;
+  await h.hooks.openDiscoveryTag(true, () => 0);
+  assert.equal(state.currentComic.id, 'one', '隨機 TAG 避開上一類型，也避開上一冊');
+  state.currentComic = null;
+  state.activeSeries = 'missing';
+  await h.hooks.openDiscoveryTag(false, () => 0);
+  assert.equal(state.currentComic, null, '候選範圍變更後舊 TAG 不能開書');
+  assert.equal(elements.libraryTagDiscoveryPanel.hidden, true);
+  state.activeSeries = 'all';
+  let finish;
+  h.context.window.electronAPI.getDiscoveryTags = () => new Promise(resolve => { finish = resolve; });
+  const pending = h.hooks.toggleDiscoveryTags();
+  h.hooks.closeDiscoveryTags();
+  finish(groups);
+  await pending;
+  assert.equal(elements.libraryTagDiscoveryPanel.hidden, true, '關閉後遲到回覆不能重開面板');
+  h.context.window.electronAPI.getDiscoveryTags = async () => [];
+  await h.hooks.toggleDiscoveryTags();
+  assert.equal(elements.discoveryTagRandom.disabled, true);
+  assert.match(elements.discoveryTagStatus.textContent, /還沒有可用標籤/);
+  h.hooks.closeDiscoveryTags();
+  h.context.window.electronAPI.getDiscoveryTags = async () => { throw new Error('temporary catalog outage'); };
+  await h.hooks.toggleDiscoveryTags();
+  assert.match(elements.discoveryTagStatus.textContent, /標籤暫時讀不到/);
+  assert.equal(elements.discoveryTagPick.disabled, true);
+  assert.equal(elements.libraryTagDiscoveryPanel.hidden, false);
+}
+{
+  const h = createHarness();
+  const { state, elements } = h.hooks;
+  elements.searchInput.value = '';
+  elements.libraryTagDiscoveryPanel.hidden = true;
+  state.comics = Array.from({ length: 1001 }, (_, i) => ({ id: `book-${i}`, title: `Book ${i}`, relativePath: `Book${i}` }));
+  const batches = [];
+  h.context.window.electronAPI.getDiscoveryTags = async ids => {
+    batches.push(ids.length);
+    return [{ namespace: 'general', value: '<unsafe & tag>', comicIds: Array.from(ids) }];
+  };
+  await h.hooks.toggleDiscoveryTags();
+  assert.deepEqual(batches, [1000, 1], '超過1000本分批取得標籤，不能只看第一頁');
+  assert.match(elements.discoveryTagSelect.innerHTML, /1001/);
+  assert.match(elements.discoveryTagSelect.innerHTML, /&lt;unsafe &amp; tag&gt;/);
+  assert.doesNotMatch(elements.discoveryTagSelect.innerHTML, /<unsafe/);
+}
+console.log('tag discovery selection, scope, stale response and empty/failure tests passed');
+
 assert.equal(hooks.getCoverUrl('photos:YWxidW0'), 'gai://cover/photos:YWxidW0', '照片封面ID保留protocol可識別的冒號');

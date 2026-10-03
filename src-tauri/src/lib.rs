@@ -405,6 +405,17 @@ async fn search_catalog(
 }
 
 #[tauri::command]
+async fn get_discovery_tags(
+    runtime_ids: Vec<String>,
+    state: State<'_, Arc<AppState>>,
+) -> Result<Vec<catalog::DiscoveryTagGroup>, String> {
+    let store = catalog_store(&state)?;
+    tokio::task::spawn_blocking(move || store.discovery_tags(&runtime_ids))
+        .await
+        .map_err(|error| error.to_string())?
+}
+
+#[tauri::command]
 async fn get_comic_metadata(
     id: String,
     state: State<'_, Arc<AppState>>,
@@ -3567,6 +3578,7 @@ pub fn run() {
             import_photo_bytes,
             scan_library,
             search_catalog,
+            get_discovery_tags,
             get_comic_metadata,
             apply_batch_metadata,
             undo_batch_metadata,

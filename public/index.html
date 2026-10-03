@@ -151,12 +151,12 @@
         <main class="content-area">
           <section class="library-start-panel" id="library-start-panel" aria-labelledby="library-start-title" hidden>
             <div class="library-start-copy">
-              <h2 id="library-start-title" data-i18n="把你的漫畫放上書架">把你的漫畫放上書架</h2>
-              <p data-i18n="選擇本機、外接磁碟或已連線的 NAS 資料夾；原始檔不會被改動。">選擇本機、外接磁碟或已連線的 NAS 資料夾；原始檔不會被改動。</p>
+              <h2 id="library-start-title" data-i18n="找漫畫像考古？先翻一本。">找漫畫像考古？先翻一本。</h2>
+              <p data-i18n="加入本機、外接硬碟或已掛載 NAS 的漫畫資料夾；也能先試讀原創風景圖集。">加入本機、外接硬碟或已掛載 NAS 的漫畫資料夾；也能先試讀原創風景圖集。</p>
             </div>
             <div class="library-start-actions">
-              <button id="library-start-choose" class="library-start-primary" type="button"><i class="fa-solid fa-folder-plus" aria-hidden="true"></i><span data-i18n="加入漫畫來源…">加入漫畫來源…</span></button>
-              <button id="library-start-demo" class="library-start-secondary" type="button" data-i18n="先試讀內建選集">先試讀內建選集</button>
+              <button id="library-start-demo" class="library-start-primary" type="button" data-i18n="試讀原創風景">試讀原創風景</button>
+              <button id="library-start-choose" class="library-start-secondary" type="button"><i class="fa-solid fa-folder-plus" aria-hidden="true"></i><span data-i18n="加入漫畫資料夾">加入漫畫資料夾</span></button>
             </div>
           </section>
 
@@ -188,6 +188,10 @@
                 <i class="fa-solid fa-chevron-left" aria-hidden="true"></i>
                 <span data-i18n="回上層">回上層</span>
               </button>
+              <button id="library-discovery-btn" class="library-discovery-btn" type="button" disabled title="從目前資料夾與篩選結果挑一本，再點會盡量換一本。" data-i18n-title="從目前資料夾與篩選結果挑一本，再點會盡量換一本。">
+                <i class="fa-solid fa-shuffle" aria-hidden="true"></i><span data-i18n="隨手翻一本">隨手翻一本</span>
+              </button>
+              <button id="library-tag-discovery-btn" class="library-discovery-btn" type="button" aria-expanded="false" aria-controls="library-tag-discovery-panel" data-i18n="依標籤探索">依標籤探索</button>
             </div>
             <div class="filter-options">
               <label class="series-filter-field" for="series-filter-select">
@@ -205,6 +209,18 @@
             </div>
           </div>
 
+          <section id="library-tag-discovery-panel" class="library-tag-discovery-panel" aria-label="依標籤探索" data-i18n-aria-label="依標籤探索" hidden>
+            <p data-i18n="從目前範圍的標籤找一本；也可以把類型交給運氣。">從目前範圍的標籤找一本；也可以把類型交給運氣。</p>
+            <div class="library-tag-discovery-actions">
+              <label for="library-discovery-tag" data-i18n="選擇探索標籤">選擇探索標籤</label>
+              <select id="library-discovery-tag" disabled></select>
+              <button id="library-discovery-tag-pick" class="library-discovery-btn" type="button" disabled data-i18n="抽這個 TAG">抽這個 TAG</button>
+              <button id="library-discovery-tag-random" class="library-discovery-btn" type="button" disabled data-i18n="隨機 TAG">隨機 TAG</button>
+              <button id="library-discovery-tag-setup" class="library-discovery-btn" type="button" data-i18n="開啟標籤工具">開啟標籤工具</button>
+            </div>
+            <p id="library-discovery-tag-status" role="status" aria-live="polite"></p>
+          </section>
+          <p class="library-discovery-status" id="library-discovery-status" role="status" aria-live="polite" hidden></p>
           <div class="catalog-facets" id="catalog-facets" aria-live="polite" hidden></div>
 
           <!-- 資料夾層級導航列 (姬米妮貼心打造 ✨) -->

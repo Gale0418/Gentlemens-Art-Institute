@@ -120,6 +120,14 @@ pub struct CatalogSearchResult {
     pub facets: BTreeMap<String, BTreeMap<String, usize>>,
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct DiscoveryTagGroup {
+    pub namespace: String,
+    pub value: String,
+    pub comic_ids: Vec<String>,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
 #[serde(rename_all = "camelCase")]
 pub struct BatchEditRequest {
@@ -1012,6 +1020,19 @@ impl CatalogStore {
 
     pub fn search(&self, query: CatalogQuery) -> Result<CatalogSearchResult, String> {
         self.with_connection(|connection| search_catalog(connection, query))
+    }
+
+    pub fn discovery_tags(&self, runtime_ids: &[String]) -> Result<Vec<DiscoveryTagGroup>, String> {
+        if runtime_ids.len() > RUNTIME_ITEM_IDS_MAX {
+            return Err("一次探索的作品數量超過限制".into());
+        }
+        if runtime_ids.iter().any(|id| id.len() > 4096) {
+            return Err("探索作品識別碼過長".into());
+        }
+        if runtime_ids.is_empty() {
+            return Ok(Vec::new());
+        }
+        self.with_connection(|connection| discovery_tag_groups(connection, runtime_ids))
     }
 
     pub fn tag_inventory(&self, query: TagInventoryQuery) -> Result<TagInventoryResult, String> {
@@ -2906,6 +2927,92 @@ fn effective_creators(
         .or(candidate)
         .and_then(|item| serde_json::from_str(&item).ok())
         .unwrap_or_default())
+}
+
+// Read indexed metadata for the visible discovery scope. No filesystem access,
+// per-comic metadata hydration, or persistent catalog mutation is needed.
+fn discovery_tag_groups(
+    connection: &Connection,
+    runtime_ids: &[String],
+) -> Result<Vec<DiscoveryTagGroup>, String> {
+    let ids = serde_json::to_string(runtime_ids).map_err(|error| error.to_string())?;
+    let mut statement = connection
+        .prepare(
+            "WITH selected AS (
+           SELECT DISTINCT l.runtime_id,l.comic_id,l.source_id,
+                  trim(replace(l.relative_path,char(92),'/'),'/') AS relative_path
+           FROM comic_locations l
+           WHERE l.online=1 AND l.runtime_id IN (SELECT value FROM json_each(?1))
+         ), projected AS (
+           SELECT raw.id AS raw_id,final.id AS canonical_id,
+                  final.namespace,final.display_value
+           FROM tags raw
+           JOIN canonical_tags source ON source.id=raw.canonical_tag_id
+           LEFT JOIN tag_redirects redirect ON redirect.source_tag_id=source.id
+           JOIN canonical_tags final ON final.id=COALESCE(redirect.target_tag_id,source.id)
+           WHERE final.disabled=0
+         ), folder_rules AS (
+           SELECT source_id,tag_id,trim(replace(folder_path,char(92),'/'),'/') AS folder_path
+           FROM folder_tag_rules WHERE enabled=1
+         ), seeds AS (
+           SELECT s.runtime_id,c.tag_id FROM selected s
+           JOIN comic_tag_candidates c ON c.comic_id=s.comic_id
+           JOIN metadata_sources m ON m.id=c.source_id
+           WHERE m.parser_id NOT LIKE 'ai:%'
+           UNION
+           SELECT s.runtime_id,r.tag_id FROM selected s
+           JOIN folder_rules r ON r.source_id=s.source_id
+           WHERE r.folder_path='' OR s.relative_path=r.folder_path
+              OR substr(s.relative_path,1,length(r.folder_path)+1)=r.folder_path||'/'
+         ), inherited AS (
+           SELECT DISTINCT s.runtime_id,p.canonical_id FROM seeds s
+           JOIN projected p ON p.raw_id=s.tag_id
+         ), overrides AS (
+           SELECT s.runtime_id,p.canonical_id,o.action,
+                  ROW_NUMBER() OVER (
+                    PARTITION BY s.runtime_id,p.canonical_id ORDER BY o.rowid DESC
+                  ) AS precedence
+           FROM selected s JOIN comic_tag_overrides o ON o.comic_id=s.comic_id
+           JOIN projected p ON p.raw_id=o.tag_id
+         ), effective AS (
+           SELECT i.runtime_id,i.canonical_id FROM inherited i
+           WHERE NOT EXISTS (
+             SELECT 1 FROM overrides o WHERE o.runtime_id=i.runtime_id
+               AND o.canonical_id=i.canonical_id AND o.precedence=1 AND o.action='exclude'
+           )
+           UNION
+           SELECT runtime_id,canonical_id FROM overrides WHERE precedence=1 AND action='include'
+         )
+         SELECT DISTINCT p.namespace,p.display_value,e.runtime_id
+         FROM effective e JOIN projected p ON p.canonical_id=e.canonical_id
+         ORDER BY p.namespace,p.display_value,e.runtime_id",
+        )
+        .map_err(|error| error.to_string())?;
+    let rows = statement
+        .query_map([ids], |row| {
+            Ok((
+                row.get::<_, String>(0)?,
+                row.get::<_, String>(1)?,
+                row.get::<_, String>(2)?,
+            ))
+        })
+        .map_err(|error| error.to_string())?;
+    let mut groups: BTreeMap<(String, String), BTreeSet<String>> = BTreeMap::new();
+    for row in rows {
+        let (namespace, value, runtime_id) = row.map_err(|error| error.to_string())?;
+        groups
+            .entry((namespace, value))
+            .or_default()
+            .insert(runtime_id);
+    }
+    Ok(groups
+        .into_iter()
+        .map(|((namespace, value), comic_ids)| DiscoveryTagGroup {
+            namespace,
+            value,
+            comic_ids: comic_ids.into_iter().collect(),
+        })
+        .collect())
 }
 
 fn effective_tags(connection: &Connection, comic_id: &str) -> Result<Vec<ScopedTag>, String> {
@@ -7071,6 +7178,115 @@ mod tests {
         assert!(store.get_location("two").unwrap().fingerprint_collision);
         assert!(store.get_metadata("one").is_ok());
         assert!(store.get_metadata("two").is_ok());
+    }
+
+    #[test]
+    fn discovery_tags_obey_scope_overrides_disabled_and_folder_rules() {
+        let store = store("discovery_tags");
+        store.with_connection(|connection| {
+            connection.execute("INSERT INTO comics(id,title) VALUES('one','One'),('two','Two'),('three','Three')", []).map_err(|e| e.to_string())?;
+            connection.execute("INSERT INTO comic_locations(comic_id,runtime_id,source_id,relative_path,kind) VALUES('one','runtime-one','local:a','Shelf/One','folder'),('two','runtime-two','local:b','Shelf/Two','folder'),('three','runtime-three','local:a','Other/Three','folder')", []).map_err(|e| e.to_string())?;
+            Ok(())
+        }).unwrap();
+        let tag = ScopedTag {
+            namespace: "general".into(),
+            value: "Adventure".into(),
+        };
+        store
+            .apply_batch(BatchEditRequest {
+                comic_ids: vec!["one".into(), "two".into()],
+                fields: BTreeMap::new(),
+                add_tags: vec![tag.clone()],
+                exclude_tags: vec![],
+            })
+            .unwrap();
+        let ids = vec![
+            "runtime-one".into(),
+            "runtime-two".into(),
+            "runtime-three".into(),
+        ];
+        let groups = store.discovery_tags(&ids).unwrap();
+        assert_eq!(groups.len(), 1);
+        assert_eq!(groups[0].comic_ids, vec!["runtime-one", "runtime-two"]);
+        assert_eq!(
+            store.discovery_tags(&["runtime-one".into()]).unwrap()[0].comic_ids,
+            vec!["runtime-one"]
+        );
+        store
+            .upsert_folder_rule(FolderTagRule {
+                id: None,
+                source_id: "local:a".into(),
+                folder_path: "Shelf".into(),
+                tag: ScopedTag {
+                    namespace: "genre".into(),
+                    value: "Nature".into(),
+                },
+                enabled: true,
+            })
+            .unwrap();
+        store.with_connection(|connection| {
+            connection.execute("UPDATE comic_locations SET relative_path='\\Shelf\\One\\' WHERE runtime_id='runtime-one'", []).map_err(|e| e.to_string())?;
+            connection.execute("UPDATE folder_tag_rules SET folder_path='/Shelf/'", []).map_err(|e| e.to_string())?;
+            Ok(())
+        }).unwrap();
+        let groups = store.discovery_tags(&ids).unwrap();
+        assert_eq!(
+            groups
+                .iter()
+                .find(|g| g.value == "Nature")
+                .unwrap()
+                .comic_ids,
+            vec!["runtime-one"]
+        );
+        store
+            .apply_batch(BatchEditRequest {
+                comic_ids: vec!["one".into()],
+                fields: BTreeMap::new(),
+                add_tags: vec![],
+                exclude_tags: vec![tag],
+            })
+            .unwrap();
+        assert_eq!(
+            store
+                .discovery_tags(&ids)
+                .unwrap()
+                .iter()
+                .find(|g| g.value == "Adventure")
+                .unwrap()
+                .comic_ids,
+            vec!["runtime-two"]
+        );
+        let tag_id = store
+            .tag_inventory(TagInventoryQuery::default())
+            .unwrap()
+            .items
+            .into_iter()
+            .find(|t| t.display_value == "Adventure")
+            .unwrap()
+            .id;
+        store.set_tag_disabled(tag_id, true).unwrap();
+        assert!(!store
+            .discovery_tags(&ids)
+            .unwrap()
+            .iter()
+            .any(|g| g.value == "Adventure"));
+        store
+            .with_connection(|connection| {
+                connection
+                    .execute(
+                        "UPDATE comic_locations SET online=0 WHERE runtime_id='runtime-one'",
+                        [],
+                    )
+                    .map_err(|e| e.to_string())?;
+                Ok(())
+            })
+            .unwrap();
+        assert!(store.discovery_tags(&ids).unwrap().is_empty());
+        assert!(store.discovery_tags(&[]).unwrap().is_empty());
+        assert!(store
+            .discovery_tags(&vec!["x".into(); RUNTIME_ITEM_IDS_MAX + 1])
+            .is_err());
+        assert!(store.discovery_tags(&["x".repeat(4097)]).is_err());
     }
 
     #[test]

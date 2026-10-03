@@ -1,5 +1,7 @@
 # 第57版發行收尾
 
+> 歷史紀錄：第57版已撤回，原P1／P2已於第58版修正。第58版兩平台已重新送審，現況見 [第58版收尾](build58-bookmark-restore-closeout-2026-10-03.md)。
+
 日期：2026-10-03。主人明確授權 CodeRabbit 審查、修正、整合 main、移除工作分支，以及換新版提交 Apple。
 
 ## Apple 狀態與目標
@@ -44,16 +46,16 @@ Tauri universal 編譯後沒有自動合併附屬 `catalog-import`，本輪以 l
 
 Mac 全包檢查的 `asc validate` 因同時存在已發布與待審 App Info 而無法選定年齡分級。改以確切 App Info ID 回讀兩筆分級（內容一致）、主分類 BOOKS、免費價格、既有完整商店截圖與審查聯絡資料；版本三語描述、關鍵字、支援網址與更新說明均已核對。Pro IAP 獨立檢查0 blocking；已加入iOS提交。兩平台提交成功後再回讀版本與submission的 WAITING_FOR_REVIEW，未把CLI總檢查誤稱通過。
 
-## 送審後新審查留言（尚未修正）
+## 第57版送審後的審查留言（第58版已修正）
 
 GitHub Codex reviewer 後續提出兩項留言，已核對當前第57版原碼；本輪未進行這兩個案例的實機重現：
 
 - **P1：啟動還原會覆蓋原生資料夾授權。** 原生啟動 setup 已把保存的書籤載入 state，`initApp()` 呼叫的 `restoreExternalBookmarks()` 仍使用 `readExternalBookmarks()` 的 WebView localStorage 清單呼叫 `setBookmarks()`。localStorage 被清空或落後時，原生 `set_bookmarks` 會保存該空／舊清單、停止移除來源的授權並移除其目錄索引。需要以原生資料作為權威，另明確處理舊版遷移；不得把自動啟動還原當成使用者刪除來源。[留言](https://github.com/Gale0418/Gentlemens-Art-Institute/pull/1#discussion_r4171729099)
 - **P2：非 Mac 的 Node 測試相容性。** iOS 在地化 fixture 無條件執行 `/usr/bin/plutil`；非 Mac 執行 `npm test` 會失敗。需要將 Mac 平台專用檢查明確限制於 Mac，或改用可攜解析器。[留言](https://github.com/Gale0418/Gentlemens-Art-Institute/pull/1#discussion_r4171729103)
 
-這些留言在本次既有 CodeRabbit 複審之後確認；CodeRabbit 的0 issues僅代表該輪結果。目前第57版兩平台仍待 Apple 審查，此次分支清理沒有修改程式或撤回提交。新問題已列回任務中心，不能宣稱已無未解P1。
+這些留言在本次既有 CodeRabbit 複審之後確認；CodeRabbit 的0 issues僅代表該輪結果。當時第57版兩平台仍待 Apple 審查，分支清理尚未修改程式或撤回提交；後續已撤回57、修完兩項並完成第58版複審與重送。
 
 
 ## 第58版修補接續
 
-2026-10-03 第57版兩平台 submission 已撤回；後續確認的啟動書籤P1與非Mac測試P2已修，正在最終回歸與第58版重送。此頁保留第57版歷史證據；現況見 [第58版收尾](build58-bookmark-restore-closeout-2026-10-03.md)。
+2026-10-03 第57版兩平台 submission 已撤回；後續確認的啟動書籤P1與非Mac測試P2已修，第58版已通過最終回歸／CodeRabbit複審並完成兩平台重送，均等待審查。此頁保留第57版歷史證據；現況見 [第58版收尾](build58-bookmark-restore-closeout-2026-10-03.md)。

@@ -4,13 +4,13 @@
     "date": "2026-10-03",
     "ios": {
       "version": "1.0",
-      "build": 57,
+      "build": 58,
       "state": "WAITING_FOR_REVIEW"
     },
     "macOS": {
       "liveVersion": "1.0",
       "submittedVersion": "1.0.1",
-      "build": 57,
+      "build": 58,
       "state": "WAITING_FOR_REVIEW"
     },
     "installedLocalBuild": 56

@@ -1544,6 +1544,33 @@ impl CatalogStore {
         })
     }
 
+    /// Reconcile against the committed bookmark list, including prior failed
+    /// removals. Each successful source cleanup is durable; a later retry
+    /// discovers any remaining locations directly from the catalog.
+    pub fn reconcile_external_source_locations(
+        &self,
+        selected: &BTreeSet<String>,
+    ) -> Result<usize, String> {
+        let sources = self.with_connection(|connection| {
+            let mut statement = connection.prepare(
+                "SELECT DISTINCT source_id FROM comic_locations WHERE source_id LIKE 'external:%'"
+            ).map_err(|error| error.to_string())?;
+            let sources = statement
+                .query_map([], |row| row.get::<_, String>(0))
+                .map_err(|error| error.to_string())?
+                .collect::<Result<Vec<_>, _>>()
+                .map_err(|error| error.to_string())?;
+            Ok(sources)
+        })?;
+        sources
+            .into_iter()
+            .filter(|source| !selected.contains(source))
+            .try_fold(0, |removed, source| {
+                self.forget_source_locations(&source)
+                    .map(|count| removed + count)
+            })
+    }
+
     pub fn forget_source_locations(&self, source_id: &str) -> Result<usize, String> {
         self.with_connection(|connection| {
             let tx = connection
@@ -5364,6 +5391,48 @@ mod tests {
                 .map(|item| item.id.as_str())
                 .collect::<Vec<_>>(),
             vec!["second-runtime", "first-runtime"]
+        );
+    }
+
+    #[test]
+    fn external_cleanup_retries_failed_removal_with_the_same_committed_selection() {
+        let store = store("retry_external_cleanup");
+        let mut removed = comic("removed-runtime", "removed/a.zip");
+        removed.source_id = "external:removed".into();
+        let mut kept = comic("kept-runtime", "kept/b.zip");
+        kept.source_id = "external:kept".into();
+        let local = comic("local-runtime", "local/c.zip");
+        store.sync_library(&[removed, kept, local]).unwrap();
+        let selected = BTreeSet::from(["external:kept".into()]);
+        store.with_connection(|connection| {
+            connection.execute_batch("CREATE TRIGGER fail_external_cleanup BEFORE DELETE ON comic_locations WHEN OLD.source_id='external:removed' BEGIN SELECT RAISE(ABORT, 'injected cleanup failure'); END;")
+                .map_err(|error| error.to_string())
+        }).unwrap();
+        assert!(store
+            .reconcile_external_source_locations(&selected)
+            .is_err());
+        assert!(store.get_runtime_item("removed-runtime").unwrap().is_some());
+        store
+            .with_connection(|connection| {
+                connection
+                    .execute_batch("DROP TRIGGER fail_external_cleanup")
+                    .map_err(|error| error.to_string())
+            })
+            .unwrap();
+        assert_eq!(
+            store
+                .reconcile_external_source_locations(&selected)
+                .unwrap(),
+            1
+        );
+        assert!(store.get_runtime_item("removed-runtime").unwrap().is_none());
+        assert!(store.get_runtime_item("kept-runtime").unwrap().is_some());
+        assert!(store.get_runtime_item("local-runtime").unwrap().is_some());
+        assert_eq!(
+            store
+                .reconcile_external_source_locations(&selected)
+                .unwrap(),
+            0
         );
     }
 

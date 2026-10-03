@@ -347,10 +347,28 @@ fn persist_settings_file_atomically(
 }
 
 fn load_persisted_external_bookmarks(settings_dir: &Path) -> Vec<state::ExternalBookmark> {
-    std::fs::read(settings_dir.join(EXTERNAL_BOOKMARKS_SETTINGS_FILE))
-        .ok()
-        .and_then(|data| serde_json::from_slice(&data).ok())
-        .unwrap_or_default()
+    external_bookmarks_for_restore(settings_dir, Vec::new(), true).unwrap_or_default()
+}
+
+fn external_bookmarks_for_restore(
+    settings_dir: &Path,
+    legacy_bookmarks: Vec<state::ExternalBookmark>,
+    legacy_cache_readable: bool,
+) -> Result<Vec<state::ExternalBookmark>, String> {
+    match std::fs::read(settings_dir.join(EXTERNAL_BOOKMARKS_SETTINGS_FILE)) {
+        Ok(data) => serde_json::from_slice(&data)
+            .map_err(|error| format!("無法讀取已保存的外部資料夾授權：{error}")),
+        // 只允許未保存過原生設定的舊版遷移。保存的空清單也具有權威，
+        // 不可因瀏覽器殘留快取而重新加入已被使用者移除的來源。
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+            if legacy_cache_readable {
+                Ok(legacy_bookmarks)
+            } else {
+                Err("舊外部資料夾清單暫時無法讀取，未保存任何變更；請稍後重試".into())
+            }
+        }
+        Err(error) => Err(format!("無法讀取已保存的外部資料夾授權：{error}")),
+    }
 }
 
 // iOS 更新 App 後容器 UUID 可能改變；只重定位內建 Documents，不改外部來源。
@@ -2665,12 +2683,32 @@ async fn suggest_comic_metadata(
 #[tauri::command]
 async fn set_bookmarks(
     data: Vec<crate::state::ExternalBookmark>,
+    restore_from_saved: Option<bool>,
+    legacy_cache_readable: Option<bool>,
     state: State<'_, Arc<AppState>>,
     app_handle: tauri::AppHandle,
-) -> Result<(), String> {
+) -> Result<Vec<crate::state::ExternalBookmark>, String> {
     // Serialize disk persistence with the matching in-memory update. Otherwise
     // an older request can finish writing after a newer request has applied.
     let _bookmark_lifecycle = state.bookmark_lifecycle.lock().await;
+    let data = if restore_from_saved.unwrap_or(false) {
+        let settings_dir = app_handle
+            .path()
+            .app_local_data_dir()
+            .map_err(|error| format!("無法取得 App 設定目錄：{error}"))?;
+        tokio::task::spawn_blocking(move || {
+            external_bookmarks_for_restore(
+                &settings_dir,
+                data,
+                legacy_cache_readable.unwrap_or(true),
+            )
+        })
+        .await
+        .map_err(|error| format!("外部來源還原工作失敗：{error}"))??
+    } else {
+        data
+    };
+    let committed_bookmarks = data.clone();
     let bookmarks_to_persist = data.clone();
     let settings_handle = app_handle.clone();
     tokio::task::spawn_blocking(move || {
@@ -2688,14 +2726,11 @@ async fn set_bookmarks(
                 .any(|new_bookmark| new_bookmark.bookmark == old.bookmark)
         })
         .collect();
-    let removed_source_ids = removed_bookmarks
+    let selected_source_ids = data
         .iter()
         .map(|bookmark| scanner::external_source_id(&bookmark.bookmark))
         .collect::<BTreeSet<_>>();
-    #[cfg(any(target_os = "ios", target_os = "macos"))]
-    let mut stop_accessing_errors: Vec<String> = Vec::new();
-    #[cfg(not(any(target_os = "ios", target_os = "macos")))]
-    let stop_accessing_errors: Vec<String> = Vec::new();
+    let mut cleanup_errors: Vec<String> = Vec::new();
 
     #[cfg(any(target_os = "ios", target_os = "macos"))]
     for removed in &removed_bookmarks {
@@ -2707,27 +2742,27 @@ async fn set_bookmarks(
                 bookmark: removed.bookmark.clone(),
             })
             .unwrap_or_else(|error| {
-                stop_accessing_errors.push(format!("{}: {error}", removed.name));
+                cleanup_errors.push(format!("無法釋放 {} 的舊權限：{error}", removed.name));
             });
     }
 
     {
         let _catalog_sync = state.catalog_sync.lock().await;
         let _scan_lifecycle = state.scan_lifecycle.lock().await;
-        if !removed_source_ids.is_empty() {
+        // Persistence has committed. Reconcile the durable catalog on every
+        // call so a previous cleanup failure is retryable with the same list.
+        let cleanup_result = async {
             let store = catalog_store(&state)?;
-            let source_ids = removed_source_ids.iter().cloned().collect::<Vec<_>>();
+            let selected = selected_source_ids.clone();
             tokio::task::spawn_blocking(move || {
-                source_ids
-                    .into_iter()
-                    .try_fold(0usize, |removed, source_id| {
-                        store
-                            .forget_source_locations(&source_id)
-                            .map(|count| removed + count)
-                    })
+                store.reconcile_external_source_locations(&selected)
             })
             .await
-            .map_err(|error| error.to_string())??;
+            .map_err(|error| error.to_string())?
+        }
+        .await;
+        if let Err(error) = cleanup_result {
+            cleanup_errors.push(format!("舊來源目錄清理未完成：{error}"));
         }
         {
             let mut active = state.active_bookmarks.lock().unwrap();
@@ -2736,7 +2771,10 @@ async fn set_bookmarks(
             }
         }
         let mut comics = state.comics.lock().await;
-        comics.retain(|comic| !removed_source_ids.contains(&comic.source_id));
+        comics.retain(|comic| {
+            !comic.source_id.starts_with("external:")
+                || selected_source_ids.contains(&comic.source_id)
+        });
         *state.external_bookmarks.write().unwrap() = data;
         drop(comics);
         state.invalidate_reader_cache();
@@ -2748,12 +2786,12 @@ async fn set_bookmarks(
     tauri::async_runtime::spawn(async move {
         crate::scanner::start_background_scan(state_clone, app_handle).await;
     });
-    if stop_accessing_errors.is_empty() {
-        Ok(())
+    if cleanup_errors.is_empty() {
+        Ok(committed_bookmarks)
     } else {
         Err(format!(
-            "清單已更新，舊權限可能未完全釋放；無法釋放外部資料夾權限: {}",
-            stop_accessing_errors.join("; ")
+            "清單已更新，部分舊來源清理未完成：{}",
+            cleanup_errors.join("; ")
         ))
     }
 }
@@ -3659,6 +3697,86 @@ mod tests {
         assert_eq!(fs::read(&destination).unwrap(), br#"[{"bookmark":"new"}]"#);
         assert_eq!(fs::read_dir(&settings_dir).unwrap().count(), 1);
         fs::remove_dir_all(settings_dir).unwrap();
+    }
+
+    #[test]
+    fn bookmark_restore_migrates_legacy_only_when_native_file_is_missing() {
+        let dir =
+            std::env::temp_dir().join(format!("gai-bookmark-restore-{}", uuid::Uuid::new_v4()));
+        fs::create_dir_all(&dir).unwrap();
+        let legacy = vec![state::ExternalBookmark {
+            bookmark: "legacy-grant".into(),
+            name: "Legacy".into(),
+        }];
+        let migrated = external_bookmarks_for_restore(&dir, legacy.clone(), true).unwrap();
+        assert_eq!(migrated[0].bookmark, "legacy-grant");
+        assert!(!dir.join(EXTERNAL_BOOKMARKS_SETTINGS_FILE).exists());
+
+        fs::write(
+            dir.join(EXTERNAL_BOOKMARKS_SETTINGS_FILE),
+            br#"[{"bookmark":"native-grant","name":"Native"}]"#,
+        )
+        .unwrap();
+        for browser in [Vec::new(), legacy] {
+            let restored = external_bookmarks_for_restore(&dir, browser, true).unwrap();
+            assert_eq!(restored.len(), 1);
+            assert_eq!(restored[0].bookmark, "native-grant");
+        }
+        fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn bookmark_restore_defers_migration_when_legacy_cache_cannot_be_read() {
+        let dir =
+            std::env::temp_dir().join(format!("gai-bookmark-cache-read-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&dir).unwrap();
+        assert!(external_bookmarks_for_restore(&dir, Vec::new(), false).is_err());
+        assert!(!dir.join(EXTERNAL_BOOKMARKS_SETTINGS_FILE).exists());
+        std::fs::write(dir.join(EXTERNAL_BOOKMARKS_SETTINGS_FILE), b"[]").unwrap();
+        assert!(external_bookmarks_for_restore(&dir, Vec::new(), false)
+            .unwrap()
+            .is_empty());
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn bookmark_restore_preserves_an_explicitly_saved_empty_native_list() {
+        let dir = std::env::temp_dir().join(format!("gai-bookmark-empty-{}", uuid::Uuid::new_v4()));
+        fs::create_dir_all(&dir).unwrap();
+        fs::write(dir.join(EXTERNAL_BOOKMARKS_SETTINGS_FILE), b"[]").unwrap();
+        let stale = vec![state::ExternalBookmark {
+            bookmark: "removed-grant".into(),
+            name: "Removed".into(),
+        }];
+        assert!(external_bookmarks_for_restore(&dir, stale, true)
+            .unwrap()
+            .is_empty());
+        fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn bookmark_restore_never_treats_corrupt_or_unreadable_native_data_as_missing() {
+        let dir =
+            std::env::temp_dir().join(format!("gai-bookmark-invalid-{}", uuid::Uuid::new_v4()));
+        fs::create_dir_all(&dir).unwrap();
+        let file = dir.join(EXTERNAL_BOOKMARKS_SETTINGS_FILE);
+        let legacy = vec![state::ExternalBookmark {
+            bookmark: "legacy-grant".into(),
+            name: "Legacy".into(),
+        }];
+        for invalid in [
+            b"not JSON".as_slice(),
+            br#"[{"bookmark":"missing-name"}]"#.as_slice(),
+        ] {
+            fs::write(&file, invalid).unwrap();
+            assert!(external_bookmarks_for_restore(&dir, legacy.clone(), true).is_err());
+            assert_eq!(fs::read(&file).unwrap(), invalid);
+        }
+        fs::remove_file(&file).unwrap();
+        fs::create_dir(&file).unwrap();
+        assert!(external_bookmarks_for_restore(&dir, legacy, true).is_err());
+        assert!(file.is_dir());
+        fs::remove_dir_all(dir).unwrap();
     }
 
     fn capability_comic(id: &str, title: &str) -> ComicItem {

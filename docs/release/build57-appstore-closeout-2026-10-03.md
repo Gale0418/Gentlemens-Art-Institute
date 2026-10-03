@@ -52,3 +52,8 @@ GitHub Codex reviewer 後續提出兩項留言，已核對當前第57版原碼�
 - **P2：非 Mac 的 Node 測試相容性。** iOS 在地化 fixture 無條件執行 `/usr/bin/plutil`；非 Mac 執行 `npm test` 會失敗。需要將 Mac 平台專用檢查明確限制於 Mac，或改用可攜解析器。[留言](https://github.com/Gale0418/Gentlemens-Art-Institute/pull/1#discussion_r4171729103)
 
 這些留言在本次既有 CodeRabbit 複審之後確認；CodeRabbit 的0 issues僅代表該輪結果。目前第57版兩平台仍待 Apple 審查，此次分支清理沒有修改程式或撤回提交。新問題已列回任務中心，不能宣稱已無未解P1。
+
+
+## 第58版修補接續
+
+2026-10-03 第57版兩平台 submission 已撤回；後續確認的啟動書籤P1與非Mac測試P2已修，正在最終回歸與第58版重送。此頁保留第57版歷史證據；現況見 [第58版收尾](build58-bookmark-restore-closeout-2026-10-03.md)。

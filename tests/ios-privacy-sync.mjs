@@ -198,32 +198,35 @@ console.log('PASS: iOS privacy sync fixture covers app_iOS/gai_iOS, missing refe
 
 // Permission keys must be at the root even when nested dictionaries contain
 // keys with the same name. TCC ignores a nested camera description.
-for (const nestedCamera of [false, true]) {
-  const temporaryRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'gai-ios-root-permissions-'));
-  try {
-    const appleDir = path.join(temporaryRoot, 'gen', 'apple');
-    const targetDir = path.join(appleDir, 'gai_iOS');
-    const projectDir = path.join(appleDir, 'gai.xcodeproj');
-    fs.mkdirSync(projectDir, { recursive: true });
-    fs.mkdirSync(targetDir, { recursive: true });
-    fs.writeFileSync(path.join(projectDir, 'project.pbxproj'), fixtureProject('gai_iOS'));
-    const infoFile = path.join(targetDir, 'Info.plist');
-    fs.writeFileSync(infoFile, `<?xml version="1.0" encoding="UTF-8"?><plist version="1.0"><dict>
-      <key>Nested</key><dict><key>CFBundleLocalizations</key><array><string>nested</string></array>
-      ${nestedCamera ? '<key>NSCameraUsageDescription</key><string>nested only</string>' : ''}</dict>
-      <key>CFBundleIdentifier</key><string>com.windsheep.gai</string></dict></plist>`);
-    const sync = () => childProcess.spawnSync(process.execPath, [path.join(root, 'scripts/sync-ios-localizations.mjs'), appleDir], { cwd: root, encoding: 'utf8' });
-    const result = sync();
-    assert.equal(result.status, 0, result.stderr);
-    const info = JSON.parse(childProcess.execFileSync('/usr/bin/plutil', ['-convert', 'json', '-o', '-', '--', infoFile], { encoding: 'utf8' }));
-    assert.ok(info.NSCameraUsageDescription.includes('Take a photo'));
-    assert.deepEqual(info.CFBundleLocalizations, ['zh-Hant', 'en', 'ja']);
-    assert.deepEqual(info.Nested.CFBundleLocalizations, ['nested']);
-    const before = fs.readFileSync(infoFile);
-    assert.equal(sync().status, 0);
-    assert.deepEqual(fs.readFileSync(infoFile), before, 'root permission sync stays idempotent');
-  } finally {
-    fs.rmSync(temporaryRoot, { recursive: true, force: true });
+// sync-ios-localizations also invokes Apple's plutil internally.
+if (process.platform === 'darwin') {
+  for (const nestedCamera of [false, true]) {
+    const temporaryRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'gai-ios-root-permissions-'));
+    try {
+      const appleDir = path.join(temporaryRoot, 'gen', 'apple');
+      const targetDir = path.join(appleDir, 'gai_iOS');
+      const projectDir = path.join(appleDir, 'gai.xcodeproj');
+      fs.mkdirSync(projectDir, { recursive: true });
+      fs.mkdirSync(targetDir, { recursive: true });
+      fs.writeFileSync(path.join(projectDir, 'project.pbxproj'), fixtureProject('gai_iOS'));
+      const infoFile = path.join(targetDir, 'Info.plist');
+      fs.writeFileSync(infoFile, `<?xml version="1.0" encoding="UTF-8"?><plist version="1.0"><dict>
+        <key>Nested</key><dict><key>CFBundleLocalizations</key><array><string>nested</string></array>
+        ${nestedCamera ? '<key>NSCameraUsageDescription</key><string>nested only</string>' : ''}</dict>
+        <key>CFBundleIdentifier</key><string>com.windsheep.gai</string></dict></plist>`);
+      const sync = () => childProcess.spawnSync(process.execPath, [path.join(root, 'scripts/sync-ios-localizations.mjs'), appleDir], { cwd: root, encoding: 'utf8' });
+      const result = sync();
+      assert.equal(result.status, 0, result.stderr);
+      const info = JSON.parse(childProcess.execFileSync('/usr/bin/plutil', ['-convert', 'json', '-o', '-', '--', infoFile], { encoding: 'utf8' }));
+      assert.ok(info.NSCameraUsageDescription.includes('Take a photo'));
+      assert.deepEqual(info.CFBundleLocalizations, ['zh-Hant', 'en', 'ja']);
+      assert.deepEqual(info.Nested.CFBundleLocalizations, ['nested']);
+      const before = fs.readFileSync(infoFile);
+      assert.equal(sync().status, 0);
+      assert.deepEqual(fs.readFileSync(infoFile), before, 'root permission sync stays idempotent');
+    } finally {
+      fs.rmSync(temporaryRoot, { recursive: true, force: true });
+    }
   }
+  console.log('PASS: camera permission and locales are root keys despite nested dictionaries');
 }
-console.log('PASS: camera permission and locales are root keys despite nested dictionaries');

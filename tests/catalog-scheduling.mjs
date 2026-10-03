@@ -4,11 +4,15 @@ import vm from 'node:vm';
 
 const appSource = fs.readFileSync(new URL('../public/app.js', import.meta.url), 'utf8');
 assert.match(appSource, /await restoreExternalBookmarks\(\)/, 'initial external bookmark restore must use the intent queue');
-assert.match(appSource, /async function restoreExternalBookmarks\(\)[\s\S]{0,260}setBookmarks\(readExternalBookmarks\(\)\)/, 'empty initial bookmark restore must still clear native state');
+assert.match(appSource, /eAPI\.restoreBookmarks\(readExternalBookmarks\(\), externalBookmarksLegacyReadable\)/, 'startup and first mutation must obtain an authoritative native bookmark snapshot');
 assert.match(appSource, /const latestBookmarks = readExternalBookmarks\(\)[\s\S]{0,180}bookmark\.bookmark !== bookmarkIdentity/, 'bookmark deletion must resolve identity inside the queue');
 assert.match(appSource, /async function initApp\(\)[\s\S]{0,180}sanitizeSmbConfig\(\)/, 'SMB legacy secrets must be sanitized during app initialization');
 assert.match(appSource, /requestPriorityLibraryScan\(state\.scanStatus, state\.favorites\)/, 'scan progress must submit native priority scan hints');
+const nativeSource = fs.readFileSync(new URL('../src-tauri/src/lib.rs', import.meta.url), 'utf8');
+const nativeBookmarkMutation = nativeSource.slice(nativeSource.indexOf('async fn set_bookmarks('), nativeSource.indexOf('async fn get_bookmarks('));
+assert.match(nativeBookmarkMutation, /if let Err\(error\) = cleanup_result[\s\S]*active\.remove[\s\S]*external_bookmarks\.write[\s\S]*if cleanup_errors\.is_empty/, 'post-commit cleanup errors must be retained until the matching process state is published');
 const tauriBridgeSource = fs.readFileSync(new URL('../public/tauri-api.js', import.meta.url), 'utf8');
+assert.match(tauriBridgeSource, /restoreBookmarks: \(data, legacyCacheReadable\) => invoke\('set_bookmarks', \{ data, restoreFromSaved: true, legacyCacheReadable \}\)/, 'startup restore must explicitly select native authority and legacy migration semantics');
 assert.match(tauriBridgeSource, /invoke\('scan_priority_library', \{[\s\S]*favoriteIds/, 'native bridge must expose the priority scan command');
 assert.match(tauriBridgeSource, /scanVisibleDirectory: \(relativePath, sourceId\) => invoke\('scan_visible_directory', \{[\s\S]*\.\.\.\(sourceId \? \{ sourceId \} : \{\}\)/, 'visible directory bridge must accept an optional source id');
 
@@ -2008,18 +2012,81 @@ console.log('external bookmark intent queue tests passed');
   assert.equal(failedRead.context.localStorage.values.has('gai:smb'), false, 'failed SMB read still attempts to remove the legacy record');
 }
 
-// 初始化 restore 即使 localStorage 為空，也要以空全量清單清掉同 process
-// 可能殘留的 native 來源。
+// 原生書籤具有權威：瀏覽器為空／過期時仍保留原生來源；只有 backend
+// 確認尚未保存過原生設定，才會用傳入快取做一次舊版遷移。
+for (const browser of [[], [{ name: '過期來源', bookmark: 'stale' }], [null, { bookmark: 'invalid' }]]) {
+  const restore = createHarness();
+  const native = [{ name: '原生來源', bookmark: 'native' }];
+  restore.context.localStorage.setItem('gai:externalBookmarks', JSON.stringify(browser));
+  let restores = 0;
+  restore.context.window.electronAPI.restoreBookmarks = async legacy => {
+    restores += 1;
+    assert.deepEqual(JSON.parse(JSON.stringify(legacy)), browser.filter(item => item && typeof item.bookmark === 'string' && typeof item.name === 'string'));
+    return native;
+  };
+  restore.context.window.electronAPI.setBookmarks = () => { throw new Error('startup must not submit the browser list as an ordinary edit'); };
+  await restore.hooks.restoreExternalBookmarks();
+  assert.deepEqual(JSON.parse(restore.context.localStorage.getItem('gai:externalBookmarks')), native);
+  await restore.hooks.restoreExternalBookmarks();
+  assert.equal(restores, 1, 'initialization is shared and idempotent within the current session');
+}
+
+// 使用者已明確移除全部來源時，原生保存的 [] 不得被過期快取復活。
 {
   const restore = createHarness();
-  let restored;
-  restore.context.window.electronAPI.setBookmarks = async bookmarks => {
-    restored = Array.from(bookmarks);
-  };
+  restore.context.localStorage.setItem('gai:externalBookmarks', JSON.stringify([{ name: '已移除', bookmark: 'stale' }]));
+  restore.context.window.electronAPI.restoreBookmarks = async () => [];
   await restore.hooks.restoreExternalBookmarks();
-  assert.deepEqual(restored, [], 'empty restore must submit an empty native bookmark list');
+  assert.deepEqual(JSON.parse(restore.context.localStorage.getItem('gai:externalBookmarks')), []);
 }
-console.log('external bookmark identity and empty restore tests passed');
+
+// 快取空間不足時仍使用工作階段的原生 snapshot，新增不會漏掉原本來源。
+{
+  const restore = createHarness();
+  const native = [{ name: '原生來源', bookmark: 'native' }];
+  restore.context.window.electronAPI.restoreBookmarks = async () => native;
+  restore.context.localStorage.setItem = () => { throw new Error('storage full'); };
+  restore.context.window.electronAPI.openExternalFolder = async () => ({ name: '新增來源', bookmark: 'new' });
+  let committed;
+  restore.context.window.electronAPI.setBookmarks = async data => { committed = JSON.parse(JSON.stringify(data)); };
+  restore.context.showLoader = () => {};
+  restore.context.startScanStatusPolling = () => {};
+  restore.context.scheduleLibraryRefresh = () => {};
+  await restore.hooks.addIOSLibrarySource(); // 刻意先於 initApp 的 restore。
+  assert.deepEqual(committed, [...native, { name: '新增來源', bookmark: 'new' }]);
+  await restore.hooks.restoreExternalBookmarks();
+  assert.deepEqual(committed, [...native, { name: '新增來源', bookmark: 'new' }]);
+}
+
+// 原生讀取／格式失敗時，不得退回瀏覽器清單覆寫原生；下一個 intent 可重試。
+{
+  const restore = createHarness();
+  let attempts = 0;
+  restore.context.window.electronAPI.restoreBookmarks = async () => {
+    if (++attempts === 1) throw new Error('saved native bookmarks unreadable');
+    return [{ name: '原生來源', bookmark: 'native' }];
+  };
+  await assert.rejects(restore.hooks.restoreExternalBookmarks(), /unreadable/);
+  await restore.hooks.restoreExternalBookmarks();
+  assert.deepEqual(JSON.parse(restore.context.localStorage.getItem('gai:externalBookmarks')), [{ name: '原生來源', bookmark: 'native' }]);
+}
+{
+  const restore = createHarness();
+  restore.context.localStorage.getItem = () => { throw new Error('storage unavailable'); };
+  restore.context.window.electronAPI.restoreBookmarks = async (legacy, readable) => {
+    assert.deepEqual(Array.from(legacy), []);
+    assert.equal(readable, false, 'a failed storage read must defer legacy migration');
+    throw new Error('legacy migration deferred');
+  };
+  await assert.rejects(vm.runInContext('restoreExternalBookmarks()', restore.context), /migration deferred/);
+  restore.context.localStorage.getItem = () => '[]';
+  restore.context.window.electronAPI.restoreBookmarks = async (_legacy, readable) => {
+    assert.equal(readable, true, 'a successful empty read may migrate an empty list');
+    return [];
+  };
+  await vm.runInContext('restoreExternalBookmarks()', restore.context);
+}
+console.log('native bookmark authority, startup queue and storage failure tests passed');
 
 // 同一路徑的不同來源必須各自導覽；root 才能合併展示來源候選，避免在
 // 外部 H/HCG 中混入另一個 H/H漫畫/Alpha 的幽靈卡片。
@@ -2134,6 +2201,7 @@ console.log('rapid source navigation tests passed');
 for (const [nativeError, expectedCount] of [
   [null, 0],
   ['清單已更新，舊權限可能未完全釋放；無法釋放外部資料夾權限', 0],
+  ['清單已更新，部分舊來源清理未完成：舊來源目錄清理未完成', 0],
   ['無法更新來源清單', 1],
 ]) {
   const removal = createHarness();

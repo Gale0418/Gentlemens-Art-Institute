@@ -550,6 +550,7 @@ if (window.__TAURI__) {
     getCatalogExportPath: (filename) => invoke('default_catalog_export_path', { filename }),
     getBookmarks: () => invoke('get_bookmarks'),
     setBookmarks: (data) => invoke('set_bookmarks', { data }),
+    restoreBookmarks: (data, legacyCacheReadable) => invoke('set_bookmarks', { data, restoreFromSaved: true, legacyCacheReadable }),
     saveImportedPhoto: (filename, data) => {
       if (!(data instanceof Uint8Array) || data.byteLength === 0 || data.byteLength > 64 * 1024 * 1024) {
         return Promise.reject(new Error(bridgeText('匯入圖片必須介於 1 byte 與 64 MiB。')));

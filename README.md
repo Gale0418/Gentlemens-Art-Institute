@@ -8,7 +8,7 @@
 
 已取得測試版時，先試讀內建原創風景，再加入自己的收藏。內建圖集供操作體驗；App 不提供漫畫下載或內容庫。NAS 離線時會保留已整理紀錄，原始頁面仍需來源可讀；進度保存在當前裝置，未提供跨裝置自動同步。
 
-**發布狀態：Mac 1.0 已可販售；iOS 1.0 (57) 與 Mac 1.0.1 (57) 已送審，均為 WAITING_FOR_REVIEW。** 2026-10-03 Apple 回讀確認。本輪65檔 CodeRabbit 審查的4項問題均已修正，10檔複審0 issues，前端15組與Rust187項通過；程式碼已整合main。版本、簽章與提交證據見 [發行收尾](docs/release/build57-appstore-closeout-2026-10-03.md)。原生TAG探索的Mac驗收沿用56版，iPad56已覆蓋但TAG操作待解鎖；完整VoiceOver與StoreKit交易仍列後續驗收。 GitHub 後續審查另確認啟動書籤還原的P1及非Mac測試相容性的P2，尚未修正，已列入收尾紀錄；工作分支已刪除，遠端僅剩main。
+**發布狀態：Mac 1.0 已可販售；第 57 版兩平台已撤回，正準備第 58 版重新送審。** 2026-10-03 已修正啟動時瀏覽器快取覆蓋原生書籤、清理失敗造成狀態不同步，以及非 Mac 測試誤執行 `plutil`。前端15組通過；Rust192項通過（1項既有ignored），CodeRabbit最終9檔複審0 issues，正式建置進行中。進度見 [第58版收尾](docs/release/build58-bookmark-restore-closeout-2026-10-03.md)。遠端僅保留main。實機TAG、完整VoiceOver與StoreKit交易仍保留驗收界線。
 
 [隱私政策](#隱私政策) · [支援與使用說明](SUPPORT.md)
 
@@ -27,7 +27,7 @@
 - SQLite catalog 是 metadata / location / progress 的主要本機 authority；來源離線不等於資料刪除。
 - 本機、iOS security-scoped folder 與單一 SMB/NAS 是獨立來源；其中一個來源離線不應清除其他來源或 catalog 紀錄。
 - 內建全年齡原創 demo 可在乾淨安裝、沒有 NAS／帳號／第三方下載的情況下直接驗證核心 reader。
-- 2026-10-03：iOS商店 `1.0` 綁定 build44，狀態 `WAITING_FOR_REVIEW`；Mac `1.0` 已 `READY_FOR_DISTRIBUTION`；本機 Mac／iPad 第54版的實機證據見 [產品體驗報告](docs/audits/2026-10-03-product-experience.md)。完整 StoreKit 交易、Privacy UI 確認、公開 Mac 正式簽署／公證與新版上傳重送仍待完成。第56版已覆蓋兩平台；TAG 探索的 Mac 驗收與實機限制見 [探索體驗報告](docs/audits/2026-10-03-discovery-experience.md)，勿把源碼變更視為已上架。
+- 2026-10-03：Mac `1.0` 已 `READY_FOR_DISTRIBUTION`；iOS `1.0` 與 Mac `1.0.1` 的第57版已撤回，待第58版修補與正式送審。本機Mac／iPad仍為第56版，TAG探索的Mac證據見 [探索體驗報告](docs/audits/2026-10-03-discovery-experience.md)。第58版尚未宣稱完成實機TAG、完整VoiceOver或StoreKit交易驗收。
 - `src-tauri/vendor/wry/` 是**刻意保留的 iOS WebKit startup patch**，目前仍由 Cargo `[patch.crates-io]` 使用；不要因為它看起來像 vendor 目錄就清掉。
 
 ## 隱私政策

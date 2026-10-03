@@ -368,6 +368,8 @@ function retryFailedReadingProgressSnapshots() {
 // 外部資料夾清單是全量寫入；所有 UI intent 必須在同一條 queue 內重讀
 // localStorage，避免兩個舊 snapshot 互相覆蓋。
 let externalBookmarkMutationQueue = Promise.resolve();
+let externalBookmarksSnapshot = null;
+let externalBookmarksLegacyReadable = true;
 
 function isLibraryRefreshBlocked() {
   return Boolean(
@@ -1296,7 +1298,7 @@ async function initApp() {
 
   // 載入外部書籤；和新增／刪除共用 queue，避免初始化 restore 覆蓋
   // 使用者在另一個 UI 事件中剛提交的最新清單。
-  if (eAPI.setBookmarks) {
+  if (eAPI.restoreBookmarks) {
     try {
       await restoreExternalBookmarks();
     } catch (error) {
@@ -1317,12 +1319,27 @@ function classifyBookmarkUpdateError(error) {
 }
 
 function readExternalBookmarks() {
+  if (externalBookmarksSnapshot !== null) return externalBookmarksSnapshot.map(bookmark => ({ ...bookmark }));
   try {
     const bookmarks = JSON.parse(localStorage.getItem('gai:externalBookmarks') || '[]');
-    return Array.isArray(bookmarks) ? bookmarks : [];
+    externalBookmarksLegacyReadable = true;
+    return Array.isArray(bookmarks) ? bookmarks.filter(bookmark => (
+      bookmark && typeof bookmark === 'object'
+      && typeof bookmark.bookmark === 'string' && typeof bookmark.name === 'string'
+    )) : [];
   } catch (error) {
-    console.warn('外部資料夾清單格式無效，將重新建立：', error);
+    externalBookmarksLegacyReadable = false;
+    console.warn('無法讀取舊外部資料夾清單；尚未保存原生設定時將暫停遷移：', error);
     return [];
+  }
+}
+
+function rememberExternalBookmarks(bookmarks) {
+  externalBookmarksSnapshot = bookmarks.map(bookmark => ({ ...bookmark }));
+  try {
+    localStorage.setItem('gai:externalBookmarks', JSON.stringify(externalBookmarksSnapshot));
+  } catch (error) {
+    console.warn('無法快取外部資料夾清單；原生設定與本次工作階段清單仍保留：', error);
   }
 }
 
@@ -1366,18 +1383,27 @@ function sanitizeSmbConfig() {
 }
 
 function enqueueExternalBookmarkMutation(operation) {
-  const queued = externalBookmarkMutationQueue.then(operation, operation);
+  const run = async () => {
+    // 使用者可能在啟動讀取設定時就按新增；第一個修改 intent 也必須先
+    // 取得原生來源，不能從尚未初始化的瀏覽器快取建立全量替換清單。
+    if (externalBookmarksSnapshot === null && eAPI?.restoreBookmarks) {
+      const restored = await eAPI.restoreBookmarks(readExternalBookmarks(), externalBookmarksLegacyReadable);
+      if (!Array.isArray(restored)) throw new Error('Native bookmark restore returned an invalid list');
+      rememberExternalBookmarks(restored);
+    }
+    return operation();
+  };
+  const queued = externalBookmarkMutationQueue.then(run, run);
   // 保留目前操作的 rejection 給呼叫端，但讓後續 UI intent 繼續排程。
   externalBookmarkMutationQueue = queued.catch(() => {});
   return queued;
 }
 
 async function restoreExternalBookmarks() {
-  if (!eAPI?.setBookmarks) return;
-  await enqueueExternalBookmarkMutation(async () => {
-    // 空清單也是有效的全量提交，用來清除 native process 內殘留的來源。
-    await eAPI.setBookmarks(readExternalBookmarks());
-  });
+  if (!eAPI?.restoreBookmarks) return;
+  // 原生在同一把生命週期鎖內讀取持久化清單；只有尚未保存過的舊版
+  // 才採用瀏覽器資料遷移。初始化與之後的修改共用同一條 queue。
+  await enqueueExternalBookmarkMutation(() => {});
 }
 
 function isIOSLibraryDevice() {
@@ -1412,14 +1438,14 @@ async function addIOSLibrarySource() {
         desiredBookmarks = renamedBookmarks;
         renamedBookmark = true;
         await window.electronAPI.setBookmarks(renamedBookmarks);
-        localStorage.setItem('gai:externalBookmarks', JSON.stringify(renamedBookmarks));
+        rememberExternalBookmarks(renamedBookmarks);
         return;
       }
 
       const nextBookmarks = [...bookmarks, { bookmark: result.bookmark, name: result.name }];
       desiredBookmarks = nextBookmarks;
       await window.electronAPI.setBookmarks(nextBookmarks);
-      localStorage.setItem('gai:externalBookmarks', JSON.stringify(nextBookmarks));
+      rememberExternalBookmarks(nextBookmarks);
     });
     if (duplicateBookmark) return;
     renderExternalBookmarks();
@@ -1432,7 +1458,7 @@ async function addIOSLibrarySource() {
     console.error('加入 iOS 外部資料夾失敗：', error);
     const { message, stateWasUpdated } = classifyBookmarkUpdateError(error);
     if (stateWasUpdated && desiredBookmarks) {
-      localStorage.setItem('gai:externalBookmarks', JSON.stringify(desiredBookmarks));
+      rememberExternalBookmarks(desiredBookmarks);
       renderExternalBookmarks();
       if (renamedBookmark) return;
       if (elements.scanDirStatus) {
@@ -8440,7 +8466,7 @@ function renderExternalBookmarks() {
             if (window.electronAPI && window.electronAPI.setBookmarks) {
               await window.electronAPI.setBookmarks(nextBookmarks);
             }
-            localStorage.setItem('gai:externalBookmarks', JSON.stringify(nextBookmarks));
+            rememberExternalBookmarks(nextBookmarks);
           });
         } catch (error) {
           const { message, stateWasUpdated } = classifyBookmarkUpdateError(error);
@@ -8450,7 +8476,7 @@ function renderExternalBookmarks() {
             return;
           }
           // 原生清單已提交；仍保存新清單，避免下次啟動重新加入已移除的來源。
-          if (desiredBookmarks) localStorage.setItem('gai:externalBookmarks', JSON.stringify(desiredBookmarks));
+          if (desiredBookmarks) rememberExternalBookmarks(desiredBookmarks);
           if (elements.scanDirStatus) elements.scanDirStatus.textContent = readerText('來源已移除；舊存取權限將在 App 結束後釋放。');
         }
         renderExternalBookmarks();

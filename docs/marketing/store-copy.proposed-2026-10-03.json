@@ -1,11 +1,19 @@
 {
-  "status": "draft-not-uploaded",
+  "status": "applied-to-submitted-versions",
   "observedReleaseState": {
     "date": "2026-10-03",
-    "storeVersion": "1.0",
-    "storeBuild": 44,
-    "state": "WAITING_FOR_REVIEW",
-    "installedLocalBuild": 54
+    "ios": {
+      "version": "1.0",
+      "build": 57,
+      "state": "WAITING_FOR_REVIEW"
+    },
+    "macOS": {
+      "liveVersion": "1.0",
+      "submittedVersion": "1.0.1",
+      "build": 57,
+      "state": "WAITING_FOR_REVIEW"
+    },
+    "installedLocalBuild": 56
   },
   "locales": {
     "zh-Hant": {
@@ -16,5 +24,10 @@
       "keywords": "漫畫,閱讀器,CBZ,CBR,條漫,雙頁,壓縮檔,圖集,NAS"
     }
   },
-  "authorship": "Gemini draft, Codex factual and wording edits"
+  "authorship": "Gemini draft, Codex factual and wording edits",
+  "appliedFields": [
+    "description",
+    "keywords",
+    "promotionalText"
+  ]
 }

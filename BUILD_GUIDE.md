@@ -68,6 +68,15 @@ src-tauri/target/release/bundle/
 
 正式 icon 來源是 `src-tauri/icons/`；根目錄不再有 Electron packaging icon。
 
+### Mac App Store universal 封裝注意事項
+
+請在 APFS 工作目錄建置，使用 `src-tauri/tauri.appstore.macos.conf.json`，保留 `arm64` 與 `x86_64`。第57版發現兩項需要檢查的封裝條件：
+
+- Tauri universal 輸出可能缺少附屬 `catalog-import`。將兩個 target 的同名 binary 用 `lipo -create` 合併至 universal 的 release 目錄，再執行 `tauri bundle --target universal-apple-darwin --bundles app --config src-tauri/tauri.appstore.macos.conf.json --ci`。主程式與附屬工具均須回讀兩個架構。
+- NAS 複製的 `icon.icns` 可能保留0700。bundle 的圖示檔應為0644，所有一般檔案須可讀、目錄須可搜尋；修正後重新檢查應用簽章。用正式 Mac App Store installer 憑證執行 `productbuild --component <app> /Applications --sign <identity> <pkg>`，展開 PKG 檢查 payload 權限並執行 `pkgutil --check-signature`。Apple 90255 表示安裝包內有非 root 使用者無法讀取的檔案。
+
+完整此次發行證據見 [第57版發行收尾](docs/release/build57-appstore-closeout-2026-10-03.md)。
+
 ## 4. iOS / iPadOS
 
 ### 4.1 不要在 SMB / exFAT checkout 直接跑 Xcode build

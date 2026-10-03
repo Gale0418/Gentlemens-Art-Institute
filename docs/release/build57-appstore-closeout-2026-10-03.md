@@ -6,7 +6,7 @@
 
 最新官方 API 回讀：Mac 1.0 為 READY_FOR_DISTRIBUTION（已可販售），iOS 1.0 (44) 為 WAITING_FOR_REVIEW。修正先前「兩平台均未上市」的過時描述。
 
-iOS 目標 1.0 (57)，Mac 更新目標 1.0.1 (57)。先驗證正式發行包，再撤回舊 iOS 提交、換成新版，保留 Pro 項目。目前尚未宣稱上傳／送審成功。
+iOS 1.0 (57) 已於 2026-10-03 12:51（台灣時間）正式提交並回讀 WAITING_FOR_REVIEW，包含原本的 Pro 項目。Mac 1.0.1 (57) 已於12:55（台灣時間）正式提交並回讀 WAITING_FOR_REVIEW；新版簽章、雙架構及安裝包權限檢查均完成。
 
 ## CodeRabbit 與修正
 
@@ -27,4 +27,19 @@ Mac TAG實機驗收沿用56版，iPad TAG尚待解鎖驗收。完整VoiceOver、
 
 ## 提交紀錄
 
-建置、簽署、Git main與Apple上傳／送審完成後補入確切版本、build ID、submission ID與回讀狀態。任務中心保持可回查的證據與未完成項目。
+- GitHub PR #1 已合併 main，程式碼提交 `2d8a96f784cac5a6fbab7c5c466644d069f28aa4`。工作分支刪除仍受 Chrome 政策檢查與 GitHub 插件缺少刪除分支功能限制。
+- iOS version ID：`f2110298-4d29-4ba1-8fa4-9310c72ee321`。
+- iOS build ID：`d247b334-7b35-403c-8c35-0287e0426511`，1.0 (57)，VALID。
+- iOS submission ID：`90383c71-4499-46a2-9450-77ffb65f3388`，WAITING_FOR_REVIEW，2026-10-03T04:51:01.830Z；原44版提交已取消。
+- iOS 發行 IPA SHA256：`66f0ed52ee8620493b63dd420a7d18064318c6aa243239b377fdf0c19367377d`。
+- Mac version ID：`cc371f96-660a-4453-847c-e6a79c98a8eb`。
+- Mac build ID：`5afa6bcf-2217-406b-a813-b40a1dd44973`，1.0.1 (57)，VALID。
+- Mac submission ID：`00f4e6cc-5c99-4a45-b98c-b7bfdd1f2eec`，WAITING_FOR_REVIEW，2026-10-03T04:55:07.640Z。
+- Mac universal PKG SHA256：`02cf7287a28106f9ef47fb4ff64eff8d9b0289823331913fb993e558674ec2c5`。
+- Gemini 繁中版本描述、關鍵字與宣傳文字已套用兩平台新版；Mac 另更新三語版本更新說明。
+
+## Mac 封裝檢查
+
+Tauri universal 編譯後沒有自動合併附屬 `catalog-import`，本輪以 lipo 合併兩架構後重新 bundle。主程式及附屬工具均為 arm64 + x86_64；正式應用簽章與 installer 簽章驗證通過。Apple 首次拒絕 90255 的原因是 icon.icns 模式為0700；改0644重新封裝，展開 PKG 檢查全部 payload 可供非 root 使用者讀取。僅修改包裝權限，原碼與簽章驗證仍通過。
+
+Mac 全包檢查的 `asc validate` 因同時存在已發布與待審 App Info 而無法選定年齡分級。改以確切 App Info ID 回讀兩筆分級（內容一致）、主分類 BOOKS、免費價格、既有完整商店截圖與審查聯絡資料；版本三語描述、關鍵字、支援網址與更新說明均已核對。Pro IAP 獨立檢查0 blocking；已加入iOS提交。兩平台提交成功後再回讀版本與submission的 WAITING_FOR_REVIEW，未把CLI總檢查誤稱通過。

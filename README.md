@@ -8,7 +8,7 @@
 
 已取得測試版時，先試讀內建原創風景，再加入自己的收藏。內建圖集供操作體驗；App 不提供漫畫下載或內容庫。NAS 離線時會保留已整理紀錄，原始頁面仍需來源可讀；進度保存在當前裝置，未提供跨裝置自動同步。
 
-**發布狀態：Mac 1.0 已可販售；iOS 1.0 (57) 與 Mac 1.0.1 (57) 已送審，均為 WAITING_FOR_REVIEW。** 2026-10-03 Apple 回讀確認。本輪65檔 CodeRabbit 審查的4項問題均已修正，10檔複審0 issues，前端15組與Rust187項通過；程式碼已整合main。版本、簽章與提交證據見 [發行收尾](docs/release/build57-appstore-closeout-2026-10-03.md)。原生TAG探索的Mac驗收沿用56版，iPad56已覆蓋但TAG操作待解鎖；完整VoiceOver與StoreKit交易仍列後續驗收。
+**發布狀態：Mac 1.0 已可販售；iOS 1.0 (57) 與 Mac 1.0.1 (57) 已送審，均為 WAITING_FOR_REVIEW。** 2026-10-03 Apple 回讀確認。本輪65檔 CodeRabbit 審查的4項問題均已修正，10檔複審0 issues，前端15組與Rust187項通過；程式碼已整合main。版本、簽章與提交證據見 [發行收尾](docs/release/build57-appstore-closeout-2026-10-03.md)。原生TAG探索的Mac驗收沿用56版，iPad56已覆蓋但TAG操作待解鎖；完整VoiceOver與StoreKit交易仍列後續驗收。 GitHub 後續審查另確認啟動書籤還原的P1及非Mac測試相容性的P2，尚未修正，已列入收尾紀錄；工作分支已刪除，遠端僅剩main。
 
 [隱私政策](#隱私政策) · [支援與使用說明](SUPPORT.md)
 

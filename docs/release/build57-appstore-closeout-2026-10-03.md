@@ -27,7 +27,7 @@ Mac TAG實機驗收沿用56版，iPad TAG尚待解鎖驗收。完整VoiceOver、
 
 ## 提交紀錄
 
-- GitHub PR #1 已合併 main，程式碼提交 `2d8a96f784cac5a6fbab7c5c466644d069f28aa4`。工作分支刪除仍受 Chrome 政策檢查與 GitHub 插件缺少刪除分支功能限制。
+- GitHub PR #1 已合併 main，程式碼提交 `2d8a96f784cac5a6fbab7c5c466644d069f28aa4`。2026-10-03 Chrome 已恢復操作，經 PR 頁面 Delete branch 刪除 `codex/comic-a45-build53-audit`；GitHub 插件回讀僅剩 `main`。
 - iOS version ID：`f2110298-4d29-4ba1-8fa4-9310c72ee321`。
 - iOS build ID：`d247b334-7b35-403c-8c35-0287e0426511`，1.0 (57)，VALID。
 - iOS submission ID：`90383c71-4499-46a2-9450-77ffb65f3388`，WAITING_FOR_REVIEW，2026-10-03T04:51:01.830Z；原44版提交已取消。
@@ -43,3 +43,12 @@ Mac TAG實機驗收沿用56版，iPad TAG尚待解鎖驗收。完整VoiceOver、
 Tauri universal 編譯後沒有自動合併附屬 `catalog-import`，本輪以 lipo 合併兩架構後重新 bundle。主程式及附屬工具均為 arm64 + x86_64；正式應用簽章與 installer 簽章驗證通過。Apple 首次拒絕 90255 的原因是 icon.icns 模式為0700；改0644重新封裝，展開 PKG 檢查全部 payload 可供非 root 使用者讀取。僅修改包裝權限，原碼與簽章驗證仍通過。
 
 Mac 全包檢查的 `asc validate` 因同時存在已發布與待審 App Info 而無法選定年齡分級。改以確切 App Info ID 回讀兩筆分級（內容一致）、主分類 BOOKS、免費價格、既有完整商店截圖與審查聯絡資料；版本三語描述、關鍵字、支援網址與更新說明均已核對。Pro IAP 獨立檢查0 blocking；已加入iOS提交。兩平台提交成功後再回讀版本與submission的 WAITING_FOR_REVIEW，未把CLI總檢查誤稱通過。
+
+## 送審後新審查留言（尚未修正）
+
+GitHub Codex reviewer 後續提出兩項留言，已核對當前第57版原碼；本輪未進行這兩個案例的實機重現：
+
+- **P1：啟動還原會覆蓋原生資料夾授權。** 原生啟動 setup 已把保存的書籤載入 state，`initApp()` 呼叫的 `restoreExternalBookmarks()` 仍使用 `readExternalBookmarks()` 的 WebView localStorage 清單呼叫 `setBookmarks()`。localStorage 被清空或落後時，原生 `set_bookmarks` 會保存該空／舊清單、停止移除來源的授權並移除其目錄索引。需要以原生資料作為權威，另明確處理舊版遷移；不得把自動啟動還原當成使用者刪除來源。[留言](https://github.com/Gale0418/Gentlemens-Art-Institute/pull/1#discussion_r4171729099)
+- **P2：非 Mac 的 Node 測試相容性。** iOS 在地化 fixture 無條件執行 `/usr/bin/plutil`；非 Mac 執行 `npm test` 會失敗。需要將 Mac 平台專用檢查明確限制於 Mac，或改用可攜解析器。[留言](https://github.com/Gale0418/Gentlemens-Art-Institute/pull/1#discussion_r4171729103)
+
+這些留言在本次既有 CodeRabbit 複審之後確認；CodeRabbit 的0 issues僅代表該輪結果。目前第57版兩平台仍待 Apple 審查，此次分支清理沒有修改程式或撤回提交。新問題已列回任務中心，不能宣稱已無未解P1。

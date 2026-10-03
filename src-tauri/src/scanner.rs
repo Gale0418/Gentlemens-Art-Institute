@@ -31,6 +31,7 @@ pub(crate) struct LibraryBatch {
     pub(crate) found: usize,
     pub(crate) visible: bool,
     pub(crate) visible_path: Option<String>,
+    pub(crate) visible_source_id: Option<String>,
     pub(crate) directories: Option<Vec<String>>,
 }
 
@@ -147,6 +148,7 @@ fn publish_partial_library(
             found: results.len(),
             visible: false,
             visible_path: None,
+            visible_source_id: None,
             directories: None,
         };
         *published = results.len();
@@ -191,6 +193,7 @@ fn publish_visible_library(
             found: results.len(),
             visible: true,
             visible_path: None,
+            visible_source_id: None,
             directories: None,
         }
     };
@@ -204,6 +207,7 @@ pub(crate) fn publish_visible_directories(
     generation: u64,
     visible_generation: u64,
     visible_path: String,
+    visible_source_id: Option<String>,
     directories: Vec<String>,
 ) {
     let _scan_lifecycle = state.scan_lifecycle.blocking_lock();
@@ -221,6 +225,7 @@ pub(crate) fn publish_visible_directories(
             found: 0,
             visible: true,
             visible_path: Some(visible_path),
+            visible_source_id,
             directories: Some(directories),
         },
     );
@@ -770,7 +775,10 @@ fn scan_recursive(
             }
             continue;
         }
-        if ext_lower != ".cbz" && ext_lower != ".zip" {
+        if !matches!(
+            ext_lower.as_str(),
+            ".cbz" | ".zip" | ".cb7" | ".7z" | ".cbr" | ".rar"
+        ) {
             continue;
         }
         let Some(rel_path) = path
@@ -1053,7 +1061,7 @@ fn prepare_saved_item(
         let root = if let Some(root) = active_root {
             root
         } else {
-            #[cfg(target_os = "ios")]
+            #[cfg(any(target_os = "ios", target_os = "macos"))]
             {
                 use tauri_plugin_ios_folder::{StartAccessingRequest, TauriPluginIosFolderExt};
                 let resolved = match _app_handle.tauri_plugin_ios_folder().start_accessing(
@@ -1074,7 +1082,7 @@ fn prepare_saved_item(
                     .insert(bookmark.clone(), resolved.path.clone());
                 resolved.path
             }
-            #[cfg(not(target_os = "ios"))]
+            #[cfg(not(any(target_os = "ios", target_os = "macos")))]
             {
                 item.r#type = "offline".into();
                 return Some(item);
@@ -1122,6 +1130,7 @@ fn publish_saved_items(
             found,
             visible: false,
             visible_path: None,
+            visible_source_id: None,
             directories: None,
         }
     };
@@ -1213,6 +1222,7 @@ pub async fn scan_visible_directory(
     state: Arc<AppState>,
     app_handle: tauri::AppHandle,
     relative_path: String,
+    source_id: Option<String>,
 ) -> Result<(), String> {
     let visible_generation = state.visible_scan_generation.fetch_add(1, Ordering::SeqCst) + 1;
     if relative_path == "📁 外部裝置" {
@@ -1223,7 +1233,21 @@ pub async fn scan_visible_directory(
     let local_configured = !state.scan_dir.read().unwrap().is_empty();
     let smb_config = state.smb_config.read().unwrap().clone();
     let smb_configured = smb_config.is_some();
-    let (run_smb, run_local) = visible_source_lanes(is_external, local_configured, smb_configured);
+    let (mut run_smb, mut run_local) =
+        visible_source_lanes(is_external, local_configured, smb_configured);
+    if let Some(source_id) = source_id.as_deref() {
+        if is_external {
+            if !source_id.starts_with("external:") {
+                return Err("漫畫來源與目前目錄不符".into());
+            }
+        } else if source_id == "smb" {
+            run_local = false;
+        } else if source_id.starts_with("local:") {
+            run_smb = false;
+        } else {
+            return Err("漫畫來源與目前目錄不符".into());
+        }
+    }
     let smb_task = if run_smb {
         if let Some(config) = smb_config {
             let smb_state = state.clone();
@@ -1258,7 +1282,10 @@ pub async fn scan_visible_directory(
     {
         let bookmarks = state.external_bookmarks.read().unwrap().clone();
         let Some(entry) = bookmarks.iter().find(|entry| {
-            external_path == entry.name || external_path.starts_with(&format!("{}/", entry.name))
+            (external_path == entry.name || external_path.starts_with(&format!("{}/", entry.name)))
+                && source_id
+                    .as_deref()
+                    .is_none_or(|id| external_source_id(&entry.bookmark) == id)
         }) else {
             return Err("找不到目前外部漫畫來源".into());
         };
@@ -1275,7 +1302,7 @@ pub async fn scan_visible_directory(
         let root = if let Some(root) = active_root {
             root
         } else {
-            #[cfg(target_os = "ios")]
+            #[cfg(any(target_os = "ios", target_os = "macos"))]
             {
                 use tauri_plugin_ios_folder::{StartAccessingRequest, TauriPluginIosFolderExt};
                 let path = app_handle
@@ -1292,7 +1319,7 @@ pub async fn scan_visible_directory(
                     .insert(entry.bookmark.clone(), path.clone());
                 path
             }
-            #[cfg(not(target_os = "ios"))]
+            #[cfg(not(any(target_os = "ios", target_os = "macos")))]
             {
                 return Ok(());
             }
@@ -1304,12 +1331,13 @@ pub async fn scan_visible_directory(
             Some(entry.bookmark.clone()),
         )
     } else {
-        (
-            state.scan_dir.read().unwrap().clone(),
-            relative_path,
-            None,
-            None,
-        )
+        let configured_root = state.scan_dir.read().unwrap().clone();
+        if let Some(source_id) = source_id.as_deref() {
+            if source_id != "smb" && local_source_id(Path::new(&configured_root)) != source_id {
+                return Err("漫畫來源與目前目錄不符".into());
+            }
+        }
+        (configured_root, relative_path, None, None)
     };
     let subpath =
         safe_visible_relative_path(&subpath).ok_or_else(|| "漫畫目錄路徑無效".to_string())?;
@@ -1418,6 +1446,7 @@ pub async fn scan_visible_directory(
             generation,
             visible_generation,
             visible_path,
+            source_id,
             directories,
         );
         Ok(())
@@ -1599,13 +1628,13 @@ pub async fn start_background_scan(state: Arc<AppState>, app_handle: tauri::AppH
             .iter()
             .map(|entry| external_source_id(&entry.bookmark))
             .collect::<BTreeSet<_>>();
-        #[cfg(not(target_os = "ios"))]
+        #[cfg(not(any(target_os = "ios", target_os = "macos")))]
         if !external_bookmarks.is_empty() {
             external_incomplete.store(true, Ordering::Release);
         }
         #[allow(unused_variables)]
         for bookmark_entry in external_bookmarks {
-            #[cfg(target_os = "ios")]
+            #[cfg(any(target_os = "ios", target_os = "macos"))]
             {
                 use tauri_plugin_ios_folder::StartAccessingRequest;
                 use tauri_plugin_ios_folder::StopAccessingRequest;
@@ -1689,7 +1718,6 @@ pub async fn start_background_scan(state: Arc<AppState>, app_handle: tauri::AppH
             let external_complete = outcome.external_complete;
             let local_source_id = outcome.local_source_id.clone();
             let external_source_ids = outcome.external_source_ids.clone();
-            let discovered = outcome.comics.clone();
             state
                 .saved_scan_closed_generation
                 .store(my_gen, Ordering::Release);
@@ -1707,7 +1735,7 @@ pub async fn start_background_scan(state: Arc<AppState>, app_handle: tauri::AppH
                         &app_handle,
                         my_gen,
                         source_id.clone(),
-                        source_items(&discovered, &source_id),
+                        source_items(&outcome.comics, &source_id),
                     )
                     .await;
                 }
@@ -1724,7 +1752,7 @@ pub async fn start_background_scan(state: Arc<AppState>, app_handle: tauri::AppH
                         &app_handle,
                         my_gen,
                         source_id.clone(),
-                        source_items(&discovered, source_id),
+                        source_items(&outcome.comics, source_id),
                     )
                     .await;
                     if state.scan_generation.load(Ordering::Acquire) != my_gen {

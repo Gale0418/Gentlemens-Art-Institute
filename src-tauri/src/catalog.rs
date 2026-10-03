@@ -3,6 +3,7 @@ use crate::metadata::{
 };
 use crate::state::ComicItem;
 use base64::{engine::general_purpose, Engine as _};
+use cap_fs_ext::DirExt;
 use rayon::prelude::*;
 use rusqlite::{params, Connection, OptionalExtension, Transaction};
 use serde::{Deserialize, Serialize};
@@ -16,6 +17,7 @@ use std::time::Duration;
 use unicode_normalization::UnicodeNormalization;
 
 const FINGERPRINT_VERSION: &str = "blake3-sampled-v1";
+const FILE_SIGNATURE_VERSION: &str = "file-signature-v2";
 const ARCHIVE_SAMPLE_BYTES: usize = 256 * 1024;
 const DIRECTORY_SAMPLE_BYTES: usize = 64 * 1024;
 const PAGE_SIZE_MAX: usize = 200;
@@ -420,13 +422,14 @@ impl CatalogStore {
         F: FnMut(usize, usize),
         C: Fn() -> bool + Sync,
     {
-        let known = self.with_connection(load_location_signatures)?;
         let total = comics.len();
         progress(0, total);
         let source_ids = comics
             .iter()
             .map(|comic| comic.source_id.clone())
             .collect::<BTreeSet<_>>();
+        let known =
+            self.with_connection(|connection| load_location_signatures(connection, &source_ids))?;
         let current_locations = comics
             .iter()
             .map(|comic| (comic.source_id.clone(), comic.relative_path.clone()))
@@ -472,12 +475,14 @@ impl CatalogStore {
                                 matches!(comic.r#type.as_str(), "folder" | "external-folder"),
                             )],
                             diagnostics: vec![],
+                            failures: vec![],
                         });
                         (
                             comic.clone(),
                             signature,
                             fingerprint,
                             fingerprint_version,
+                            comic.relative_path.clone(),
                             parse,
                         )
                     })
@@ -493,12 +498,20 @@ impl CatalogStore {
                                 let signature = path.and_then(file_signature);
                                 let key = (comic.source_id.clone(), comic.relative_path.clone());
                                 let previous = known.get(&key);
-                                let unchanged = previous.is_some_and(|item| {
-                                    item.fingerprint_version.as_deref() == Some(FINGERPRINT_VERSION)
-                                        && item.size == signature.as_ref().and_then(|value| value.0)
-                                        && item.mtime
-                                            == signature.as_ref().and_then(|value| value.1.clone())
-                                });
+                                let signature_is_complete = signature
+                                    .as_ref()
+                                    .is_some_and(|value| value.0.is_some() && value.1.is_some());
+                                let unchanged = signature_is_complete
+                                    && previous.is_some_and(|item| {
+                                        item.fingerprint_version.as_deref()
+                                            == Some(FINGERPRINT_VERSION)
+                                            && item.size
+                                                == signature.as_ref().and_then(|value| value.0)
+                                            && item.mtime
+                                                == signature
+                                                    .as_ref()
+                                                    .and_then(|value| value.1.clone())
+                                    });
                                 let fingerprint = if unchanged {
                                     previous.and_then(|item| item.fingerprint.clone())
                                 } else {
@@ -524,14 +537,20 @@ impl CatalogStore {
                                                     ),
                                                 ],
                                                 diagnostics: vec![],
+                                                failures: vec![],
                                             }),
                                     )
                                 };
+                                let scope_path = path
+                                    .filter(|item| item.exists())
+                                    .map(|item| item.to_string_lossy().into_owned())
+                                    .unwrap_or_else(|| comic.relative_path.clone());
                                 (
                                     comic.clone(),
                                     signature,
                                     fingerprint,
                                     fingerprint_version,
+                                    scope_path,
                                     parse,
                                 )
                             })
@@ -545,7 +564,7 @@ impl CatalogStore {
                 ensure_sync_current(&is_current)?;
                 let tx = connection.transaction().map_err(|error| error.to_string())?;
                 let mut affected = BTreeSet::new();
-                for (comic, signature, fingerprint, fingerprint_version, parse) in prepared {
+                for (comic, signature, fingerprint, fingerprint_version, scope_path, parse) in prepared {
                     let (comic_id, fingerprint_collision) = upsert_location(
                         &tx,
                         &comic,
@@ -556,7 +575,14 @@ impl CatalogStore {
                     import_runtime_progress(&tx, &comic_id, &comic.progress)?;
                     affected.insert(comic_id.clone());
                     if let Some(outcome) = parse {
-                        replace_imports(&tx, &comic_id, outcome.sources, outcome.diagnostics)?;
+                        replace_imports(
+                            &tx,
+                            &comic_id,
+                            &scope_path,
+                            outcome.sources,
+                            outcome.diagnostics,
+                            outcome.failures,
+                        )?;
                     }
                     if fingerprint_collision {
                         tx.execute(
@@ -680,7 +706,8 @@ impl CatalogStore {
                 params![record.location_id, runtime_id, record.after_relative_path, record.after_actual_path, i64::from(online)],
             ).map_err(|error| error.to_string())?;
             tx.execute("UPDATE file_operations SET status='succeeded',completed_at=CURRENT_TIMESTAMP WHERE id=?1 AND status='pending'", [operation_id]).map_err(|error| error.to_string())?;
-            tx.execute("UPDATE comics SET offline=CASE WHEN EXISTS(SELECT 1 FROM comic_locations WHERE comic_id=?1 AND online=1) THEN 0 ELSE 1 END WHERE id=?1", [record.comic_id]).map_err(|error| error.to_string())?;
+            tx.execute("UPDATE comics SET offline=CASE WHEN EXISTS(SELECT 1 FROM comic_locations WHERE comic_id=?1 AND online=1) THEN 0 ELSE 1 END WHERE id=?1", [&record.comic_id]).map_err(|error| error.to_string())?;
+            refresh_fts(&tx, &record.comic_id)?;
             tx.commit().map_err(|error| error.to_string())
         })
     }
@@ -727,6 +754,42 @@ impl CatalogStore {
         })
     }
 
+    pub fn mark_file_operation_needs_reconcile(
+        &self,
+        operation_id: &str,
+        message: &str,
+    ) -> Result<(), String> {
+        self.with_connection(|connection| {
+            let changed = connection
+                .execute(
+                    "UPDATE file_operations SET status='needs_reconcile',error_message=?2,completed_at=CURRENT_TIMESTAMP WHERE id=?1 AND status IN ('pending','succeeded')",
+                    params![operation_id, message],
+                )
+                .map_err(|error| error.to_string())?;
+            if changed != 1 {
+                return Err("檔案操作無法標記為待人工調和".into());
+            }
+            Ok(())
+        })
+    }
+
+    #[cfg(test)]
+    pub(crate) fn test_set_location_relative_path(
+        &self,
+        location_id: i64,
+        relative_path: &str,
+    ) -> Result<(), String> {
+        self.with_connection(|connection| {
+            connection
+                .execute(
+                    "UPDATE comic_locations SET relative_path=?2 WHERE id=?1",
+                    params![location_id, relative_path],
+                )
+                .map_err(|error| error.to_string())?;
+            Ok(())
+        })
+    }
+
     pub fn file_operation_for_undo(&self, token: &str) -> Result<FileOperationRecord, String> {
         self.with_connection(|connection| load_file_operation(connection, token, true))
     }
@@ -746,14 +809,15 @@ impl CatalogStore {
             ).map_err(|error| error.to_string())?;
             if changed != 1 { return Err("漫畫位置在操作後又被修改，已停止撤銷以避免覆寫".into()); }
             tx.execute("UPDATE file_operations SET status='undone',undone_at=CURRENT_TIMESTAMP WHERE id=?1 AND status='succeeded'", [operation_id]).map_err(|error| error.to_string())?;
-            tx.execute("UPDATE comics SET offline=0 WHERE id=?1", [record.comic_id]).map_err(|error| error.to_string())?;
+            tx.execute("UPDATE comics SET offline=0 WHERE id=?1", [&record.comic_id]).map_err(|error| error.to_string())?;
+            refresh_fts(&tx, &record.comic_id)?;
             tx.commit().map_err(|error| error.to_string())
         })
     }
 
     pub fn reconcile_file_operations(&self) -> Result<FileReconcileResult, String> {
         let pending = self.with_connection(|connection| {
-            let mut statement = connection.prepare("SELECT id,undo_token,comic_id,location_id,action,source_id,before_relative_path,before_actual_path,after_relative_path,after_actual_path,expected_fingerprint,status FROM file_operations WHERE status='pending' ORDER BY created_at").map_err(|error| error.to_string())?;
+            let mut statement = connection.prepare("SELECT id,undo_token,comic_id,location_id,action,source_id,before_relative_path,before_actual_path,after_relative_path,after_actual_path,expected_fingerprint,status FROM file_operations WHERE status IN ('pending','needs_reconcile') ORDER BY created_at").map_err(|error| error.to_string())?;
             let rows = statement.query_map([], |row| Ok(FileOperationRecord {
                 id: row.get(0)?, undo_token: row.get(1)?, comic_id: row.get(2)?, location_id: row.get(3)?, action: row.get(4)?, source_id: row.get(5)?,
                 before_relative_path: row.get(6)?, before_actual_path: row.get(7)?, after_relative_path: row.get(8)?, after_actual_path: row.get(9)?, expected_fingerprint: row.get(10)?, status: row.get(11)?,
@@ -762,6 +826,10 @@ impl CatalogStore {
         })?;
         let mut result = FileReconcileResult::default();
         for operation in pending {
+            if operation.status == "needs_reconcile" {
+                result.needs_attention += 1;
+                continue;
+            }
             let is_local =
                 operation.source_id == "local" || operation.source_id.starts_with("local:");
             if !is_local {
@@ -921,7 +989,7 @@ impl CatalogStore {
                     "SELECT l.runtime_id
                      FROM reading_progress p
                      JOIN comic_locations l ON l.comic_id=p.comic_id
-                     WHERE p.current_page > 0
+                     WHERE (p.current_page > 0 OR p.total_pages = 1)
                        AND p.updated_at IS NOT NULL
                        AND trim(p.updated_at) <> ''
                        AND l.runtime_id IS NOT NULL
@@ -1306,8 +1374,9 @@ impl CatalogStore {
             } else {
                 for identifier in &request.comic_ids {
                     let comic_id = resolve_comic_id(connection, identifier)?.ok_or_else(|| format!("找不到漫畫：{identifier}"))?;
-                    let path = connection.query_row("SELECT actual_path FROM comic_locations WHERE comic_id = ?1 AND online = 1 AND actual_path IS NOT NULL ORDER BY last_seen_at DESC LIMIT 1", [comic_id.as_str()], |row| row.get(0)).optional().map_err(|error| error.to_string())?;
-                    if let Some(path) = path { targets.push((comic_id, path)); }
+                    let mut statement = connection.prepare("SELECT actual_path FROM comic_locations WHERE comic_id = ?1 AND online = 1 AND actual_path IS NOT NULL ORDER BY last_seen_at DESC").map_err(|error| error.to_string())?;
+                    let rows = statement.query_map([comic_id.as_str()], |row| row.get::<_, String>(0)).map_err(|error| error.to_string())?;
+                    for path in rows { targets.push((comic_id.clone(), path.map_err(|error| error.to_string())?)); }
                 }
             }
             Ok(targets)
@@ -1334,13 +1403,15 @@ impl CatalogStore {
                 .transaction()
                 .map_err(|error| error.to_string())?;
             let mut diagnostics = 0;
-            for (comic_id, _, outcome) in parsed.iter() {
+            for (comic_id, path, outcome) in parsed.iter() {
                 diagnostics += outcome.diagnostics.len();
                 replace_imports(
                     &tx,
                     comic_id,
+                    path,
                     outcome.sources.clone(),
                     outcome.diagnostics.clone(),
+                    outcome.failures.clone(),
                 )?;
                 resolve_effective_metadata(&tx, comic_id)?;
                 refresh_fts(&tx, comic_id)?;
@@ -1956,12 +2027,24 @@ fn backfill_canonical_tags(connection: &mut Connection) -> Result<(), String> {
 
 fn load_location_signatures(
     connection: &mut Connection,
+    source_ids: &BTreeSet<String>,
 ) -> Result<HashMap<(String, String), LocationSignature>, String> {
+    if source_ids.is_empty() {
+        return Ok(HashMap::new());
+    }
+    let placeholders = (1..=source_ids.len())
+        .map(|index| format!("?{index}"))
+        .collect::<Vec<_>>()
+        .join(",");
+    let sql = format!(
+        "SELECT source_id,relative_path,size,mtime,fingerprint,fingerprint_version \
+         FROM comic_locations WHERE source_id IN ({placeholders})"
+    );
     let mut statement = connection
-        .prepare("SELECT source_id,relative_path,size,mtime,fingerprint,fingerprint_version FROM comic_locations")
+        .prepare(&sql)
         .map_err(|error| error.to_string())?;
     let rows = statement
-        .query_map([], |row| {
+        .query_map(rusqlite::params_from_iter(source_ids.iter()), |row| {
             Ok((
                 (row.get::<_, String>(0)?, row.get::<_, String>(1)?),
                 LocationSignature {
@@ -1978,15 +2061,198 @@ fn load_location_signatures(
 }
 
 pub(crate) fn file_signature(path: &Path) -> Option<(Option<i64>, Option<String>)> {
-    std::fs::metadata(path).ok().map(|metadata| {
-        (
-            Some(metadata.len() as i64),
-            metadata
-                .modified()
-                .ok()
-                .map(|time| chrono::DateTime::<chrono::Utc>::from(time).to_rfc3339()),
-        )
-    })
+    let metadata = std::fs::metadata(path).ok()?;
+    let mut components = vec![format!(
+        "root|{}|{}",
+        metadata.len(),
+        modified_stamp(&metadata)?
+    )];
+    if metadata.is_dir() {
+        let mut entries = std::fs::read_dir(path)
+            .ok()?
+            .map(|entry| {
+                let entry = entry.ok()?;
+                let entry_path = entry.path();
+                let entry_name = entry.file_name();
+                let entry_name_text = entry_name.to_string_lossy();
+                if !is_folder_signature_artifact(&entry_name_text) && !is_image(&entry_path) {
+                    return Some(None);
+                }
+                let child_metadata = entry.metadata().ok()?;
+                let kind = if child_metadata.is_dir() {
+                    "dir"
+                } else if child_metadata.is_file() {
+                    "file"
+                } else {
+                    "other"
+                };
+                Some(Some(format!(
+                    "child|{}|{}|{}|{}",
+                    entry_name_text,
+                    kind,
+                    child_metadata.len(),
+                    modified_stamp(&child_metadata)?
+                )))
+            })
+            .collect::<Option<Vec<Option<_>>>>()?
+            .into_iter()
+            .flatten()
+            .collect::<Vec<_>>();
+        entries.sort();
+        components.extend(entries);
+    } else {
+        for sidecar in metadata_sidecar_paths(path) {
+            let component = match std::fs::metadata(&sidecar) {
+                Ok(sidecar_metadata) if sidecar_metadata.is_file() => format!(
+                    "sidecar|{}|file|{}|{}",
+                    sidecar.file_name()?.to_string_lossy(),
+                    sidecar_metadata.len(),
+                    modified_stamp(&sidecar_metadata)?
+                ),
+                Ok(_) => format!(
+                    "sidecar|{}|non-file",
+                    sidecar.file_name()?.to_string_lossy()
+                ),
+                Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+                    format!("sidecar|{}|missing", sidecar.file_name()?.to_string_lossy())
+                }
+                Err(_) => return None,
+            };
+            components.push(component);
+        }
+    }
+    let root = components.remove(0);
+    components.sort();
+    components.insert(0, root);
+    let mut hasher = blake3::Hasher::new();
+    hasher.update(FILE_SIGNATURE_VERSION.as_bytes());
+    for component in components {
+        hasher.update(component.as_bytes());
+        hasher.update(&[0]);
+    }
+    Some((
+        Some(metadata.len() as i64),
+        Some(format!(
+            "{FILE_SIGNATURE_VERSION}:{}",
+            hasher.finalize().to_hex()
+        )),
+    ))
+}
+
+pub(crate) fn file_signature_from_dir(
+    parent: &cap_std::fs::Dir,
+    name: &Path,
+) -> Option<(Option<i64>, Option<String>)> {
+    let metadata = parent.symlink_metadata(name).ok()?;
+    if metadata.file_type().is_symlink() {
+        return None;
+    }
+    let mut components = vec![format!(
+        "root|{}|{}",
+        metadata.len(),
+        modified_stamp_cap(&metadata)?
+    )];
+    if metadata.is_dir() {
+        let child_dir = parent.open_dir_nofollow(name).ok()?;
+        let mut entries = child_dir
+            .entries()
+            .ok()?
+            .filter_map(Result::ok)
+            .filter_map(|entry| {
+                let entry_name = entry.file_name();
+                let entry_name_text = entry_name.to_string_lossy();
+                if !is_folder_signature_artifact(&entry_name_text)
+                    && !is_image(Path::new(&entry_name))
+                {
+                    return Some(None);
+                }
+                let child_metadata = entry.metadata().ok()?;
+                let kind = if child_metadata.is_dir() {
+                    "dir"
+                } else if child_metadata.is_file() {
+                    "file"
+                } else {
+                    "other"
+                };
+                Some(Some(format!(
+                    "child|{}|{}|{}|{}",
+                    entry_name_text,
+                    kind,
+                    child_metadata.len(),
+                    modified_stamp_cap(&child_metadata)?
+                )))
+            })
+            .flatten()
+            .collect::<Vec<_>>();
+        entries.sort();
+        components.extend(entries);
+    } else {
+        for sidecar in metadata_sidecar_paths(name) {
+            let component = match parent.metadata(&sidecar) {
+                Ok(sidecar_metadata) if sidecar_metadata.is_file() => format!(
+                    "sidecar|{}|file|{}|{}",
+                    sidecar.file_name()?.to_string_lossy(),
+                    sidecar_metadata.len(),
+                    modified_stamp_cap(&sidecar_metadata)?
+                ),
+                Ok(_) => format!(
+                    "sidecar|{}|non-file",
+                    sidecar.file_name()?.to_string_lossy()
+                ),
+                Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+                    format!("sidecar|{}|missing", sidecar.file_name()?.to_string_lossy())
+                }
+                Err(_) => return None,
+            };
+            components.push(component);
+        }
+    }
+    let root = components.remove(0);
+    components.sort();
+    components.insert(0, root);
+    let mut hasher = blake3::Hasher::new();
+    hasher.update(FILE_SIGNATURE_VERSION.as_bytes());
+    for component in components {
+        hasher.update(component.as_bytes());
+        hasher.update(&[0]);
+    }
+    Some((
+        Some(metadata.len() as i64),
+        Some(format!(
+            "{FILE_SIGNATURE_VERSION}:{}",
+            hasher.finalize().to_hex()
+        )),
+    ))
+}
+
+fn modified_stamp(metadata: &std::fs::Metadata) -> Option<String> {
+    metadata
+        .modified()
+        .ok()
+        .map(|time| chrono::DateTime::<chrono::Utc>::from(time).to_rfc3339())
+}
+
+fn modified_stamp_cap(metadata: &cap_std::fs::Metadata) -> Option<String> {
+    metadata
+        .modified()
+        .ok()
+        .map(|time| chrono::DateTime::<chrono::Utc>::from(time.into_std()).to_rfc3339())
+}
+
+fn metadata_sidecar_paths(path: &Path) -> Vec<std::path::PathBuf> {
+    let mut paths = BTreeSet::new();
+    paths.insert(path.with_extension("json"));
+    if let Some(name) = path.file_name() {
+        paths.insert(path.with_file_name(format!("{}.json", name.to_string_lossy())));
+    }
+    paths.into_iter().collect()
+}
+
+fn is_folder_signature_artifact(name: &str) -> bool {
+    matches!(
+        name.trim_matches('/').to_ascii_lowercase().as_str(),
+        "comicinfo.xml" | "info.json" | "info.txt" | "galleryinfo.txt"
+    )
 }
 
 fn ensure_sync_current<C>(is_current: &C) -> Result<(), String>
@@ -2173,19 +2439,55 @@ fn upsert_location(
 fn replace_imports(
     tx: &Transaction<'_>,
     comic_id: &str,
+    location_path: &str,
     sources: Vec<ParsedMetadataSource>,
     diagnostics: Vec<ParserDiagnostic>,
+    failures: Vec<metadata::ParseFailure>,
 ) -> Result<(), String> {
-    tx.execute(
-        "DELETE FROM metadata_sources WHERE comic_id = ?1 AND parser_id NOT LIKE 'ai:%'",
-        [comic_id],
-    )
-    .map_err(|error| error.to_string())?;
-    tx.execute(
-        "DELETE FROM import_diagnostics WHERE comic_id = ?1",
-        [comic_id],
-    )
-    .map_err(|error| error.to_string())?;
+    let existing_sources = {
+        let mut statement = tx
+            .prepare(
+                "SELECT id,source_path FROM metadata_sources WHERE comic_id = ?1 AND parser_id NOT LIKE 'ai:%'",
+            )
+            .map_err(|error| error.to_string())?;
+        let rows = statement
+            .query_map([comic_id], |row| {
+                Ok((row.get::<_, i64>(0)?, row.get::<_, String>(1)?))
+            })
+            .map_err(|error| error.to_string())?
+            .collect::<Result<Vec<_>, _>>()
+            .map_err(|error| error.to_string())?;
+        rows
+    };
+    for (source_id, source_path) in existing_sources {
+        if source_path_matches_location(&source_path, location_path)
+            && !source_path_matches_failure(&source_path, &failures)
+        {
+            tx.execute("DELETE FROM metadata_sources WHERE id = ?1", [source_id])
+                .map_err(|error| error.to_string())?;
+        }
+    }
+    let existing_diagnostics = {
+        let mut statement = tx
+            .prepare("SELECT id,source_path FROM import_diagnostics WHERE comic_id = ?1")
+            .map_err(|error| error.to_string())?;
+        let rows = statement
+            .query_map([comic_id], |row| {
+                Ok((row.get::<_, i64>(0)?, row.get::<_, String>(1)?))
+            })
+            .map_err(|error| error.to_string())?;
+        rows.collect::<Result<Vec<_>, _>>()
+            .map_err(|error| error.to_string())?
+    };
+    for (diagnostic_id, source_path) in existing_diagnostics {
+        if source_path_matches_location(&source_path, location_path) {
+            tx.execute(
+                "DELETE FROM import_diagnostics WHERE id = ?1",
+                [diagnostic_id],
+            )
+            .map_err(|error| error.to_string())?;
+        }
+    }
     for source in sources {
         tx.execute(
             "INSERT INTO metadata_sources(comic_id, parser_id, parser_version, source_path, source_digest, confidence, raw_json) VALUES(?1, ?2, ?3, ?4, ?5, ?6, ?7)",
@@ -2204,6 +2506,52 @@ fn replace_imports(
         tx.execute("INSERT INTO import_diagnostics(comic_id, parser_id, source_path, severity, message) VALUES(?1, ?2, ?3, ?4, ?5)", params![comic_id, diagnostic.parser_id, diagnostic.source_path, diagnostic.severity, diagnostic.message]).map_err(|error| error.to_string())?;
     }
     Ok(())
+}
+
+fn source_path_matches_failure(path: &str, failures: &[metadata::ParseFailure]) -> bool {
+    failures.iter().any(|failure| match failure {
+        metadata::ParseFailure::Artifact { source_path } => path == source_path,
+        metadata::ParseFailure::Scope { source_prefix } => path.starts_with(source_prefix),
+    })
+}
+
+fn source_path_matches_location(source_path: &str, location_path: &str) -> bool {
+    if source_path == location_path {
+        return true;
+    }
+
+    let location = Path::new(location_path);
+    if location.is_dir() {
+        let trimmed = location_path.trim_end_matches(['/', '\\']);
+        return source_path.starts_with(&format!("{trimmed}/"))
+            || source_path.starts_with(&format!("{trimmed}\\"));
+    }
+
+    if is_archive_location(location_path)
+        && source_path.starts_with(&format!(
+            "{}::",
+            location_path.trim_end_matches(['/', '\\'])
+        ))
+    {
+        return true;
+    }
+
+    [
+        Some(location.with_extension("json")),
+        location
+            .file_name()
+            .map(|name| location.with_file_name(format!("{}.json", name.to_string_lossy()))),
+    ]
+    .into_iter()
+    .flatten()
+    .any(|sibling| sibling.to_string_lossy() == source_path)
+}
+
+fn is_archive_location(path: &str) -> bool {
+    Path::new(path)
+        .extension()
+        .and_then(|item| item.to_str())
+        .is_some_and(|item| matches!(item.to_ascii_lowercase().as_str(), "zip" | "cbz"))
 }
 
 fn metadata_fields(metadata: &NormalizedMetadata) -> Vec<(&'static str, Value)> {
@@ -2261,7 +2609,7 @@ fn resolve_effective_metadata(tx: &Transaction<'_>, comic_id: &str) -> Result<()
     Ok(())
 }
 
-fn build_view(connection: &Connection, comic_id: &str) -> Result<ComicMetadataView, String> {
+fn build_search_view(connection: &Connection, comic_id: &str) -> Result<ComicMetadataView, String> {
     let mut view = connection.query_row(
         "SELECT c.id,c.title,c.series,c.volume,c.number,c.summary,c.language,c.reading_direction,c.published_at,c.offline,
           l.runtime_id,l.relative_path,l.source_id FROM comics c LEFT JOIN comic_locations l ON l.comic_id=c.id WHERE c.id=?1 ORDER BY l.online DESC,l.last_seen_at DESC LIMIT 1",
@@ -2274,6 +2622,244 @@ fn build_view(connection: &Connection, comic_id: &str) -> Result<ComicMetadataVi
     ).map_err(|error| error.to_string())?;
     view.creators = effective_creators(connection, comic_id)?;
     view.tags = effective_tags(connection, comic_id)?;
+    Ok(view)
+}
+
+fn build_search_views_batch(
+    connection: &Connection,
+) -> Result<HashMap<String, ComicMetadataView>, String> {
+    let mut views = HashMap::new();
+    let mut statement = connection
+        .prepare(
+            "WITH ranked_locations AS (
+               SELECT l.*,
+                      ROW_NUMBER() OVER (
+                        PARTITION BY l.comic_id
+                        ORDER BY l.online DESC,l.last_seen_at DESC
+                      ) AS location_rank
+               FROM comic_locations l
+             )
+             SELECT c.id,c.title,c.series,c.volume,c.number,c.summary,c.language,
+                    c.reading_direction,c.published_at,c.offline,
+                    l.runtime_id,l.relative_path,l.source_id
+             FROM comics c
+             LEFT JOIN ranked_locations l
+               ON l.comic_id=c.id AND l.location_rank=1",
+        )
+        .map_err(|error| error.to_string())?;
+    for row in statement
+        .query_map([], |row| {
+            Ok(ComicMetadataView {
+                comic_id: row.get(0)?,
+                title: row.get(1)?,
+                series: row.get(2)?,
+                volume: row.get(3)?,
+                number: row.get(4)?,
+                summary: row.get(5)?,
+                language: row.get(6)?,
+                reading_direction: row.get(7)?,
+                published_at: row.get(8)?,
+                offline: row.get::<_, i64>(9)? != 0,
+                runtime_id: row.get(10)?,
+                relative_path: row.get(11)?,
+                source_id: row.get(12)?,
+                creators: BTreeMap::new(),
+                tags: Vec::new(),
+                candidates: Vec::new(),
+                locked_fields: Vec::new(),
+                diagnostics: Vec::new(),
+            })
+        })
+        .map_err(|error| error.to_string())?
+    {
+        let view = row.map_err(|error| error.to_string())?;
+        views.insert(view.comic_id.clone(), view);
+    }
+    drop(statement);
+
+    let mut creator_values = HashMap::<String, String>::new();
+    let mut statement = connection
+        .prepare(
+            "SELECT comic_id,value_json FROM user_field_overrides
+             WHERE field_key='creators'",
+        )
+        .map_err(|error| error.to_string())?;
+    for row in statement
+        .query_map([], |row| {
+            Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
+        })
+        .map_err(|error| error.to_string())?
+    {
+        let (comic_id, value) = row.map_err(|error| error.to_string())?;
+        creator_values.insert(comic_id, value);
+    }
+    drop(statement);
+    let mut statement = connection
+        .prepare(
+            "SELECT mc.comic_id,mc.value_json
+             FROM metadata_candidates mc
+             JOIN metadata_sources ms ON ms.id=mc.source_id
+             WHERE mc.field_key='creators' AND ms.parser_id NOT LIKE 'ai:%'
+             ORDER BY mc.comic_id,mc.priority DESC,mc.confidence DESC,mc.id ASC",
+        )
+        .map_err(|error| error.to_string())?;
+    for row in statement
+        .query_map([], |row| {
+            Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
+        })
+        .map_err(|error| error.to_string())?
+    {
+        let (comic_id, value) = row.map_err(|error| error.to_string())?;
+        creator_values.entry(comic_id).or_insert(value);
+    }
+    drop(statement);
+    for (comic_id, value) in creator_values {
+        if let Some(view) = views.get_mut(&comic_id) {
+            view.creators = serde_json::from_str(&value).unwrap_or_default();
+        }
+    }
+
+    let mut projected_tags = HashMap::<i64, (i64, ScopedTag)>::new();
+    let mut statement = connection
+        .prepare(
+            "SELECT raw.id,final.id,final.namespace,final.display_value,final.disabled
+             FROM tags raw
+             JOIN canonical_tags source ON source.id=raw.canonical_tag_id
+             LEFT JOIN tag_redirects redirect ON redirect.source_tag_id=source.id
+             JOIN canonical_tags final ON final.id=COALESCE(redirect.target_tag_id,source.id)",
+        )
+        .map_err(|error| error.to_string())?;
+    for row in statement
+        .query_map([], |row| {
+            Ok((
+                row.get::<_, i64>(0)?,
+                row.get::<_, i64>(1)?,
+                ScopedTag {
+                    namespace: row.get(2)?,
+                    value: row.get(3)?,
+                },
+                row.get::<_, i64>(4)? != 0,
+            ))
+        })
+        .map_err(|error| error.to_string())?
+    {
+        let (raw_id, canonical_id, tag, disabled) = row.map_err(|error| error.to_string())?;
+        if !disabled {
+            projected_tags.insert(raw_id, (canonical_id, tag));
+        }
+    }
+    drop(statement);
+
+    let mut raw_tags = HashMap::<String, BTreeSet<i64>>::new();
+    let mut statement = connection
+        .prepare(
+            "SELECT DISTINCT c.comic_id,c.tag_id
+             FROM comic_tag_candidates c
+             JOIN metadata_sources s ON s.id=c.source_id
+             WHERE s.parser_id NOT LIKE 'ai:%'",
+        )
+        .map_err(|error| error.to_string())?;
+    for row in statement
+        .query_map([], |row| {
+            Ok((row.get::<_, String>(0)?, row.get::<_, i64>(1)?))
+        })
+        .map_err(|error| error.to_string())?
+    {
+        let (comic_id, tag_id) = row.map_err(|error| error.to_string())?;
+        raw_tags.entry(comic_id).or_default().insert(tag_id);
+    }
+    drop(statement);
+
+    let mut folder_rules = HashMap::<String, Vec<(String, i64)>>::new();
+    let mut statement = connection
+        .prepare(
+            "SELECT source_id,folder_path,tag_id
+             FROM folder_tag_rules WHERE enabled=1",
+        )
+        .map_err(|error| error.to_string())?;
+    for row in statement
+        .query_map([], |row| {
+            Ok((
+                row.get::<_, String>(0)?,
+                row.get::<_, String>(1)?,
+                row.get::<_, i64>(2)?,
+            ))
+        })
+        .map_err(|error| error.to_string())?
+    {
+        let (source_id, folder_path, tag_id) = row.map_err(|error| error.to_string())?;
+        folder_rules
+            .entry(source_id)
+            .or_default()
+            .push((folder_path, tag_id));
+    }
+    drop(statement);
+    for view in views.values() {
+        let (Some(source_id), Some(path)) = (&view.source_id, &view.relative_path) else {
+            continue;
+        };
+        let normalized = normalize_path(path);
+        for (folder_path, tag_id) in folder_rules.get(source_id).into_iter().flatten() {
+            if path_is_within(&normalized, folder_path) {
+                raw_tags
+                    .entry(view.comic_id.clone())
+                    .or_default()
+                    .insert(*tag_id);
+            }
+        }
+    }
+
+    let mut tag_overrides = HashMap::<String, Vec<(i64, String)>>::new();
+    let mut statement = connection
+        .prepare("SELECT comic_id,tag_id,action FROM comic_tag_overrides ORDER BY rowid")
+        .map_err(|error| error.to_string())?;
+    for row in statement
+        .query_map([], |row| {
+            Ok((
+                row.get::<_, String>(0)?,
+                row.get::<_, i64>(1)?,
+                row.get::<_, String>(2)?,
+            ))
+        })
+        .map_err(|error| error.to_string())?
+    {
+        let (comic_id, tag_id, action) = row.map_err(|error| error.to_string())?;
+        tag_overrides
+            .entry(comic_id)
+            .or_default()
+            .push((tag_id, action));
+    }
+    drop(statement);
+
+    for (comic_id, view) in views.iter_mut() {
+        let mut tags = BTreeMap::new();
+        if let Some(raw_ids) = raw_tags.get(comic_id) {
+            for raw_id in raw_ids {
+                if let Some((canonical_id, tag)) = projected_tags.get(raw_id) {
+                    tags.insert(*canonical_id, tag.clone());
+                }
+            }
+        }
+        if let Some(overrides) = tag_overrides.get(comic_id) {
+            for (raw_id, action) in overrides {
+                let Some((canonical_id, tag)) = projected_tags.get(raw_id) else {
+                    continue;
+                };
+                if action == "exclude" {
+                    tags.remove(canonical_id);
+                } else {
+                    tags.insert(*canonical_id, tag.clone());
+                }
+            }
+        }
+        view.tags = tags.into_values().collect();
+    }
+
+    Ok(views)
+}
+
+fn hydrate_full_view(connection: &Connection, view: &mut ComicMetadataView) -> Result<(), String> {
+    let comic_id = view.comic_id.as_str();
     let mut statement = connection.prepare(
         "SELECT mc.field_key,mc.value_json,ms.parser_id,mc.priority,mc.confidence,ms.source_path FROM metadata_candidates mc JOIN metadata_sources ms ON ms.id=mc.source_id WHERE mc.comic_id=?1 ORDER BY mc.field_key,mc.priority DESC"
     ).map_err(|error| error.to_string())?;
@@ -2301,6 +2887,12 @@ fn build_view(connection: &Connection, comic_id: &str) -> Result<ComicMetadataVi
         .collect::<Result<Vec<_>, _>>()
         .map_err(|error| error.to_string())?;
     view.diagnostics = load_diagnostics(connection, Some(comic_id), 100)?;
+    Ok(())
+}
+
+fn build_view(connection: &Connection, comic_id: &str) -> Result<ComicMetadataView, String> {
+    let mut view = build_search_view(connection, comic_id)?;
+    hydrate_full_view(connection, &mut view)?;
     Ok(view)
 }
 
@@ -2363,7 +2955,7 @@ fn effective_tags(connection: &Connection, comic_id: &str) -> Result<Vec<ScopedT
             tags.insert(canonical_id, tag);
         }
     }
-    let mut statement = connection.prepare("SELECT o.tag_id,o.action,t.namespace,t.value FROM comic_tag_overrides o JOIN tags t ON t.id=o.tag_id WHERE o.comic_id=?1").map_err(|error| error.to_string())?;
+    let mut statement = connection.prepare("SELECT o.tag_id,o.action,t.namespace,t.value FROM comic_tag_overrides o JOIN tags t ON t.id=o.tag_id WHERE o.comic_id=?1 ORDER BY o.rowid").map_err(|error| error.to_string())?;
     for row in statement
         .query_map([comic_id], |row| {
             Ok((
@@ -2647,8 +3239,10 @@ fn search_catalog(
     let mut total = 0usize;
     let mut items = Vec::with_capacity(limit);
     let mut facets: BTreeMap<String, BTreeMap<String, usize>> = BTreeMap::new();
-    let mut process_id = |id: String| -> Result<(), String> {
-        let view = build_view(connection, &id)?;
+    let mut process_view = |mut view: ComicMetadataView| -> Result<(), String> {
+        // Matching and facet counting only need the effective searchable fields.
+        // Candidates, locks, and diagnostics are hydrated for the page returned
+        // to the caller, avoiding several queries for every matching row.
         if parsed.matches(&view) {
             total += 1;
             if let Some(language) = &view.language {
@@ -2666,14 +3260,18 @@ fn search_catalog(
                     .or_default() += 1;
             }
             if total > offset && items.len() < limit {
+                hydrate_full_view(connection, &mut view)?;
                 items.push(view);
             }
         }
         Ok(())
     };
+    let mut process_id =
+        |id: String| -> Result<(), String> { process_view(build_search_view(connection, &id)?) };
     if seed_terms.is_empty() {
-        // Keep the result cursor on SQLite instead of materializing every ID in
-        // memory. This matters for exclusion-only searches over large catalogs.
+        // Effective searchable fields are loaded in batches so exclusion-only
+        // searches do not prepare and execute several statements per comic.
+        let mut search_views = build_search_views_batch(connection)?;
         let mut statement = connection
             .prepare("SELECT id FROM comics ORDER BY updated_at DESC,title COLLATE NOCASE")
             .map_err(|error| error.to_string())?;
@@ -2681,7 +3279,11 @@ fn search_catalog(
             .query_map([], |row| row.get::<_, String>(0))
             .map_err(|error| error.to_string())?;
         for row in rows {
-            process_id(row.map_err(|error| error.to_string())?)?;
+            let id = row.map_err(|error| error.to_string())?;
+            let view = search_views
+                .remove(&id)
+                .ok_or_else(|| format!("找不到漫畫搜尋資料: {id}"))?;
+            process_view(view)?;
         }
     } else {
         let long_terms = seed_terms
@@ -3937,25 +4539,106 @@ pub(crate) fn sampled_fingerprint(path: &Path) -> Result<String, String> {
             hash_prefix(&mut hasher, &last.path(), DIRECTORY_SAMPLE_BYTES)?;
         }
     } else {
-        let mut file = File::open(path).map_err(|error| error.to_string())?;
-        let len = file.metadata().map_err(|error| error.to_string())?.len();
-        hasher.update(&len.to_le_bytes());
-        let mut buffer = vec![0; ARCHIVE_SAMPLE_BYTES.min(len as usize)];
-        file.read_exact(&mut buffer)
-            .map_err(|error| error.to_string())?;
-        hasher.update(&buffer);
-        if len as usize > ARCHIVE_SAMPLE_BYTES {
-            file.seek(SeekFrom::End(
-                -(ARCHIVE_SAMPLE_BYTES.min(len as usize) as i64),
-            ))
-            .map_err(|error| error.to_string())?;
-            let mut tail = vec![0; ARCHIVE_SAMPLE_BYTES.min(len as usize)];
-            file.read_exact(&mut tail)
-                .map_err(|error| error.to_string())?;
-            hasher.update(&tail);
-        }
+        let file = File::open(path).map_err(|error| error.to_string())?;
+        return sampled_fingerprint_from_open_file(file);
     }
     Ok(hasher.finalize().to_hex().to_string())
+}
+
+fn sampled_fingerprint_from_open_file(mut file: File) -> Result<String, String> {
+    let mut hasher = blake3::Hasher::new();
+    hasher.update(FINGERPRINT_VERSION.as_bytes());
+    let len = file.metadata().map_err(|error| error.to_string())?.len();
+    hasher.update(&len.to_le_bytes());
+    let mut buffer = vec![0; ARCHIVE_SAMPLE_BYTES.min(len as usize)];
+    file.read_exact(&mut buffer)
+        .map_err(|error| error.to_string())?;
+    hasher.update(&buffer);
+    if len as usize > ARCHIVE_SAMPLE_BYTES {
+        file.seek(SeekFrom::End(
+            -(ARCHIVE_SAMPLE_BYTES.min(len as usize) as i64),
+        ))
+        .map_err(|error| error.to_string())?;
+        let mut tail = vec![0; ARCHIVE_SAMPLE_BYTES.min(len as usize)];
+        file.read_exact(&mut tail)
+            .map_err(|error| error.to_string())?;
+        hasher.update(&tail);
+    }
+    Ok(hasher.finalize().to_hex().to_string())
+}
+
+pub(crate) fn sampled_fingerprint_from_dir(
+    parent: &cap_std::fs::Dir,
+    name: &Path,
+) -> Result<String, String> {
+    let metadata = parent
+        .symlink_metadata(name)
+        .map_err(|error| error.to_string())?;
+    if metadata.file_type().is_symlink() {
+        return Err("檔案位置不可使用符號連結".into());
+    }
+    if !metadata.is_dir() {
+        return sampled_fingerprint_from_open_file(
+            parent
+                .open(name)
+                .map_err(|error| error.to_string())?
+                .into_std(),
+        );
+    }
+    let child_dir = parent
+        .open_dir_nofollow(name)
+        .map_err(|error| error.to_string())?;
+    let mut pages = child_dir
+        .entries()
+        .map_err(|error| error.to_string())?
+        .filter_map(Result::ok)
+        .filter(|entry| {
+            entry.file_type().is_ok_and(|file_type| file_type.is_file())
+                && is_image(Path::new(&entry.file_name()))
+        })
+        .collect::<Vec<_>>();
+    pages.sort_by_key(|entry| entry.file_name());
+
+    let mut hasher = blake3::Hasher::new();
+    hasher.update(FINGERPRINT_VERSION.as_bytes());
+    for entry in &pages {
+        hasher.update(entry.file_name().to_string_lossy().as_bytes());
+        if let Ok(metadata) = entry.metadata() {
+            hasher.update(&metadata.len().to_le_bytes());
+        }
+    }
+    if let Some(first) = pages.first() {
+        hash_prefix_open_file(
+            &mut hasher,
+            first.open().map_err(|error| error.to_string())?.into_std(),
+            DIRECTORY_SAMPLE_BYTES,
+        )?;
+    }
+    if let Some(last) = pages.last().filter(|last| {
+        pages
+            .first()
+            .is_some_and(|first| first.file_name() != last.file_name())
+    }) {
+        hash_prefix_open_file(
+            &mut hasher,
+            last.open().map_err(|error| error.to_string())?.into_std(),
+            DIRECTORY_SAMPLE_BYTES,
+        )?;
+    }
+    Ok(hasher.finalize().to_hex().to_string())
+}
+
+fn hash_prefix_open_file(
+    hasher: &mut blake3::Hasher,
+    mut file: File,
+    limit: usize,
+) -> Result<(), String> {
+    let mut buffer =
+        vec![0; limit.min(file.metadata().map_err(|error| error.to_string())?.len() as usize)];
+    file.read_exact(&mut buffer)
+        .map_err(|error| error.to_string())?;
+    hasher.update(&buffer);
+    Ok(())
 }
 fn hash_prefix(hasher: &mut blake3::Hasher, path: &Path, limit: usize) -> Result<(), String> {
     let mut file = File::open(path).map_err(|error| error.to_string())?;
@@ -4509,7 +5192,7 @@ mod tests {
     }
 
     #[test]
-    fn recent_reading_runtime_item_orders_progress_and_excludes_unread() {
+    fn recent_reading_runtime_item_orders_progress_and_includes_saved_single_page() {
         let store = store("recent_reading");
         let mut older = comic("older-runtime", "older/a.zip");
         older.progress = crate::state::Progress {
@@ -4532,14 +5215,23 @@ mod tests {
             percent: 0.0,
             updated_at: Some("2026-09-03T00:00:00Z".into()),
         };
-        store.sync_library(&[older, newer, unread]).unwrap();
+        let mut single_page = comic("single-page-runtime", "single/a.zip");
+        single_page.progress = crate::state::Progress {
+            current_page: 0,
+            total_pages: 1,
+            percent: 100.0,
+            updated_at: Some("2026-09-04T00:00:00Z".into()),
+        };
+        store
+            .sync_library(&[older, newer, unread, single_page])
+            .unwrap();
 
         let recent = store
             .get_recent_reading_runtime_item()
             .unwrap()
             .expect("已讀項目應可取得");
-        assert_eq!(recent.id, "newer-runtime");
-        assert_eq!(recent.progress.current_page, 4);
+        assert_eq!(recent.id, "single-page-runtime");
+        assert_eq!(recent.progress.current_page, 0);
     }
 
     #[test]
@@ -5264,6 +5956,567 @@ mod tests {
     }
 
     #[test]
+    fn reimport_preserves_failed_metadata_and_clears_removed_metadata() {
+        let store = store("reimport_failure_recovery");
+        let folder =
+            std::env::temp_dir().join(format!("comic_metadata_failure_{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&folder).unwrap();
+        let metadata_path = folder.join("ComicInfo.xml");
+        std::fs::write(
+            &metadata_path,
+            "<ComicInfo><Title>原始來源標題</Title><Summary>保留摘要</Summary></ComicInfo>",
+        )
+        .unwrap();
+        let mut item = comic("runtime", "失敗恢復測試");
+        item.r#type = "folder".into();
+        item.source_path = Some(folder.to_string_lossy().into_owned());
+        store.sync_library(&[item]).unwrap();
+        assert_eq!(
+            store.get_metadata("runtime").unwrap().summary.as_deref(),
+            Some("保留摘要")
+        );
+
+        std::fs::write(&metadata_path, "<ComicInfo><Title>未完成").unwrap();
+        let failed = store
+            .reimport(ReimportRequest {
+                comic_ids: vec!["runtime".into()],
+            })
+            .unwrap();
+        assert!(failed.diagnostics > 0);
+        let preserved = store.get_metadata("runtime").unwrap();
+        assert_eq!(preserved.title, "原始來源標題");
+        assert_eq!(preserved.summary.as_deref(), Some("保留摘要"));
+
+        std::fs::write(
+            &metadata_path,
+            "<ComicInfo><Title>恢復來源標題</Title><Summary>恢復摘要</Summary></ComicInfo>",
+        )
+        .unwrap();
+        store
+            .reimport(ReimportRequest {
+                comic_ids: vec!["runtime".into()],
+            })
+            .unwrap();
+        let recovered = store.get_metadata("runtime").unwrap();
+        assert_eq!(recovered.title, "恢復來源標題");
+        assert_eq!(recovered.summary.as_deref(), Some("恢復摘要"));
+
+        std::fs::remove_file(metadata_path).unwrap();
+        store
+            .reimport(ReimportRequest {
+                comic_ids: vec!["runtime".into()],
+            })
+            .unwrap();
+        let removed = store.get_metadata("runtime").unwrap();
+        assert_eq!(
+            removed.title,
+            folder.file_name().unwrap().to_string_lossy().into_owned()
+        );
+        assert!(removed.summary.is_none());
+        std::fs::remove_dir_all(folder).unwrap();
+    }
+
+    #[test]
+    fn metadata_refresh_is_scoped_to_each_shared_fingerprint_location() {
+        let store = store("metadata_location_scope");
+        let root = std::env::temp_dir().join(format!(
+            "comic_metadata_locations_{}_{}",
+            std::process::id(),
+            uuid::Uuid::new_v4()
+        ));
+        let location_a = root.join("a");
+        let location_b = root.join("b");
+        std::fs::create_dir_all(&location_a).unwrap();
+        std::fs::create_dir_all(&location_b).unwrap();
+        let sidecar_a = location_a.join("ComicInfo.xml");
+        let sidecar_b = location_b.join("ComicInfo.xml");
+        std::fs::write(
+            &sidecar_a,
+            "<ComicInfo><Title>A 來源</Title><Tags>來源A</Tags></ComicInfo>",
+        )
+        .unwrap();
+        std::fs::write(
+            &sidecar_b,
+            "<ComicInfo><Title>B 來源</Title><Tags>來源B</Tags></ComicInfo>",
+        )
+        .unwrap();
+
+        let mut item_a = comic("runtime-a", "a");
+        item_a.r#type = "folder".into();
+        item_a.source_id = "local:a".into();
+        item_a.source_path = Some(location_a.to_string_lossy().into_owned());
+        let mut item_b = comic("runtime-b", "b");
+        item_b.r#type = "folder".into();
+        item_b.source_id = "local:b".into();
+        item_b.source_path = Some(location_b.to_string_lossy().into_owned());
+
+        store
+            .sync_library(&[item_a.clone(), item_b.clone()])
+            .unwrap();
+        let shared_id = store.get_metadata("runtime-a").unwrap().comic_id;
+        assert_eq!(
+            shared_id,
+            store.get_metadata("runtime-b").unwrap().comic_id,
+            "同 fingerprint 的兩個 location 應共用 comic_id"
+        );
+        let initial_paths = store
+            .with_connection(|connection| {
+                let mut statement = connection
+                    .prepare("SELECT source_path FROM metadata_sources WHERE comic_id=?1")
+                    .map_err(|error| error.to_string())?;
+                let rows = statement
+                    .query_map([shared_id.as_str()], |row| row.get::<_, String>(0))
+                    .map_err(|error| error.to_string())?;
+                rows.collect::<Result<Vec<_>, _>>()
+                    .map_err(|error| error.to_string())
+            })
+            .unwrap();
+        assert!(initial_paths
+            .iter()
+            .any(|path| path.ends_with("a/ComicInfo.xml")));
+        assert!(initial_paths
+            .iter()
+            .any(|path| path.ends_with("b/ComicInfo.xml")));
+        let initial_tags = store.get_metadata("runtime-a").unwrap().tags;
+        assert!(initial_tags.iter().any(|tag| tag.value == "來源A"));
+        assert!(initial_tags.iter().any(|tag| tag.value == "來源B"));
+
+        std::fs::remove_file(&sidecar_b).unwrap();
+        std::fs::write(&sidecar_b, "<ComicInfo><Title>未完成").unwrap();
+        store
+            .with_connection(|connection| {
+                connection
+                    .execute(
+                        "UPDATE comic_locations SET mtime='force-refresh' WHERE source_id='local:b'",
+                        [],
+                    )
+                    .map_err(|error| error.to_string())
+            })
+            .unwrap();
+        store
+            .sync_library(&[item_a.clone(), item_b.clone()])
+            .unwrap();
+        let after_b_failure = store.get_metadata("runtime-a").unwrap();
+        assert!(after_b_failure
+            .candidates
+            .iter()
+            .any(|candidate| candidate.source_path.ends_with("a/ComicInfo.xml")));
+        assert!(after_b_failure
+            .candidates
+            .iter()
+            .any(|candidate| candidate.source_path.ends_with("b/ComicInfo.xml")));
+        assert!(after_b_failure.tags.iter().any(|tag| tag.value == "來源A"));
+        assert!(after_b_failure.tags.iter().any(|tag| tag.value == "來源B"));
+
+        std::fs::remove_file(&sidecar_a).unwrap();
+        std::fs::write(
+            &sidecar_a,
+            "<ComicInfo><Title>A 更新</Title><Tags>來源A更新</Tags></ComicInfo>",
+        )
+        .unwrap();
+        store
+            .with_connection(|connection| {
+                connection
+                    .execute(
+                        "UPDATE comic_locations SET mtime='force-refresh' WHERE source_id='local:a'",
+                        [],
+                    )
+                    .map_err(|error| error.to_string())
+            })
+            .unwrap();
+        store.sync_library(std::slice::from_ref(&item_a)).unwrap();
+        let after_partial_a = store.get_metadata("runtime-a").unwrap();
+        assert!(after_partial_a
+            .candidates
+            .iter()
+            .any(|candidate| candidate.source_path.ends_with("b/ComicInfo.xml")));
+
+        std::fs::remove_file(&sidecar_a).unwrap();
+        store
+            .with_connection(|connection| {
+                connection
+                    .execute(
+                        "UPDATE comic_locations SET mtime='force-refresh' WHERE source_id='local:a'",
+                        [],
+                    )
+                    .map_err(|error| error.to_string())
+            })
+            .unwrap();
+        store.sync_library(std::slice::from_ref(&item_a)).unwrap();
+        let after_a_removed = store.get_metadata("runtime-a").unwrap();
+        assert!(!after_a_removed
+            .candidates
+            .iter()
+            .any(|candidate| candidate.source_path.ends_with("a/ComicInfo.xml")));
+        assert!(after_a_removed
+            .candidates
+            .iter()
+            .any(|candidate| candidate.source_path.ends_with("b/ComicInfo.xml")));
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn metadata_scope_matches_archive_entries_and_json_siblings() {
+        assert!(source_path_matches_location(
+            "/library/book.cbz::ComicInfo.xml",
+            "/library/book.cbz"
+        ));
+        assert!(source_path_matches_location(
+            "/library/book.cbz.json",
+            "/library/book.cbz"
+        ));
+        assert!(source_path_matches_location(
+            "/library/book.json",
+            "/library/book.cbz"
+        ));
+        assert!(!source_path_matches_location(
+            "/library/other.cbz::ComicInfo.xml",
+            "/library/book.cbz"
+        ));
+    }
+
+    #[test]
+    fn sync_rechecks_folder_and_archive_metadata_signatures() {
+        let store = store("signature_refresh");
+        let root = std::env::temp_dir().join(format!(
+            "comic_signature_refresh_{}_{}",
+            std::process::id(),
+            uuid::Uuid::new_v4()
+        ));
+        std::fs::create_dir_all(&root).unwrap();
+        let folder_path = root.join("folder-book");
+        std::fs::create_dir_all(&folder_path).unwrap();
+        let folder_metadata = folder_path.join("ComicInfo.xml");
+        let folder_page = folder_path.join("page.jpg");
+        std::fs::write(
+            &folder_metadata,
+            "<ComicInfo><Title>OldTitle</Title></ComicInfo>",
+        )
+        .unwrap();
+        std::fs::write(&folder_page, vec![0_u8; 8192]).unwrap();
+        let archive_path = root.join("archive-book.cbz");
+        let archive_sidecar = root.join("archive-book.cbz.json");
+        std::fs::write(&archive_path, vec![7_u8; 1024]).unwrap();
+        std::fs::write(&archive_sidecar, r#"{"title":"Old","tags":["x"]}"#).unwrap();
+
+        let mut folder_item = comic("folder-runtime", "folder-book");
+        folder_item.r#type = "folder".into();
+        folder_item.source_path = Some(folder_path.to_string_lossy().into_owned());
+        let mut archive_item = comic("archive-runtime", "archive-book.cbz");
+        archive_item.source_path = Some(archive_path.to_string_lossy().into_owned());
+        store
+            .sync_library(&[folder_item.clone(), archive_item.clone()])
+            .unwrap();
+        assert_eq!(
+            store.get_metadata("folder-runtime").unwrap().title,
+            "OldTitle"
+        );
+        assert_eq!(store.get_metadata("archive-runtime").unwrap().title, "Old");
+
+        let folder_signature = file_signature(&folder_path).unwrap();
+        assert_eq!(folder_signature, file_signature(&folder_path).unwrap());
+        assert!(file_signature(&root.join("missing-location")).is_none());
+        let archive_signature = file_signature(&archive_path).unwrap();
+        assert_eq!(archive_signature, file_signature(&archive_path).unwrap());
+
+        std::thread::sleep(Duration::from_millis(20));
+        std::fs::write(
+            &folder_metadata,
+            "<ComicInfo><Title>NewTitle</Title></ComicInfo>",
+        )
+        .unwrap();
+        let changed_folder_signature = file_signature(&folder_path).unwrap();
+        assert_ne!(folder_signature, changed_folder_signature);
+        store
+            .sync_library(std::slice::from_ref(&folder_item))
+            .unwrap();
+        assert_eq!(
+            store.get_metadata("folder-runtime").unwrap().title,
+            "NewTitle"
+        );
+
+        let folder_fingerprint_before = store
+            .with_connection(|connection| {
+                connection
+                    .query_row(
+                        "SELECT fingerprint FROM comic_locations WHERE runtime_id='folder-runtime'",
+                        [],
+                        |row| row.get::<_, Option<String>>(0),
+                    )
+                    .map_err(|error| error.to_string())
+            })
+            .unwrap();
+        std::thread::sleep(Duration::from_millis(20));
+        std::fs::write(&folder_page, vec![1_u8; 8192]).unwrap();
+        store
+            .sync_library(std::slice::from_ref(&folder_item))
+            .unwrap();
+        let folder_fingerprint_after = store
+            .with_connection(|connection| {
+                connection
+                    .query_row(
+                        "SELECT fingerprint FROM comic_locations WHERE runtime_id='folder-runtime'",
+                        [],
+                        |row| row.get::<_, Option<String>>(0),
+                    )
+                    .map_err(|error| error.to_string())
+            })
+            .unwrap();
+        assert_ne!(folder_fingerprint_before, folder_fingerprint_after);
+
+        std::fs::remove_file(&folder_metadata).unwrap();
+        store
+            .sync_library(std::slice::from_ref(&folder_item))
+            .unwrap();
+        let folder_after_removal = store.get_metadata("folder-runtime").unwrap();
+        assert_eq!(folder_after_removal.title, "folder-book");
+        assert!(!folder_after_removal
+            .candidates
+            .iter()
+            .any(|candidate| candidate.source_path.ends_with("ComicInfo.xml")));
+
+        std::thread::sleep(Duration::from_millis(20));
+        std::fs::write(&archive_sidecar, r#"{"title":"New","tags":["x"]}"#).unwrap();
+        let changed_archive_signature = file_signature(&archive_path).unwrap();
+        assert_ne!(archive_signature, changed_archive_signature);
+        store
+            .sync_library(std::slice::from_ref(&archive_item))
+            .unwrap();
+        assert_eq!(store.get_metadata("archive-runtime").unwrap().title, "New");
+
+        std::fs::remove_file(&archive_sidecar).unwrap();
+        store
+            .sync_library(std::slice::from_ref(&archive_item))
+            .unwrap();
+        let archive_after_removal = store.get_metadata("archive-runtime").unwrap();
+        assert_eq!(archive_after_removal.title, "archive-book");
+        assert!(!archive_after_removal
+            .candidates
+            .iter()
+            .any(|candidate| candidate.source_path.ends_with("archive-book.cbz.json")));
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn batch_search_views_match_individual_effective_metadata_matrix() {
+        let store = store("batch_search_views_matrix");
+        store
+            .sync_library(&[
+                comic("runtime-a", "library/a.zip"),
+                comic("runtime-b", "folder/b.zip"),
+                comic("runtime-c", "other/c.zip"),
+                comic("runtime-d", "library/d.zip"),
+            ])
+            .unwrap();
+        let ids = ["runtime-a", "runtime-b", "runtime-c", "runtime-d"]
+            .into_iter()
+            .map(|runtime_id| store.get_metadata(runtime_id).unwrap().comic_id)
+            .collect::<Vec<_>>();
+
+        store
+            .with_connection(|connection| {
+                let tx = connection.transaction().map_err(|error| error.to_string())?;
+                let insert_source =
+                    |tx: &Transaction<'_>, comic_id: &str, parser_id: &str| -> Result<i64, String> {
+                        tx.execute(
+                            "INSERT INTO metadata_sources(comic_id,parser_id,parser_version,source_path,source_digest,confidence,raw_json)
+                             VALUES(?1,?2,'1','synthetic',?2,1.0,'{}')",
+                            params![comic_id, parser_id],
+                        )
+                        .map_err(|error| error.to_string())?;
+                        Ok(tx.last_insert_rowid())
+                    };
+                let insert_creator = |tx: &Transaction<'_>, comic_id: &str, source_id: i64, value: &str, priority: i64| {
+                    tx.execute(
+                        "INSERT INTO metadata_candidates(comic_id,source_id,field_key,value_json,priority,confidence)
+                         VALUES(?1,?2,'creators',?3,?4,0.5)",
+                        params![comic_id, source_id, value, priority],
+                    )
+                    .map_err(|error| error.to_string())
+                };
+
+                let a_low = insert_source(&tx, &ids[0], "synthetic:a-low")?;
+                let a_high = insert_source(&tx, &ids[0], "synthetic:a-high")?;
+                insert_creator(
+                    &tx,
+                    &ids[0],
+                    a_low,
+                    r#"{"artist":["candidate-low"]}"#,
+                    10,
+                )?;
+                insert_creator(
+                    &tx,
+                    &ids[0],
+                    a_high,
+                    r#"{"artist":["candidate-high"]}"#,
+                    20,
+                )?;
+                tx.execute(
+                    "INSERT INTO user_field_overrides(comic_id,field_key,value_json) VALUES(?1,'creators',?2)",
+                    params![&ids[0], r#"{"artist":["manual"]}"#],
+                )
+                .map_err(|error| error.to_string())?;
+
+                let b_low = insert_source(&tx, &ids[1], "synthetic:b-low")?;
+                let b_high = insert_source(&tx, &ids[1], "synthetic:b-high")?;
+                insert_creator(
+                    &tx,
+                    &ids[1],
+                    b_low,
+                    r#"{"artist":["candidate-low"]}"#,
+                    10,
+                )?;
+                insert_creator(
+                    &tx,
+                    &ids[1],
+                    b_high,
+                    r#"{"artist":["candidate-high"]}"#,
+                    20,
+                )?;
+
+                let c_source = insert_source(&tx, &ids[2], "synthetic:c")?;
+                let _d_source = insert_source(&tx, &ids[3], "synthetic:d")?;
+                let raw_a = ensure_tag_tx(
+                    &tx,
+                    &ScopedTag {
+                        namespace: "general".into(),
+                        value: "raw-a".into(),
+                    },
+                )?;
+                let raw_b = ensure_tag_tx(
+                    &tx,
+                    &ScopedTag {
+                        namespace: "general".into(),
+                        value: "raw-b".into(),
+                    },
+                )?;
+                let raw_c = ensure_tag_tx(
+                    &tx,
+                    &ScopedTag {
+                        namespace: "general".into(),
+                        value: "raw-c".into(),
+                    },
+                )?;
+                let canonical_a: i64 = tx
+                    .query_row(
+                        "SELECT canonical_tag_id FROM tags WHERE id=?1",
+                        [raw_a],
+                        |row| row.get(0),
+                    )
+                    .map_err(|error| error.to_string())?;
+                let canonical_b: i64 = tx
+                    .query_row(
+                        "SELECT canonical_tag_id FROM tags WHERE id=?1",
+                        [raw_b],
+                        |row| row.get(0),
+                    )
+                    .map_err(|error| error.to_string())?;
+                let canonical_c: i64 = tx
+                    .query_row(
+                        "SELECT canonical_tag_id FROM tags WHERE id=?1",
+                        [raw_c],
+                        |row| row.get(0),
+                    )
+                    .map_err(|error| error.to_string())?;
+                tx.execute(
+                    "UPDATE canonical_tags SET display_value='renamed-a' WHERE id=?1",
+                    [canonical_a],
+                )
+                .map_err(|error| error.to_string())?;
+                tx.execute(
+                    "INSERT INTO tag_redirects(source_tag_id,target_tag_id) VALUES(?1,?2)",
+                    params![canonical_b, canonical_a],
+                )
+                .map_err(|error| error.to_string())?;
+                tx.execute(
+                    "UPDATE canonical_tags SET disabled=1 WHERE id=?1",
+                    [canonical_c],
+                )
+                .map_err(|error| error.to_string())?;
+
+                tx.execute(
+                    "INSERT INTO comic_tag_candidates(comic_id,tag_id,source_id) VALUES(?1,?2,?3)",
+                    params![&ids[0], raw_a, a_low],
+                )
+                .map_err(|error| error.to_string())?;
+                for raw_id in [raw_a, raw_b] {
+                    tx.execute(
+                        "INSERT INTO comic_tag_candidates(comic_id,tag_id,source_id) VALUES(?1,?2,?3)",
+                        params![&ids[1], raw_id, b_low],
+                    )
+                    .map_err(|error| error.to_string())?;
+                }
+                tx.execute(
+                    "INSERT INTO comic_tag_candidates(comic_id,tag_id,source_id) VALUES(?1,?2,?3)",
+                    params![&ids[2], raw_c, c_source],
+                )
+                .map_err(|error| error.to_string())?;
+                tx.execute(
+                    "INSERT INTO comic_tag_overrides(comic_id,tag_id,action) VALUES(?1,?2,'include')",
+                    params![&ids[1], raw_a],
+                )
+                .map_err(|error| error.to_string())?;
+                tx.execute(
+                    "INSERT INTO comic_tag_overrides(comic_id,tag_id,action) VALUES(?1,?2,'exclude')",
+                    params![&ids[1], raw_b],
+                )
+                .map_err(|error| error.to_string())?;
+                tx.execute(
+                    "INSERT INTO folder_tag_rules(source_id,folder_path,tag_id,enabled) VALUES('local','library',?1,1)",
+                    [raw_a],
+                )
+                .map_err(|error| error.to_string())?;
+
+                tx.execute(
+                    "UPDATE comic_locations SET runtime_id='d-old',relative_path='library/d-old.zip',last_seen_at='2026-01-01T00:00:00Z' WHERE comic_id=?1",
+                    [&ids[3]],
+                )
+                .map_err(|error| error.to_string())?;
+                tx.execute(
+                    "INSERT INTO comic_locations(comic_id,runtime_id,source_id,relative_path,kind,online,last_seen_at)
+                     VALUES(?1,'d-new','local','library/d-new.zip','archive',1,'2026-02-01T00:00:00Z')",
+                    [&ids[3]],
+                )
+                .map_err(|error| error.to_string())?;
+                tx.commit().map_err(|error| error.to_string())
+            })
+            .unwrap();
+
+        store
+            .with_connection(|connection| {
+                let batch = build_search_views_batch(connection)?;
+                for comic_id in &ids {
+                    let expected = build_search_view(connection, comic_id)?;
+                    let actual = batch
+                        .get(comic_id)
+                        .ok_or_else(|| format!("missing batch view for {comic_id}"))?;
+                    assert_eq!(actual.runtime_id, expected.runtime_id, "runtime {comic_id}");
+                    assert_eq!(
+                        actual.relative_path, expected.relative_path,
+                        "path {comic_id}"
+                    );
+                    assert_eq!(actual.source_id, expected.source_id, "source {comic_id}");
+                    assert_eq!(actual.creators, expected.creators, "creators {comic_id}");
+                    assert_eq!(actual.tags, expected.tags, "tags {comic_id}");
+                }
+                assert_eq!(batch[&ids[0]].creators["artist"], vec!["manual"]);
+                assert_eq!(batch[&ids[1]].creators["artist"], vec!["candidate-high"]);
+                assert_eq!(batch[&ids[1]].tags, Vec::<ScopedTag>::new());
+                assert_eq!(batch[&ids[2]].tags, Vec::<ScopedTag>::new());
+                assert_eq!(batch[&ids[3]].runtime_id.as_deref(), Some("d-new"));
+                assert_eq!(
+                    batch[&ids[3]].tags,
+                    vec![ScopedTag {
+                        namespace: "general".into(),
+                        value: "renamed-a".into(),
+                    }]
+                );
+                Ok(())
+            })
+            .unwrap();
+    }
+
+    #[test]
     fn selective_search_stays_fast_with_twenty_thousand_rows() {
         let store = store("search_20k");
         store.with_connection(|connection| {
@@ -5302,6 +6555,19 @@ mod tests {
                 samples[18] < Duration::from_millis(200),
                 "p95 was {:?}",
                 samples[18]
+            );
+            let started = std::time::Instant::now();
+            let exclusion_only = store
+                .search(CatalogQuery {
+                    query: "-tag:不存在基準標籤".into(),
+                    offset: 0,
+                    limit: 100,
+                })
+                .unwrap();
+            println!(
+                "exclusion-only 20k elapsed: {:?}, total: {}",
+                started.elapsed(),
+                exclusion_only.total
             );
         }
     }

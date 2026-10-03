@@ -72,7 +72,7 @@ src-tauri/target/release/bundle/
 
 ### 4.1 不要在 SMB / exFAT checkout 直接跑 Xcode build
 
-Xcode / Cargo / Tauri 會建立 symlink、修改 bundle metadata 並產生大量小檔。若專案本體位於 NAS 或不支援完整 macOS filesystem semantics 的磁碟，先同步到本機工作目錄。
+Xcode / Cargo / Tauri 會建立 symlink、修改 bundle metadata 並產生大量小檔。若專案本體位於 NAS 或不支援完整 macOS filesystem semantics 的磁碟，先同步到 APFS／HFS+ 工作目錄。本輪曾把 HFS+ sparseimage 放在外接／遠端硬碟上再掛載建置；實際做法與限制記在 [`MissionCenter/remote-build-ipad-control.md`](MissionCenter/remote-build-ipad-control.md)。
 
 建議使用未追蹤環境變數：
 
@@ -186,7 +186,23 @@ npm run tauri -- ios build --ci --target aarch64 --export-method debugging
 
 Tauri 會編譯 Rust static library、呼叫 Xcode project，再產生 signed app / IPA。實際輸出位置以當次 Tauri CLI 輸出為準，不要依賴歷史 blocker 文件記錄的舊絕對路徑。
 
-上面的 `debugging` 是實機開發驗收匯出，不是 App Store 發行包。簽章 team 可透過 `APPLE_DEVELOPMENT_TEAM` 指定已驗證的團隊。iOS build 版本使用 `tauri.conf.json` 的 `bundle.iOS.bundleVersion`（例如 `2`，每次交付需遞增），行銷版本仍為 `1.0.0`；不要再加 `--build-number`，本輪實測它會把 build 拼成四段的 `1.0.0.2`。每次匯出都需從 IPA 的 Info.plist 回讀版本。
+上面的 `debugging` 是實機開發驗收匯出，不是 App Store 發行包。簽章 team 可透過 `APPLE_DEVELOPMENT_TEAM` 指定已驗證的團隊。iOS build 版本使用 `tauri.conf.json` 的 `bundle.iOS.bundleVersion`（每次交付需遞增）；Tauri 專案設定須保持三段式 SemVer `1.0.0`。不要再加 `--build-number`，本專案實測它會把 build 拼成四段。每次匯出都需從 IPA 的 Info.plist 回讀版本。
+
+### 4.4.1 App Store 顯示版號 `1.0`
+
+App Store Connect 的首次發行版本是 `1.0`。Tauri 不接受兩段式 `version`，因此 App Store 發行包要在 Tauri 匯出後把 `CFBundleShortVersionString` 設為 `1.0`，再用**同一個發行 profile 的 entitlements**重簽，不能只修改 IPA 內的 plist 而沿用舊簽章。使用 [`scripts/repackage-ios-app-store-version.py`](scripts/repackage-ios-app-store-version.py)：
+
+```sh
+python3 scripts/repackage-ios-app-store-version.py \
+  --input "/path/to/original-app-store.ipa" \
+  --output "/path/to/G.A.I-1.0-app-store.ipa" \
+  --version 1.0 \
+  --build-number 38 \
+  --identity "$GAI_DISTRIBUTION_IDENTITY" \
+  --work-dir "$GAI_IOS_WORK_DIR"
+```
+
+`GAI_DISTRIBUTION_IDENTITY` 由當前 keychain 回讀，不把身份、私鑰或密碼寫進 Git。腳本會驗證重簽與輸出 IPA 內版本；上傳後還要等 App Store Connect 將 build 處理為 `VALID`，再把正確 build 掛到待審版本。2026-09-28，實際重簽的 `1.0 (38)` 已由 Apple 處理為 `VALID`，確認這條流程可行。
 
 ### 4.5 安裝到實機
 

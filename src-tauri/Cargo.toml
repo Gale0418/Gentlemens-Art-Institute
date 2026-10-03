@@ -35,6 +35,8 @@ tauri-plugin-dialog = "2.0.0"
 smb2 = "0.11.3"
 tauri-plugin-ios-folder = { path = "./tauri-plugin-ios-folder" }
 cap-std = "=3.4.5"
+cap-fs-ext = "=3.4.5"
+fs4 = { version = "=1.1.0", default-features = false }
 rusqlite = { version = "=0.40.1", features = ["bundled", "modern_sqlite"] }
 uuid = { version = "1.18", features = ["v4", "serde"] }
 blake3 = "1.8"
@@ -44,6 +46,8 @@ chardetng = "0.1"
 unicode-normalization = "0.1.24"
 reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls"] }
 rayon = "1.11"
+sevenz-rust2 = { version = "0.23.0", default-features = false, features = ["ppmd", "util"] }
+libarchive2 = { path = "vendor/libarchive2" }
 
 [target.'cfg(not(target_os = "ios"))'.dependencies]
 trash = "5.2.3"
@@ -51,8 +55,16 @@ trash = "5.2.3"
 [target.'cfg(target_os = "macos")'.dependencies]
 security-framework = "3.7.0"
 
+[target.'cfg(any(target_os = "macos", target_os = "ios", target_os = "linux"))'.dependencies]
+rustix = { version = "1.1.4", features = ["fs"] }
+
+[target.'cfg(windows)'.dependencies]
+windows-sys = { version = "0.59", features = ["Win32_Foundation", "Win32_Storage_FileSystem"] }
+
 # Local stability/security pin: vendor/wry is upstream 0.55.1 with the iOS WebKit
 # startup-crash fix. Remove this patch and vendor/wry after an upstream release
 # at or above 0.55.2 contains the fix and its security review is complete.
 [patch.crates-io]
 wry = { path = "vendor/wry" }
+sevenz-rust2 = { path = "vendor/sevenz-rust2" }
+zip = { path = "vendor/zip" }

@@ -18,7 +18,7 @@
       }
     ],
     "security": {
-      "csp": "default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; font-src 'self'; connect-src 'self' gai:; img-src 'self' gai: data: blob:; object-src 'none'; base-uri 'self';"
+      "csp": "default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; font-src 'self'; connect-src 'self' ipc: http://ipc.localhost gai:; img-src 'self' gai: data: blob:; object-src 'none'; base-uri 'self';"
     }
   },
   "bundle": {
@@ -35,12 +35,12 @@
       "debugApplicationIdSuffix": ".debug"
     },
     "macOS": {
-      "bundleVersion": "36",
+      "bundleVersion": "53",
       "signingIdentity": "-"
     },
     "iOS": {
       "minimumSystemVersion": "15.0",
-      "bundleVersion": "37"
+      "bundleVersion": "53"
     }
   }
 }

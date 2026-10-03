@@ -927,6 +927,14 @@ window.GAIL10n.register({
     "en": "No matching comics here",
     "ja": "ここに一致する漫画はありません"
   },
+  "這層沒有可閱讀的圖片或支援的壓縮檔": {
+    "en": "No readable images or supported archives in this folder",
+    "ja": "このフォルダーには読める画像や対応する圧縮ファイルがありません"
+  },
+  "支援 ZIP／CBZ、7z／CB7、RAR／CBR；加密或損壞的檔案可能無法讀取。": {
+    "en": "Supports ZIP/CBZ, 7z/CB7, and RAR/CBR. Encrypted or damaged files may not open.",
+    "ja": "ZIP／CBZ、7z／CB7、RAR／CBRに対応。暗号化や破損したファイルは開けない場合があります。"
+  },
   "試著清除搜尋、切換篩選，或回上一層資料夾。": {
     "en": "Clear the search, change the filter, or go up one folder.",
     "ja": "検索を消すか、絞り込みを変えるか、一つ上のフォルダーに戻ってください。"

@@ -1,12 +1,139 @@
+#[cfg(test)]
+use crate::catalog::CatalogQuery;
 use crate::catalog::{CatalogStore, ComicLocationView, FileOperationRecord};
 use crate::state::SmbConfig;
 use base64::{engine::general_purpose, Engine as _};
+use cap_fs_ext::DirExt;
+#[cfg(windows)]
+use cap_fs_ext::{OpenOptionsFollowExt, OpenOptionsMaybeDirExt};
+#[cfg(windows)]
+use cap_std::fs::OpenOptionsExt;
 use serde::{Deserialize, Serialize};
 use std::path::{Component, Path, PathBuf};
+#[cfg(test)]
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Duration;
+#[cfg(windows)]
+use std::{
+    mem::{align_of, size_of},
+    os::windows::{ffi::OsStrExt, io::AsRawHandle},
+};
+#[cfg(windows)]
+use windows_sys::Win32::Foundation::{GetLastError, HANDLE};
+#[cfg(windows)]
+use windows_sys::Win32::Storage::FileSystem::{
+    FileRenameInfo, SetFileInformationByHandle, DELETE, FILE_RENAME_INFO, FILE_SHARE_DELETE,
+    FILE_SHARE_READ, FILE_SHARE_WRITE,
+};
 
 const SMB_CONNECT_TIMEOUT: Duration = Duration::from_secs(10);
 const SMB_IO_TIMEOUT: Duration = Duration::from_secs(30);
+
+#[cfg(test)]
+static UNDO_TEST_FORCE_ROLLBACK_COLLISION: AtomicBool = AtomicBool::new(false);
+
+#[cfg(any(target_os = "macos", target_os = "ios", target_os = "linux"))]
+fn rename_noreplace(
+    from_dir: &cap_std::fs::Dir,
+    from: &Path,
+    to_dir: &cap_std::fs::Dir,
+    to: &Path,
+) -> std::io::Result<()> {
+    rustix::fs::renameat_with(
+        from_dir,
+        from,
+        to_dir,
+        to,
+        rustix::fs::RenameFlags::NOREPLACE,
+    )
+    .map_err(Into::into)
+}
+
+#[cfg(windows)]
+fn rename_noreplace(
+    from_dir: &cap_std::fs::Dir,
+    from: &Path,
+    to_dir: &cap_std::fs::Dir,
+    to: &Path,
+) -> std::io::Result<()> {
+    let is_basename = |path: &Path| {
+        path.components().count() == 1
+            && matches!(path.components().next(), Some(Component::Normal(_)))
+    };
+    if !is_basename(from) || !is_basename(to) {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::InvalidInput,
+            "Windows no-clobber rename 只接受單一 source/destination 名稱",
+        ));
+    }
+    let mut options = cap_std::fs::OpenOptions::new();
+    options
+        .read(true)
+        .maybe_dir(true)
+        .follow(cap_fs_ext::FollowSymlinks::No)
+        .access_mode(DELETE)
+        .share_mode(FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE);
+    let source_file = from_dir.open_with(from, &options)?;
+    let name = to.as_os_str().encode_wide().collect::<Vec<_>>();
+    if align_of::<FILE_RENAME_INFO>() > align_of::<usize>() {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::Unsupported,
+            "Windows no-clobber rename 的 buffer alignment 不受支援",
+        ));
+    }
+    let file_name_offset = std::mem::offset_of!(FILE_RENAME_INFO, FileName);
+    let name_size = name
+        .len()
+        .checked_mul(size_of::<u16>())
+        .ok_or_else(|| std::io::Error::new(std::io::ErrorKind::InvalidInput, "目的地名稱過長"))?;
+    let buffer_size = file_name_offset
+        .checked_add(name_size)
+        .ok_or_else(|| std::io::Error::new(std::io::ErrorKind::InvalidInput, "目的地名稱過長"))?;
+    let buffer_size_u32 = u32::try_from(buffer_size)
+        .map_err(|_| std::io::Error::new(std::io::ErrorKind::InvalidInput, "目的地名稱過長"))?;
+    let name_size_u32 = u32::try_from(name_size)
+        .map_err(|_| std::io::Error::new(std::io::ErrorKind::InvalidInput, "目的地名稱過長"))?;
+    let words = buffer_size
+        .checked_add(size_of::<usize>() - 1)
+        .ok_or_else(|| std::io::Error::new(std::io::ErrorKind::InvalidInput, "目的地名稱過長"))?
+        / size_of::<usize>();
+    let mut buffer = vec![0usize; words];
+    unsafe {
+        let buffer_ptr = buffer.as_mut_ptr().cast::<u8>();
+        let info = buffer_ptr.cast::<FILE_RENAME_INFO>();
+        (*info).Anonymous.ReplaceIfExists = 0;
+        (*info).RootDirectory = to_dir.as_raw_handle() as HANDLE;
+        (*info).FileNameLength = name_size_u32;
+        std::ptr::copy_nonoverlapping(
+            name.as_ptr(),
+            buffer_ptr.add(file_name_offset).cast(),
+            name.len(),
+        );
+        if SetFileInformationByHandle(
+            source_file.as_raw_handle() as HANDLE,
+            FileRenameInfo,
+            buffer_ptr.cast(),
+            buffer_size_u32,
+        ) == 0
+        {
+            return Err(std::io::Error::from_raw_os_error(GetLastError() as i32));
+        }
+    }
+    Ok(())
+}
+
+#[cfg(not(any(target_os = "macos", target_os = "ios", target_os = "linux", windows)))]
+fn rename_noreplace(
+    _from_dir: &cap_std::fs::Dir,
+    _from: &Path,
+    _to_dir: &cap_std::fs::Dir,
+    _to: &Path,
+) -> std::io::Result<()> {
+    Err(std::io::Error::new(
+        std::io::ErrorKind::Unsupported,
+        "此平台沒有可用的原子 no-clobber rename",
+    ))
+}
 
 async fn catalog_call<T: Send + 'static>(
     store: &CatalogStore,
@@ -319,6 +446,16 @@ fn local_root(location: &ComicLocationView) -> Result<PathBuf, String> {
         .map_err(|error| format!("漫畫書庫目前無法存取：{error}"))
 }
 
+fn open_local_root(root: &Path) -> Result<cap_std::fs::Dir, String> {
+    let parent = root.parent().ok_or("漫畫書庫沒有可用父資料夾")?;
+    let name = root.file_name().ok_or("漫畫書庫名稱無效")?;
+    let parent_dir = cap_std::fs::Dir::open_ambient_dir(parent, cap_std::ambient_authority())
+        .map_err(|error| format!("漫畫書庫父資料夾目前無法安全開啟：{error}"))?;
+    parent_dir
+        .open_dir_nofollow(name)
+        .map_err(|error| format!("漫畫書庫根目錄不是安全資料夾：{error}"))
+}
+
 fn destination_for(
     location: &ComicLocationView,
     request: &FileMutationRequest,
@@ -347,12 +484,64 @@ fn destination_for(
     Ok(clean)
 }
 
-fn cleanup_local_trash_directory(operation: &FileOperationRecord, destination: &Path) {
-    if operation.action == "trash" {
-        if let Some(parent) = destination.parent() {
-            let _ = std::fs::remove_dir(parent);
-        }
+fn validate_local_relative(path: &Path, allow_empty: bool) -> Result<(), String> {
+    if !allow_empty && path.as_os_str().is_empty() {
+        return Err("檔案路徑不可為空".into());
     }
+    if path.is_absolute()
+        || path
+            .components()
+            .any(|component| !matches!(component, Component::Normal(_)))
+    {
+        return Err("檔案路徑必須是書庫內安全的相對路徑".into());
+    }
+    Ok(())
+}
+
+fn open_local_dir(
+    root: &cap_std::fs::Dir,
+    relative: &Path,
+    create_missing: bool,
+) -> Result<cap_std::fs::Dir, String> {
+    validate_local_relative(relative, true)?;
+    let mut current = root
+        .try_clone()
+        .map_err(|error| format!("無法複製書庫目錄描述元：{error}"))?;
+    for component in relative.components() {
+        let Component::Normal(name) = component else {
+            return Err("書庫目錄包含不安全元件".into());
+        };
+        let next = match current.open_dir_nofollow(name) {
+            Ok(directory) => directory,
+            Err(error) if create_missing && error.kind() == std::io::ErrorKind::NotFound => {
+                current
+                    .create_dir(name)
+                    .map_err(|error| format!("無法建立書庫目的資料夾：{error}"))?;
+                current
+                    .open_dir_nofollow(name)
+                    .map_err(|error| format!("書庫目的資料夾無法安全開啟：{error}"))?
+            }
+            Err(error) => {
+                return Err(format!("書庫目錄無法安全開啟：{error}"));
+            }
+        };
+        current = next;
+    }
+    Ok(current)
+}
+
+fn open_local_parent(
+    root: &cap_std::fs::Dir,
+    relative: &Path,
+    create_missing: bool,
+) -> Result<(cap_std::fs::Dir, PathBuf), String> {
+    validate_local_relative(relative, false)?;
+    let name = relative
+        .file_name()
+        .ok_or("檔案路徑缺少檔名")
+        .map(PathBuf::from)?;
+    let parent = relative.parent().unwrap_or_else(|| Path::new(""));
+    Ok((open_local_dir(root, parent, create_missing)?, name))
 }
 
 fn mutate_local(
@@ -367,6 +556,19 @@ fn mutate_local(
     if !source.starts_with(&root) {
         return Err("漫畫位置超出已授權書庫".into());
     }
+    let source_relative = source
+        .strip_prefix(&root)
+        .map_err(|_| "漫畫位置無法轉為書庫相對路徑")?
+        .to_path_buf();
+    validate_local_relative(&source_relative, false)?;
+    let root_dir = open_local_root(&root)?;
+    let (source_dir, source_name) = open_local_parent(&root_dir, &source_relative, false)?;
+    let source_metadata = source_dir
+        .symlink_metadata(&source_name)
+        .map_err(|error| format!("漫畫位置無效：{error}"))?;
+    if source_metadata.file_type().is_symlink() {
+        return Err("漫畫位置不可使用符號連結".into());
+    }
     if location.fingerprint_collision {
         return Err("漫畫檔案版本與其他項目碰撞，已停止操作".into());
     }
@@ -375,10 +577,10 @@ fn mutate_local(
         .as_deref()
         .ok_or("缺少檔案版本前置條件，請重新整理後再操作")?;
     let current = if location.fingerprint.is_some() {
-        crate::catalog::sampled_fingerprint(&source)?
+        crate::catalog::sampled_fingerprint_from_dir(&source_dir, &source_name)?
     } else {
-        let (size, mtime) =
-            crate::catalog::file_signature(&source).ok_or("無法取得漫畫檔案版本，已停止操作")?;
+        let (size, mtime) = crate::catalog::file_signature_from_dir(&source_dir, &source_name)
+            .ok_or("無法取得漫畫檔案版本，已停止操作")?;
         crate::catalog::location_revision(
             &location.source_id,
             &location.relative_path,
@@ -392,23 +594,8 @@ fn mutate_local(
     }
     let provisional_id = uuid::Uuid::new_v4().to_string();
     let after_relative = destination_for(&location, &request, &provisional_id)?;
-    let destination = root.join(&after_relative);
-    if destination.exists() {
-        return Err("目的地已有同名檔案或資料夾".into());
-    }
-    let parent = destination.parent().ok_or("目的地沒有父資料夾")?;
-    let provisional_trash_dir = (request.action == "trash").then(|| parent.to_path_buf());
-    if request.action == "trash" {
-        std::fs::create_dir_all(parent).map_err(|error| format!("無法建立隔離區：{error}"))?;
-    }
-    let canonical_parent = parent
-        .canonicalize()
-        .map_err(|error| format!("目的資料夾無法存取：{error}"))?;
-    if !canonical_parent.starts_with(&root) {
-        return Err("目的地超出已授權書庫".into());
-    }
     let after_text = after_relative.to_string_lossy().replace('\\', "/");
-    let destination_text = destination.to_string_lossy().to_string();
+    let destination_text = root.join(&after_relative).to_string_lossy().to_string();
     let operation = store.begin_file_operation(
         &location,
         &request.action,
@@ -417,64 +604,105 @@ fn mutate_local(
     )?;
     if let Err(error) = store.set_file_operation_expected_fingerprint(&operation.id, expected) {
         let _ = store.fail_file_operation(&operation.id, &error);
-        if let Some(directory) = provisional_trash_dir.as_deref() {
-            let _ = std::fs::remove_dir(directory);
-        }
         return Err(error);
     }
-    if request.action == "trash" && !after_text.contains(&operation.id) {
-        let corrected = PathBuf::from(".gai-quarantine")
+    let after_relative = if request.action == "trash" {
+        PathBuf::from(".gai-quarantine")
             .join("comics")
             .join(&operation.id)
-            .join(source.file_name().ok_or("漫畫檔名無效")?);
-        let corrected_abs = root.join(&corrected);
-        if let Err(error) = std::fs::create_dir_all(corrected_abs.parent().ok_or("隔離區無效")?)
-        {
-            let message = format!("無法建立隔離區：{error}");
-            let _ = store.fail_file_operation(&operation.id, &message);
-            if let Some(directory) = provisional_trash_dir.as_deref() {
-                let _ = std::fs::remove_dir(directory);
-            }
-            return Err(message);
-        }
-        let result =
-            execute_local_move(store, location, operation, source, corrected, corrected_abs);
-        if let Some(directory) = provisional_trash_dir.as_deref() {
-            let _ = std::fs::remove_dir(directory);
-        }
-        return result;
-    }
+            .join(&source_name)
+    } else {
+        after_relative
+    };
     execute_local_move(
         store,
         location,
         operation,
-        source,
+        root,
+        root_dir,
+        source_dir,
+        source_name,
         after_relative,
-        destination,
     )
 }
 
+#[allow(clippy::too_many_arguments)]
 fn execute_local_move(
     store: &CatalogStore,
     location: ComicLocationView,
     operation: FileOperationRecord,
-    source: PathBuf,
+    root_path: PathBuf,
+    root: cap_std::fs::Dir,
+    source_dir: cap_std::fs::Dir,
+    source_name: PathBuf,
     after_relative: PathBuf,
-    destination: PathBuf,
 ) -> Result<FileMutationResult, String> {
+    let source_metadata = match source_dir.symlink_metadata(&source_name) {
+        Ok(metadata) => metadata,
+        Err(error) => {
+            let message = format!("漫畫位置無效：{error}");
+            let _ = store.fail_file_operation(&operation.id, &message);
+            return Err(message);
+        }
+    };
+    if source_metadata.file_type().is_symlink() {
+        let message = "漫畫位置不可使用符號連結".to_string();
+        let _ = store.fail_file_operation(&operation.id, &message);
+        return Err(message);
+    }
+    let create_destination_parent = operation.action == "trash";
+    let (destination_dir, destination_name) =
+        match open_local_parent(&root, &after_relative, create_destination_parent) {
+            Ok(value) => value,
+            Err(error) => {
+                let _ = store.fail_file_operation(&operation.id, &error);
+                return Err(error);
+            }
+        };
+    let destination_exists = match destination_dir.try_exists(&destination_name) {
+        Ok(exists) => exists,
+        Err(error) => {
+            let message = format!("無法檢查目的地：{error}");
+            let _ = store.fail_file_operation(&operation.id, &message);
+            if operation.action == "trash" {
+                let _ = destination_dir.remove_open_dir();
+            }
+            return Err(message);
+        }
+    };
+    if destination_exists {
+        let message = "目的地已有同名檔案或資料夾".to_string();
+        let _ = store.fail_file_operation(&operation.id, &message);
+        if operation.action == "trash" {
+            let _ = destination_dir.remove_open_dir();
+        }
+        return Err(message);
+    }
     let after_text = after_relative.to_string_lossy().replace('\\', "/");
-    let destination_text = destination.to_string_lossy().to_string();
+    let destination_text = root_path
+        .join(&after_relative)
+        .to_string_lossy()
+        .to_string();
     if let Err(error) =
         store.set_file_operation_destination(&operation.id, &after_text, Some(&destination_text))
     {
         let _ = store.fail_file_operation(&operation.id, &error);
-        cleanup_local_trash_directory(&operation, &destination);
+        if operation.action == "trash" {
+            let _ = destination_dir.remove_open_dir();
+        }
         return Err(error);
     }
-    if let Err(error) = std::fs::rename(&source, &destination) {
+    if let Err(error) = rename_noreplace(
+        &source_dir,
+        &source_name,
+        &destination_dir,
+        &destination_name,
+    ) {
         let message = format!("檔案移動失敗：{error}");
         let _ = store.fail_file_operation(&operation.id, &message);
-        cleanup_local_trash_directory(&operation, &destination);
+        if operation.action == "trash" {
+            let _ = destination_dir.remove_open_dir();
+        }
         return Err(message);
     }
     let runtime_id = general_purpose::URL_SAFE_NO_PAD.encode(after_text.as_bytes());
@@ -483,15 +711,26 @@ fn execute_local_move(
         Some(&runtime_id),
         operation.action != "trash",
     ) {
-        let rollback = std::fs::rename(&destination, &source);
+        let rollback = rename_noreplace(
+            &destination_dir,
+            &destination_name,
+            &source_dir,
+            &source_name,
+        );
         let failure = match rollback {
             Ok(()) => {
-                cleanup_local_trash_directory(&operation, &destination);
+                if operation.action == "trash" {
+                    let _ = destination_dir.remove_open_dir();
+                }
                 format!("目錄更新失敗，檔案已還原：{error}")
             }
-            Err(rollback_error) => format!(
-                "目錄更新失敗，且檔案自動還原也失敗（需要人工檢查）：{error}; rollback: {rollback_error}"
-            ),
+            Err(rollback_error) => {
+                let failure = format!(
+                    "目錄更新失敗，且檔案自動還原也失敗（需要人工檢查）：{error}; rollback: {rollback_error}"
+                );
+                let _ = store.mark_file_operation_needs_reconcile(&operation.id, &failure);
+                failure
+            }
         };
         let _ = store.fail_file_operation(&operation.id, &failure);
         return Err(failure);
@@ -520,66 +759,90 @@ fn undo_local(store: &CatalogStore, record: &FileOperationRecord) -> Result<(), 
         online: true,
     };
     let root = local_root(&root_location)?;
-    let source = PathBuf::from(
+    let source_relative = PathBuf::from(
         record
-            .after_actual_path
+            .after_relative_path
             .as_deref()
             .ok_or("操作沒有可還原位置")?,
-    )
-    .canonicalize()
-    .map_err(|error| format!("隔離／移動後的檔案位置無效：{error}"))?;
-    if !source.starts_with(&root) {
-        return Err("還原來源超出已授權書庫".into());
-    }
-    let destination = PathBuf::from(
-        record
-            .before_actual_path
-            .as_deref()
-            .ok_or("操作沒有原始位置")?,
     );
-    if destination.exists() {
-        return Err("原位置已有其他檔案，為避免覆寫已停止還原".into());
+    let destination_relative = PathBuf::from(&record.before_relative_path);
+    validate_local_relative(&source_relative, false)?;
+    validate_local_relative(&destination_relative, false)?;
+    let root_dir = open_local_root(&root)?;
+    let (source_dir, source_name) = open_local_parent(&root_dir, &source_relative, false)?;
+    if source_dir
+        .symlink_metadata(&source_name)
+        .map_err(|error| format!("隔離／移動後的檔案位置無效：{error}"))?
+        .file_type()
+        .is_symlink()
+    {
+        return Err("還原來源不可使用符號連結".into());
     }
-    let destination_parent = destination.parent().ok_or("原位置沒有父資料夾")?;
-    let canonical_parent = destination_parent
-        .canonicalize()
-        .map_err(|error| format!("原位置父資料夾無法存取：{error}"))?;
-    if !canonical_parent.starts_with(&root) {
-        return Err("還原目的地超出已授權書庫".into());
+    let (destination_dir, destination_name) =
+        open_local_parent(&root_dir, &destination_relative, false)?;
+    if destination_dir
+        .try_exists(&destination_name)
+        .map_err(|error| format!("無法檢查原位置：{error}"))?
+    {
+        return Err("原位置已有其他檔案，為避免覆寫已停止還原".into());
     }
     let expected = record
         .expected_fingerprint
         .as_deref()
         .ok_or("操作缺少檔案版本前置條件，已停止還原")?;
-    let current = local_undo_fingerprint(&source, record, expected)?;
+    let current = local_undo_fingerprint(&source_dir, &source_name, record, expected)?;
     if current != expected {
         return Err("隔離／移動後的檔案版本已變更，已停止還原".into());
     }
 
-    std::fs::rename(&source, &destination).map_err(|error| format!("檔案還原失敗：{error}"))?;
+    rename_noreplace(
+        &source_dir,
+        &source_name,
+        &destination_dir,
+        &destination_name,
+    )
+    .map_err(|error| format!("檔案還原失敗：{error}"))?;
+    #[cfg(test)]
+    if UNDO_TEST_FORCE_ROLLBACK_COLLISION.swap(false, Ordering::SeqCst) {
+        source_dir
+            .write(&source_name, b"rollback collision")
+            .map_err(|error| format!("測試 rollback collision 建立失敗：{error}"))?;
+    }
     let runtime_id =
         general_purpose::URL_SAFE_NO_PAD.encode(record.before_relative_path.as_bytes());
     if let Err(error) = store.complete_file_operation_undo(&record.id, Some(&runtime_id)) {
-        let rollback = std::fs::rename(&destination, &source);
+        let rollback = rename_noreplace(
+            &destination_dir,
+            &destination_name,
+            &source_dir,
+            &source_name,
+        );
         return match rollback {
             Ok(()) => Err(format!("目錄還原失敗，檔案已退回原隔離／移動位置：{error}")),
-            Err(rollback_error) => Err(format!(
-                "目錄還原失敗，且檔案退回也失敗（需要人工檢查）：{error}; rollback: {rollback_error}"
-            )),
+            Err(rollback_error) => {
+                let failure = format!(
+                    "目錄還原失敗，且檔案退回也失敗（需要人工檢查）：{error}; rollback: {rollback_error}"
+                );
+                let _ = store.mark_file_operation_needs_reconcile(&record.id, &failure);
+                Err(failure)
+            }
         };
     }
-    cleanup_local_trash_directory(record, &source);
+    if record.action == "trash" {
+        let _ = source_dir.remove_open_dir();
+    }
     Ok(())
 }
 
 fn local_undo_fingerprint(
-    source: &Path,
+    source_dir: &cap_std::fs::Dir,
+    source_name: &Path,
     record: &FileOperationRecord,
     expected: &str,
 ) -> Result<String, String> {
     if expected.starts_with("location-revision-v1:") {
-        let (size, mtime) =
-            crate::catalog::file_signature(source).ok_or("無法取得檔案還原版本，已停止還原")?;
+        let (size, mtime) = crate::catalog::file_signature_from_dir(source_dir, source_name)
+            .ok_or("無法取得檔案還原版本，已停止還原")?;
         crate::catalog::location_revision(
             &record.source_id,
             &record.before_relative_path,
@@ -588,7 +851,7 @@ fn local_undo_fingerprint(
         )
         .ok_or("無法取得檔案還原版本，已停止還原".into())
     } else {
-        crate::catalog::sampled_fingerprint(source)
+        crate::catalog::sampled_fingerprint_from_dir(source_dir, source_name)
     }
 }
 
@@ -819,9 +1082,18 @@ async fn mutate_smb(
                 }
                 format!("目錄更新失敗，NAS 檔案已還原：{error}")
             }
-            Err(rollback_error) => format!(
-                "目錄更新失敗，且 NAS 檔案自動還原也失敗（需要人工檢查）：{error}; rollback: {rollback_error}"
-            ),
+            Err(rollback_error) => {
+                let failure = format!(
+                    "目錄更新失敗，且 NAS 檔案自動還原也失敗（需要人工檢查）：{error}; rollback: {rollback_error}"
+                );
+                let operation_id = operation.id.clone();
+                let message = failure.clone();
+                let _ = catalog_call(store, move |store| {
+                    store.mark_file_operation_needs_reconcile(&operation_id, &message)
+                })
+                .await;
+                failure
+            }
         };
         fail_smb_journal(store, &operation.id, &failure).await;
         return Err(failure);
@@ -878,10 +1150,21 @@ async fn undo_smb(
     if let Err(error) = completed {
         let rollback = smb_rename(&mut client, &mut tree, &before, &after).await;
         return match rollback {
-            Ok(()) => Err(format!("目錄還原失敗，NAS 檔案已退回隔離／移動位置：{error}")),
-            Err(rollback_error) => Err(format!(
-                "目錄還原失敗，且 NAS 檔案退回也失敗（需要人工檢查）：{error}; rollback: {rollback_error}"
+            Ok(()) => Err(format!(
+                "目錄還原失敗，NAS 檔案已退回隔離／移動位置：{error}"
             )),
+            Err(rollback_error) => {
+                let failure = format!(
+                    "目錄還原失敗，且 NAS 檔案退回也失敗（需要人工檢查）：{error}; rollback: {rollback_error}"
+                );
+                let operation_id = record.id.clone();
+                let message = failure.clone();
+                let _ = catalog_call(store, move |store| {
+                    store.mark_file_operation_needs_reconcile(&operation_id, &message)
+                })
+                .await;
+                Err(failure)
+            }
         };
     }
     if record.action == "trash" {
@@ -928,6 +1211,66 @@ mod tests {
             smb_runtime_id(relative),
             general_purpose::URL_SAFE_NO_PAD.encode(relative.as_bytes())
         );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn local_mutation_parent_open_rejects_symlink_components() {
+        use std::os::unix::fs::symlink;
+
+        let base =
+            std::env::temp_dir().join(format!("gai-file-op-symlink-{}", uuid::Uuid::new_v4()));
+        let root_path = base.join("library");
+        let outside = base.join("outside");
+        std::fs::create_dir_all(&root_path).unwrap();
+        std::fs::create_dir_all(&outside).unwrap();
+        symlink(&outside, root_path.join("escape")).unwrap();
+        let root =
+            cap_std::fs::Dir::open_ambient_dir(&root_path, cap_std::ambient_authority()).unwrap();
+
+        assert!(open_local_parent(&root, Path::new("escape/book.cbz"), false).is_err());
+
+        drop(root);
+        let _ = std::fs::remove_dir_all(&base);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn local_root_open_rejects_replaced_root_symlink() {
+        use std::os::unix::fs::symlink;
+
+        let base =
+            std::env::temp_dir().join(format!("gai-file-op-root-symlink-{}", uuid::Uuid::new_v4()));
+        let root_path = base.join("library");
+        let moved_root = base.join("library-moved");
+        let outside = base.join("outside");
+        std::fs::create_dir_all(&root_path).unwrap();
+        std::fs::create_dir_all(&outside).unwrap();
+        let canonical_root = root_path.canonicalize().unwrap();
+        std::fs::rename(&root_path, &moved_root).unwrap();
+        symlink(&outside, &root_path).unwrap();
+
+        assert!(open_local_root(&canonical_root).is_err());
+
+        let _ = std::fs::remove_dir_all(&base);
+    }
+
+    #[cfg(any(target_os = "macos", target_os = "ios", target_os = "linux"))]
+    #[test]
+    fn local_noreplace_preserves_existing_destination() {
+        let base =
+            std::env::temp_dir().join(format!("gai-file-op-noreplace-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&base).unwrap();
+        std::fs::write(base.join("source"), b"source").unwrap();
+        std::fs::write(base.join("target"), b"target").unwrap();
+        let root = cap_std::fs::Dir::open_ambient_dir(&base, cap_std::ambient_authority()).unwrap();
+
+        assert!(rename_noreplace(&root, Path::new("source"), &root, Path::new("target")).is_err());
+        assert_eq!(std::fs::read(base.join("source")).unwrap(), b"source");
+        assert_eq!(std::fs::read(base.join("target")).unwrap(), b"target");
+
+        drop(root);
+        let _ = std::fs::remove_dir_all(&base);
     }
 
     #[test]
@@ -1022,6 +1365,17 @@ mod tests {
         let renamed = store.get_runtime_item(&stable_id).unwrap().unwrap();
         assert_eq!(renamed.relative_path, "renamed");
         assert_eq!(renamed.progress.current_page, 3);
+        assert_eq!(
+            store
+                .search(CatalogQuery {
+                    query: "renamed".into(),
+                    offset: 0,
+                    limit: 20,
+                })
+                .unwrap()
+                .total,
+            1
+        );
         let operation = store.file_operation_for_undo(&result.undo_token).unwrap();
         undo_local(&store, &operation).unwrap();
         assert!(original.exists());
@@ -1029,6 +1383,17 @@ mod tests {
         let restored = store.get_runtime_item(&stable_id).unwrap().unwrap();
         assert_eq!(restored.relative_path, "book");
         assert_eq!(restored.progress.current_page, 3);
+        assert_eq!(
+            store
+                .search(CatalogQuery {
+                    query: "renamed".into(),
+                    offset: 0,
+                    limit: 20,
+                })
+                .unwrap()
+                .total,
+            0
+        );
 
         let location = store.get_location(&stable_id).unwrap();
         let crash_destination = root.join("recovered");
@@ -1085,6 +1450,60 @@ mod tests {
         undo_local(&store, &trash_operation).unwrap();
         assert!(original.exists());
         assert!(!quarantine_root.join(&trash_operation.id).exists());
+
+        let location = store.get_location(&stable_id).unwrap();
+        let pending_operation = store
+            .begin_file_operation(
+                &location,
+                "rename",
+                Some("pending-review"),
+                Some(&root.join("pending-review").to_string_lossy()),
+            )
+            .unwrap();
+        store
+            .mark_file_operation_needs_reconcile(&pending_operation.id, "pending 雙失敗 fixture")
+            .unwrap();
+        assert_eq!(
+            store
+                .file_operation_for_undo(&pending_operation.undo_token)
+                .unwrap()
+                .status,
+            "needs_reconcile"
+        );
+
+        // Exercise the actual undo error path: force the catalog CAS to fail,
+        // then inject a destination collision so its filesystem rollback fails.
+        let location = store.get_location(&stable_id).unwrap();
+        let double_fault = mutate_local(
+            &store,
+            location,
+            FileMutationRequest {
+                comic_id: stable_id.clone(),
+                action: "rename".into(),
+                destination_relative_path: Some("double-fault".into()),
+                expected_fingerprint: registered_fingerprint(
+                    &store.get_location(&stable_id).unwrap(),
+                ),
+            },
+        )
+        .unwrap();
+        let double_fault_operation = store
+            .file_operation_for_undo(&double_fault.undo_token)
+            .unwrap();
+        store
+            .test_set_location_relative_path(double_fault_operation.location_id, "catalog-diverged")
+            .unwrap();
+        UNDO_TEST_FORCE_ROLLBACK_COLLISION.store(true, Ordering::SeqCst);
+        let error = undo_local(&store, &double_fault_operation).unwrap_err();
+        assert!(error.contains("需要人工檢查"));
+        assert_eq!(
+            store
+                .file_operation_for_undo(&double_fault_operation.undo_token)
+                .unwrap()
+                .status,
+            "needs_reconcile"
+        );
+        std::fs::remove_file(root.join("double-fault")).unwrap();
 
         drop(store);
         let _ = std::fs::remove_dir_all(&base);

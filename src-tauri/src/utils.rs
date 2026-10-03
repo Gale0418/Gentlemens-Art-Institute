@@ -1,3 +1,4 @@
+use std::fs::File;
 use std::io::Read;
 use std::path::{Path, PathBuf};
 
@@ -6,6 +7,7 @@ pub enum ArchiveError {
     FileAccess(String),
     InvalidZip(String),
     UnsupportedZip(String),
+    InvalidArchive(String),
     NoSupportedImages,
 }
 
@@ -17,7 +19,8 @@ impl std::fmt::Display for ArchiveError {
             Self::UnsupportedZip(error) => {
                 write!(f, "ZIP 使用了目前不支援的格式或加密方式：{error}")
             }
-            Self::NoSupportedImages => write!(f, "ZIP 裡沒有支援的圖片檔案"),
+            Self::InvalidArchive(error) => write!(f, "封存檔無法閱讀：{error}"),
+            Self::NoSupportedImages => write!(f, "封存檔裡沒有支援的圖片檔案"),
         }
     }
 }
@@ -30,6 +33,58 @@ pub(crate) fn safe_archive_entry_name(name: &str) -> bool {
         && !name
             .split(['/', '\\'])
             .any(|part| part.is_empty() || part == "." || part == "..")
+}
+
+fn zip_error(error: zip::result::ZipError) -> ArchiveError {
+    match error {
+        zip::result::ZipError::UnsupportedArchive(message) => {
+            ArchiveError::UnsupportedZip(message.to_string())
+        }
+        other => ArchiveError::InvalidZip(other.to_string()),
+    }
+}
+
+/// ZIP crate applies bounded central-directory metadata checks before its
+/// `Vec`/`HashMap` allocation; this helper only adds the application file-size
+/// cap and maps crate errors into the app error type.
+pub(crate) fn open_zip_archive(path: &Path) -> Result<zip::ZipArchive<File>, ArchiveError> {
+    open_zip_archive_from_file(
+        File::open(path).map_err(|error| ArchiveError::FileAccess(error.to_string()))?,
+    )
+}
+
+pub(crate) fn open_zip_archive_for_page(
+    path: &Path,
+) -> Result<zip::ZipArchive<File>, ArchiveError> {
+    open_zip_archive_for_page_from_file(
+        File::open(path).map_err(|error| ArchiveError::FileAccess(error.to_string()))?,
+    )
+}
+
+pub(crate) fn open_zip_archive_from_file(
+    file: File,
+) -> Result<zip::ZipArchive<File>, ArchiveError> {
+    open_zip_archive_with_file_size(file)
+}
+
+pub(crate) fn open_zip_archive_for_page_from_file(
+    file: File,
+) -> Result<zip::ZipArchive<File>, ArchiveError> {
+    open_zip_archive_with_file_size(file)
+}
+
+fn open_zip_archive_with_file_size(file: File) -> Result<zip::ZipArchive<File>, ArchiveError> {
+    let file_size = file
+        .metadata()
+        .map_err(|error| ArchiveError::FileAccess(error.to_string()))?
+        .len();
+    if file_size > crate::archive_reader::MAX_ARCHIVE_BYTES {
+        return Err(ArchiveError::InvalidZip(format!(
+            "ZIP 檔案超過 {} bytes 上限",
+            crate::archive_reader::MAX_ARCHIVE_BYTES
+        )));
+    }
+    zip::ZipArchive::new(file).map_err(zip_error)
 }
 
 fn visible_archive_page_name(name: &str) -> bool {
@@ -75,24 +130,83 @@ pub fn get_folder_images(folder_path: &Path) -> Vec<PathBuf> {
     images
 }
 
-pub fn get_archive_images(zip_path: &Path) -> Result<Vec<String>, ArchiveError> {
-    let file = std::fs::File::open(zip_path)
-        .map_err(|error| ArchiveError::FileAccess(error.to_string()))?;
-    let mut archive = zip::ZipArchive::new(file).map_err(|error| match error {
-        zip::result::ZipError::UnsupportedArchive(_) => {
-            ArchiveError::UnsupportedZip(error.to_string())
+/// Capability-root 版本的資料夾 page index。名稱只來自已開啟的 directory
+/// descriptor，呼叫者再以同一 descriptor 開啟實際 page。
+pub(crate) fn get_folder_image_names_from_dir(folder: &cap_std::fs::Dir) -> Vec<String> {
+    let mut images = Vec::new();
+    let Ok(entries) = folder.read_dir(".") else {
+        return images;
+    };
+    for entry in entries.flatten() {
+        let Ok(file_type) = entry.file_type() else {
+            continue;
+        };
+        if file_type.is_symlink() || !file_type.is_file() {
+            continue;
         }
-        _ => ArchiveError::InvalidZip(error.to_string()),
-    })?;
+        let file_name = entry.file_name();
+        let file_name = file_name.to_string_lossy();
+        if file_name.starts_with('.') || file_name.eq_ignore_ascii_case("__MACOSX") {
+            continue;
+        }
+        if supported_image_extension(Path::new(file_name.as_ref())) {
+            images.push(file_name.into_owned());
+        }
+    }
+    images.sort_by(|a, b| natord::compare(a, b));
+    images
+}
+
+pub fn get_archive_images(zip_path: &Path) -> Result<Vec<String>, ArchiveError> {
+    get_archive_images_with_file(zip_path, None)
+}
+
+pub(crate) fn get_archive_images_from_file(
+    zip_path: &Path,
+    file: File,
+) -> Result<Vec<String>, ArchiveError> {
+    get_archive_images_with_file(zip_path, Some(file))
+}
+
+fn get_archive_images_with_file(
+    zip_path: &Path,
+    safe_file: Option<File>,
+) -> Result<Vec<String>, ArchiveError> {
+    let extension = zip_path
+        .extension()
+        .and_then(|value| value.to_str())
+        .unwrap_or_default()
+        .to_ascii_lowercase();
+    if matches!(extension.as_str(), "7z" | "cb7" | "rar" | "cbr") {
+        let entries = match safe_file {
+            Some(file) => crate::archive_reader::list_entries_from_file(file, zip_path),
+            None => crate::archive_reader::list_entries(zip_path),
+        }
+        .map_err(|error| ArchiveError::InvalidArchive(error.to_string()))?;
+        let mut names = entries
+            .into_iter()
+            .filter(|entry| !entry.is_directory && entry.size > 0)
+            .map(|entry| entry.name)
+            .filter(|name| {
+                visible_archive_page_name(name) && supported_image_extension(Path::new(name))
+            })
+            .collect::<Vec<_>>();
+        names.sort_by(|a, b| natord::compare(a, b).then_with(|| a.cmp(b)));
+        names.dedup();
+        return if names.is_empty() {
+            Err(ArchiveError::NoSupportedImages)
+        } else {
+            Ok(names)
+        };
+    }
+    let mut archive = match safe_file {
+        Some(file) => open_zip_archive_from_file(file),
+        None => open_zip_archive(zip_path),
+    }?;
 
     let mut entry_names = Vec::new();
     for index in 0..archive.len() {
-        let entry = archive.by_index(index).map_err(|error| match error {
-            zip::result::ZipError::UnsupportedArchive(_) => {
-                ArchiveError::UnsupportedZip(error.to_string())
-            }
-            _ => ArchiveError::InvalidZip(error.to_string()),
-        })?;
+        let entry = archive.by_index(index).map_err(zip_error)?;
         let name = entry.name();
         if entry.is_dir()
             || entry.size() == 0
@@ -120,14 +234,7 @@ pub fn get_archive_images(zip_path: &Path) -> Result<Vec<String>, ArchiveError> 
         return Err(ArchiveError::NoSupportedImages);
     }
 
-    let mut first_entry = archive
-        .by_name(&entry_names[0])
-        .map_err(|error| match error {
-            zip::result::ZipError::UnsupportedArchive(_) => {
-                ArchiveError::UnsupportedZip(error.to_string())
-            }
-            _ => ArchiveError::InvalidZip(error.to_string()),
-        })?;
+    let mut first_entry = archive.by_name(&entry_names[0]).map_err(zip_error)?;
     let mut probe = [0_u8; 1];
     let read = first_entry
         .read(&mut probe)
@@ -231,6 +338,108 @@ mod tests {
         assert_eq!(
             get_archive_images(&path),
             Err(ArchiveError::NoSupportedImages)
+        );
+        std::fs::remove_file(path).unwrap();
+    }
+
+    #[test]
+    fn zip64_pages_and_prepended_archives_remain_readable() {
+        for prefix in [0, 128] {
+            let path = temp_zip_path("zip64-valid");
+            let cursor = std::io::Cursor::new(Vec::new());
+            let mut writer = zip::ZipWriter::new(cursor);
+            writer
+                .start_file(
+                    "page.jpg",
+                    zip::write::FileOptions::default().large_file(true),
+                )
+                .unwrap();
+            writer.write_all(b"image").unwrap();
+            let bytes = writer.finish().unwrap().into_inner();
+            let mut wrapped = vec![0_u8; prefix];
+            wrapped.extend_from_slice(&bytes);
+            std::fs::write(&path, wrapped).unwrap();
+            let mut archive = open_zip_archive(&path).unwrap();
+            let mut image = Vec::new();
+            archive
+                .by_name("page.jpg")
+                .unwrap()
+                .read_to_end(&mut image)
+                .unwrap();
+            assert_eq!(image, b"image");
+            std::fs::remove_file(path).unwrap();
+        }
+    }
+
+    #[test]
+    fn zip64_large_self_extracting_prefix_remains_readable() {
+        let path = temp_zip_path("zip64-sfx");
+        let fixture = include_bytes!("../vendor/zip/tests/data/zip64_demo.zip");
+        let mut bytes = vec![0_u8; 1024 * 1024 + 99];
+        bytes.extend_from_slice(fixture);
+        std::fs::write(&path, &bytes).unwrap();
+        let archive = open_zip_archive(&path).unwrap();
+        assert_eq!(archive.len(), 1);
+
+        struct CountingReader {
+            cursor: std::io::Cursor<Vec<u8>>,
+            seeks: usize,
+        }
+        impl std::io::Read for CountingReader {
+            fn read(&mut self, bytes: &mut [u8]) -> std::io::Result<usize> {
+                self.cursor.read(bytes)
+            }
+        }
+        impl std::io::Seek for CountingReader {
+            fn seek(&mut self, position: std::io::SeekFrom) -> std::io::Result<u64> {
+                self.seeks += 1;
+                std::io::Seek::seek(&mut self.cursor, position)
+            }
+        }
+        let measured = zip::ZipArchive::new(CountingReader {
+            cursor: std::io::Cursor::new(bytes),
+            seeks: 0,
+        })
+        .unwrap();
+        let seeks = measured.into_inner().seeks;
+        assert!(seeks < 100, "ZIP64 recovery performed {seeks} seeks");
+        std::fs::remove_file(path).unwrap();
+    }
+
+    #[test]
+    fn zip64_locator_count_is_checked_before_zip_archive_allocation() {
+        let path = temp_zip_path("zip64-count");
+        let mut bytes = Vec::new();
+        bytes.extend_from_slice(&0x0606_4b50_u32.to_le_bytes());
+        bytes.extend_from_slice(&44_u64.to_le_bytes());
+        bytes.extend_from_slice(&45_u16.to_le_bytes());
+        bytes.extend_from_slice(&45_u16.to_le_bytes());
+        bytes.extend_from_slice(&0_u32.to_le_bytes());
+        bytes.extend_from_slice(&0_u32.to_le_bytes());
+        bytes.extend_from_slice(&(crate::archive_reader::MAX_ENTRY_COUNT as u64 + 1).to_le_bytes());
+        bytes.extend_from_slice(&(crate::archive_reader::MAX_ENTRY_COUNT as u64 + 1).to_le_bytes());
+        bytes.extend_from_slice(&0_u64.to_le_bytes());
+        bytes.extend_from_slice(&0_u64.to_le_bytes());
+        bytes.extend_from_slice(&0x0706_4b50_u32.to_le_bytes());
+        bytes.extend_from_slice(&0_u32.to_le_bytes());
+        bytes.extend_from_slice(&0_u64.to_le_bytes());
+        bytes.extend_from_slice(&1_u32.to_le_bytes());
+        bytes.extend_from_slice(&0x0605_4b50_u32.to_le_bytes());
+        bytes.extend_from_slice(&0_u16.to_le_bytes());
+        bytes.extend_from_slice(&0_u16.to_le_bytes());
+        bytes.extend_from_slice(&0_u16.to_le_bytes());
+        bytes.extend_from_slice(&0_u16.to_le_bytes());
+        bytes.extend_from_slice(&0_u32.to_le_bytes());
+        bytes.extend_from_slice(&0_u32.to_le_bytes());
+        bytes.extend_from_slice(&0_u16.to_le_bytes());
+        std::fs::write(&path, bytes).unwrap();
+
+        let error = open_zip_archive(&path).unwrap_err();
+        assert!(
+            error
+                .to_string()
+                .contains("ZIP entry count exceeds the safety limit"),
+            "{error}"
         );
         std::fs::remove_file(path).unwrap();
     }

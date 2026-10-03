@@ -2,13 +2,44 @@ use crate::cache_policy::select_pages_for_budget;
 use crate::state::AppState;
 use base64::{engine::general_purpose, Engine as _};
 use std::collections::HashSet;
-use std::fs::File;
 use std::io::Read;
+#[cfg(test)]
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use tauri::{Emitter, Manager};
 
 const MAX_PRELOAD_PAGE_BYTES: usize = 64 * 1024 * 1024;
+
+fn comic_source_revision(state: &AppState, comic: &crate::state::ComicItem) -> String {
+    let scan_root = state.scan_dir.read().unwrap().clone();
+    let bookmark_root = comic.external_bookmark.as_ref().and_then(|bookmark| {
+        state
+            .active_bookmarks
+            .lock()
+            .unwrap()
+            .get(bookmark)
+            .cloned()
+    });
+    serde_json::json!({
+        "sourceId": comic.source_id,
+        "relativePath": comic.relative_path,
+        "sourcePath": comic.source_path,
+        "externalBookmark": comic.external_bookmark,
+        "scanRoot": scan_root,
+        "bookmarkRoot": bookmark_root,
+        "type": comic.r#type,
+    })
+    .to_string()
+}
+
+fn source_revision_is_current(state: &AppState, id: &str, expected: &str) -> bool {
+    state
+        .comics
+        .try_lock()
+        .ok()
+        .and_then(|comics| comics.iter().find(|comic| comic.id == id).cloned())
+        .is_some_and(|comic| comic_source_revision(state, &comic) == expected)
+}
 
 #[derive(Debug)]
 struct PreloadError {
@@ -44,6 +75,7 @@ impl PreloadError {
     }
 }
 
+#[cfg(test)]
 fn resolve_preload_path(
     comic_type: Option<&str>,
     scan_dir: &Path,
@@ -63,15 +95,18 @@ pub async fn preload_comic(
     id: String,
     generation: u64,
 ) {
-    let current_page = {
+    let (current_page, comic) = {
         let comics = state.comics.lock().await;
-        comics
-            .iter()
-            .find(|comic| comic.id == id)
-            .map(|comic| comic.progress.current_page)
-            .unwrap_or(0)
+        let comic = comics.iter().find(|comic| comic.id == id).cloned();
+        (
+            comic
+                .as_ref()
+                .map(|item| item.progress.current_page)
+                .unwrap_or(0),
+            comic,
+        )
     };
-    preload_comic_window(state, app_handle, id, current_page, generation).await;
+    preload_comic_window_with_item(state, app_handle, id, current_page, generation, comic).await;
 }
 
 pub async fn preload_comic_window(
@@ -81,26 +116,31 @@ pub async fn preload_comic_window(
     current_page: usize,
     generation: u64,
 ) {
+    let comic = {
+        let comics = state.comics.lock().await;
+        comics.iter().find(|comic| comic.id == id).cloned()
+    };
+    preload_comic_window_with_item(state, app_handle, id, current_page, generation, comic).await;
+}
+
+async fn preload_comic_window_with_item(
+    state: Arc<AppState>,
+    app_handle: tauri::AppHandle,
+    id: String,
+    current_page: usize,
+    generation: u64,
+    comic: Option<crate::state::ComicItem>,
+) {
     let relative_path_bytes = match general_purpose::URL_SAFE_NO_PAD.decode(&id) {
         Ok(bytes) => bytes,
         Err(_) => return,
     };
-    let relative_path_str = match String::from_utf8(relative_path_bytes) {
-        Ok(path) => path,
-        Err(_) => return,
-    };
+    if String::from_utf8(relative_path_bytes).is_err() {
+        return;
+    }
 
-    let comic_type = {
-        let comics = state.comics.lock().await;
-        comics
-            .iter()
-            .find(|comic| comic.id == id)
-            .map(|comic| comic.r#type.clone())
-    };
-    if comic_type
-        .as_deref()
-        .is_some_and(|kind| kind.contains("image"))
-    {
+    let comic_type = comic.as_ref().map(|item| item.r#type.as_str());
+    if comic_type.is_some_and(|kind| kind.contains("image")) {
         let _ = app_handle.emit(
             "ram-cache-progress",
             serde_json::json!({
@@ -110,20 +150,52 @@ pub async fn preload_comic_window(
         );
         return;
     }
-    let scan_dir = state.scan_dir.read().unwrap().clone();
     let smb_temp_dir = app_handle
         .path()
         .app_local_data_dir()
         .unwrap_or_else(|_| std::env::temp_dir())
         .join("ComicTemp");
-    let full_path = resolve_preload_path(
-        comic_type.as_deref(),
-        Path::new(&scan_dir),
-        &smb_temp_dir,
-        &relative_path_str,
-    );
+    let Some(comic) = comic else {
+        return;
+    };
+    let source_revision = comic_source_revision(&state, &comic);
+    let (capability_root, capability_relative, full_path) =
+        match crate::protocol::comic_capability(&comic, &state, Some(&smb_temp_dir)) {
+            Ok(value) => value,
+            Err(_) => {
+                let _ = app_handle.emit(
+                    "ram-cache-progress",
+                    serde_json::json!({
+                        "id": id, "generation": generation, "pageIndex": current_page,
+                        "loaded": 0, "total": 0, "finished": true
+                    }),
+                );
+                return;
+            }
+        };
 
-    if !full_path.exists() || full_path.is_dir() {
+    if capability_root.is_dir(&capability_relative) {
+        let _ = app_handle.emit(
+            "ram-cache-progress",
+            serde_json::json!({
+                "id": id, "generation": generation, "pageIndex": current_page,
+                "loaded": 0, "total": 0, "finished": true
+            }),
+        );
+        return;
+    }
+
+    // RAR/7z readers are sequential. A ZIP-style random-access preload would
+    // repeatedly decode solid blocks and stall reading, so page requests load
+    // them on demand until they have a dedicated streaming preload worker.
+    let extension = full_path
+        .extension()
+        .and_then(|value| value.to_str())
+        .unwrap_or_default();
+    if matches!(
+        extension.to_ascii_lowercase().as_str(),
+        "rar" | "cbr" | "7z" | "cb7"
+    ) {
         let _ = app_handle.emit(
             "ram-cache-progress",
             serde_json::json!({
@@ -139,9 +211,11 @@ pub async fn preload_comic_window(
     let completion_id = id.clone();
     let task =
         tokio::task::spawn_blocking(move || -> Result<Option<PreloadResult>, PreloadError> {
-            let file = File::open(&full_path)
-                .map_err(|error| PreloadError::new(format!("無法讀取預載 ZIP：{error}")))?;
-            let mut archive = zip::ZipArchive::new(file)
+            let file = capability_root
+                .open(&capability_relative)
+                .map_err(|error| PreloadError::new(format!("無法讀取預載 ZIP：{error}")))?
+                .into_std();
+            let mut archive = crate::utils::open_zip_archive_from_file(file)
                 .map_err(|error| PreloadError::new(format!("預載 ZIP 格式無效：{error}")))?;
             let entry_names = {
                 let opened = state.opened_comic_files.read().unwrap();
@@ -177,6 +251,7 @@ pub async fn preload_comic_window(
                     .preload_generation
                     .load(std::sync::atomic::Ordering::Acquire)
                     != generation
+                    || !source_revision_is_current(&state, &id, &source_revision)
                 {
                     return Ok(None);
                 }
@@ -251,6 +326,7 @@ pub async fn preload_comic_window(
                         .preload_generation
                         .load(std::sync::atomic::Ordering::Acquire)
                         != generation
+                        || !source_revision_is_current(&state, &id, &source_revision)
                     {
                         return Ok(None);
                     }

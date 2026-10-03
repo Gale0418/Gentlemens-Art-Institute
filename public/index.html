@@ -217,7 +217,7 @@
           <div class="empty-state" id="empty-state" style="display: none;">
             <div class="empty-icon">📂</div>
             <h3 data-i18n="書架尚無漫畫">書架尚無漫畫</h3>
-            <p id="empty-library-hint"><span data-i18n="請把漫畫圖片資料夾或">請把漫畫圖片資料夾或</span> <code>.cbz</code>/<code>.zip</code> <span data-i18n="壓縮檔放入掃描目錄，然後點擊右上角的「重新整理」按鈕吧！">壓縮檔放入掃描目錄，然後點擊右上角的「重新整理」按鈕吧！</span><br><small data-i18n="您可在設定中查看或變更掃描路徑。">您可在設定中查看或變更掃描路徑。</small></p>
+            <p id="empty-library-hint"><span data-i18n="請把漫畫圖片資料夾或">請把漫畫圖片資料夾或</span> <code>.cbz</code>/<code>.zip</code>/<code>.cb7</code>/<code>.7z</code>/<code>.cbr</code>/<code>.rar</code> <span data-i18n="壓縮檔放入掃描目錄，然後點擊右上角的「重新整理」按鈕吧！">壓縮檔放入掃描目錄，然後點擊右上角的「重新整理」按鈕吧！</span><br><small data-i18n="您可在設定中查看或變更掃描路徑。">您可在設定中查看或變更掃描路徑。</small></p>
             <p id="empty-filter-hint" data-i18n="試著清除搜尋、切換篩選，或回上一層資料夾。" hidden>試著清除搜尋、切換篩選，或回上一層資料夾。</p>
           </div>
 
@@ -458,7 +458,10 @@
     <div class="modal-content">
       <div class="modal-header">
         <h2 id="settings-title"><i class="fa-solid fa-gear"></i><span data-i18n="外觀與漫畫庫設定">外觀與漫畫庫設定</span></h2>
-        <button class="close-modal-btn" id="close-settings-btn" aria-label="關閉設定" data-i18n-aria-label="關閉設定"><i class="fa-solid fa-xmark"></i></button>
+        <div class="settings-header-actions">
+          <button id="save-settings-btn" class="modal-action-btn primary" type="button" hidden data-i18n="儲存套用">儲存套用</button>
+          <button class="close-modal-btn" id="close-settings-btn" aria-label="關閉設定" data-i18n-aria-label="關閉設定"><i class="fa-solid fa-xmark"></i></button>
+        </div>
       </div>
       <div class="modal-body">
         <section class="language-settings" aria-labelledby="language-settings-title">

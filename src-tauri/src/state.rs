@@ -444,6 +444,20 @@ impl AppState {
         self.cache_budget_bytes.load(Ordering::Acquire)
     }
 
+    /// Invalidate every reader/preload that was resolved against the previous
+    /// local root or external bookmark set.  The lifecycle lock makes the
+    /// generation check and pool clear atomic with a preload commit, so an old
+    /// task cannot repopulate a cache after a source transition.
+    pub fn invalidate_reader_cache(&self) {
+        let _lifecycle = self.comic_lifecycle.lock().unwrap();
+        self.reader_generation.fetch_add(1, Ordering::SeqCst);
+        self.preload_generation.fetch_add(1, Ordering::SeqCst);
+        self.ram_cache_pool.lock().unwrap().clear();
+        self.opened_comic_files.write().unwrap().clear();
+        *self.active_comic_id.lock().unwrap() = None;
+        *self.pending_open_id.lock().unwrap() = None;
+    }
+
     pub fn refresh_cache_budget(&self) -> usize {
         let pressure = self.memory_pressure_level();
         let desired = measured_memory_budget(pressure);
@@ -545,6 +559,7 @@ mod tests {
         OnlineServicesConfig, GIB, MAX_COMPRESSED_PAGE_CACHE_BYTES,
     };
     use std::collections::HashMap;
+    use std::sync::atomic::Ordering;
 
     #[test]
     fn online_services_are_off_by_default_and_require_disclosure() {
@@ -628,5 +643,33 @@ mod tests {
         let mut remaining = pool["book"].keys().copied().collect::<Vec<_>>();
         remaining.sort_unstable();
         assert_eq!(remaining, vec![0, 2]);
+    }
+
+    #[test]
+    fn source_invalidation_cancels_readers_and_clears_all_identity_state() {
+        let state = AppState::new();
+        state.reader_generation.store(7, Ordering::SeqCst);
+        state.preload_generation.store(11, Ordering::SeqCst);
+        state
+            .ram_cache_pool
+            .lock()
+            .unwrap()
+            .insert("same-id".into(), HashMap::from([(0, vec![1, 2, 3])]));
+        state
+            .opened_comic_files
+            .write()
+            .unwrap()
+            .insert("same-id".into(), vec!["page.jpg".into()]);
+        *state.active_comic_id.lock().unwrap() = Some("same-id".into());
+        *state.pending_open_id.lock().unwrap() = Some("same-id".into());
+
+        state.invalidate_reader_cache();
+
+        assert_eq!(state.reader_generation.load(Ordering::SeqCst), 8);
+        assert_eq!(state.preload_generation.load(Ordering::SeqCst), 12);
+        assert!(state.ram_cache_pool.lock().unwrap().is_empty());
+        assert!(state.opened_comic_files.read().unwrap().is_empty());
+        assert!(state.active_comic_id.lock().unwrap().is_none());
+        assert!(state.pending_open_id.lock().unwrap().is_none());
     }
 }

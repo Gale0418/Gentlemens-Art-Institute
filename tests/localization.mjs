@@ -115,6 +115,20 @@ console.log(`PASS: locale selection, persistence, private-content boundaries, sa
     { window: { GAIL10n: { locale: 'en' } } },
   );
   assert.equal(translateNative('照片相簿目前不可用').message, 'The photo album is not accessible.');
+  const smbCodes = [
+    'SMB_DOWNLOAD_CAPACITY',
+    'SMB_DOWNLOAD_SIZE_MISMATCH',
+    'SMB_SPACE_CHECK_FAILED',
+    'SMB_OPEN_TIMEOUT',
+    'SMB_DOWNLOAD_NO_SPACE',
+    'SMB_DOWNLOAD_INCOMPLETE',
+  ];
+  for (const code of smbCodes) {
+    for (const locale of ['zh-Hant', 'en', 'ja']) {
+      assert.ok(nativeErrors[code]?.[locale], `${code} is missing ${locale} text`);
+    }
+  }
+  assert.equal(translateNative('SMB_DOWNLOAD_INCOMPLETE').message, 'The SMB transfer did not complete. Reopen the comic.');
   assert.equal(translateNative('未識別的原生錯誤'), '未識別的原生錯誤', 'unknown native text must remain available for diagnosis');
   const rateLimit = vm.runInNewContext(
     `${mapSource[0]}\n${resolver[0]}\nlocalizedNativeError('Luna 拒絕請求（HTTP 429）：quota exceeded')`,

@@ -8,7 +8,9 @@ assert.match(appSource, /async function restoreExternalBookmarks\(\)[\s\S]{0,260
 assert.match(appSource, /const latestBookmarks = readExternalBookmarks\(\)[\s\S]{0,180}bookmark\.bookmark !== bookmarkIdentity/, 'bookmark deletion must resolve identity inside the queue');
 assert.match(appSource, /async function initApp\(\)[\s\S]{0,180}sanitizeSmbConfig\(\)/, 'SMB legacy secrets must be sanitized during app initialization');
 assert.match(appSource, /requestPriorityLibraryScan\(state\.scanStatus, state\.favorites\)/, 'scan progress must submit native priority scan hints');
-assert.match(fs.readFileSync(new URL('../public/tauri-api.js', import.meta.url), 'utf8'), /invoke\('scan_priority_library', \{[\s\S]*favoriteIds/, 'native bridge must expose the priority scan command');
+const tauriBridgeSource = fs.readFileSync(new URL('../public/tauri-api.js', import.meta.url), 'utf8');
+assert.match(tauriBridgeSource, /invoke\('scan_priority_library', \{[\s\S]*favoriteIds/, 'native bridge must expose the priority scan command');
+assert.match(tauriBridgeSource, /scanVisibleDirectory: \(relativePath, sourceId\) => invoke\('scan_visible_directory', \{[\s\S]*\.\.\.\(sourceId \? \{ sourceId \} : \{\}\)/, 'visible directory bridge must accept an optional source id');
 
 class FakeClock {
   constructor() {
@@ -98,6 +100,32 @@ class FakeElement {
     return child;
   }
 
+  insertBefore(child, anchor) {
+    if (!anchor || !this.children.includes(anchor)) return this.appendChild(child);
+    if (child.parentNode && child.parentNode !== this) {
+      child.parentNode.children = child.parentNode.children.filter(item => item !== child);
+    } else if (child.parentNode === this) {
+      this.children = this.children.filter(item => item !== child);
+    }
+    child.parentNode = this;
+    child.isConnected = true;
+    this.children.splice(this.children.indexOf(anchor), 0, child);
+    return child;
+  }
+
+  removeChild(child) {
+    const index = this.children.indexOf(child);
+    if (index === -1) throw new Error('child is not present');
+    this.children.splice(index, 1);
+    const detach = node => {
+      node.parentNode = null;
+      node.isConnected = false;
+      node.children?.forEach(detach);
+    };
+    detach(child);
+    return child;
+  }
+
   replaceChildren(...children) {
     this.replaceChildrenCalls += 1;
     this.children.forEach(child => { child.parentNode = null; child.isConnected = false; });
@@ -131,9 +159,19 @@ class FakeElement {
     return null;
   }
   querySelector(selector) {
+    if (selector === '.catalog-thumb.current') {
+      return this.children.find(child => child.classList.contains('current')) || null;
+    }
     if (selector.startsWith('img[data-index="')) {
       const index = selector.match(/data-index="(\d+)"/)?.[1];
       return this.children.find(child => child.dataset?.index === index) || null;
+    }
+    if (selector === '.reader-catalog-grid' || selector === '.reader-catalog-window-controls') {
+      return this.children.find(child => child.className === selector.slice(1)) || null;
+    }
+    if (selector === '[data-catalog-spacer="top"]' || selector === '[data-catalog-spacer="bottom"]') {
+      const value = selector.includes('top') ? 'top' : 'bottom';
+      return this.children.find(child => child.dataset?.catalogSpacer === value) || null;
     }
     return null;
   }
@@ -254,6 +292,14 @@ const makeCover = id => {
   img.dataset.src = `/cover/${id}`;
   return img;
 };
+
+assert.equal(hooks.catalogThumbnailURL('gai://page/photo-id/3'), 'gai://page/photo-id/3?thumbnail=1',
+  'native page thumbnails request the PhotoKit thumbnail variant');
+assert.equal(hooks.catalogThumbnailURL('gai://folder/photo-id/3?existing=1#image'),
+  'gai://folder/photo-id/3?existing=1&thumbnail=1#image',
+  'native folder thumbnails preserve existing query and fragment');
+assert.equal(hooks.catalogThumbnailURL('/fixture/page-3.png'), '/fixture/page-3.png',
+  'fixture thumbnail sources remain unchanged');
 
 // Continue 卡片的實際欄寬與排序欄位都必須進入簽名；未讀收藏不可偽裝成閱讀進度。
 {
@@ -706,16 +752,313 @@ const makeCover = id => {
   const nextButton = controls.children.find(child => child.dataset.catalogWindowControl === 'next');
   catalog.document.activeElement = nextButton;
   nextButton.dispatch('click');
-  assert.equal(catalog.hooks.state.catalogWindowStart, 2580, 'catalog next control keeps the requested window start');
+  assert.equal(catalog.hooks.state.catalogWindowStart, 2574, 'catalog next control advances by the actual row capacity');
   const rerenderedControls = catalog.hooks.elements.pagesContainer.children.find(child => child.className === 'reader-catalog-window-controls');
   const focusedNextButton = rerenderedControls.children.find(child => child.dataset.catalogWindowControl === 'next');
   assert.equal(focusedNextButton.focusCalls, 1, 'catalog window navigation restores focus to its replacement control');
+
+  // 捲動跨過批次邊界時只回收離窗節點；重疊頁面的 thumbnail node 與 img 必須保留。
+  const currentGrid = catalog.hooks.elements.pagesContainer.children
+    .find(child => child.className === 'reader-catalog-grid');
+  const reusedThumb = currentGrid.children.find(child => child.dataset.index === '2660');
+  const reusedImage = reusedThumb.children.find(child => child.tagName === 'IMG');
+  const evictedThumb = currentGrid.children.find(child => child.dataset.index === '2574');
+  catalog.hooks.elements.readerViewport.scrollTop = 60 + (Math.floor(2680 / 6) * 194);
+  catalog.hooks.renderCatalogGrid({ fromScroll: true });
+  const shiftedGrid = catalog.hooks.elements.pagesContainer.children
+    .find(child => child.className === 'reader-catalog-grid');
+  assert.equal(shiftedGrid.children.find(child => child.dataset.index === '2660'), reusedThumb,
+    '批次滑動保留重疊 thumbnail identity');
+  assert.equal(shiftedGrid.children.find(child => child.dataset.index === '2660')
+    .children.find(child => child.tagName === 'IMG'), reusedImage,
+    '批次滑動保留重疊 image identity');
+  assert.equal(shiftedGrid.children.includes(evictedThumb), false,
+    '批次滑動回收離窗 thumbnail');
 
   catalog.hooks.state.readingMode = 'catalog';
   catalog.hooks.updateReaderUiControls();
   for (const control of [catalog.hooks.elements.btnFitMode, catalog.hooks.elements.btnRotateLeft, catalog.hooks.elements.btnRotateRight]) {
     assert.equal(control.disabled, true, 'catalog mode disables image transform controls');
     assert.equal(control.getAttribute('aria-disabled'), 'true', 'catalog mode exposes disabled transform state to assistive technology');
+  }
+}
+
+// 尾批必須在所有欄數與頁數組合下包含最後一頁；非尾批 renderEnd 維持列對齊，
+// spacer 加上部分起始列後仍等於完整文件的 totalRows。
+for (let columns = 1; columns <= 12; columns += 1) {
+  const width = 40 + (130 * columns) + (14 * (columns - 1));
+  const catalog = createHarness({ width });
+  catalog.context.IntersectionObserver = undefined;
+  for (const totalPages of [3016, 5000, 160, 161]) {
+    const capacity = Math.max(columns, Math.floor(160 / columns) * columns);
+    catalog.hooks.state.currentComic = { id: `tail-${columns}-${totalPages}` };
+    catalog.hooks.state.currentComicPages = Array.from({ length: totalPages }, (_, index) => `p${index}`);
+    catalog.hooks.state.currentPageIndex = totalPages - 1;
+    catalog.hooks.state.catalogWindowStart = 0;
+    catalog.hooks.state.catalogWindowEnd = 0;
+    catalog.hooks.state.catalogColumns = 0;
+    catalog.hooks.state.readingMode = 'catalog';
+    catalog.hooks.renderPages();
+    const bounds = catalog.hooks.getCatalogVirtualBounds(totalPages, { preserveWindow: true });
+    const grid = catalog.hooks.elements.pagesContainer.children
+      .find(child => child.className === 'reader-catalog-grid');
+    const first = grid.children[0];
+    const last = grid.children.at(-1);
+    const expectedStart = Math.max(0, totalPages - capacity);
+    assert.equal(catalog.hooks.state.catalogWindowStart, expectedStart,
+      `tail window start stays clamped for columns=${columns}, total=${totalPages}`);
+    assert.equal(first.dataset.index, String(expectedStart),
+      `tail render starts at the full-capacity tail for columns=${columns}, total=${totalPages}`);
+    assert.equal(last.dataset.index, String(totalPages - 1),
+      `tail render includes final page for columns=${columns}, total=${totalPages}`);
+    assert.ok(grid.children.length <= 160,
+      `tail DOM stays bounded for columns=${columns}, total=${totalPages}`);
+    const topRows = Math.floor(bounds.renderStart / columns);
+    const gridRows = Math.ceil(((bounds.renderStart % columns) + (bounds.renderEnd - bounds.renderStart)) / columns);
+    const bottomRows = Math.max(0, bounds.totalRows - Math.ceil(bounds.renderEnd / columns));
+    assert.equal(topRows + gridRows + bottomRows, bounds.totalRows,
+      `tail spacer geometry covers all rows for columns=${columns}, total=${totalPages}`);
+    if (bounds.renderEnd !== totalPages) {
+      assert.equal(bounds.renderEnd % columns, 0,
+        `non-tail renderEnd is row aligned for columns=${columns}, total=${totalPages}`);
+    }
+  }
+}
+
+// incremental fromScroll 進入欄數不整除的尾批時，top spacer 仍必須採完整列高度。
+{
+  const columns = 5;
+  const totalPages = 3016;
+  const tail = createHarness({ width: 40 + (130 * columns) + (14 * (columns - 1)) });
+  tail.context.IntersectionObserver = undefined;
+  tail.hooks.state.currentComic = { id: 'incremental-tail' };
+  tail.hooks.state.currentComicPages = Array.from({ length: totalPages }, (_, index) => `p${index}`);
+  tail.hooks.state.currentPageIndex = 0;
+  tail.hooks.state.readingMode = 'catalog';
+  tail.hooks.renderPages();
+  tail.hooks.elements.readerViewport.scrollTop = 60 + (Math.floor(3000 / columns) * 194);
+  tail.hooks.renderCatalogGrid({ fromScroll: true });
+  const topSpacer = tail.hooks.elements.pagesContainer.children
+    .find(child => child.dataset.catalogSpacer === 'top');
+  assert.equal(topSpacer.style.height, `${Math.floor((totalPages - 160) / columns) * 194}px`,
+    'incremental tail top spacer uses complete rows');
+}
+
+// 初始 catalog window 必須依實際列容量判斷 current page；capacity 邊界附近不得漏目前頁。
+for (let columns = 1; columns <= 12; columns += 1) {
+  const width = 40 + (130 * columns) + (14 * (columns - 1));
+  const capacity = Math.max(columns, Math.floor(160 / columns) * columns);
+  const current = createHarness({ width });
+  current.context.IntersectionObserver = undefined;
+  current.hooks.state.currentComicPages = Array.from({ length: 5000 }, (_, index) => `p${index}`);
+  current.hooks.state.currentComic = { id: `current-boundary-${columns}` };
+  current.hooks.state.readingMode = 'catalog';
+  for (const pageIndex of [Math.max(0, capacity - 3), capacity - 2, capacity - 1,
+    capacity, capacity + 1, capacity + 2, capacity + 3]) {
+    current.hooks.state.currentPageIndex = pageIndex;
+    current.hooks.state.catalogWindowStart = 0;
+    current.hooks.state.catalogWindowEnd = 0;
+    current.hooks.state.catalogColumns = 0;
+    current.hooks.renderPages();
+    const grid = current.hooks.elements.pagesContainer.children
+      .find(child => child.className === 'reader-catalog-grid');
+    assert.ok(grid.children.some(child => child.dataset.index === String(pageIndex)),
+      `initial window keeps current page for columns=${columns}, index=${pageIndex}`);
+  }
+}
+
+// 初次跳到長篇尾窗必須同步完成，不能留下會在 resize 後移動 viewport 的動畫。
+{
+  const entry = createHarness({ width: 800 });
+  entry.context.IntersectionObserver = undefined;
+  entry.hooks.state.currentComic = { id: 'catalog-entry-race' };
+  entry.hooks.state.currentComicPages = Array.from({ length: 5000 }, (_, index) => `p${index}`);
+  entry.hooks.state.currentPageIndex = 4999;
+  entry.hooks.state.readingMode = 'catalog';
+  entry.hooks.renderPages();
+  assert.ok(entry.hooks.elements.readerViewport.scrollTop > 1000,
+    'catalog entry positions the current page before returning');
+  const oldGrid = entry.hooks.elements.pagesContainer.querySelector('.reader-catalog-grid');
+  const oldCurrent = oldGrid.querySelector('.catalog-thumb.current');
+  let staleScrolls = 0;
+  oldCurrent.scrollIntoView = () => { staleScrolls += 1; entry.hooks.elements.readerViewport.scrollTop = 0; };
+  entry.context.window.innerWidth = 1440;
+  entry.hooks.handleReaderResize();
+  entry.clock.tick(0);
+  const resizedTop = entry.hooks.elements.readerViewport.scrollTop;
+  entry.clock.tick(200);
+  assert.equal(staleScrolls, 0, 'detached entry thumbnail cannot run a delayed scroll');
+  assert.equal(entry.hooks.elements.readerViewport.scrollTop, resizedTop,
+    'entry positioning cannot overwrite the resize anchor');
+  assert.ok(resizedTop > 1000, 'tail anchor survives the column change');
+}
+
+// resize 只在欄數真的改變時重算；同一 frame 的 5→8→5 與 no-op 不重建 DOM，
+// 欄數改變則以目錄可見列作 anchor，currentPageIndex 不得被改寫。
+{
+  const resize = createHarness({ width: 40 + (130 * 5) + (14 * 4) });
+  resize.context.IntersectionObserver = undefined;
+  resize.hooks.state.currentComic = { id: 'catalog-resize' };
+  resize.hooks.state.currentComicPages = Array.from({ length: 3016 }, (_, index) => `p${index}`);
+  resize.hooks.state.currentPageIndex = 17;
+  resize.hooks.state.readingMode = 'catalog';
+  resize.hooks.renderPages();
+  resize.hooks.elements.readerViewport.scrollTop = 60 + (Math.floor(1500 / 5) * 194) + 20;
+  const beforeResizeGrid = resize.hooks.elements.pagesContainer.children
+    .find(child => child.className === 'reader-catalog-grid');
+  const beforeGeneration = resize.hooks.getCatalogThumbnailLoadState().generation;
+  const originalReplaceChildren = resize.hooks.elements.pagesContainer.replaceChildren.bind(
+    resize.hooks.elements.pagesContainer,
+  );
+  resize.hooks.elements.pagesContainer.replaceChildren = (...children) => {
+    originalReplaceChildren(...children);
+    // Simulate WKWebView clamping scrollTop while a resize render replaces DOM.
+    resize.hooks.elements.readerViewport.scrollTop = 0;
+  };
+
+  resize.context.window.innerWidth = 40 + (130 * 8) + (14 * 7);
+  resize.hooks.handleReaderResize();
+  resize.clock.tick(0);
+  assert.equal(resize.hooks.state.catalogColumns, 8, 'resize applies the new catalog columns');
+  assert.equal(resize.hooks.state.currentPageIndex, 17, 'resize does not change reader current page');
+  assert.ok(resize.hooks.elements.readerViewport.scrollTop > 1000,
+    'mid catalog resize preserves a logical visible anchor');
+  assert.notEqual(resize.hooks.elements.pagesContainer.children
+    .find(child => child.className === 'reader-catalog-grid'), beforeResizeGrid,
+  'column change may rebuild the catalog grid');
+  assert.ok(resize.hooks.getCatalogThumbnailLoadState().generation > beforeGeneration,
+    'column change resets the thumbnail generation');
+
+  resize.context.window.innerWidth = 40 + (130 * 5) + (14 * 4);
+  resize.hooks.handleReaderResize();
+  resize.clock.tick(0);
+  assert.equal(resize.hooks.state.catalogColumns, 5, 'resize back restores the original columns');
+  assert.ok(resize.hooks.elements.readerViewport.scrollTop > 1000,
+    'resize back preserves the logical visible anchor');
+
+  const stableGrid = resize.hooks.elements.pagesContainer.children
+    .find(child => child.className === 'reader-catalog-grid');
+  const stableGeneration = resize.hooks.getCatalogThumbnailLoadState().generation;
+  resize.context.window.innerWidth = 40 + (130 * 8) + (14 * 7);
+  resize.hooks.handleReaderResize();
+  resize.context.window.innerWidth = 40 + (130 * 5) + (14 * 4);
+  resize.hooks.handleReaderResize();
+  resize.clock.tick(0);
+  assert.equal(resize.hooks.elements.pagesContainer.children
+    .find(child => child.className === 'reader-catalog-grid'), stableGrid,
+  'rapid same-frame resize coalesces without rebuilding');
+  assert.equal(resize.hooks.getCatalogThumbnailLoadState().generation, stableGeneration,
+    'rapid same-frame resize does not reset thumbnail loading');
+
+  resize.hooks.handleReaderResize();
+  resize.clock.tick(0);
+  assert.equal(resize.hooks.elements.pagesContainer.children
+    .find(child => child.className === 'reader-catalog-grid'), stableGrid,
+  'no-op resize preserves catalog node identity');
+  assert.equal(resize.hooks.getCatalogThumbnailLoadState().generation, stableGeneration,
+    'no-op resize does not reset thumbnail loading');
+
+  resize.hooks.elements.readerViewport.scrollTop = 60 + (Math.floor(1500 / 5) * 194) + 20;
+  resize.hooks.handleCatalogScroll();
+  resize.context.window.innerWidth = 40 + (130 * 8) + (14 * 7);
+  resize.hooks.handleReaderResize();
+  resize.clock.tick(0);
+  assert.equal(resize.hooks.state.catalogColumns, 8, 'scroll and resize same frame use resize path');
+  assert.ok(resize.hooks.elements.readerViewport.scrollTop > 1000,
+    'scroll and resize same frame restore the captured anchor after DOM clamp');
+}
+
+// 關閉 reader 後才執行的 resize/scroll RAF 不得搬移下一本漫畫的 catalog viewport。
+{
+  const stale = createHarness({ width: 40 + (130 * 5) + (14 * 4) });
+  stale.context.IntersectionObserver = undefined;
+  stale.hooks.state.currentComic = { id: 'stale-old' };
+  stale.hooks.state.currentComicPages = Array.from({ length: 3016 }, (_, index) => `old-${index}`);
+  stale.hooks.state.currentPageIndex = 0;
+  stale.hooks.state.readingMode = 'catalog';
+  stale.hooks.renderPages();
+  stale.context.window.innerWidth = 40 + (130 * 8) + (14 * 7);
+  stale.hooks.handleReaderResize();
+  stale.hooks.handleCatalogScroll();
+  await stale.hooks.closeReader();
+
+  stale.context.window.innerWidth = 40 + (130 * 5) + (14 * 4);
+  stale.hooks.state.currentComic = { id: 'stale-new' };
+  stale.hooks.state.currentComicPages = Array.from({ length: 80 }, (_, index) => `new-${index}`);
+  stale.hooks.state.currentPageIndex = 0;
+  stale.hooks.state.readingMode = 'catalog';
+  stale.hooks.renderPages();
+  const newGrid = stale.hooks.elements.pagesContainer.children
+    .find(child => child.className === 'reader-catalog-grid');
+  const newScrollTop = stale.hooks.elements.readerViewport.scrollTop;
+  stale.clock.tick(0);
+  assert.equal(stale.hooks.elements.pagesContainer.children
+    .find(child => child.className === 'reader-catalog-grid'), newGrid,
+  'closed reader cancels stale catalog RAF before reopening');
+  assert.equal(stale.hooks.state.catalogColumns, 5, 'stale resize cannot apply old columns to new comic');
+  assert.equal(stale.hooks.elements.readerViewport.scrollTop, newScrollTop,
+    'stale resize cannot move the new comic viewport');
+}
+
+// 前後按鈕依實際列容量接續；實際 click 往返時，所有視窗聯集不得漏頁。
+for (let columns = 1; columns <= 12; columns += 1) {
+  const width = 40 + (130 * columns) + (14 * (columns - 1));
+  for (const totalPages of [3016, 5000, 160, 161]) {
+    const catalog = createHarness({ width });
+    catalog.context.IntersectionObserver = undefined;
+    catalog.hooks.state.currentComic = { id: `buttons-${columns}-${totalPages}` };
+    catalog.hooks.state.currentComicPages = Array.from({ length: totalPages }, (_, index) => `p${index}`);
+    catalog.hooks.state.currentPageIndex = 0;
+    catalog.hooks.state.readingMode = 'catalog';
+    catalog.hooks.renderPages();
+    const capacity = Math.max(columns, Math.floor(160 / columns) * columns);
+    const forward = [];
+    let steps = 0;
+    while (steps < 100) {
+      const grid = catalog.hooks.elements.pagesContainer.children
+        .find(child => child.className === 'reader-catalog-grid');
+      const first = Number(grid.children[0].dataset.index);
+      const last = Number(grid.children.at(-1).dataset.index);
+      forward.push([first, last]);
+      const controls = catalog.hooks.elements.pagesContainer.children
+        .find(child => child.className === 'reader-catalog-window-controls');
+      const previous = controls.children.find(child => child.dataset.catalogWindowControl === 'previous');
+      const next = controls.children.find(child => child.dataset.catalogWindowControl === 'next');
+      if (steps === 0) assert.equal(previous.disabled, true, 'first catalog window disables previous');
+      if (next.disabled) {
+        assert.match(next.textContent, new RegExp(String(capacity)), 'next label uses row capacity');
+        break;
+      }
+      next.dispatch('click');
+      steps += 1;
+    }
+    assert.ok(steps < 100, `forward catalog navigation terminates for columns=${columns}, total=${totalPages}`);
+    assert.equal(forward[0][0], 0, 'forward navigation starts at page 1');
+    assert.equal(forward.at(-1)[1], totalPages - 1, 'forward navigation reaches final page');
+    for (let index = 1; index < forward.length; index += 1) {
+      assert.ok(forward[index][0] <= forward[index - 1][1] + 1,
+        `forward windows have no gap for columns=${columns}, total=${totalPages}`);
+    }
+
+    const backward = [];
+    steps = 0;
+    while (steps < 100) {
+      const grid = catalog.hooks.elements.pagesContainer.children
+        .find(child => child.className === 'reader-catalog-grid');
+      backward.push([Number(grid.children[0].dataset.index), Number(grid.children.at(-1).dataset.index)]);
+      const controls = catalog.hooks.elements.pagesContainer.children
+        .find(child => child.className === 'reader-catalog-window-controls');
+      const previous = controls.children.find(child => child.dataset.catalogWindowControl === 'previous');
+      if (previous.disabled) break;
+      previous.dispatch('click');
+      steps += 1;
+    }
+    assert.ok(steps < 100, `backward catalog navigation terminates for columns=${columns}, total=${totalPages}`);
+    assert.equal(backward.at(-1)[0], 0, 'backward navigation returns to page 1');
+    for (let index = 1; index < backward.length; index += 1) {
+      assert.ok(backward[index - 1][0] <= backward[index][1] + 1,
+        `backward windows have no gap for columns=${columns}, total=${totalPages}`);
+    }
   }
 }
 
@@ -785,6 +1128,151 @@ const makeCover = id => {
   assert.ok(oldActiveImages.every(img => img.src === ''), '切窗會取消舊世代圖片 src');
   oldActiveImages[0].dispatch('load');
   assert.equal(slowCatalog.hooks.getCatalogThumbnailLoadState().active, 8, '舊世代 load 不扣新世代槽位');
+}
+
+// 快速 fling 直接跳到不重疊尾窗時，必須先 detach 整批舊節點再取消 task；
+// 否則 active task 的同步 cancel callback 會先 pump 舊 queue，餓死新尾窗。
+{
+  const flingCatalog = createHarness({ width: 1000 });
+  flingCatalog.context.IntersectionObserver = undefined;
+  flingCatalog.hooks.state.currentComic = { id: 'fling-catalog' };
+  flingCatalog.hooks.state.currentComicPages = Array.from({ length: 500 }, (_, index) => `fling-${index}`);
+  flingCatalog.hooks.state.currentPageIndex = 0;
+  flingCatalog.hooks.state.readingMode = 'catalog';
+  flingCatalog.hooks.renderPages();
+  const firstGrid = flingCatalog.hooks.elements.pagesContainer.children
+    .find(child => child.className === 'reader-catalog-grid');
+  const oldActiveImage = firstGrid.children[0].children.find(child => child.tagName === 'IMG');
+  const oldQueuedThumb = firstGrid.children[8];
+  const oldQueuedImage = oldQueuedThumb.children.find(child => child.tagName === 'IMG');
+  const oldQueuedSource = oldQueuedImage.dataset.src;
+  assert.equal(oldActiveImage.loading, 'eager', 'catalog queue owns lazy scheduling');
+  assert.equal(flingCatalog.hooks.getCatalogThumbnailLoadState().active, 8);
+  assert.equal(oldQueuedImage.isConnected, true);
+  assert.equal(oldQueuedImage.dataset.catalogLoadQueued, 'true');
+
+  // 模擬一口氣滑到底，使用 incremental patch 路徑而非整批 reset。
+  flingCatalog.hooks.elements.readerViewport.scrollTop = 60 + (Math.floor(490 / 6) * 194);
+  flingCatalog.hooks.renderCatalogGrid({ fromScroll: true });
+  const tailGrid = flingCatalog.hooks.elements.pagesContainer.children
+    .find(child => child.className === 'reader-catalog-grid');
+  assert.equal(tailGrid.children[0].dataset.index, '344', 'fling 直接落在正確尾窗');
+  assert.equal(tailGrid.children.at(-1).dataset.index, '499');
+  assert.equal(oldQueuedThumb.isConnected, false, '舊 queued thumbnail 先 detach');
+  assert.equal(oldQueuedImage.dataset.catalogLoadQueued, undefined, '舊 queued task 已移除');
+  assert.equal(oldQueuedImage.dataset.src, oldQueuedSource, '舊 queued image 未曾被 pump 啟動');
+  assert.equal(oldActiveImage.src, '', '舊 active image 已取消');
+  assert.equal(flingCatalog.hooks.getCatalogThumbnailLoadState().active, 8,
+    '新尾窗補滿併發槽位');
+  assert.ok(tailGrid.children.slice(0, 8).every(thumb => thumb.children[0].src.includes('fling-')),
+    '新尾窗優先開始載入');
+  oldActiveImage.dispatch('load');
+  assert.equal(flingCatalog.hooks.getCatalogThumbnailLoadState().active, 8,
+    '舊 active late callback 不污染新尾窗');
+}
+
+// IntersectionObserver 在 detach 後仍可能送出已排程的 late entry；不可讓它把舊圖重新放回 queue。
+{
+  const observerCatalog = createHarness({ width: 1000 });
+  observerCatalog.hooks.state.currentComic = { id: 'observer-fling-catalog' };
+  observerCatalog.hooks.state.currentComicPages = Array.from({ length: 500 }, (_, index) => `observer-${index}`);
+  observerCatalog.hooks.state.currentPageIndex = 0;
+  observerCatalog.hooks.state.readingMode = 'catalog';
+  observerCatalog.hooks.renderPages();
+  const observer = observerCatalog.context.IntersectionObserver.instances.at(-1);
+  const firstGrid = observerCatalog.hooks.elements.pagesContainer.children
+    .find(child => child.className === 'reader-catalog-grid');
+  const oldQueuedImage = firstGrid.children[8].children.find(child => child.tagName === 'IMG');
+  const oldSource = oldQueuedImage.dataset.src;
+  observer.callback(firstGrid.children.slice(0, 8).map(thumb => ({
+    isIntersecting: true,
+    target: thumb.children.find(child => child.tagName === 'IMG'),
+  })));
+  assert.equal(observerCatalog.hooks.getCatalogThumbnailLoadState().active, 8);
+  observerCatalog.hooks.elements.readerViewport.scrollTop = 60 + (Math.floor(490 / 6) * 194);
+  observerCatalog.hooks.renderCatalogGrid({ fromScroll: true });
+  assert.equal(oldQueuedImage.isConnected, false);
+  observer.callback([{ isIntersecting: true, target: oldQueuedImage }]);
+  assert.equal(oldQueuedImage.dataset.src, oldSource, 'late entry 不會啟動 detached 舊圖');
+  assert.equal(oldQueuedImage.dataset.catalogLoadQueued, undefined, 'late entry 不會留下 stale queue flag');
+  const tailGrid = observerCatalog.hooks.elements.pagesContainer.children
+    .find(child => child.className === 'reader-catalog-grid');
+  observer.callback(tailGrid.children.map(thumb => ({
+    isIntersecting: true,
+    target: thumb.children.find(child => child.tagName === 'IMG'),
+  })));
+  assert.equal(observerCatalog.hooks.getCatalogThumbnailLoadState().active, 8,
+    '尾窗 entry 只啟動尾部圖片並填滿併發額度');
+  tailGrid.children[0].children.find(child => child.tagName === 'IMG').dispatch('load');
+  assert.equal(observerCatalog.hooks.getCatalogThumbnailLoadState().active, 8,
+    '尾窗 load 後會繼續補下一張 queued 圖');
+}
+
+// overlap 窗若剛好讓舊 8 active 全部離窗，保留區 queued task 沒有新的 IO entry
+// 也必須由 patch 完成後主動補泵，不能停在 active=0。
+{
+  const overlapCatalog = createHarness({ width: 1000 });
+  overlapCatalog.hooks.state.currentComic = { id: 'observer-overlap-catalog' };
+  overlapCatalog.hooks.state.currentComicPages = Array.from({ length: 500 }, (_, index) => `overlap-${index}`);
+  overlapCatalog.hooks.state.currentPageIndex = 0;
+  overlapCatalog.hooks.state.readingMode = 'catalog';
+  overlapCatalog.hooks.renderPages();
+  const observer = overlapCatalog.context.IntersectionObserver.instances.at(-1);
+  const firstGrid = overlapCatalog.hooks.elements.pagesContainer.children
+    .find(child => child.className === 'reader-catalog-grid');
+  observer.callback(firstGrid.children.map(thumb => ({
+    isIntersecting: true,
+    target: thumb.children.find(child => child.tagName === 'IMG'),
+  })));
+  assert.equal(overlapCatalog.hooks.getCatalogThumbnailLoadState().active, 8);
+  overlapCatalog.hooks.elements.readerViewport.scrollTop = 60 + (Math.floor(100 / 6) * 194);
+  overlapCatalog.hooks.renderCatalogGrid({ fromScroll: true });
+  const overlapGrid = overlapCatalog.hooks.elements.pagesContainer.children
+    .find(child => child.className === 'reader-catalog-grid');
+  assert.equal(overlapGrid.children[0].dataset.index, '78', 'overlap scroll 只平移到下一批');
+  assert.equal(overlapCatalog.hooks.getCatalogThumbnailLoadState().active, 8,
+    '舊 active 離窗後仍立即補滿保留 queue');
+}
+
+// closeReader 在 detach 前必須清空 catalog observer、queue 與 active task；
+// 舊圖片晚回呼也不得污染重新開啟的漫畫世代。
+{
+  const closingCatalog = createHarness();
+  closingCatalog.hooks.state.currentComic = { id: 'closing-catalog' };
+  closingCatalog.hooks.state.currentComicPages = Array.from({ length: 320 }, (_, index) => `closing-${index}`);
+  closingCatalog.hooks.state.currentPageIndex = 0;
+  closingCatalog.hooks.state.readingMode = 'catalog';
+  closingCatalog.hooks.renderPages();
+  const closingGrid = closingCatalog.hooks.elements.pagesContainer.children
+    .find(child => child.className === 'reader-catalog-grid');
+  const lateImage = closingGrid.children[0].children.find(child => child.tagName === 'IMG');
+  const observer = closingCatalog.context.IntersectionObserver.instances.at(-1);
+  observer.callback([{ isIntersecting: true, target: lateImage }]);
+  assert.equal(closingCatalog.hooks.getCatalogThumbnailLoadState().active, 1);
+  assert.equal(closingCatalog.hooks.getCatalogThumbnailLoadState().observerConnected, true);
+  await closingCatalog.hooks.closeReader();
+  const closedState = closingCatalog.hooks.getCatalogThumbnailLoadState();
+  assert.equal(closedState.active, 0, 'close clears active catalog image tasks');
+  assert.equal(closedState.queued, 0, 'close clears queued catalog images');
+  assert.equal(closedState.tasks, 0, 'close clears catalog task set');
+  assert.equal(closedState.observerConnected, false, 'close disconnects catalog observer');
+  lateImage.dispatch('load');
+
+  closingCatalog.hooks.state.currentComic = { id: 'reopened-catalog' };
+  closingCatalog.hooks.state.currentComicPages = Array.from({ length: 12 }, (_, index) => `reopened-${index}`);
+  closingCatalog.hooks.state.currentPageIndex = 0;
+  closingCatalog.hooks.state.readingMode = 'catalog';
+  closingCatalog.hooks.renderPages();
+  assert.equal(closingCatalog.hooks.state.currentComic.id, 'reopened-catalog');
+  assert.equal(closingCatalog.hooks.getCatalogThumbnailLoadState().active, 0,
+    'late closed callback cannot occupy reopened generation');
+  closingCatalog.hooks.state.readingMode = 'single';
+  closingCatalog.hooks.renderPages();
+  const switchedState = closingCatalog.hooks.getCatalogThumbnailLoadState();
+  assert.equal(switchedState.active, 0, 'leaving catalog clears active image tasks');
+  assert.equal(switchedState.queued, 0, 'leaving catalog clears queued images');
+  assert.equal(switchedState.tasks, 0, 'leaving catalog clears task set');
+  assert.equal(switchedState.observerConnected, false, 'leaving catalog disconnects observer');
 }
 
 // 書架重建取消 lazy-cover 載入時，queued/loading 卡片必須回到可重新排程的 idle。
@@ -910,6 +1398,123 @@ const makeCover = id => {
   assert.deepEqual(visibleScanPaths, ['系列/第一部', '系列', ''], 'each navigated directory, including root, requests a shallow scan');
   assert.equal(navigation.hooks.state.currentPath, '');
   assert.equal(navigation.hooks.elements.libraryUpBtn.disabled, true);
+}
+
+// PhotoKit 的 photos／photos:... 是虛擬來源；navigate/close 回到相簿根目錄時
+// 不得呼叫 filesystem visible scan，也不得把上一次錯誤留在 UI。
+{
+  const photoNavigation = createHarness();
+  const scanCalls = [];
+  photoNavigation.context.window.electronAPI.scanVisibleDirectory = (path, sourceId) => {
+    scanCalls.push({ path, sourceId });
+    return Promise.resolve();
+  };
+  vm.runInContext('filterAndRenderGrid = () => {}; renderSidebar = () => {}', photoNavigation.context);
+  for (const sourceId of ['photos:', 'photos:album-a', 'photos', 'builtin:landscapes']) {
+    photoNavigation.hooks.elements.visibleScanStatus.hidden = false;
+    photoNavigation.hooks.elements.visibleScanStatus.textContent = '舊的 filesystem 錯誤';
+    await photoNavigation.hooks.requestVisibleDirectoryScan('相簿', { sourceId });
+    assert.equal(photoNavigation.hooks.elements.visibleScanStatus.textContent, '',
+      `PhotoKit source ${sourceId} clears stale visible scan status`);
+    assert.equal(photoNavigation.hooks.elements.visibleScanStatus.hidden, true,
+      `PhotoKit source ${sourceId} hides visible scan status`);
+  }
+  assert.deepEqual(scanCalls, [], 'PhotoKit sources never call filesystem visible scan');
+
+  photoNavigation.hooks.navigateLibraryToPath('相簿', 'photos:album-a');
+  await Promise.resolve();
+  assert.deepEqual(scanCalls, [], 'PhotoKit navigation does not schedule filesystem scan');
+  photoNavigation.hooks.state.currentComic = { id: 'photos:album-a' };
+  photoNavigation.hooks.state.currentComicPages = [];
+  photoNavigation.hooks.state.readingMode = 'single';
+  photoNavigation.hooks.state.readerReturnComicFolder = photoNavigation.hooks.createDirectoryLocation('photos:', '');
+  await photoNavigation.hooks.closeReader();
+  assert.deepEqual(scanCalls, [], 'closing a PhotoKit reader does not scan its virtual folder');
+
+  for (const sourceId of ['local:library', 'smb', 'external:bookmark']) {
+    await photoNavigation.hooks.requestVisibleDirectoryScan('漫畫', { sourceId });
+  }
+  assert.deepEqual(scanCalls, [
+    { path: '漫畫', sourceId: 'local:library' },
+    { path: '漫畫', sourceId: 'smb' },
+    { path: '漫畫', sourceId: 'external:bookmark' },
+  ], 'local, SMB and external sources keep visible scan calls');
+}
+
+// catalog-thumb 的 pointerup 不得觸發閱讀器中間 tap／左右翻頁；原生 click
+// 與 Enter/Space 仍由 thumbnail 自己跳到對應頁面。
+{
+  const pointerCatalog = createHarness();
+  pointerCatalog.hooks.elements.readerOverlay.style.display = 'flex';
+  pointerCatalog.hooks.elements.readerOverlay.classList.add('reader-idle');
+  pointerCatalog.hooks.state.readingMode = 'catalog';
+  const thumbTarget = new FakeElement('div');
+  thumbTarget.classList.add('catalog-thumb');
+  const eventTarget = { closest: selector => selector.includes('.catalog-thumb') ? thumbTarget : null };
+  const mousemoveStart = appSource.indexOf("  elements.readerOverlay.addEventListener('mousemove', (e) => {");
+  const mousemoveEnd = appSource.indexOf('  let touchStartX = 0;', mousemoveStart);
+  assert.ok(mousemoveStart >= 0 && mousemoveEnd > mousemoveStart);
+  vm.runInContext(`{ let readerTouchActive = false; ${appSource.slice(mousemoveStart, mousemoveEnd)} }`,
+    pointerCatalog.context);
+  const hover = pointerCatalog.hooks.elements.readerOverlay.listeners.get('mousemove')[0].handler;
+  hover({ buttons: 0, clientY: 760, target: eventTarget });
+  assert.equal(pointerCatalog.hooks.elements.readerOverlay.classList.contains('reader-idle'), true,
+    'WebKit compatibility mousemove over an edge thumbnail does not reveal covering chrome');
+  pointerCatalog.document.elementFromPoint = () => eventTarget;
+  const retargeted = { buttons: 0, clientX: 410, clientY: 760, target: { closest: () => null } };
+  hover(retargeted);
+  assert.equal(pointerCatalog.hooks.elements.readerOverlay.classList.contains('reader-idle'), true,
+    'retargeted compatibility mousemove uses the actual thumbnail under the pointer');
+  pointerCatalog.hooks.handleReaderPointerClick({ ...retargeted, button: 0 });
+  assert.equal(pointerCatalog.hooks.elements.readerOverlay.classList.contains('reader-idle'), true,
+    'retargeted pointerup on a thumbnail preserves the native click target');
+  delete pointerCatalog.document.elementFromPoint;
+  hover({ buttons: 0, clientY: 760, target: { closest: () => null } });
+  assert.equal(pointerCatalog.hooks.elements.readerOverlay.classList.contains('reader-idle'), false,
+    'mousemove on the empty reader edge still reveals controls');
+  pointerCatalog.hooks.elements.readerOverlay.classList.add('reader-idle');
+  for (const bar of ['readerTopBar', 'readerBottomBar']) {
+    const leaveSection = appSource.match(new RegExp(`elements\\.${bar}\\.addEventListener\\('mouseleave', \\(\\) => \\{[\\s\\S]*?\\n  \\}\\);`));
+    assert.ok(leaveSection, `${bar} leave listener exists`);
+    vm.runInContext(leaveSection[0], pointerCatalog.context);
+    const leave = pointerCatalog.hooks.elements[bar].listeners.get('mouseleave')[0].handler;
+    leave();
+    assert.equal(pointerCatalog.hooks.elements.readerOverlay.classList.contains('reader-idle'), true,
+      `${bar} late leave cannot revive hidden chrome`);
+  }
+  pointerCatalog.hooks.handleReaderPointerClick({
+    button: 0,
+    clientX: 410,
+    target: eventTarget,
+  });
+  assert.equal(pointerCatalog.hooks.elements.readerOverlay.classList.contains('reader-idle'), true,
+    'catalog pointerup does not toggle reader chrome');
+
+  pointerCatalog.hooks.state.currentComic = { id: 'catalog-pointer' };
+  pointerCatalog.hooks.state.currentComicPages = Array.from({ length: 12 }, (_, index) => `p${index}`);
+  pointerCatalog.hooks.state.currentPageIndex = 0;
+  pointerCatalog.hooks.state.readingMode = 'catalog';
+  pointerCatalog.hooks.renderPages();
+  const grid = pointerCatalog.hooks.elements.pagesContainer.children
+    .find(child => child.className === 'reader-catalog-grid');
+  const thumb = grid.children[5];
+  assert.equal(typeof thumb.onclick, 'function', 'catalog click handler remains installed');
+  assert.equal(typeof thumb.onkeydown, 'function', 'catalog keyboard handler remains installed');
+  vm.runInContext(`
+    window.catalogModeSelections = [];
+    setReadingMode = mode => window.catalogModeSelections.push(mode);
+  `, pointerCatalog.context);
+  thumb.onclick();
+  assert.equal(pointerCatalog.hooks.state.currentPageIndex, 5, 'thumbnail click opens its own page');
+  assert.deepEqual(Array.from(pointerCatalog.context.window.catalogModeSelections), ['single'],
+    'thumbnail click changes mode exactly once');
+  for (const key of ['Enter', ' ']) {
+    pointerCatalog.hooks.state.currentPageIndex = 0;
+    thumb.onkeydown({ target: thumb, key, preventDefault() {}, stopPropagation() {} });
+    assert.equal(pointerCatalog.hooks.state.currentPageIndex, 5, 'keyboard activation opens the same page');
+  }
+  assert.deepEqual(Array.from(pointerCatalog.context.window.catalogModeSelections), ['single', 'single', 'single'],
+    'click, Enter and Space each activate exactly once');
 }
 
 // 一般漫畫第一次只開詳情，收合後第二次仍開啟原書，而非被抽屜狀態重置選取。
@@ -1392,6 +1997,115 @@ console.log('external bookmark intent queue tests passed');
   assert.deepEqual(restored, [], 'empty restore must submit an empty native bookmark list');
 }
 console.log('external bookmark identity and empty restore tests passed');
+
+// 同一路徑的不同來源必須各自導覽；root 才能合併展示來源候選，避免在
+// 外部 H/HCG 中混入另一個 H/H漫畫/Alpha 的幽靈卡片。
+{
+  const isolated = createHarness();
+  isolated.hooks.state.activeSeries = 'all';
+  isolated.hooks.state.activeFilter = 'all';
+  isolated.hooks.elements.searchInput.value = '';
+  isolated.hooks.state.comics = [
+    { id: 'h-alpha', title: 'Alpha H', relativePath: 'H/HCG/Alpha.cbz', sourceId: 'external:h' },
+    { id: 'h-manga-alpha', title: 'Alpha H漫畫', relativePath: 'H/H漫畫/Alpha.cbz', sourceId: 'external:h' },
+    { id: 'hcg-alpha', title: 'Alpha HCG', relativePath: 'H/HCG/Alpha.cbz', sourceId: 'external:hcg' },
+  ];
+  isolated.hooks.state.currentPath = 'H/HCG';
+  isolated.hooks.state.currentSourceId = 'external:h';
+  assert.deepEqual(Array.from(isolated.hooks.getDirectoryItems(), item => item.id), ['h-alpha'], 'selected source isolates same-path shelf items');
+  isolated.hooks.state.currentSourceId = 'external:hcg';
+  assert.deepEqual(Array.from(isolated.hooks.getDirectoryItems(), item => item.id), ['hcg-alpha'], 'second source keeps the same relative path independent');
+  isolated.hooks.state.currentSourceId = '';
+  isolated.hooks.state.currentPath = 'H/HCG';
+  assert.deepEqual(Array.from(isolated.hooks.getDirectoryItems(), item => item.id), ['h-alpha', 'hcg-alpha'], 'merged root navigation may show both source candidates');
+}
+console.log('source-aware directory isolation tests passed');
+
+// 新事件帶 visibleSourceId 時，另一來源即使使用同一 visiblePath 也不能
+// 看到對方的目錄候選；缺少欄位的舊事件只進 legacy root lane。
+{
+  const visible = createHarness();
+  visible.hooks.elements.searchInput = { value: '' };
+  visible.hooks.state.visibleDirectoryGeneration = 7;
+  visible.hooks.state.scanStatus = { generation: 7, isScanning: true };
+  visible.hooks.state.currentPath = 'shared';
+  visible.hooks.state.currentSourceId = 'external:a';
+  visible.hooks.applyIncrementalLibraryBatch({
+    generation: 7,
+    visible: true,
+    visiblePath: 'shared',
+    visibleSourceId: 'external:b',
+    directories: ['shared/only-b'],
+    items: [],
+  });
+  assert.equal(visible.hooks.getDirectoryItems().some(item => item.relativePath === 'shared/only-b'), false,
+    'source-specific visible directories never cross into the current source');
+  visible.hooks.state.currentSourceId = '';
+  assert.equal(visible.hooks.getDirectoryItems().some(item => item.relativePath === 'shared/only-b'), true,
+    'merged root can present a source-qualified directory candidate');
+}
+console.log('visible source payload isolation tests passed');
+
+// 同一來源的舊 catalog 路徑，也不能在當層淺掃後復活成別處的目錄。
+{
+  const visible = createHarness();
+  visible.hooks.elements.searchInput = { value: '' };
+  visible.hooks.state.scanStatus = { generation: 9, isScanning: true };
+  visible.hooks.state.visibleDirectoryGeneration = 9;
+  visible.hooks.state.currentPath = 'H/HCG';
+  visible.hooks.state.currentSourceId = 'external:h';
+  visible.hooks.state.comics = [
+    { id: 'stale', title: 'Old', relativePath: 'H/HCG/Ghost/old.cbz', sourceId: 'external:h' },
+    { id: 'real', title: 'New', relativePath: 'H/HCG/Real/new.cbz', sourceId: 'external:h' },
+  ];
+  assert.equal(visible.hooks.getDirectoryItems().length, 2, 'before a shallow scan the catalog remains available');
+  visible.hooks.applyIncrementalLibraryBatch({
+    generation: 9, visible: true, visiblePath: 'H/HCG', visibleSourceId: 'external:h',
+    directories: ['H/HCG/Real', 'H/H漫畫/Other'], items: [],
+  });
+  assert.deepEqual(Array.from(visible.hooks.getDirectoryItems(), item => item.title), ['Real'],
+    'the physical one-level snapshot removes old and sibling directory cards');
+  const nodes = vm.runInContext('collectFolderTreeNodes()', visible.context);
+  assert.equal(nodes.has('external:h\u0000H/HCG/Ghost'), false, 'the tree also drops a stale direct child');
+  assert.equal(nodes.has('external:h\u0000H/HCG/Real'), true, 'the tree keeps a real direct child');
+  visible.hooks.applyIncrementalLibraryBatch({
+    generation: 9, visible: true, visiblePath: 'H/HCG', visibleSourceId: 'external:h',
+    directories: [], items: [],
+  });
+  assert.deepEqual(Array.from(visible.hooks.getDirectoryItems()), [],
+    'a later empty snapshot replaces instead of merging the previous visit');
+}
+console.log('authoritative shallow directory snapshot tests passed');
+
+// A→B→A 必須建立 A 的新請求；舊 A promise 不能因為 Map key 相同而被重用。
+{
+  const rapid = createHarness();
+  const calls = [];
+  const resolvers = [];
+  rapid.context.window.electronAPI.scanVisibleDirectory = (relativePath, sourceId) => {
+    calls.push({ relativePath, sourceId });
+    return new Promise(resolve => resolvers.push(resolve));
+  };
+  rapid.hooks.elements.searchInput = { value: '' };
+  rapid.hooks.state.visibleDirectoryGeneration = 1;
+  rapid.hooks.state.scanStatus = { generation: 1, isScanning: true };
+  const cachedA = rapid.hooks.getVisibleDirectoryMapKey('external:a', 'shared');
+  rapid.hooks.state.visibleDirectories.set(cachedA, ['shared/verified']);
+  rapid.hooks.navigateLibraryToPath('shared', 'external:a');
+  rapid.hooks.navigateLibraryToPath('shared', 'external:b');
+  rapid.hooks.navigateLibraryToPath('shared', 'external:a');
+  assert.deepEqual(Array.from(rapid.hooks.state.visibleDirectories.get(cachedA)), ['shared/verified'],
+    'returning to A keeps its verified directory snapshot until the new scan arrives');
+  await Promise.resolve();
+  assert.deepEqual(JSON.parse(JSON.stringify(calls)), [
+    { relativePath: 'shared', sourceId: 'external:a' },
+    { relativePath: 'shared', sourceId: 'external:b' },
+    { relativePath: 'shared', sourceId: 'external:a' },
+  ], 'returning to a source/path starts a fresh visible scan');
+  resolvers.forEach(resolve => resolve());
+  await Promise.resolve();
+}
+console.log('rapid source navigation tests passed');
 
 // 原生清單已提交但權限釋放失敗時，移除後的清單仍須保存；真正失敗則保留原清單。
 for (const [nativeError, expectedCount] of [

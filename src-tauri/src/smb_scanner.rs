@@ -268,6 +268,7 @@ pub(crate) async fn scan_visible_smb(
                 found: 0,
                 visible: true,
                 visible_path: Some(relative_path),
+                visible_source_id: Some("smb".to_string()),
                 directories: Some(directories),
             },
         );
@@ -372,7 +373,7 @@ async fn scan_smb_dir(
             .and_then(|value| value.to_str())
             .unwrap_or("")
             .to_lowercase();
-        if ext != "cbz" && ext != "zip" {
+        if !matches!(ext.as_str(), "cbz" | "zip" | "cb7" | "7z" | "cbr" | "rar") {
             continue;
         }
 
@@ -485,6 +486,7 @@ async fn publish_smb_progress(
                 found: base_count.saturating_add(discovered),
                 visible: false,
                 visible_path: None,
+                visible_source_id: None,
                 directories: None,
             },
         )
@@ -544,6 +546,7 @@ async fn publish_smb_visible_progress(
             found: discovered,
             visible: true,
             visible_path: None,
+            visible_source_id: None,
             directories: None,
         }
     };

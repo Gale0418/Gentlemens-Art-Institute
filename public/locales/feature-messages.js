@@ -1,4 +1,52 @@
 window.GAIL10n.register({
+  "有 {count} 本漫畫的閱讀進度尚未保存。": {
+    "en": "Reading progress for {count} comic(s) is still pending.",
+    "ja": "{count}作品の読書進捗がまだ保存されていません。"
+  },
+  "重試保存閱讀進度": {
+    "en": "Retry saving reading progress",
+    "ja": "読書進捗の保存を再試行"
+  },
+  "此 App session 可重試，尚未可靠備份。": {
+    "en": "This app session can retry, but the progress is not reliably backed up yet.",
+    "ja": "このアプリセッションでは再試行できますが、進捗はまだ確実にバックアップされていません。"
+  },
+  "匯入圖片必須介於 1 byte 與 64 MiB。": {
+    "en": "Imported images must be between 1 byte and 64 MiB.",
+    "ja": "読み込む画像は1バイト以上64 MiB以下にしてください。"
+  },
+  "匯入檔名過長。": {
+    "en": "The import filename is too long.",
+    "ja": "読み込むファイル名が長すぎます。"
+  },
+  "閱讀進度序號格式不正確。": {
+    "en": "The reading progress sequence is invalid.",
+    "ja": "読書進捗のシーケンスが無効です。"
+  },
+  "第 {pages} 頁載入失敗，請重試。": {
+    "en": "Page {pages} failed to load. Retry.",
+    "ja": "{pages}ページ目の読み込みに失敗しました。再試行してください。"
+  },
+  "正在重試…": {
+    "en": "Retrying…",
+    "ja": "再試行中…"
+  },
+  "匯入結果：成功 {success} 張，失敗 {failed} 張，未處理 {pending} 張。": {
+    "en": "Import result: {success} succeeded, {failed} failed, {pending} pending.",
+    "ja": "読み込み結果：成功 {success} 枚、失敗 {failed} 枚、未処理 {pending} 枚。"
+  },
+  "重試未匯入的 {count} 張": {
+    "en": "Retry {count} pending photos",
+    "ja": "未処理の写真 {count} 枚を再試行"
+  },
+  "已成功寫入的圖片會保留；請按「重試未匯入的圖片」再次處理失敗項。": {
+    "en": "Successfully imported photos are kept. Use the retry button to process the failed items.",
+    "ja": "正常に読み込めた写真は保持されます。再試行ボタンで失敗した項目を処理してください。"
+  },
+  "正在重試匯入 {count} 張圖片…": {
+    "en": "Retrying import of {count} photos…",
+    "ja": "写真 {count} 枚の読み込みを再試行中…"
+  },
   "購買功能需要 iOS 15 或更新版本": {
     "en": "Purchases require iOS 15 or later.",
     "ja": "購入には iOS 15 以降が必要です。"

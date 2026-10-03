@@ -1533,6 +1533,18 @@ body {
   gap: 12px;
 }
 
+#scan-path-row[hidden],
+#save-settings-btn[hidden] {
+  display: none;
+}
+
+.settings-header-actions {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  flex-shrink: 0;
+}
+
 .path-input-row input {
   flex: 1;
   background: rgba(0, 0, 0, 0.2);
@@ -1858,6 +1870,9 @@ body {
 
 .library-source-advanced summary {
   width: fit-content;
+  min-height: 44px;
+  box-sizing: border-box;
+  padding-block: 13px;
   cursor: pointer;
   font-size: 12px;
   font-weight: 600;
@@ -1891,6 +1906,12 @@ body {
   flex-direction: column;
   gap: 8px;
   margin-top: -10px;
+}
+
+.external-bookmark-remove {
+  flex-shrink: 0;
+  min-width: 44px;
+  min-height: 44px;
 }
 
 @media (max-width: 620px) {
@@ -2272,6 +2293,12 @@ body {
 .continue-body small {
   color: var(--text-muted);
   font-size: 11px;
+}
+
+.continue-context {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 
 .continue-progress,
@@ -2753,10 +2780,23 @@ body {
 
 .reader-catalog-grid {
   display: grid;
-  grid-template-columns: repeat(auto-fill, minmax(130px, 1fr));
+  grid-template-columns: repeat(var(--catalog-columns, auto-fit), minmax(0, 1fr));
   gap: 14px;
   width: 100%;
   padding-bottom: 20px;
+  grid-auto-rows: 180px;
+  contain: layout paint style;
+}
+
+.reader-catalog-grid[data-catalog-start-column] > .catalog-thumb:first-child {
+  grid-column-start: var(--catalog-start-column);
+}
+
+.catalog-virtual-spacer {
+  grid-column: 1 / -1;
+  width: 100%;
+  pointer-events: none;
+  contain: strict;
 }
 
 .reader-catalog-window-controls {
@@ -2799,12 +2839,9 @@ body {
   justify-content: center;
   align-items: center;
   background: rgba(255,255,255,0.05);
-}
-
-.catalog-thumb:hover {
-  border-color: var(--accent);
-  transform: scale(1.04);
-  box-shadow: 0 6px 24px rgba(255, 99, 132, 0.35);
+  touch-action: manipulation;
+  user-select: none;
+  -webkit-touch-callout: none;
 }
 
 .catalog-thumb.current {
@@ -2817,6 +2854,18 @@ body {
   max-height: 100%;
   object-fit: contain;
   display: block;
+  user-select: none;
+  -webkit-user-drag: none;
+  -webkit-touch-callout: none;
+  pointer-events: none;
+}
+
+@media (hover: hover) and (pointer: fine) {
+  .catalog-thumb:hover {
+    border-color: var(--accent);
+    transform: scale(1.04);
+    box-shadow: 0 6px 24px rgba(255, 99, 132, 0.35);
+  }
 }
 
 .catalog-thumb-label {
@@ -2861,6 +2910,22 @@ body {
   font-weight: 500;
   box-shadow: 0 4px 16px rgba(0, 0, 0, 0.5);
   transition: all 0.3s ease;
+}
+
+.reader-status-panel .reader-image-error {
+  pointer-events: auto;
+  cursor: pointer;
+  border: 1px solid rgba(255, 180, 120, 0.45);
+  background: rgba(75, 35, 20, 0.92);
+  color: #fff;
+  padding: 8px 12px;
+  border-radius: 8px;
+  font: inherit;
+}
+
+.reader-status-panel .reader-image-error:disabled {
+  cursor: wait;
+  opacity: 0.75;
 }
 
 .catalog-exchange {
@@ -6128,7 +6193,7 @@ select:focus-visible,
   }
 }
 
-@media (max-width: 900px) {
+@media (max-width: 1100px) {
   .main-layout {
     --library-drawer-width: min(86vw, 320px);
     --inspector-drawer-width: min(92vw, 360px);
@@ -6262,7 +6327,7 @@ select:focus-visible,
   display: none;
 }
 
-@media (max-width: 900px) {
+@media (max-width: 1100px) {
   .main-layout.library-panels-narrow .library-panel-scrim:not([hidden]) {
     position: absolute;
     z-index: 25;
@@ -6270,14 +6335,72 @@ select:focus-visible,
     display: block;
     width: 100%;
     border: 0;
-    background: rgba(0, 0, 0, 0.46);
-    cursor: pointer;
+    /* The folder drawer is non-modal: keep the shelf scrollable while it is open. */
+    background: transparent;
+    pointer-events: none;
   }
 }
 
 .library-start-copy {
   max-width: 48ch;
 }
+
+.library-discovery-btn {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  min-height: 44px;
+  margin-top: 8px;
+  padding: 9px 14px;
+  border: 1px solid var(--line-subtle);
+  border-radius: var(--radius-sm);
+  background: var(--surface-interactive);
+  color: var(--text-primary);
+  font: inherit;
+  cursor: pointer;
+}
+
+.library-discovery-btn:hover:not(:disabled) {
+  border-color: var(--accent-color);
+}
+
+.library-discovery-btn:focus-visible {
+  outline: 3px solid var(--focus-ring);
+  outline-offset: 3px;
+}
+
+.library-discovery-btn:disabled {
+  opacity: 0.55;
+  cursor: default;
+}
+
+.library-discovery-status {
+  margin: 0;
+  color: var(--text-secondary);
+  line-height: 1.5;
+}
+
+.library-tag-discovery-panel {
+  border: 1px solid var(--line-subtle);
+  border-radius: var(--radius-sm);
+  padding: 16px;
+  color: var(--text-secondary);
+}
+.library-tag-discovery-panel[hidden] { display: none; }
+.library-tag-discovery-panel p { margin: 0 0 12px; line-height: 1.5; }
+.library-tag-discovery-panel p:last-child { margin: 12px 0 0; }
+.library-tag-discovery-actions { display: flex; flex-wrap: wrap; align-items: center; gap: 10px; }
+.library-tag-discovery-actions select {
+  min-height: 44px;
+  max-width: 100%;
+  flex: 1 1 180px;
+  border: 1px solid var(--line-subtle);
+  border-radius: var(--radius-sm);
+  padding: 9px 12px;
+  background: var(--surface-interactive);
+  color: var(--text-primary);
+}
+.library-tag-discovery-actions select:focus-visible { outline: 3px solid var(--focus-ring); outline-offset: 2px; }
 
 .library-start-copy h2 {
   margin-bottom: 6px;
@@ -6465,13 +6588,26 @@ html:not([data-i18n-ready]) body {
 
 .folder-tree {
   display: block;
+  flex: 1 1 auto;
   min-width: 0;
+  min-height: 0;
   width: calc(100% + 12px);
   margin-left: -12px;
-  max-height: min(58dvh, 720px);
   overflow-y: auto;
   overscroll-behavior: contain;
   scrollbar-width: thin;
+}
+
+.sidebar > .sidebar-section:first-child {
+  display: flex;
+  flex: 1 1 auto;
+  flex-direction: column;
+  min-height: 0;
+}
+
+.sidebar > .progress-summary-box {
+  flex: 0 0 auto;
+  margin-top: 0;
 }
 
 .folder-tree li.folder-tree-node {
@@ -6598,11 +6734,17 @@ html:not([data-i18n-ready]) body {
 }
 
 @media (max-width: 900px) {
-  .folder-tree {
-    max-height: 48dvh;
-  }
-
   .folder-tree-current-path {
     margin-top: -1px;
+  }
+}
+
+/* 手機上的抽屜把手固定在下緣，避免壓住書架篩選列。 */
+@media (max-width: 620px) {
+  .sidebar-collapse-btn,
+  .inspector-collapse-btn {
+    top: auto;
+    bottom: max(12px, env(safe-area-inset-bottom));
+    transform: none;
   }
 }

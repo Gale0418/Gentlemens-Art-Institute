@@ -1,6 +1,7 @@
 import fs from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
+import { execFileSync } from 'node:child_process';
 
 // Keep canonical permission translations in generated Xcode projects, including APFS staging.
 const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
@@ -23,14 +24,24 @@ for (const locale of locales) {
 }
 const infoFile = path.join(appleDir, infoRelative);
 let info = fs.readFileSync(infoFile, 'utf8');
+const readRootInfo = () => JSON.parse(execFileSync('/usr/bin/plutil', ['-convert', 'json', '-o', '-', '--', infoFile], { encoding: 'utf8' }));
+const rootInfo = readRootInfo();
+if (!rootInfo || Array.isArray(rootInfo) || typeof rootInfo !== 'object') throw new Error('Info.plist must have a root dictionary');
+const insertRootKey = entry => {
+  const closing = info.lastIndexOf('</dict>');
+  if (closing < 0) throw new Error('Missing root dictionary closing tag');
+  info = info.slice(0, closing) + entry + '\n' + info.slice(closing);
+};
 const localizedKeys = '<key>CFBundleLocalizations</key>\n\t<array><string>zh-Hant</string><string>en</string><string>ja</string></array>';
-if (!info.includes('<key>CFBundleLocalizations</key>')) info = info.replace('<dict>', `<dict>\n\t${localizedKeys}`);
+if (!Object.hasOwn(rootInfo, 'CFBundleLocalizations')) insertRootKey(`\t${localizedKeys}`);
 // WebKit's image file picker offers Take Photo; every regenerated target needs this key.
 const cameraKey = '<key>NSCameraUsageDescription</key>';
-if (!info.includes(cameraKey)) {
-  info = info.replace('</dict>', `\t${cameraKey}\n\t<string>Take a photo to import it into your local comic library. Photos are stored on this device.</string>\n</dict>`);
+if (!Object.hasOwn(rootInfo, 'NSCameraUsageDescription')) {
+  insertRootKey(`\t${cameraKey}\n\t<string>Take a photo to import it into your local comic library. Photos are stored on this device.</string>`);
 }
 fs.writeFileSync(infoFile, info);
+const verifiedInfo = readRootInfo();
+if (typeof verifiedInfo.NSCameraUsageDescription !== 'string' || !verifiedInfo.NSCameraUsageDescription.trim()) throw new Error('Missing root camera usage description');
 
 const variant = '6A110C000000000000000001';
 const build = '6A110C000000000000000002';

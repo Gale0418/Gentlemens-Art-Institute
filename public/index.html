@@ -151,12 +151,12 @@
         <main class="content-area">
           <section class="library-start-panel" id="library-start-panel" aria-labelledby="library-start-title" hidden>
             <div class="library-start-copy">
-              <h2 id="library-start-title" data-i18n="把你的漫畫放上書架">把你的漫畫放上書架</h2>
-              <p data-i18n="選擇本機、外接磁碟或已連線的 NAS 資料夾；原始檔不會被改動。">選擇本機、外接磁碟或已連線的 NAS 資料夾；原始檔不會被改動。</p>
+              <h2 id="library-start-title" data-i18n="找漫畫像考古？先翻一本。">找漫畫像考古？先翻一本。</h2>
+              <p data-i18n="加入本機、外接硬碟或已掛載 NAS 的漫畫資料夾；也能先試讀原創風景圖集。">加入本機、外接硬碟或已掛載 NAS 的漫畫資料夾；也能先試讀原創風景圖集。</p>
             </div>
             <div class="library-start-actions">
-              <button id="library-start-choose" class="library-start-primary" type="button"><i class="fa-solid fa-folder-plus" aria-hidden="true"></i><span data-i18n="加入漫畫來源…">加入漫畫來源…</span></button>
-              <button id="library-start-demo" class="library-start-secondary" type="button" data-i18n="先試讀內建選集">先試讀內建選集</button>
+              <button id="library-start-demo" class="library-start-primary" type="button" data-i18n="試讀原創風景">試讀原創風景</button>
+              <button id="library-start-choose" class="library-start-secondary" type="button"><i class="fa-solid fa-folder-plus" aria-hidden="true"></i><span data-i18n="加入漫畫資料夾">加入漫畫資料夾</span></button>
             </div>
           </section>
 
@@ -188,6 +188,10 @@
                 <i class="fa-solid fa-chevron-left" aria-hidden="true"></i>
                 <span data-i18n="回上層">回上層</span>
               </button>
+              <button id="library-discovery-btn" class="library-discovery-btn" type="button" disabled title="從目前資料夾與篩選結果挑一本，再點會盡量換一本。" data-i18n-title="從目前資料夾與篩選結果挑一本，再點會盡量換一本。">
+                <i class="fa-solid fa-shuffle" aria-hidden="true"></i><span data-i18n="隨手翻一本">隨手翻一本</span>
+              </button>
+              <button id="library-tag-discovery-btn" class="library-discovery-btn" type="button" aria-expanded="false" aria-controls="library-tag-discovery-panel" data-i18n="依標籤探索">依標籤探索</button>
             </div>
             <div class="filter-options">
               <label class="series-filter-field" for="series-filter-select">
@@ -205,6 +209,18 @@
             </div>
           </div>
 
+          <section id="library-tag-discovery-panel" class="library-tag-discovery-panel" aria-label="依標籤探索" data-i18n-aria-label="依標籤探索" hidden>
+            <p data-i18n="從目前範圍的標籤找一本；也可以把類型交給運氣。">從目前範圍的標籤找一本；也可以把類型交給運氣。</p>
+            <div class="library-tag-discovery-actions">
+              <label for="library-discovery-tag" data-i18n="選擇探索標籤">選擇探索標籤</label>
+              <select id="library-discovery-tag" disabled></select>
+              <button id="library-discovery-tag-pick" class="library-discovery-btn" type="button" disabled data-i18n="抽這個 TAG">抽這個 TAG</button>
+              <button id="library-discovery-tag-random" class="library-discovery-btn" type="button" disabled data-i18n="隨機 TAG">隨機 TAG</button>
+              <button id="library-discovery-tag-setup" class="library-discovery-btn" type="button" data-i18n="開啟標籤工具">開啟標籤工具</button>
+            </div>
+            <p id="library-discovery-tag-status" role="status" aria-live="polite"></p>
+          </section>
+          <p class="library-discovery-status" id="library-discovery-status" role="status" aria-live="polite" hidden></p>
           <div class="catalog-facets" id="catalog-facets" aria-live="polite" hidden></div>
 
           <!-- 資料夾層級導航列 (姬米妮貼心打造 ✨) -->
@@ -217,7 +233,7 @@
           <div class="empty-state" id="empty-state" style="display: none;">
             <div class="empty-icon">📂</div>
             <h3 data-i18n="書架尚無漫畫">書架尚無漫畫</h3>
-            <p id="empty-library-hint"><span data-i18n="請把漫畫圖片資料夾或">請把漫畫圖片資料夾或</span> <code>.cbz</code>/<code>.zip</code> <span data-i18n="壓縮檔放入掃描目錄，然後點擊右上角的「重新整理」按鈕吧！">壓縮檔放入掃描目錄，然後點擊右上角的「重新整理」按鈕吧！</span><br><small data-i18n="您可在設定中查看或變更掃描路徑。">您可在設定中查看或變更掃描路徑。</small></p>
+            <p id="empty-library-hint"><span data-i18n="請把漫畫圖片資料夾或">請把漫畫圖片資料夾或</span> <code>.cbz</code>/<code>.zip</code>/<code>.cb7</code>/<code>.7z</code>/<code>.cbr</code>/<code>.rar</code> <span data-i18n="壓縮檔放入掃描目錄，然後點擊右上角的「重新整理」按鈕吧！">壓縮檔放入掃描目錄，然後點擊右上角的「重新整理」按鈕吧！</span><br><small data-i18n="您可在設定中查看或變更掃描路徑。">您可在設定中查看或變更掃描路徑。</small></p>
             <p id="empty-filter-hint" data-i18n="試著清除搜尋、切換篩選，或回上一層資料夾。" hidden>試著清除搜尋、切換篩選，或回上一層資料夾。</p>
           </div>
 
@@ -458,7 +474,10 @@
     <div class="modal-content">
       <div class="modal-header">
         <h2 id="settings-title"><i class="fa-solid fa-gear"></i><span data-i18n="外觀與漫畫庫設定">外觀與漫畫庫設定</span></h2>
-        <button class="close-modal-btn" id="close-settings-btn" aria-label="關閉設定" data-i18n-aria-label="關閉設定"><i class="fa-solid fa-xmark"></i></button>
+        <div class="settings-header-actions">
+          <button id="save-settings-btn" class="modal-action-btn primary" type="button" hidden data-i18n="儲存套用">儲存套用</button>
+          <button class="close-modal-btn" id="close-settings-btn" aria-label="關閉設定" data-i18n-aria-label="關閉設定"><i class="fa-solid fa-xmark"></i></button>
+        </div>
       </div>
       <div class="modal-body">
         <section class="language-settings" aria-labelledby="language-settings-title">
@@ -474,6 +493,31 @@
             <option value="ja">日本語</option>
           </select>
         </section>
+        <div class="input-group library-source-settings">
+          <label id="library-source-label" for="scan-dir-input" data-i18n="漫畫來源：">漫畫來源：</label>
+          <div class="path-input-row" id="scan-path-row">
+            <input type="text" id="scan-dir-input" placeholder="請輸入絕對路徑" data-i18n-placeholder="請輸入絕對路徑">
+            <button id="save-path-btn" class="modal-action-btn primary" data-i18n="儲存套用">儲存套用</button>
+          </div>
+          <button id="library-source-btn" class="modal-action-btn primary library-source-btn" type="button" aria-describedby="scan-dir-status">
+            <i class="fa-solid fa-folder-open" aria-hidden="true"></i>
+            <span data-i18n="加入漫畫來源…">加入漫畫來源…</span>
+          </button>
+          <p class="input-tip" id="scan-dir-status" aria-live="polite" data-i18n="從系統檔案選擇器加入本機、外接磁碟或已連線的 NAS 資料夾。">從系統檔案選擇器加入本機、外接磁碟或已連線的 NAS 資料夾。</p>
+
+          <details class="library-source-advanced">
+            <summary data-i18n="進階 NAS 連線">進階 NAS 連線</summary>
+            <div class="library-source-advanced-body">
+              <p data-i18n="只有無法先在系統掛載 NAS 時，才需要直接輸入 SMB 連線資料。">只有無法先在系統掛載 NAS 時，才需要直接輸入 SMB 連線資料。</p>
+              <button id="smb-setup-btn" class="modal-action-btn" type="button"><i class="fa-solid fa-globe" aria-hidden="true"></i><span data-i18n="設定 SMB 連線">設定 SMB 連線</span></button>
+            </div>
+          </details>
+        </div>
+        
+        <div id="external-bookmarks-list" class="external-bookmarks-list">
+          <!-- 動態載入外部書籤 -->
+        </div>
+
         <section class="theme-settings" aria-labelledby="theme-settings-title">
           <div class="theme-settings-heading">
             <div>
@@ -547,31 +591,6 @@
           </div>
           <p class="commerce-price" id="commerce-price" aria-live="polite" data-i18n="價格載入中…">價格載入中…</p>
         </section>
-
-        <div class="input-group library-source-settings">
-          <label id="library-source-label" for="scan-dir-input" data-i18n="漫畫來源：">漫畫來源：</label>
-          <div class="path-input-row" id="scan-path-row">
-            <input type="text" id="scan-dir-input" placeholder="請輸入絕對路徑" data-i18n-placeholder="請輸入絕對路徑">
-            <button id="save-path-btn" class="modal-action-btn primary" data-i18n="儲存套用">儲存套用</button>
-          </div>
-          <button id="library-source-btn" class="modal-action-btn primary library-source-btn" type="button" aria-describedby="scan-dir-status">
-            <i class="fa-solid fa-folder-open" aria-hidden="true"></i>
-            <span data-i18n="加入漫畫來源…">加入漫畫來源…</span>
-          </button>
-          <p class="input-tip" id="scan-dir-status" aria-live="polite" data-i18n="從系統檔案選擇器加入本機、外接磁碟或已連線的 NAS 資料夾。">從系統檔案選擇器加入本機、外接磁碟或已連線的 NAS 資料夾。</p>
-
-          <details class="library-source-advanced">
-            <summary data-i18n="進階 NAS 連線">進階 NAS 連線</summary>
-            <div class="library-source-advanced-body">
-              <p data-i18n="只有無法先在系統掛載 NAS 時，才需要直接輸入 SMB 連線資料。">只有無法先在系統掛載 NAS 時，才需要直接輸入 SMB 連線資料。</p>
-              <button id="smb-setup-btn" class="modal-action-btn" type="button"><i class="fa-solid fa-globe" aria-hidden="true"></i><span data-i18n="設定 SMB 連線">設定 SMB 連線</span></button>
-            </div>
-          </details>
-        </div>
-        
-        <div id="external-bookmarks-list" class="external-bookmarks-list">
-          <!-- 動態載入外部書籤 -->
-        </div>
 
         <section class="catalog-exchange" aria-labelledby="catalog-exchange-title">
           <div>

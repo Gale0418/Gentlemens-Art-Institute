@@ -1,4 +1,86 @@
 window.GAIL10n.register({
+  "依標籤探索": {
+    "en": "Explore by tag",
+    "ja": "タグから探す"
+  },
+  "從目前範圍的標籤找一本；也可以把類型交給運氣。": {
+    "en": "Pick a book by a tag in this shelf, or let chance choose the tag.",
+    "ja": "現在の範囲のタグから一冊を選ぶか、タグもおまかせにできます。"
+  },
+  "選擇探索標籤": {
+    "en": "Choose a discovery tag",
+    "ja": "探索するタグを選ぶ"
+  },
+  "抽這個 TAG": {
+    "en": "Pick from this tag",
+    "ja": "このタグから一冊"
+  },
+  "隨機 TAG": {
+    "en": "Random tag",
+    "ja": "タグもおまかせ"
+  },
+  "開啟標籤工具": {
+    "en": "Open tag tools",
+    "ja": "タグ編集を開く"
+  },
+  "正在找目前範圍的標籤…": {
+    "en": "Finding tags in this shelf…",
+    "ja": "現在の範囲のタグを探しています…"
+  },
+  "選一個 TAG 抽一本，或讓運氣替你選類型。": {
+    "en": "Choose a tag for a random book, or let chance choose the tag too.",
+    "ja": "タグを選んで一冊おまかせにするか、タグもおまかせに。"
+  },
+  "目前範圍還沒有可用標籤。開啟標籤工具，先幫漫畫加一個吧！": {
+    "en": "No tags are available in this shelf. Open tag tools to add one to a book.",
+    "ja": "この範囲には使えるタグがありません。タグ編集で作品にタグを追加しましょう。"
+  },
+  "標籤暫時讀不到，請稍後重試；仍可使用隨手翻一本。": {
+    "en": "Tags could not be loaded. Try again later, or use Surprise me.",
+    "ja": "タグを読み込めませんでした。後で再試行するか、おまかせで一冊を使えます。"
+  },
+  "本次抽到：{tag}": {
+    "en": "This pick: {tag}",
+    "ja": "今回のタグ：{tag}"
+  },
+  "先選取漫畫，再輸入標籤；例如 general:冒險，套用後就能依 TAG 探索。": {
+    "en": "Select a book, then enter a tag such as general:Adventure. Apply it to explore by tag.",
+    "ja": "作品を選び、general:冒険 などのタグを入力して適用すると、タグから探せます。"
+  }
+});
+window.GAIL10n.register({
+  "找漫畫像考古？先翻一本。": {
+    "en": "Digging for comics? Open a book.",
+    "ja": "漫画探しは発掘作業？まず一冊。"
+  },
+  "加入本機、外接硬碟或已掛載 NAS 的漫畫資料夾；也能先試讀原創風景圖集。": {
+    "en": "Add a comics folder from your device, an external drive, or a mounted NAS. Or try the original landscape collection first.",
+    "ja": "本体、外付けドライブ、マウント済み NAS の漫画フォルダーを追加できます。まずはオリジナル風景画像集で試し読みもできます。"
+  },
+  "試讀原創風景": {
+    "en": "Try original landscapes",
+    "ja": "オリジナル風景を試し読み"
+  },
+  "加入漫畫資料夾": {
+    "en": "Add a comics folder",
+    "ja": "漫画フォルダーを追加"
+  },
+  "隨手翻一本": {
+    "en": "Surprise me",
+    "ja": "おまかせで一冊"
+  },
+  "這本暫時打不開，請換一本或檢查來源。": {
+    "en": "This book could not be opened. Try another book or check its source.",
+    "ja": "この作品を開けませんでした。別の作品を選ぶか、保存元を確認してください。"
+  },
+  "從目前資料夾與篩選結果挑一本，再點會盡量換一本。": {
+    "en": "Pick a book from the current folder and filters. Try again for another book when available.",
+    "ja": "現在のフォルダーと絞り込みから一冊選びます。候補があれば、次は別の本を選びます。"
+  },
+  "目前範圍沒有可讀漫畫，試著換個資料夾或清除篩選。": {
+    "en": "No readable books in this selection. Try another folder or clear the filters.",
+    "ja": "この範囲には読める作品がありません。別のフォルダーを開くか、絞り込みを解除してください。"
+  },
   "關閉側欄": {
     "en": "Close sidebar",
     "ja": "サイドバーを閉じる"

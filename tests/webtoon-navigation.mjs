@@ -64,7 +64,7 @@ assert.equal(focusableCheck({ ...visibleControl, parentNode: hiddenParent }), fa
   };
   const target = { closest: selector => selector === '[aria-modal="true"]' ? modal : null };
   const context = {
-    state: { readerBoundaryDialog: null },
+    state: {},
     elements: { readerOverlay: { style: { display: 'flex' }, contains: () => false } },
     getComputedStyle: () => ({ display: 'flex', visibility: 'visible' }),
     focusReaderEntry: () => { redirected += 1; },
@@ -74,9 +74,6 @@ assert.equal(focusableCheck({ ...visibleControl, parentNode: hiddenParent }), fa
   modal.hidden = true;
   vm.runInNewContext(`${guard}\nguardReaderFocus({ target: target });`, { ...context, target });
   assert.equal(redirected, 1, 'focus inside a hidden aria-modal still returns to the reader entry');
-  context.state.readerBoundaryDialog = { overlay: { contains: () => true } };
-  vm.runInNewContext(`${guard}\nguardReaderFocus({ target: target });`, { ...context, target });
-  assert.equal(redirected, 1, 'reader boundary dialog remains an explicit focus exception');
 }
 assert.match(extractFunction('trapReaderFocus'), /triggerControlsActive\(\)/, 'empty reader focus trap wakes idle chrome');
 assert.match(css, /\.reader-overlay\.mode-webtoon \.webtoon-nav-button[\s\S]*min-height: 44px/);
@@ -435,9 +432,16 @@ async function flushMicrotasks() {
   const failed = runtime.hooks.saveReadingProgress();
   runtime.hooks.state.currentPageIndex = 1;
   const recovered = runtime.hooks.saveReadingProgress();
+  // The real bounded retry waits on the injected clock. Flush the rejected
+  // native call first, advance its 250 ms retry, then let the queue continue
+  // to the newer snapshot; otherwise this fixture leaves a live retry timer.
+  await flushMicrotasks();
+  runtime.clock.tick(250);
+  await flushMicrotasks();
   await Promise.all([failed, recovered]);
-  assert.deepEqual(calls, [0, 1], 'queue continues after one native progress failure');
-  assert.ok(sequences[1] > sequences[0], 'failed progress still consumes one session sequence');
+  assert.deepEqual(calls, [0, 0, 1], 'queue retries the failed snapshot before the newer page');
+  assert.equal(sequences[1], sequences[0], 'retry preserves the failed snapshot sequence');
+  assert.ok(sequences[2] > sequences[1], 'newer progress keeps a monotonic session sequence');
 }
 console.log('PASS: serialized reading progress preserves rapid and backward navigation order');
 
@@ -720,7 +724,7 @@ function renderWebtoonPages(hooks, count, currentPageIndex) {
   assert.equal(findDialog(document), undefined, 'legacy boundary touch taps do not open a dialog');
 }
 
-// The button retains the existing confirmation and delayed open safeguards.
+// An explicit webtoon navigation button opens the adjacent comic without a dialog.
 {
   const { hooks, document, clock, openCalls } = createRuntimeHarness();
   hooks.elements.readerOverlay.style.display = 'flex';
@@ -731,13 +735,28 @@ function renderWebtoonPages(hooks, count, currentPageIndex) {
   hooks.renderPages();
   const next = webtoonButtons(hooks.elements.pagesContainer).find(button => button.classList.contains('webtoon-nav-next'));
   next.dispatch('click');
-  const dialog = findDialog(document);
-  assert.ok(dialog, 'next button opens the existing confirmation modal');
-  dialog.children[0].children[2].children[1].dispatch('click');
-  await Promise.resolve();
-  clock.tick(800);
+  next.dispatch('click');
+  assert.equal(findDialog(document), undefined, 'next button does not ask for confirmation');
+  clock.tick(0);
   await new Promise(resolve => setImmediate(resolve));
-  assert.deepEqual(openCalls, ['b']);
+  assert.deepEqual(openCalls, ['b'], 'rapid repeated taps open the adjacent comic only once');
+}
+
+{
+  const { hooks, document, clock, openCalls } = createRuntimeHarness();
+  hooks.elements.readerOverlay.style.display = 'flex';
+  hooks.state.readingMode = 'webtoon';
+  hooks.state.currentComic = comic('b', 'B');
+  hooks.state.currentComicPages = ['/page.jpg'];
+  hooks.state.comics = [comic('a', 'A'), hooks.state.currentComic];
+  hooks.renderPages();
+  const previous = webtoonButtons(hooks.elements.pagesContainer)
+    .find(button => button.classList.contains('webtoon-nav-prev'));
+  previous.dispatch('click');
+  assert.equal(findDialog(document), undefined, 'previous button does not ask for confirmation');
+  clock.tick(0);
+  await new Promise(resolve => setImmediate(resolve));
+  assert.deepEqual(openCalls, ['a']);
 }
 
 // If there is no same-source, same-folder neighbor, no navigation button is rendered.
@@ -765,7 +784,7 @@ function renderWebtoonPages(hooks, count, currentPageIndex) {
   assert.equal(hooks.state.readingMode, 'webtoon', 'adjacent open preserves webtoon mode');
 }
 
-// Reopening/closing clears the generated controls and stale confirmation state.
+// Reopening/closing clears the generated controls.
 {
   const { hooks, document } = createRuntimeHarness();
   hooks.elements.readerOverlay.style.display = 'flex';
@@ -777,11 +796,10 @@ function renderWebtoonPages(hooks, count, currentPageIndex) {
   assert.equal(webtoonButtons(hooks.elements.pagesContainer).length, 1);
   await hooks.closeReader();
   assert.deepEqual(hooks.elements.pagesContainer.children, []);
-  assert.equal(hooks.state.readerBoundaryDialog, null);
   assert.equal(findDialog(document), undefined);
 }
 
-console.log('PASS: webtoon navigation buttons, mode preservation, boundary absence, confirmation, and cleanup are covered');
+console.log('PASS: webtoon navigation buttons, direct open, mode preservation, boundary absence, and cleanup are covered');
 
 // Two-page controls keep the cover exception, support a one-page offset, and
 // retain that offset for the following two-page navigation.

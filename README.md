@@ -1,18 +1,18 @@
 # 紳士藝術研究所 Gentlemen's Art Institute
 
-**漫畫多到找一本像考古？把書庫交給 G.A.I，今天就別再跟檔案總管猜拳了。**
+**自己的漫畫，找得到、接著看。**
 
-圖片資料夾、ZIP／CBZ 直接讀，條漫一路往下滑；想照原本節奏翻，也有單頁與雙頁模式。不必先把圖片接成一張巨圖，原始檔案也不用改。進度、收藏、搜尋與基本標籤放在同一個書架，下次打開就接著看。
+硬碟裡的收藏堆成山，找一本還得像在考古？G.A.I 把自己的漫畫檔與圖集放上書架，讓搜尋、收藏與閱讀進度都在同一個地方。圖片資料夾、ZIP／CBZ、RAR／CBR、7z／CB7 不用先手動解壓；單頁、雙頁、右至左與條漫，依作品切換。
 
-資料夾點進去，先顯示眼前這一層；整個書庫的掃描在背景繼續跑。NAS 暫時離線，已整理的書庫紀錄也不會跟著消失。這才是收藏越堆越高時，真正需要的待遇吧 (｀・ω・´)σ
+基本閱讀免費，不要求建立 App 帳號。可從本機、外接硬碟或已透過系統掛載的 NAS 選擇資料夾。首發 v1 Pro 採一次買斷，提供直接 SMB／NAS、批次整理、重複候選與選用 AI 工具；AI 需自備金鑰，API 費用另計。
 
-**基本閱讀免費。** 本機檔案、已透過系統掛載的 NAS 資料夾、三種閱讀模式、進度、收藏、搜尋、基本標籤與資料匯出都能用。想把書庫整理得更兇？**v1 Pro 一次買斷，沒有訂閱**，加入直接 SMB／NAS 連線、批次標籤、進階整理、重複作品候選與 AI 解說／整理工具。
+已取得測試版時，先試讀內建原創風景，再加入自己的收藏。內建圖集供操作體驗；App 不提供漫畫下載或內容庫。NAS 離線時會保留已整理紀錄，原始頁面仍需來源可讀；進度保存在當前裝置，未提供跨裝置自動同步。
 
-AI 是選用功能：自備 OpenAI 或 Google API Key，確認供應商與傳送內容、同意後才會傳送選取的頁面與提示文字。書本外的「AI 掃描」會取樣開頭三頁及約 40%、50%、60% 位置，建議仍由你決定是否套用。Pro 不附 API 額度，供應商費用另計。
-
-G.A.I 適用於 macOS、iPhone 與 iPad；不提供漫畫下載、來源爬取或內容訂閱。檔案由你提供，請確認自己有權使用。
+**發布狀態：Mac 1.0 已可販售，iOS 1.0 仍等待審查。** 2026-10-03 Apple 回讀確認；本輪第57版已修完65檔 CodeRabbit 審查的4項問題，10檔複審0 issues，前端15組與Rust187項通過。iOS準備以1.0 (57)取代舊44版，Mac準備更新1.0.1 (57)；提交結果見 [發行收尾](docs/release/build57-appstore-closeout-2026-10-03.md)。原生TAG探索的Mac驗收通過，iPad56已覆蓋但TAG操作待解鎖。
 
 [隱私政策](#隱私政策) · [支援與使用說明](SUPPORT.md)
+
+[看看七張宣傳圖](docs/release/PROMO_ART.md)：沿用 App 畫面構圖、替換示範內容；圖中的漫畫不隨 App 提供。
 
 專案現在是 **Tauri 2 + Rust + SQLite + Vanilla HTML/CSS/JavaScript** 的單一路線產品。2026-09-04 起，舊 Electron / Express / browser fallback runtime、對應套件、scripts、測試與包裝資產已正式移除；不再維護第二套後端。
 
@@ -27,7 +27,7 @@ G.A.I 適用於 macOS、iPhone 與 iPad；不提供漫畫下載、來源爬取�
 - SQLite catalog 是 metadata / location / progress 的主要本機 authority；來源離線不等於資料刪除。
 - 本機、iOS security-scoped folder 與單一 SMB/NAS 是獨立來源；其中一個來源離線不應清除其他來源或 catalog 紀錄。
 - 內建全年齡原創 demo 可在乾淨安裝、沒有 NAS／帳號／第三方下載的情況下直接驗證核心 reader。
-- iOS 1.0.0（build 37）已由 App Store Connect 處理為 `VALID` 並掛到待審版本；隱私政策與支援頁面已公開，實際介面的 iPad 商店截圖及 Pro 內購審查截圖已上傳。App Privacy 與加密聲明仍待完成；**尚未送審或上架**。
+- 2026-10-03：iOS商店 `1.0` 綁定 build44，狀態 `WAITING_FOR_REVIEW`；Mac `1.0` 已 `READY_FOR_DISTRIBUTION`；本機 Mac／iPad 第54版的實機證據見 [產品體驗報告](docs/audits/2026-10-03-product-experience.md)。完整 StoreKit 交易、Privacy UI 確認、公開 Mac 正式簽署／公證與新版上傳重送仍待完成。第56版已覆蓋兩平台；TAG 探索的 Mac 驗收與實機限制見 [探索體驗報告](docs/audits/2026-10-03-discovery-experience.md)，勿把源碼變更視為已上架。
 - `src-tauri/vendor/wry/` 是**刻意保留的 iOS WebKit startup patch**，目前仍由 Cargo `[patch.crates-io]` 使用；不要因為它看起來像 vendor 目錄就清掉。
 
 ## 隱私政策
@@ -57,7 +57,7 @@ G.A.I 不要求建立自有帳號，也未整合廣告或第三方行為分析�
 
 本 repository 已公開供檢視，**不採開源授權**。G.A.I 原創程式碼、文件與專案資產保留所有權利；除適用法律或託管平台條款允許的範圍外，未經書面許可，不授權使用、修改、再散布或販售。完整條款見 [LICENSE](LICENSE)。第三方元件仍依各自授權提供，包含 `src-tauri/vendor/wry/` 中保留的授權文件。
 
-G.A.I 是讀取使用者自行提供內容的漫畫閱讀工具，不提供漫畫下載、來源站或任何第三方漫畫的使用權。請僅匯入你有權使用的內容。公開原始碼不代表 App 已上架；目前版本與商店驗收狀態請見上方 Current status。
+G.A.I 是讀取使用者自行提供內容的漫畫閱讀工具，不提供漫畫下載、來源站或任何第三方漫畫的使用權。請僅匯入你有權使用的內容。公開原始碼不代表 App 已上架；目前版本與商店驗收狀態請見上方 Current status。第三方元件的授權與 notices 見 [`docs/release/THIRD_PARTY_NOTICES.md`](docs/release/THIRD_PARTY_NOTICES.md)。
 
 請勿將 API Key、NAS 密碼、Apple 簽章私鑰或私人書庫提交至 repository。開發時使用自己的帳號與簽章設定；安全問題請以電子郵件聯絡，勿在公開 issue 貼出憑證。
 
@@ -74,7 +74,7 @@ G.A.I 是讀取使用者自行提供內容的漫畫閱讀工具，不提供漫�
 
 ### Reader cache
 
-前端只保留有界的鄰近頁工作集；Rust 壓縮頁快取依裝置記憶體、process 可用記憶體與 OS memory pressure 動態調整，並以實際 ZIP entry bytes 決定 nearest-first page window。背景 preload 單頁最多 64 MiB，與正式 protocol 的單頁 serving safety limit 一致。完整契約見 [`docs/E6-E8-DECISIONS.md`](docs/E6-E8-DECISIONS.md)。
+前端只保留有界的鄰近頁工作集；Rust 壓縮頁快取依裝置記憶體、process 可用記憶體與 OS memory pressure 動態調整，並以實際封存檔 entry bytes 決定 nearest-first page window。背景 preload 單頁最多 64 MiB，與正式 protocol 的單頁 serving safety limit 一致。完整契約見 [`docs/E6-E8-DECISIONS.md`](docs/E6-E8-DECISIONS.md)。
 
 ### Source lifecycle
 
@@ -93,7 +93,7 @@ G.A.I 是讀取使用者自行提供內容的漫畫閱讀工具，不提供漫�
 - SMB connect/share/read/stat/rename/create-directory 都有 deadline，避免 NAS 異常時無限等待。
 - SMB mutation 使用 typed `NotFound`、journal、版本前置條件與誠實 rollback 狀態。
 - SMB-only library 與 cold-start offline shelf 由 SQLite 正確恢復。
-- ZIP、folder scanner、protocol 同步拒絕 traversal、symlink、hidden/unsafe entry 與超大 page preload。
+- ZIP／CBZ、RAR／CBR、7z／CB7、folder scanner、protocol 同步拒絕 traversal、symlink、hidden/unsafe entry 與超大 page preload。
 - iOS security-scoped bookmark 會正確釋放並先 resolve symlink 再驗授權 root。
 - reader progress 由 SQLite 權威資料與 Tauri bridge 正規化，不讓 stale background refresh 倒退閱讀位置。
 - mutable folder page URL 使用 `no-store`，刪頁後不會被 WebView 舊快取污染。
@@ -167,7 +167,7 @@ Impeccable 的共享專案檔案可以進 Git：
 ├── .cargo/                  # shared Cargo build policy
 ├── .impeccable/             # shared Impeccable config + design artifact
 ├── docs/
-│   ├── release/             # canonical App Store / TestFlight preparation
+│   ├── release/             # canonical App Store / TestFlight preparation and notices
 │   ├── E6-E8-DECISIONS.md   # durable architecture / release decisions
 │   └── RUST-QUALITY.md      # local Rust / release quality contract
 ├── public/                  # Tauri WebView frontend

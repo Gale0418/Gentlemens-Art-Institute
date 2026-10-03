@@ -1,0 +1,10 @@
+{
+  "bundle": {
+    "macOS": {
+      "entitlements": "Entitlements-macOS.plist",
+      "infoPlist": "Info-AppStore-macOS.plist",
+      "signingIdentity": "3rd Party Mac Developer Application: Yun Yang Chiu (X3UYL4NRRN)"
+    }
+  },
+  "version": "1.0.1"
+}

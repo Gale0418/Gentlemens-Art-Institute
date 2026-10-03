@@ -1870,6 +1870,9 @@ body {
 
 .library-source-advanced summary {
   width: fit-content;
+  min-height: 44px;
+  box-sizing: border-box;
+  padding-block: 13px;
   cursor: pointer;
   font-size: 12px;
   font-weight: 600;
@@ -1903,6 +1906,12 @@ body {
   flex-direction: column;
   gap: 8px;
   margin-top: -10px;
+}
+
+.external-bookmark-remove {
+  flex-shrink: 0;
+  min-width: 44px;
+  min-height: 44px;
 }
 
 @media (max-width: 620px) {
@@ -2284,6 +2293,12 @@ body {
 .continue-body small {
   color: var(--text-muted);
   font-size: 11px;
+}
+
+.continue-context {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 
 .continue-progress,

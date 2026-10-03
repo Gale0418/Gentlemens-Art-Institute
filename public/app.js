@@ -3713,6 +3713,18 @@ function renderContinueStrip() {
     })
     .slice(0, 5);
 
+  const titleCounts = new Map();
+  candidates.forEach(comic => titleCounts.set(comic.title, (titleCounts.get(comic.title) || 0) + 1));
+  const contexts = new Map(candidates.map(comic => {
+    const path = typeof comic.relativePath === 'string' ? comic.relativePath : '';
+    const sourceId = getFolderTreeSourceId(comic);
+    const sourceLabel = /^(?:local(?::|$)|external:|smb$)/.test(sourceId)
+      ? getFolderTreeSourceLabel(sourceId) : '';
+    const context = titleCounts.get(comic.title) > 1
+      ? [sourceLabel, path].filter(Boolean).join(' · ') : '';
+    return [comic.id, context];
+  }));
+
   const renderSignature = candidates.map(comic => {
     const progress = getProgressInfo(comic);
     const favorite = isFavoriteId(comic.id);
@@ -3720,6 +3732,7 @@ function renderContinueStrip() {
     return [
       comic.id,
       comic.title,
+      contexts.get(comic.id),
       progress.currentPage,
       progress.totalPages,
       progress.percent,
@@ -3746,10 +3759,11 @@ function renderContinueStrip() {
     const favorite = isFavoriteId(comic.id);
     const displayPercent = progress.percent;
     return `
-      <button class="continue-card" data-comic-id="${comic.id}">
-        <img src="${escapeHtml(getCoverUrl(comic.id))}" loading="lazy" decoding="async" fetchpriority="low" alt="${escapeHtml(comic.title)}" onerror="this.style.display='none';">
+      <button class="continue-card" data-comic-id="${escapeHtml(comic.id)}" title="${escapeHtml([comic.title, contexts.get(comic.id)].filter(Boolean).join(' · '))}">
+        <img src="${escapeHtml(getCoverUrl(comic.id))}" loading="lazy" decoding="async" fetchpriority="low" alt="" onerror="this.style.display='none';">
         <span class="continue-body">
           <strong>${escapeHtml(comic.title)}</strong>
+          ${contexts.get(comic.id) ? `<small class="continue-context">${escapeHtml(contexts.get(comic.id))}</small>` : ''}
           <small>${progress.hasProgress ? readerText('第 {page} 頁', { page: progress.currentPage + 1 }) : readerText('已收藏')}</small>
           <span class="continue-progress"><span style="width: ${displayPercent}%"></span></span>
         </span>
@@ -8227,6 +8241,8 @@ function renderExternalBookmarks() {
     delBtn.innerHTML = '<i class="fa-solid fa-trash"></i>';
     delBtn.title = readerText('移除外部資料夾：{name}', { name: b.name });
     delBtn.setAttribute('aria-label', readerText('移除外部資料夾：{name}', { name: b.name }));
+    delBtn.className = 'external-bookmark-remove';
+    delBtn.type = 'button';
     delBtn.style.background = 'var(--accent-red)';
     delBtn.style.color = 'white';
     delBtn.style.border = 'none';

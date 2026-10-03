@@ -246,3 +246,15 @@ assert.ok(settingsActionsHtml, 'settings action container is nested in the fixed
 assert.match(settingsActionsHtml, /<button\b[^>]*\bid="save-settings-btn"[^>]*>[^<]*<\/button>/,
   'completion is a button inside the header actions, not a nearby sibling or scrolling-body element');
 console.log('PASS: iPad completion returns to shelf without path validation or scan mutation; desktop path controls retained');
+
+const sourcePosition = settingsHtml.indexOf('class="input-group library-source-settings"');
+assert.ok(sourcePosition > settingsHtml.indexOf('class="language-settings"'));
+assert.ok(sourcePosition < settingsHtml.indexOf('class="theme-settings"'), 'source setup precedes optional appearance choices');
+assert.ok(sourcePosition < settingsHtml.indexOf('id="commerce-settings"'), 'adding books does not require scrolling past the sales section');
+for (const selector of ['.external-bookmark-remove', '.library-source-advanced summary']) {
+  const rule = settingsCss.match(new RegExp(`${selector.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}\\s*\\{([^}]+)\\}`))?.[1];
+  assert.ok(rule, `${selector} has its own touch sizing rule`);
+  assert.match(rule, /min-height:\s*44px;/, `${selector} preserves at least 44px height`);
+  if (selector === '.external-bookmark-remove') assert.match(rule, /min-width:\s*44px;/);
+}
+console.log('PASS: source setup precedes Pro, and source controls retain named touch sizing');

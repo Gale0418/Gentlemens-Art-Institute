@@ -321,6 +321,29 @@ assert.equal(hooks.catalogThumbnailURL('/fixture/page-3.png'), '/fixture/page-3.
   assert.notEqual(hooks.elements.continueStrip.innerHTML, firstMarkup, 'progress changes invalidate the Continue render signature');
 }
 
+// 同名的繼續閱讀卡片顯示來源路徑，路徑改動也必須更新畫面。
+{
+  const sharedProgress = { currentPage: 3, totalPages: 20, percent: 15, updatedAt: '2026-10-03T00:00:00Z' };
+  const books = [
+    { id: 'same-a', title: 'Knowledge', relativePath: 'first/knowledge', sourceId: 'local', progress: sharedProgress },
+    { id: 'same-b', title: 'Knowledge', relativePath: 'second/<knowledge>&"', sourceId: 'smb', progress: sharedProgress },
+  ];
+  hooks.state.comics = books;
+  hooks.renderContinueStrip();
+  let markup = hooks.elements.continueStrip.innerHTML;
+  assert.equal((markup.match(/class="continue-context"/g) || []).length, 2);
+  assert.ok(markup.includes('first/knowledge'));
+  assert.ok(markup.includes('second/&lt;knowledge&gt;&amp;&quot;'), 'source context is escaped in text and tooltip');
+  assert.ok(!markup.includes('second/<knowledge>'), 'paths never inject markup');
+  assert.equal((markup.match(/alt=""/g) || []).length, 2, 'decorative covers do not repeat the accessible book title');
+  books[0].relativePath = 'moved/knowledge';
+  hooks.renderContinueStrip();
+  assert.ok(hooks.elements.continueStrip.innerHTML.includes('moved/knowledge'), 'path change invalidates cached Continue markup');
+  books[1].title = 'Unique';
+  hooks.renderContinueStrip();
+  assert.ok(!hooks.elements.continueStrip.innerHTML.includes('continue-context'), 'unique names keep the compact card');
+}
+
 // 舊世代封面取消後不應釋放新世代名額，也不應把取消事件算成失敗。
 {
   const first = makeCover('first');

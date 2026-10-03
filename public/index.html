@@ -477,6 +477,31 @@
             <option value="ja">日本語</option>
           </select>
         </section>
+        <div class="input-group library-source-settings">
+          <label id="library-source-label" for="scan-dir-input" data-i18n="漫畫來源：">漫畫來源：</label>
+          <div class="path-input-row" id="scan-path-row">
+            <input type="text" id="scan-dir-input" placeholder="請輸入絕對路徑" data-i18n-placeholder="請輸入絕對路徑">
+            <button id="save-path-btn" class="modal-action-btn primary" data-i18n="儲存套用">儲存套用</button>
+          </div>
+          <button id="library-source-btn" class="modal-action-btn primary library-source-btn" type="button" aria-describedby="scan-dir-status">
+            <i class="fa-solid fa-folder-open" aria-hidden="true"></i>
+            <span data-i18n="加入漫畫來源…">加入漫畫來源…</span>
+          </button>
+          <p class="input-tip" id="scan-dir-status" aria-live="polite" data-i18n="從系統檔案選擇器加入本機、外接磁碟或已連線的 NAS 資料夾。">從系統檔案選擇器加入本機、外接磁碟或已連線的 NAS 資料夾。</p>
+
+          <details class="library-source-advanced">
+            <summary data-i18n="進階 NAS 連線">進階 NAS 連線</summary>
+            <div class="library-source-advanced-body">
+              <p data-i18n="只有無法先在系統掛載 NAS 時，才需要直接輸入 SMB 連線資料。">只有無法先在系統掛載 NAS 時，才需要直接輸入 SMB 連線資料。</p>
+              <button id="smb-setup-btn" class="modal-action-btn" type="button"><i class="fa-solid fa-globe" aria-hidden="true"></i><span data-i18n="設定 SMB 連線">設定 SMB 連線</span></button>
+            </div>
+          </details>
+        </div>
+        
+        <div id="external-bookmarks-list" class="external-bookmarks-list">
+          <!-- 動態載入外部書籤 -->
+        </div>
+
         <section class="theme-settings" aria-labelledby="theme-settings-title">
           <div class="theme-settings-heading">
             <div>
@@ -550,31 +575,6 @@
           </div>
           <p class="commerce-price" id="commerce-price" aria-live="polite" data-i18n="價格載入中…">價格載入中…</p>
         </section>
-
-        <div class="input-group library-source-settings">
-          <label id="library-source-label" for="scan-dir-input" data-i18n="漫畫來源：">漫畫來源：</label>
-          <div class="path-input-row" id="scan-path-row">
-            <input type="text" id="scan-dir-input" placeholder="請輸入絕對路徑" data-i18n-placeholder="請輸入絕對路徑">
-            <button id="save-path-btn" class="modal-action-btn primary" data-i18n="儲存套用">儲存套用</button>
-          </div>
-          <button id="library-source-btn" class="modal-action-btn primary library-source-btn" type="button" aria-describedby="scan-dir-status">
-            <i class="fa-solid fa-folder-open" aria-hidden="true"></i>
-            <span data-i18n="加入漫畫來源…">加入漫畫來源…</span>
-          </button>
-          <p class="input-tip" id="scan-dir-status" aria-live="polite" data-i18n="從系統檔案選擇器加入本機、外接磁碟或已連線的 NAS 資料夾。">從系統檔案選擇器加入本機、外接磁碟或已連線的 NAS 資料夾。</p>
-
-          <details class="library-source-advanced">
-            <summary data-i18n="進階 NAS 連線">進階 NAS 連線</summary>
-            <div class="library-source-advanced-body">
-              <p data-i18n="只有無法先在系統掛載 NAS 時，才需要直接輸入 SMB 連線資料。">只有無法先在系統掛載 NAS 時，才需要直接輸入 SMB 連線資料。</p>
-              <button id="smb-setup-btn" class="modal-action-btn" type="button"><i class="fa-solid fa-globe" aria-hidden="true"></i><span data-i18n="設定 SMB 連線">設定 SMB 連線</span></button>
-            </div>
-          </details>
-        </div>
-        
-        <div id="external-bookmarks-list" class="external-bookmarks-list">
-          <!-- 動態載入外部書籤 -->
-        </div>
 
         <section class="catalog-exchange" aria-labelledby="catalog-exchange-title">
           <div>

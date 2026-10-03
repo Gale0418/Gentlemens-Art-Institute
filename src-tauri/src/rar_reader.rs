@@ -297,6 +297,7 @@ fn has_valid_rar5_end_marker(source: &File) -> std::io::Result<bool> {
         return Ok(false);
     }
     let mut file = source.try_clone()?;
+    file.seek(SeekFrom::Start(0))?;
     let mut signature = [0_u8; 8];
     file.read_exact(&mut signature)?;
     if signature != *RAR5_SIGNATURE {
@@ -448,5 +449,27 @@ mod tests {
 
         *marker.last_mut().expect("marker has body") ^= 1;
         assert!(!valid_rar5_end_candidate(&marker, 0));
+    }
+
+    #[test]
+    fn rar5_end_marker_is_verified_with_source_positioned_at_eof() {
+        let path = std::env::temp_dir().join(format!(
+            "gai-rar5-eof-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        let mut bytes = RAR5_SIGNATURE.to_vec();
+        bytes.extend_from_slice(&0x5156_771d_u32.to_le_bytes());
+        bytes.extend_from_slice(&[0x03, 0x05, 0x04, 0x00]);
+        std::fs::write(&path, bytes).unwrap();
+        let mut file = File::open(&path).unwrap();
+        file.seek(SeekFrom::End(0)).unwrap();
+        assert!(has_valid_rar5_end_marker(&file).unwrap());
+        assert!(has_valid_rar5_end_marker(&file).unwrap());
+        drop(file);
+        std::fs::remove_file(path).unwrap();
     }
 }

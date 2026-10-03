@@ -8,7 +8,7 @@
 
 已取得測試版時，先試讀內建原創風景，再加入自己的收藏。內建圖集供操作體驗；App 不提供漫畫下載或內容庫。NAS 離線時會保留已整理紀錄，原始頁面仍需來源可讀；進度保存在當前裝置，未提供跨裝置自動同步。
 
-**發布狀態：尚未上市。** 截至 2026-10-03，App Store 仍是第 44 版等待審查，本機 Mac／iPad 已覆蓋第 56 版；「隨手翻一本」已完成兩平台驗收，自選／隨機 TAG 探索已完成 Mac 驗收，iPad TAG 實機驗收待解鎖；這個 repository 提供專案進度與原始碼檢視，未提供公開安裝包或公開測試邀請。
+**發布狀態：Mac 1.0 已可販售，iOS 1.0 仍等待審查。** 2026-10-03 Apple 回讀確認；本輪第57版已修完65檔 CodeRabbit 審查的4項問題，10檔複審0 issues，前端15組與Rust187項通過。iOS準備以1.0 (57)取代舊44版，Mac準備更新1.0.1 (57)；提交結果見 [發行收尾](docs/release/build57-appstore-closeout-2026-10-03.md)。原生TAG探索的Mac驗收通過，iPad56已覆蓋但TAG操作待解鎖。
 
 [隱私政策](#隱私政策) · [支援與使用說明](SUPPORT.md)
 
@@ -27,7 +27,7 @@
 - SQLite catalog 是 metadata / location / progress 的主要本機 authority；來源離線不等於資料刪除。
 - 本機、iOS security-scoped folder 與單一 SMB/NAS 是獨立來源；其中一個來源離線不應清除其他來源或 catalog 紀錄。
 - 內建全年齡原創 demo 可在乾淨安裝、沒有 NAS／帳號／第三方下載的情況下直接驗證核心 reader。
-- 2026-10-03：商店 `1.0` 綁定 build44，狀態 `WAITING_FOR_REVIEW`；本機 Mac／iPad 第54版的實機證據見 [產品體驗報告](docs/audits/2026-10-03-product-experience.md)。完整 StoreKit 交易、Privacy UI 確認、公開 Mac 正式簽署／公證與新版上傳重送仍待完成。第56版已覆蓋兩平台；TAG 探索的 Mac 驗收與實機限制見 [探索體驗報告](docs/audits/2026-10-03-discovery-experience.md)，勿把源碼變更視為已上架。
+- 2026-10-03：iOS商店 `1.0` 綁定 build44，狀態 `WAITING_FOR_REVIEW`；Mac `1.0` 已 `READY_FOR_DISTRIBUTION`；本機 Mac／iPad 第54版的實機證據見 [產品體驗報告](docs/audits/2026-10-03-product-experience.md)。完整 StoreKit 交易、Privacy UI 確認、公開 Mac 正式簽署／公證與新版上傳重送仍待完成。第56版已覆蓋兩平台；TAG 探索的 Mac 驗收與實機限制見 [探索體驗報告](docs/audits/2026-10-03-discovery-experience.md)，勿把源碼變更視為已上架。
 - `src-tauri/vendor/wry/` 是**刻意保留的 iOS WebKit startup patch**，目前仍由 Cargo `[patch.crates-io]` 使用；不要因為它看起來像 vendor 目錄就清掉。
 
 ## 隱私政策

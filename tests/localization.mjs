@@ -183,3 +183,7 @@ for (const file of [
   assert.equal(store.locales['zh-Hant'].description, canonical.storeListing.description, 'Traditional Chinese store copies must stay consistent');
 }
 console.log('PASS: all three store locales are complete and Traditional Chinese matches canonical copy');
+{
+  const retryKeys = [...fs.readFileSync('public/app.js', 'utf8').matchAll(/retry \? '([^']+)'/g)].map(match => match[1]);
+  for (const key of retryKeys) assert.ok(dictionaries[key], `retry message needs an exact registered key: ${key}`);
+}

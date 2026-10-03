@@ -1637,7 +1637,7 @@ function bindEvents() {
       let scanError = null;
       let refreshError = null;
       const notCommitted = [];
-      showLoader(readerText(retry ? '正在重試匯入 {count} 張圖片...' : '正在從相簿匯入 {count} 張圖片...', { count: prepared.length }), { progress: 0, detail: readerText('請勿關閉 App') });
+      showLoader(readerText(retry ? '正在重試匯入 {count} 張圖片…' : '正在從相簿匯入 {count} 張圖片...', { count: prepared.length }), { progress: 0, detail: readerText('請勿關閉 App') });
 
       const finishImport = async () => {
         pendingPhotoImports = notCommitted;
@@ -1691,7 +1691,7 @@ function bindEvents() {
             notCommitted.push({ file, filename, error });
             console.error('匯入單張圖片失敗：', error);
           }
-          showLoader(readerText(retry ? '正在重試匯入 {count} 張圖片...' : '正在從相簿匯入 {count} 張圖片...', { count: prepared.length }), { progress: ((index + 1) / prepared.length) * 100, detail: readerText('正在匯入: {name}', { name: file.name }) });
+          showLoader(readerText(retry ? '正在重試匯入 {count} 張圖片…' : '正在從相簿匯入 {count} 張圖片...', { count: prepared.length }), { progress: ((index + 1) / prepared.length) * 100, detail: readerText('正在匯入: {name}', { name: file.name }) });
         }
         await finishImport();
       } catch (error) {

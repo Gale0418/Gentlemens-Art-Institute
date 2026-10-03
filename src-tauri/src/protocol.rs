@@ -332,13 +332,15 @@ fn read_archive_page(
     zip_path: &Path,
     target_name: &str,
 ) -> Result<(Vec<u8>, String), ArchivePageError> {
-    read_archive_page_with_file(zip_path, target_name, None)
+    let file =
+        File::open(zip_path).map_err(|error| ArchivePageError::InvalidZip(error.to_string()))?;
+    read_archive_page_with_file(zip_path, target_name, file)
 }
 
 fn read_archive_page_with_file(
     zip_path: &Path,
     target_name: &str,
-    safe_file: Option<File>,
+    safe_file: File,
 ) -> Result<(Vec<u8>, String), ArchivePageError> {
     if !crate::utils::safe_archive_entry_name(target_name) {
         return Err(ArchivePageError::InvalidZip(
@@ -353,17 +355,12 @@ fn read_archive_page_with_file(
         extension.to_ascii_lowercase().as_str(),
         "7z" | "cb7" | "rar" | "cbr"
     ) {
-        let result = match safe_file {
-            Some(file) => crate::archive_reader::read_entry_from_file(
-                file,
-                zip_path,
-                target_name,
-                MAX_IMAGE_BYTES as usize,
-            ),
-            None => {
-                crate::archive_reader::read_entry(zip_path, target_name, MAX_IMAGE_BYTES as usize)
-            }
-        };
+        let result = crate::archive_reader::read_entry_from_file(
+            safe_file,
+            zip_path,
+            target_name,
+            MAX_IMAGE_BYTES as usize,
+        );
         result.map_err(|error| match error {
             crate::archive_reader::ArchiveError::EntryNotFound(_) => {
                 ArchivePageError::MissingEntry(target_name.to_string())
@@ -375,11 +372,8 @@ fn read_archive_page_with_file(
             other => ArchivePageError::ReadFailed(other.to_string()),
         })?
     } else {
-        let mut archive = match safe_file {
-            Some(file) => crate::utils::open_zip_archive_for_page_from_file(file),
-            None => crate::utils::open_zip_archive_for_page(zip_path),
-        }
-        .map_err(|error| ArchivePageError::InvalidZip(error.to_string()))?;
+        let mut archive = crate::utils::open_zip_archive_for_page_from_file(safe_file)
+            .map_err(|error| ArchivePageError::InvalidZip(error.to_string()))?;
         let mut entry = archive
             .by_name(target_name)
             .map_err(|_| ArchivePageError::MissingEntry(target_name.to_string()))?;
@@ -959,12 +953,25 @@ pub fn handle_comic_request(
                 },
             };
 
-            let page_file = open_safe_file(
+            let page_file = match open_safe_file(
                 authorized_root.as_ref(),
                 authorized_relative.as_deref(),
                 &full_path,
-            )
-            .ok();
+            ) {
+                Ok(file) => file,
+                Err(error) => {
+                    let status = if error.kind() == io::ErrorKind::PermissionDenied {
+                        StatusCode::FORBIDDEN
+                    } else {
+                        StatusCode::NOT_FOUND
+                    };
+                    return Response::builder()
+                        .status(status)
+                        .header("Access-Control-Allow-Origin", "*")
+                        .body(b"archive access denied or file missing".to_vec())
+                        .map_err(Into::into);
+                }
+            };
             match read_archive_page_with_file(&full_path, &target_name, page_file) {
                 Ok((buf, extension)) => {
                     let mime = detect_mime(&buf, &extension);
@@ -1152,6 +1159,16 @@ mod tests {
     }
 
     #[test]
+    fn missing_archive_capability_never_opens_an_existing_ambient_path() {
+        let path =
+            std::env::temp_dir().join(format!("comic-no-capability-{}.zip", std::process::id()));
+        std::fs::write(&path, b"ambient file exists").unwrap();
+        let error = open_safe_file(None, None, &path).unwrap_err();
+        assert_eq!(error.kind(), io::ErrorKind::PermissionDenied);
+        std::fs::remove_file(path).unwrap();
+    }
+
+    #[test]
     fn unknown_page_count_does_not_reject_cover_page() {
         assert!(!is_page_out_of_range(0, 0));
     }
@@ -1327,7 +1344,7 @@ mod tests {
         let old_path = own.join("book.old.zip");
         std::fs::rename(&archive, &old_path).unwrap();
         std::fs::rename(&replacement, &archive).unwrap();
-        let (bytes, _) = read_archive_page_with_file(&archive, "page.jpg", Some(descriptor))
+        let (bytes, _) = read_archive_page_with_file(&archive, "page.jpg", descriptor)
             .expect("an already-open descriptor remains bound to the authorized file");
         assert!(bytes
             .windows(b"original".len())

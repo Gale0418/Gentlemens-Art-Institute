@@ -1,0 +1,39 @@
+{
+  "locales": {
+    "zh-Hant": {
+      "description": "硬碟裡塞滿了多年珍藏的漫畫壓縮檔與圖集資料夾，卻總是找不到順手、乾淨又不囉嗦的閱讀器嗎？G.A.I 是專為重視本機掌控權的私人漫畫收藏家打造的閱讀與書庫整理工具！沒有煩人的廣告、不強制註冊或綁定任何 App 帳號，打開就能直接沉浸在你的專屬書庫裡 (｀・ω・´)ゞ\n\n【核心閱讀體驗：免手動解壓、常用格式一次收好】\n• 多元來源支援：直接讀取本機資料夾、外接硬碟／隨身碟，以及已在系統層級掛載完成的 NAS 網路磁碟資料夾。\n• 壓縮檔直讀：原生支援 ZIP / CBZ、RAR / CBR、7z / CB7 與一般圖片資料夾，不必先解壓縮塞爆硬碟空間，選好檔案即可閱讀。\n• 靈活排版模式：支援單頁、雙頁跨頁拼合、日式右翻（右至左）、美式左翻（左至右），以及適合捲動閱讀的直向條漫（Webtoon）模式。\n• 個人化書庫管理：在當前裝置自動記住每本作品的閱讀進度，並提供我的最愛收藏、關鍵字快速搜尋與自訂標籤分類，書庫再大也不怕迷路（註：閱讀進度與書庫紀錄儲存於當前裝置本機，不包含跨裝置雲端同步功能）。\n\n【免費版 vs. v1 Pro 單次買斷說明】\n• 免費版即享完整基礎閱讀：上述的本機／外接／系統已掛載磁碟讀取、三大壓縮格式直讀、單雙頁與條漫切換、當前裝置進度記憶及基礎標籤搜尋，皆可免費使用！\n• v1 Pro 單次買斷（非訂閱制）：不想被每月扣款的訂閱制綁架？v1 Pro 採用單次買斷制！已購買的 v1 Pro 權益在後續支援版本中皆會保留（註：買斷範圍涵蓋 v1 Pro 既有項目之支援，並非承諾未來所有全新功能皆永久免費包含）。\n\n【v1 Pro 進階解鎖：玩家級書庫整理與選用 AI 工具】\n• App 內直接連線 SMB：不必先在系統掛載，直接於 App 內連線區網 SMB 共享資料夾，輕鬆瀏覽家中的 NAS 收藏。\n• 批次整理與重複候選檢測：提供批次整理工具，並能掃描找出書庫中的疑似重複作品候選清單，交由你人工審核整理。\n• 選用式 BYOK AI 輔助工具（自備金鑰）：支援串接你自備的 OpenAI 或 Google API 金鑰（API 呼叫費用由各該平台另行計算）。\n\n【透明安心的 AI 運作機制】\n我們非常重視你的書庫隱私與檔案安全 ( ´ ▽ ` )ﾉ：\n1. 主動觸發才傳送：本功能並非本地端離線 AI，但絕不會在背景偷偷上傳檔案。唯有在你明確同意並主動觸發時，才會將當前選定的頁面與提示詞傳送至你設定的 API 服務。\n2. 純文字輔助、不破壞原圖：AI 會在面板產生文字解說與對白翻譯參考，不會把譯文重畫（嵌字）進漫畫氣泡中，完整保留原畫質感。\n3. 整理候選需人工套用：AI 產生的整理與標籤建議僅為「候選項目」，必須經由你確認並手動套用後才會生效，不會自動改動你的收藏。\n\n【重要內容聲明】\nG.A.I 僅為本地檔案閱讀與整理工具，App 不提供任何漫畫內容、下載、網站爬蟲或線上書庫，僅附帶原創風景示範圖集供體驗操作。請自備合法的個人收藏檔案，享受純粹的閱讀時光吧 (≧∇≦)/",
+      "promotionalText": "專為私人漫畫與圖集收藏打造的純淨閱讀器！直讀本機與外接硬碟 ZIP/CBZ、RAR/CBR、7z/CB7，無廣告免註冊。支援單雙頁與條漫，升級 v1 Pro 再解鎖內建 SMB、批次整理與自備金鑰 AI 輔助 (｀・ω・´)ゞ",
+      "keywords": "漫畫閱讀器,CBZ,CBR,ZIP,RAR,7z,條漫,雙頁,NAS,標籤管理,AI翻譯",
+      "whatsNew": "本次更新調整了商店介紹文案與各裝置專用預覽圖片，讓大家更清楚了解 G.A.I 的操作畫面與完整功能！詳細的閱讀與書庫整理功能說明，歡迎直接參考下方的商店介紹喔 ( ´ ▽ ` )ﾉ"
+    },
+    "en-US": {
+      "description": "Got a personal collection of manga folders and comic archives on your drives, and want a clean reader that respects your local library? G.A.I is built for local manga collectors—zero ads and no forced account sign-ups (｀・ω・´)ゞ\n\n[Core Reading & Local Library]\n• Flexible Sources: Read image folders and archives from local storage, external drives, and system-mounted NAS folders.\n• Direct Archive Support: Open ZIP/CBZ, RAR/CBR, and 7z/CB7 files directly without extracting.\n• Viewing Modes: Single-page, double-page spreads, left/right reading directions, and vertical Webtoon scroll.\n• On-Device Library: Saves reading progress on the current device, with favorites, search, and tags (stored on this device only; no cross-device sync).\n\n[Free Core vs. v1 Pro One-Time Purchase]\n• Free Core: Local/external/mounted NAS reading, all archive formats, layout modes, on-device progress, and tags are free.\n• v1 Pro Buyout: One-time purchase, not a subscription! Purchased v1 Pro entitlements remain available in later supported versions (applies to v1 Pro scope; not all future features are free forever).\n\n[v1 Pro: SMB, Batch Tools & Optional AI]\n• Direct In-App SMB: Browse SMB network shares directly inside the app.\n• Batch & Duplicate Tools: Batch-organize your library and detect duplicate candidates for manual review.\n• Optional BYOK AI: Use your own OpenAI or Google API key (API fees billed separately by your provider).\n• Transparent AI ( ´ ▽ ` )ﾉ: Not local AI—pages and prompts are sent ONLY after your explicit consent and manual action. AI outputs text notes, dialogue translations (never redrawing text into bubbles), and organization candidates that require your manual application.\n\n[Disclaimer]\nG.A.I provides no manga content, downloads, scrapers, or online catalogs—only an original landscape demo. Bring your own legal files and enjoy (≧∇≦)/",
+      "promotionalText": "Clean, ad-free reader for personal manga archives! Read ZIP/CBZ, RAR/CBR & 7z/CB7 directly. Go v1 Pro (one-time) for in-app SMB, batch tools & BYOK AI (｀・ω・´)ゞ",
+      "keywords": "manga,comic,reader,cbz,cbr,cb7,zip,rar,7z,webtoon,archive,viewer,offline,smb,nas,library,organizer",
+      "whatsNew": "We have updated our store description and device-specific screenshots to better showcase G.A.I! For full details on reading and library organization features, please check out the store description below ( ´ ▽ ` )ﾉ"
+    },
+    "ja": {
+      "description": "HDDやSSDに長年集めたマンガの圧縮ファイルや画像フォルダが眠っていませんか？G.A.Iは、ローカル環境のコレクションを自分の手で管理したいコレクター向けのマンガ・画像リーダーです！邪魔な広告はなく、アカウント登録も不要。開いてすぐにお気に入りの書庫に没頭できます (｀・ω・´)ゞ\n\n【基本の閲覧機能：解凍不要でサクサク読める】\n• 多彩な読み込み先：端末内のローカルフォルダ、外付けストレージ、システム側でマウント済みのNASフォルダに対応。\n• 圧縮ファイルを直接閲覧：ZIP / CBZ、RAR / CBR、7z / CB7および画像フォルダを解凍せずにそのまま開けます。\n• 柔軟な表示モード：単ページ、見開き（2ページ）表示、右開き／左開き、さらに縦スクロール（Webtoon）に対応。\n• 端末内での書庫管理：現在の端末で読書進捗を自動記憶し、お気に入り、検索、タグでコレクションを整理できます（※進捗や書庫データは現在の端末内に保存され、端末間の同期機能はありません）。\n\n【無料版と買い切りv1 Proについて】\n• 基本機能は無料：上記のローカル／外付け／マウント済みNASの読み込み、圧縮ファイル閲覧、表示切替、この端末での進捗記憶やタグ検索は無料で使えます。\n• v1 Proは買い切り型（非サブスク）：一度の購入で解禁され、購入済みのv1特典は今後のサポートバージョンでも維持されます（※v1 Proの範囲内の機能維持であり、将来の全機能の永久無料化を約束するものではありません）。\n\n【v1 Proの拡張機能：本格整理＆選択式AIツール】\n• アプリ内SMB直接接続：アプリ内から直接SMB共有フォルダへ接続可能。\n• 一括整理＆重複候補の検出：書庫の一括整理や重複候補のリストアップを行い、手動で確認しながら整理できます。\n• 選択式のBYOK AIツール：ご自身のOpenAIまたはGoogleのAPIキーを設定して利用できます（API利用料は各提供元で別途発生します）。\n\n【安心・透明なAIの仕組み】\n大切な書庫を守るため、以下の仕組みで動作します ( ´ ▽ ` )ﾉ：\n1. 明示的な同意と手動実行のみ：ローカルAIではありませんが、勝手に送信することはありません。同意のうえで手動実行した時のみ、ページとプロンプトを送信します。\n2. 吹き出しを書き換えない文字表示：AIは解説やセリフ翻訳をテキストで生成し、マンガの吹き出し内に訳文を描き直すことはありません。\n3. 整理候補は手動で適用：AIが提案する整理候補は、あなたが確認して手動で適用するまで反映されません。\n\n【ご注意】\nG.A.Iはマンガ作品の提供、ダウンロード、クローラー、オンライン書庫を含まず、オリジナルの風景デモ画像のみ同梱しています。ご自身の適法なファイルでお楽しみください (≧∇≦)/",
+      "promotionalText": "個人のマンガ・画像書庫を快適に楽しめる広告なし＆登録不要のリーダー！ZIP/CBZ・RAR/CBR・7z/CB7を直接閲覧。買い切りv1 Proでアプリ内SMB、一括整理、ご自身のAPIキーによるAI補助も解禁 (｀・ω・´)ゞ",
+      "keywords": "漫画リーダー,マンガ,CBZ,CBR,ZIP,RAR,7z,縦スクロール,見開き,NAS,AI翻訳",
+      "whatsNew": "ストアの紹介文とデバイス専用のプレビュー画像を更新しました！閲覧機能や書庫整理機能の詳細については、ストアの紹介文をご参照ください ( ´ ▽ ` )ﾉ"
+    }
+  },
+  "imageLocalizationAdvice": "沒有文字疊加的純原始 App 介面畫面，在各語系商店頁面可直接共用；但若預覽圖帶有中文宣傳大標題，或畫面中的示範圖片含有中文漫畫對白／解說文字，建議為 en-US 與 ja 另外準備對應的英文、日文版本以提升在地化體驗與審查清晰度（Apple 並未強制規定每個語系都必須上傳不同圖片，可依圖片是否含特定語言文字彈性配置，供主代理參考）。",
+  "authorship": "Gemini draft; Codex factual wording and byte-limit edits",
+  "imagePolicy": "Use the user-approved image designs across existing zh-Hant/en-US/ja version localizations; no claim that artwork is localized.",
+  "status": "applied-to-submitted-versions",
+  "observedReleaseState": {
+    "date": "2026-10-17",
+    "iOS": {
+      "version": "1.0.1",
+      "build": 59,
+      "state": "WAITING_FOR_REVIEW"
+    },
+    "macOS": {
+      "version": "1.0.2",
+      "build": 59,
+      "state": "WAITING_FOR_REVIEW"
+    }
+  }
+}

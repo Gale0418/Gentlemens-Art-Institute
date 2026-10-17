@@ -8,7 +8,7 @@
 
 已取得測試版時，先試讀內建原創風景，再加入自己的收藏。內建圖集供操作體驗；App 不提供漫畫下載或內容庫。NAS 離線時會保留已整理紀錄，原始頁面仍需來源可讀；進度保存在當前裝置，未提供跨裝置自動同步。
 
-**發布狀態：Mac 1.0 已可販售；iOS 1.0 (58) 與 Pro 已送審，WAITING_FOR_REVIEW；Mac 1.0.1 (58) universal 也已送審；兩平台均為 WAITING_FOR_REVIEW。** 第57版兩平台已撤回。已修原生來源還原、失敗重試與非Mac測試相容性；Node15組、Rust192項通過（1項既有ignored），CodeRabbit最後9檔0 issues。修補已存main、兩項審查討論已結案；遠端僅main。證據見 [第58版收尾](docs/release/build58-bookmark-restore-closeout-2026-10-03.md)。實機TAG、完整VoiceOver與StoreKit交易仍保留驗收界線。
+**發布狀態：iOS 1.0 (58)、Mac 1.0.1 (58) 已核准上架；iOS 1.0.1 (59) 與 Mac 1.0.2 (59) 已送審，均為 WAITING_FOR_REVIEW，核准後自動發布。** 第59版更新商店圖組與 Gemini 繁中／英文／日文介紹，沿用已核准58程式重新封裝與簽章，指令區段核對一致。詳 [第59版發行紀錄](docs/release/build59-store-refresh-2026-10-17.md)。完整實機TAG、VoiceOver及StoreKit交易矩陣仍保留既有驗收界線。
 
 [隱私政策](#隱私政策) · [支援與使用說明](SUPPORT.md)
 

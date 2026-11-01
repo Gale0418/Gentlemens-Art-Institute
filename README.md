@@ -8,7 +8,7 @@
 
 已取得測試版時，先試讀內建原創風景，再加入自己的收藏。內建圖集供操作體驗；App 不提供漫畫下載或內容庫。NAS 離線時會保留已整理紀錄，原始頁面仍需來源可讀；進度保存在當前裝置，未提供跨裝置自動同步。
 
-**發布狀態（2026-11-01）：iOS 1.0.1 (59) 與 Mac 1.0.2 (59) 均為 `READY_FOR_DISTRIBUTION`；本機 iPad 已安裝 1.0.2 (63)，啟動驗證待裝置解鎖。** 第59版商店圖組與 Gemini 繁中／英文／日文介紹的變更紀錄見 [第59版發行紀錄](docs/release/build59-store-refresh-2026-10-17.md)。完整實機 TAG、VoiceOver 及 StoreKit 交易矩陣仍未完成；上述 iPad 安裝不代表這些驗收已通過。
+**發布狀態（2026-11-01）：iOS 1.0.1 (59) 與 Mac 1.0.2 (59) 均為 `READY_FOR_DISTRIBUTION`；iOS 1.0.2 (63) 已上傳且 build 為 `VALID`，版本草稿尚未送審。本機 iPad 已安裝 1.0.2 (63)，啟動驗證待裝置解鎖。** 第59版商店圖組與 Gemini 繁中／英文／日文介紹的變更紀錄見 [第59版發行紀錄](docs/release/build59-store-refresh-2026-10-17.md)。完整實機 TAG、VoiceOver 及 StoreKit 交易矩陣仍未完成；上述 iPad 安裝不代表這些驗收已通過。
 
 [隱私政策](#隱私政策) · [支援與使用說明](SUPPORT.md)
 
@@ -27,7 +27,7 @@
 - SQLite catalog 是 metadata / location / progress 的主要本機 authority；來源離線不等於資料刪除。
 - 本機、iOS security-scoped folder 與單一 SMB/NAS 是獨立來源；其中一個來源離線不應清除其他來源或 catalog 紀錄。
 - 內建全年齡原創 demo 可在乾淨安裝、沒有 NAS／帳號／第三方下載的情況下直接驗證核心 reader。
-- 2026-11-01：iOS 1.0.1 (59) 與 Mac 1.0.2 (59) 已 `READY_FOR_DISTRIBUTION`；本機 iPad 已安裝 iOS 1.0.2 (63)，但裝置鎖定，啟動驗證待完成。商店版 1.0.2 (63) 已簽章建置，尚未上傳；完整實機 TAG、VoiceOver 與 StoreKit 交易矩陣仍未完成。
+- 2026-11-01：iOS 1.0.1 (59) 與 Mac 1.0.2 (59) 已 `READY_FOR_DISTRIBUTION`；本機 iPad 已安裝 iOS 1.0.2 (63)，但裝置鎖定，啟動驗證待完成。商店版 1.0.2 (63) 上傳並回讀為 `VALID`，已連結 `PREPARE_FOR_SUBMISSION` 草稿，未送審；完整實機 TAG、VoiceOver 與 StoreKit 交易矩陣仍未完成。
 - 歷史紀錄（2026-10-03）：Mac `1.0` 已 `READY_FOR_DISTRIBUTION`；iOS `1.0` 與 Mac `1.0.1` 的第57版已撤回，第58版兩平台已正式送審。本機 Mac／iPad 當時為第56版；TAG 探索的 Mac 證據見 [探索體驗報告](docs/audits/2026-10-03-discovery-experience.md)。
 - `src-tauri/vendor/wry/` 是**刻意保留的 iOS WebKit startup patch**，目前仍由 Cargo `[patch.crates-io]` 使用；不要因為它看起來像 vendor 目錄就清掉。
 

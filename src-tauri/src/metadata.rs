@@ -57,6 +57,20 @@ pub struct ParserDiagnostic {
 pub struct ParseOutcome {
     pub sources: Vec<ParsedMetadataSource>,
     pub diagnostics: Vec<ParserDiagnostic>,
+    /// Metadata artifacts that could not be read or parsed.  Catalog refreshes
+    /// retain only the matching old sources; a successfully removed artifact
+    /// still has no failure entry and is therefore removed normally.
+    pub failures: Vec<ParseFailure>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ParseFailure {
+    /// One metadata artifact failed after its path was identified.
+    Artifact { source_path: String },
+    /// The metadata scope could not be inspected at all.  This is used for a
+    /// directory or archive so existing children remain available while the
+    /// source is temporarily inaccessible or damaged.
+    Scope { source_prefix: String },
 }
 
 struct ParseContext<'a> {
@@ -335,49 +349,73 @@ pub fn parse_metadata_for_path(path: &Path) -> ParseOutcome {
     if path.is_dir() {
         match std::fs::read_dir(path) {
             Ok(entries) => {
-                for entry in entries.flatten() {
+                for entry in entries {
+                    let entry = match entry {
+                        Ok(entry) => entry,
+                        Err(error) => {
+                            outcome.failures.push(ParseFailure::Scope {
+                                source_prefix: directory_source_prefix(path),
+                            });
+                            outcome.diagnostics.push(diagnostic(
+                                None,
+                                path,
+                                format!("無法讀取 metadata 目錄項目：{error}"),
+                            ));
+                            continue;
+                        }
+                    };
                     let entry_path = entry.path();
-                    if entry_path.is_file()
-                        && is_metadata_name(&entry.file_name().to_string_lossy())
-                    {
-                        parse_artifact(
-                            &entry_path.to_string_lossy(),
-                            read_bounded(&entry_path),
-                            &mut outcome,
-                        );
+                    if is_metadata_name(&entry.file_name().to_string_lossy()) {
+                        match entry.file_type() {
+                            Ok(file_type) if file_type.is_file() => parse_artifact(
+                                &entry_path.to_string_lossy(),
+                                read_bounded(&entry_path),
+                                &mut outcome,
+                            ),
+                            Ok(_) => {}
+                            Err(error) => parse_artifact(
+                                &entry_path.to_string_lossy(),
+                                Err(error.to_string()),
+                                &mut outcome,
+                            ),
+                        }
                     }
                 }
             }
-            Err(error) => outcome.diagnostics.push(diagnostic(
-                None,
-                path,
-                format!("無法列出 metadata 目錄：{error}"),
-            )),
+            Err(error) => {
+                outcome.failures.push(ParseFailure::Scope {
+                    source_prefix: directory_source_prefix(path),
+                });
+                outcome.diagnostics.push(diagnostic(
+                    None,
+                    path,
+                    format!("無法列出 metadata 目錄：{error}"),
+                ));
+            }
         }
     } else if is_zip_path(path) {
         parse_zip_metadata(path, &mut outcome);
         for sibling in json_siblings(path) {
-            if sibling.is_file() {
-                parse_artifact(
-                    &sibling.to_string_lossy(),
-                    read_bounded(&sibling),
-                    &mut outcome,
-                );
-            }
+            parse_sibling_metadata(&sibling, &mut outcome);
         }
     } else {
         for sibling in json_siblings(path) {
-            if sibling.is_file() {
-                parse_artifact(
-                    &sibling.to_string_lossy(),
-                    read_bounded(&sibling),
-                    &mut outcome,
-                );
-            }
+            parse_sibling_metadata(&sibling, &mut outcome);
         }
     }
     outcome.sources.push(filename_source(path));
     outcome
+}
+
+fn parse_sibling_metadata(path: &Path, outcome: &mut ParseOutcome) {
+    match std::fs::metadata(path) {
+        Ok(metadata) if metadata.is_file() => {
+            parse_artifact(&path.to_string_lossy(), read_bounded(path), outcome);
+        }
+        Ok(_) => {}
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+        Err(error) => parse_artifact(&path.to_string_lossy(), Err(error.to_string()), outcome),
+    }
 }
 
 pub fn filename_metadata_for_path(path: &Path) -> ParsedMetadataSource {
@@ -386,12 +424,18 @@ pub fn filename_metadata_for_path(path: &Path) -> ParsedMetadataSource {
 
 fn parse_zip_metadata(path: &Path, outcome: &mut ParseOutcome) {
     let Ok(file) = File::open(path) else {
+        outcome.failures.push(ParseFailure::Scope {
+            source_prefix: archive_source_prefix(path),
+        });
         outcome
             .diagnostics
             .push(diagnostic(None, path, "無法開啟壓縮檔"));
         return;
     };
     let Ok(mut archive) = zip::ZipArchive::new(file) else {
+        outcome.failures.push(ParseFailure::Scope {
+            source_prefix: archive_source_prefix(path),
+        });
         outcome.diagnostics.push(diagnostic(
             None,
             path,
@@ -401,10 +445,22 @@ fn parse_zip_metadata(path: &Path, outcome: &mut ParseOutcome) {
     };
     let mut targets = Vec::new();
     for index in 0..archive.len() {
-        if let Ok(file) = archive.by_index(index) {
-            let name = file.name().replace('\\', "/");
-            if !name.trim_matches('/').contains('/') && is_metadata_name(&name) {
-                targets.push((index, name));
+        match archive.by_index(index) {
+            Ok(file) => {
+                let name = file.name().replace('\\', "/");
+                if !name.trim_matches('/').contains('/') && is_metadata_name(&name) {
+                    targets.push((index, name));
+                }
+            }
+            Err(error) => {
+                outcome.failures.push(ParseFailure::Scope {
+                    source_prefix: archive_source_prefix(path),
+                });
+                outcome.diagnostics.push(diagnostic(
+                    None,
+                    path,
+                    format!("無法讀取 ZIP metadata 索引：{error}"),
+                ));
             }
         }
     }
@@ -437,6 +493,9 @@ fn parse_artifact(source_path: &str, result: Result<Vec<u8>, String>, outcome: &
     let bytes = match result {
         Ok(bytes) => bytes,
         Err(message) => {
+            outcome.failures.push(ParseFailure::Artifact {
+                source_path: source_path.to_string(),
+            });
             outcome.diagnostics.push(ParserDiagnostic {
                 parser_id: None,
                 source_path: source_path.to_string(),
@@ -500,13 +559,30 @@ fn parse_artifact(source_path: &str, result: Result<Vec<u8>, String>, outcome: &
             },
             metadata,
         }),
-        Err(message) => outcome.diagnostics.push(ParserDiagnostic {
-            parser_id: Some(parser.parser_id().into()),
-            source_path: source_path.to_string(),
-            severity: "warning".into(),
-            message,
-        }),
+        Err(message) => {
+            outcome.failures.push(ParseFailure::Artifact {
+                source_path: source_path.to_string(),
+            });
+            outcome.diagnostics.push(ParserDiagnostic {
+                parser_id: Some(parser.parser_id().into()),
+                source_path: source_path.to_string(),
+                severity: "warning".into(),
+                message,
+            });
+        }
     }
+}
+
+fn archive_source_prefix(path: &Path) -> String {
+    format!("{}::", path.to_string_lossy())
+}
+
+fn directory_source_prefix(path: &Path) -> String {
+    let mut prefix = path.to_string_lossy().into_owned();
+    if !prefix.ends_with(std::path::MAIN_SEPARATOR) {
+        prefix.push(std::path::MAIN_SEPARATOR);
+    }
+    prefix
 }
 
 fn parse_json_metadata(bytes: &[u8], hdoujin: bool) -> Result<NormalizedMetadata, String> {

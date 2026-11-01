@@ -95,7 +95,7 @@ pub fn is_batch(ids: &[String]) -> bool {
 }
 
 pub fn is_direct_smb(source_id: &str, item_type: &str) -> bool {
-    source_id == "smb" || item_type == "smb-archive"
+    crate::state::is_smb_source_id(source_id) || item_type == "smb-archive"
 }
 
 #[cfg(test)]

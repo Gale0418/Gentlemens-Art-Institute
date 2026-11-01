@@ -4,11 +4,16 @@ import vm from 'node:vm';
 
 const appSource = fs.readFileSync(new URL('../public/app.js', import.meta.url), 'utf8');
 assert.match(appSource, /await restoreExternalBookmarks\(\)/, 'initial external bookmark restore must use the intent queue');
-assert.match(appSource, /async function restoreExternalBookmarks\(\)[\s\S]{0,260}setBookmarks\(readExternalBookmarks\(\)\)/, 'empty initial bookmark restore must still clear native state');
+assert.match(appSource, /eAPI\.restoreBookmarks\(readExternalBookmarks\(\), externalBookmarksLegacyReadable\)/, 'startup and first mutation must obtain an authoritative native bookmark snapshot');
 assert.match(appSource, /const latestBookmarks = readExternalBookmarks\(\)[\s\S]{0,180}bookmark\.bookmark !== bookmarkIdentity/, 'bookmark deletion must resolve identity inside the queue');
 assert.match(appSource, /async function initApp\(\)[\s\S]{0,180}sanitizeSmbConfig\(\)/, 'SMB legacy secrets must be sanitized during app initialization');
 assert.match(appSource, /requestPriorityLibraryScan\(state\.scanStatus, state\.favorites\)/, 'scan progress must submit native priority scan hints');
+const nativeSource = fs.readFileSync(new URL('../src-tauri/src/lib.rs', import.meta.url), 'utf8');
+const nativeBookmarkMutation = nativeSource.slice(nativeSource.indexOf('async fn set_bookmarks('), nativeSource.indexOf('async fn get_bookmarks('));
+assert.match(nativeBookmarkMutation, /if let Err\(error\) = cleanup_result[\s\S]*active\.remove[\s\S]*external_bookmarks\.write[\s\S]*if cleanup_errors\.is_empty/, 'post-commit cleanup errors must be retained until the matching process state is published');
 const tauriBridgeSource = fs.readFileSync(new URL('../public/tauri-api.js', import.meta.url), 'utf8');
+assert.match(tauriBridgeSource, /restoreBookmarks: \(data, legacyCacheReadable\) => invoke\('set_bookmarks', \{ data, restoreFromSaved: true, legacyCacheReadable \}\)/, 'startup restore must explicitly select native authority and legacy migration semantics');
+assert.match(tauriBridgeSource, /repairExternalBookmarks: \(data\) => invoke\('repair_external_bookmarks', \{ data \}\)/, 'corrupt bookmark recovery must use the dedicated native repair command');
 assert.match(tauriBridgeSource, /invoke\('scan_priority_library', \{[\s\S]*favoriteIds/, 'native bridge must expose the priority scan command');
 assert.match(tauriBridgeSource, /scanVisibleDirectory: \(relativePath, sourceId\) => invoke\('scan_visible_directory', \{[\s\S]*\.\.\.\(sourceId \? \{ sourceId \} : \{\}\)/, 'visible directory bridge must accept an optional source id');
 
@@ -100,6 +105,32 @@ class FakeElement {
     return child;
   }
 
+  insertBefore(child, anchor) {
+    if (!anchor || !this.children.includes(anchor)) return this.appendChild(child);
+    if (child.parentNode && child.parentNode !== this) {
+      child.parentNode.children = child.parentNode.children.filter(item => item !== child);
+    } else if (child.parentNode === this) {
+      this.children = this.children.filter(item => item !== child);
+    }
+    child.parentNode = this;
+    child.isConnected = true;
+    this.children.splice(this.children.indexOf(anchor), 0, child);
+    return child;
+  }
+
+  removeChild(child) {
+    const index = this.children.indexOf(child);
+    if (index === -1) throw new Error('child is not present');
+    this.children.splice(index, 1);
+    const detach = node => {
+      node.parentNode = null;
+      node.isConnected = false;
+      node.children?.forEach(detach);
+    };
+    detach(child);
+    return child;
+  }
+
   replaceChildren(...children) {
     this.replaceChildrenCalls += 1;
     this.children.forEach(child => { child.parentNode = null; child.isConnected = false; });
@@ -133,9 +164,19 @@ class FakeElement {
     return null;
   }
   querySelector(selector) {
+    if (selector === '.catalog-thumb.current') {
+      return this.children.find(child => child.classList.contains('current')) || null;
+    }
     if (selector.startsWith('img[data-index="')) {
       const index = selector.match(/data-index="(\d+)"/)?.[1];
       return this.children.find(child => child.dataset?.index === index) || null;
+    }
+    if (selector === '.reader-catalog-grid' || selector === '.reader-catalog-window-controls') {
+      return this.children.find(child => child.className === selector.slice(1)) || null;
+    }
+    if (selector === '[data-catalog-spacer="top"]' || selector === '[data-catalog-spacer="bottom"]') {
+      const value = selector.includes('top') ? 'top' : 'bottom';
+      return this.children.find(child => child.dataset?.catalogSpacer === value) || null;
     }
     return null;
   }
@@ -257,6 +298,59 @@ const makeCover = id => {
   return img;
 };
 
+assert.equal(hooks.catalogThumbnailURL('gai://page/photo-id/3'), 'gai://page/photo-id/3?thumbnail=1',
+  'native page thumbnails request the PhotoKit thumbnail variant');
+assert.equal(hooks.catalogThumbnailURL('gai://folder/photo-id/3?existing=1#image'),
+  'gai://folder/photo-id/3?existing=1&thumbnail=1#image',
+  'native folder thumbnails preserve existing query and fragment');
+assert.equal(hooks.catalogThumbnailURL('/fixture/page-3.png'), '/fixture/page-3.png',
+  'fixture thumbnail sources remain unchanged');
+
+// Reader image refresh must schedule catalog virtualization only in catalog
+// mode; the transform helper is also used by fullscreenchange and must not
+// accidentally move a catalog window while a normal reader is active.
+{
+  const catalog = createHarness({ width: 1000 });
+  catalog.context.IntersectionObserver = undefined;
+  vm.runInContext(
+    'window.__GIA_TEST_HOOKS__.scheduleReaderImageTransformRefresh = scheduleReaderImageTransformRefresh;',
+    catalog.context,
+  );
+  catalog.hooks.state.currentComic = { id: 'refresh-catalog' };
+  catalog.hooks.state.currentComicPages = Array.from({ length: 5000 }, (_, index) => `p${index}`);
+  catalog.hooks.state.currentPageIndex = 0;
+  catalog.hooks.state.readingMode = 'catalog';
+  catalog.hooks.renderPages();
+  const initialWindowStart = catalog.hooks.state.catalogWindowStart;
+  catalog.hooks.elements.readerViewport.scrollTop = 60 + (Math.floor(3000 / 6) * 194);
+  catalog.hooks.scheduleReaderImageTransformRefresh();
+  catalog.clock.tick(0);
+  assert.notEqual(catalog.hooks.state.catalogWindowStart, initialWindowStart,
+    'catalog image refresh schedules virtual rendering for the visible window');
+
+  const reader = createHarness({ width: 1000 });
+  reader.context.IntersectionObserver = undefined;
+  vm.runInContext(
+    'window.__GIA_TEST_HOOKS__.scheduleReaderImageTransformRefresh = scheduleReaderImageTransformRefresh;',
+    reader.context,
+  );
+  reader.hooks.state.currentComic = { id: 'refresh-reader' };
+  reader.hooks.state.currentComicPages = Array.from({ length: 5000 }, (_, index) => `p${index}`);
+  reader.hooks.state.currentPageIndex = 0;
+  reader.hooks.state.readingMode = 'catalog';
+  reader.hooks.renderPages();
+  const readerGrid = reader.hooks.elements.pagesContainer.querySelector('.reader-catalog-grid');
+  const readerWindowStart = reader.hooks.state.catalogWindowStart;
+  reader.hooks.state.readingMode = 'single';
+  reader.hooks.elements.readerViewport.scrollTop = 60 + (Math.floor(3000 / 6) * 194);
+  reader.hooks.scheduleReaderImageTransformRefresh();
+  reader.clock.tick(0);
+  assert.equal(reader.hooks.state.catalogWindowStart, readerWindowStart,
+    'normal reader image refresh does not schedule catalog virtualization');
+  assert.equal(reader.hooks.elements.pagesContainer.querySelector('.reader-catalog-grid'), readerGrid,
+    'normal reader image refresh leaves the catalog grid untouched');
+}
+
 // Continue 卡片的實際欄寬與排序欄位都必須進入簽名；未讀收藏不可偽裝成閱讀進度。
 {
   const favorite = {
@@ -275,6 +369,29 @@ const makeCover = id => {
   favorite.progress.percent = 37;
   hooks.renderContinueStrip();
   assert.notEqual(hooks.elements.continueStrip.innerHTML, firstMarkup, 'progress changes invalidate the Continue render signature');
+}
+
+// 同名的繼續閱讀卡片顯示來源路徑，路徑改動也必須更新畫面。
+{
+  const sharedProgress = { currentPage: 3, totalPages: 20, percent: 15, updatedAt: '2026-10-03T00:00:00Z' };
+  const books = [
+    { id: 'same-a', title: 'Knowledge', relativePath: 'first/knowledge', sourceId: 'local', progress: sharedProgress },
+    { id: 'same-b', title: 'Knowledge', relativePath: 'second/<knowledge>&"', sourceId: 'smb', progress: sharedProgress },
+  ];
+  hooks.state.comics = books;
+  hooks.renderContinueStrip();
+  let markup = hooks.elements.continueStrip.innerHTML;
+  assert.equal((markup.match(/class="continue-context"/g) || []).length, 2);
+  assert.ok(markup.includes('first/knowledge'));
+  assert.ok(markup.includes('second/&lt;knowledge&gt;&amp;&quot;'), 'source context is escaped in text and tooltip');
+  assert.ok(!markup.includes('second/<knowledge>'), 'paths never inject markup');
+  assert.equal((markup.match(/alt=""/g) || []).length, 2, 'decorative covers do not repeat the accessible book title');
+  books[0].relativePath = 'moved/knowledge';
+  hooks.renderContinueStrip();
+  assert.ok(hooks.elements.continueStrip.innerHTML.includes('moved/knowledge'), 'path change invalidates cached Continue markup');
+  books[1].title = 'Unique';
+  hooks.renderContinueStrip();
+  assert.ok(!hooks.elements.continueStrip.innerHTML.includes('continue-context'), 'unique names keep the compact card');
 }
 
 // 舊世代封面取消後不應釋放新世代名額，也不應把取消事件算成失敗。
@@ -309,6 +426,37 @@ const makeCover = id => {
   assert.equal(visibleB.src, '/cover/visible-b');
   assert.equal(hooks.getCoverQueueState().active, 2);
   hooks.resetCoverLoadQueue();
+}
+
+// 目前資料夾的可見封面優先於「繼續閱讀」，舊卡片取消不佔名額。
+{
+  const shelf = createHarness();
+  const recent = makeCover('recent-secondary');
+  recent.dataset.coverPriority = 'secondary';
+  const folderBookA = makeCover('current-folder-a');
+  const folderBookB = makeCover('current-folder-b');
+  [recent, folderBookA, folderBookB].forEach(image => {
+    shelf.hooks.setCoverVisibility(image, true);
+    shelf.hooks.enqueueCoverLoad(image);
+  });
+  shelf.clock.tick(80);
+  assert.equal(folderBookA.src, '/cover/current-folder-a', 'current folder wins even if recent cover queued first');
+  assert.equal(folderBookB.src, '/cover/current-folder-b');
+  assert.equal(recent.src, '', 'recent cover waits while the current folder occupies both slots');
+  folderBookA.dispatch('load');
+  shelf.clock.tick(0);
+  assert.equal(recent.src, '/cover/recent-secondary', 'recent cover loads when a slot is free');
+  shelf.hooks.removeScheduledCover(recent);
+  recent.dispatch('error');
+  assert.equal(shelf.hooks.getCoverQueueState().active, 1, 'replaced recent cover releases only its own slot');
+  assert.equal(shelf.hooks.getCoverQueueState().failed.size, 0, 'cancelled recent cover does not poison shelf retry');
+  assert.equal(recent.dataset.coverState, 'idle', 'cancelled image can be reused');
+  assert.equal(recent.dataset.src, '/cover/recent-secondary');
+  shelf.hooks.setCoverVisibility(recent, true);
+  shelf.hooks.enqueueCoverLoad(recent);
+  shelf.clock.tick(0);
+  assert.equal(recent.src, '/cover/recent-secondary', 'reused image can be scheduled again');
+  shelf.hooks.resetCoverLoadQueue();
 }
 
 // 失敗黑名單有 TTL，掃描／來源刷新則可清空並重試。
@@ -708,16 +856,313 @@ const makeCover = id => {
   const nextButton = controls.children.find(child => child.dataset.catalogWindowControl === 'next');
   catalog.document.activeElement = nextButton;
   nextButton.dispatch('click');
-  assert.equal(catalog.hooks.state.catalogWindowStart, 2580, 'catalog next control keeps the requested window start');
+  assert.equal(catalog.hooks.state.catalogWindowStart, 2574, 'catalog next control advances by the actual row capacity');
   const rerenderedControls = catalog.hooks.elements.pagesContainer.children.find(child => child.className === 'reader-catalog-window-controls');
   const focusedNextButton = rerenderedControls.children.find(child => child.dataset.catalogWindowControl === 'next');
   assert.equal(focusedNextButton.focusCalls, 1, 'catalog window navigation restores focus to its replacement control');
+
+  // 捲動跨過批次邊界時只回收離窗節點；重疊頁面的 thumbnail node 與 img 必須保留。
+  const currentGrid = catalog.hooks.elements.pagesContainer.children
+    .find(child => child.className === 'reader-catalog-grid');
+  const reusedThumb = currentGrid.children.find(child => child.dataset.index === '2660');
+  const reusedImage = reusedThumb.children.find(child => child.tagName === 'IMG');
+  const evictedThumb = currentGrid.children.find(child => child.dataset.index === '2574');
+  catalog.hooks.elements.readerViewport.scrollTop = 60 + (Math.floor(2680 / 6) * 194);
+  catalog.hooks.renderCatalogGrid({ fromScroll: true });
+  const shiftedGrid = catalog.hooks.elements.pagesContainer.children
+    .find(child => child.className === 'reader-catalog-grid');
+  assert.equal(shiftedGrid.children.find(child => child.dataset.index === '2660'), reusedThumb,
+    '批次滑動保留重疊 thumbnail identity');
+  assert.equal(shiftedGrid.children.find(child => child.dataset.index === '2660')
+    .children.find(child => child.tagName === 'IMG'), reusedImage,
+    '批次滑動保留重疊 image identity');
+  assert.equal(shiftedGrid.children.includes(evictedThumb), false,
+    '批次滑動回收離窗 thumbnail');
 
   catalog.hooks.state.readingMode = 'catalog';
   catalog.hooks.updateReaderUiControls();
   for (const control of [catalog.hooks.elements.btnFitMode, catalog.hooks.elements.btnRotateLeft, catalog.hooks.elements.btnRotateRight]) {
     assert.equal(control.disabled, true, 'catalog mode disables image transform controls');
     assert.equal(control.getAttribute('aria-disabled'), 'true', 'catalog mode exposes disabled transform state to assistive technology');
+  }
+}
+
+// 尾批必須在所有欄數與頁數組合下包含最後一頁；非尾批 renderEnd 維持列對齊，
+// spacer 加上部分起始列後仍等於完整文件的 totalRows。
+for (let columns = 1; columns <= 12; columns += 1) {
+  const width = 40 + (130 * columns) + (14 * (columns - 1));
+  const catalog = createHarness({ width });
+  catalog.context.IntersectionObserver = undefined;
+  for (const totalPages of [3016, 5000, 160, 161]) {
+    const capacity = Math.max(columns, Math.floor(160 / columns) * columns);
+    catalog.hooks.state.currentComic = { id: `tail-${columns}-${totalPages}` };
+    catalog.hooks.state.currentComicPages = Array.from({ length: totalPages }, (_, index) => `p${index}`);
+    catalog.hooks.state.currentPageIndex = totalPages - 1;
+    catalog.hooks.state.catalogWindowStart = 0;
+    catalog.hooks.state.catalogWindowEnd = 0;
+    catalog.hooks.state.catalogColumns = 0;
+    catalog.hooks.state.readingMode = 'catalog';
+    catalog.hooks.renderPages();
+    const bounds = catalog.hooks.getCatalogVirtualBounds(totalPages, { preserveWindow: true });
+    const grid = catalog.hooks.elements.pagesContainer.children
+      .find(child => child.className === 'reader-catalog-grid');
+    const first = grid.children[0];
+    const last = grid.children.at(-1);
+    const expectedStart = Math.max(0, totalPages - capacity);
+    assert.equal(catalog.hooks.state.catalogWindowStart, expectedStart,
+      `tail window start stays clamped for columns=${columns}, total=${totalPages}`);
+    assert.equal(first.dataset.index, String(expectedStart),
+      `tail render starts at the full-capacity tail for columns=${columns}, total=${totalPages}`);
+    assert.equal(last.dataset.index, String(totalPages - 1),
+      `tail render includes final page for columns=${columns}, total=${totalPages}`);
+    assert.ok(grid.children.length <= 160,
+      `tail DOM stays bounded for columns=${columns}, total=${totalPages}`);
+    const topRows = Math.floor(bounds.renderStart / columns);
+    const gridRows = Math.ceil(((bounds.renderStart % columns) + (bounds.renderEnd - bounds.renderStart)) / columns);
+    const bottomRows = Math.max(0, bounds.totalRows - Math.ceil(bounds.renderEnd / columns));
+    assert.equal(topRows + gridRows + bottomRows, bounds.totalRows,
+      `tail spacer geometry covers all rows for columns=${columns}, total=${totalPages}`);
+    if (bounds.renderEnd !== totalPages) {
+      assert.equal(bounds.renderEnd % columns, 0,
+        `non-tail renderEnd is row aligned for columns=${columns}, total=${totalPages}`);
+    }
+  }
+}
+
+// incremental fromScroll 進入欄數不整除的尾批時，top spacer 仍必須採完整列高度。
+{
+  const columns = 5;
+  const totalPages = 3016;
+  const tail = createHarness({ width: 40 + (130 * columns) + (14 * (columns - 1)) });
+  tail.context.IntersectionObserver = undefined;
+  tail.hooks.state.currentComic = { id: 'incremental-tail' };
+  tail.hooks.state.currentComicPages = Array.from({ length: totalPages }, (_, index) => `p${index}`);
+  tail.hooks.state.currentPageIndex = 0;
+  tail.hooks.state.readingMode = 'catalog';
+  tail.hooks.renderPages();
+  tail.hooks.elements.readerViewport.scrollTop = 60 + (Math.floor(3000 / columns) * 194);
+  tail.hooks.renderCatalogGrid({ fromScroll: true });
+  const topSpacer = tail.hooks.elements.pagesContainer.children
+    .find(child => child.dataset.catalogSpacer === 'top');
+  assert.equal(topSpacer.style.height, `${Math.floor((totalPages - 160) / columns) * 194}px`,
+    'incremental tail top spacer uses complete rows');
+}
+
+// 初始 catalog window 必須依實際列容量判斷 current page；capacity 邊界附近不得漏目前頁。
+for (let columns = 1; columns <= 12; columns += 1) {
+  const width = 40 + (130 * columns) + (14 * (columns - 1));
+  const capacity = Math.max(columns, Math.floor(160 / columns) * columns);
+  const current = createHarness({ width });
+  current.context.IntersectionObserver = undefined;
+  current.hooks.state.currentComicPages = Array.from({ length: 5000 }, (_, index) => `p${index}`);
+  current.hooks.state.currentComic = { id: `current-boundary-${columns}` };
+  current.hooks.state.readingMode = 'catalog';
+  for (const pageIndex of [Math.max(0, capacity - 3), capacity - 2, capacity - 1,
+    capacity, capacity + 1, capacity + 2, capacity + 3]) {
+    current.hooks.state.currentPageIndex = pageIndex;
+    current.hooks.state.catalogWindowStart = 0;
+    current.hooks.state.catalogWindowEnd = 0;
+    current.hooks.state.catalogColumns = 0;
+    current.hooks.renderPages();
+    const grid = current.hooks.elements.pagesContainer.children
+      .find(child => child.className === 'reader-catalog-grid');
+    assert.ok(grid.children.some(child => child.dataset.index === String(pageIndex)),
+      `initial window keeps current page for columns=${columns}, index=${pageIndex}`);
+  }
+}
+
+// 初次跳到長篇尾窗必須同步完成，不能留下會在 resize 後移動 viewport 的動畫。
+{
+  const entry = createHarness({ width: 800 });
+  entry.context.IntersectionObserver = undefined;
+  entry.hooks.state.currentComic = { id: 'catalog-entry-race' };
+  entry.hooks.state.currentComicPages = Array.from({ length: 5000 }, (_, index) => `p${index}`);
+  entry.hooks.state.currentPageIndex = 4999;
+  entry.hooks.state.readingMode = 'catalog';
+  entry.hooks.renderPages();
+  assert.ok(entry.hooks.elements.readerViewport.scrollTop > 1000,
+    'catalog entry positions the current page before returning');
+  const oldGrid = entry.hooks.elements.pagesContainer.querySelector('.reader-catalog-grid');
+  const oldCurrent = oldGrid.querySelector('.catalog-thumb.current');
+  let staleScrolls = 0;
+  oldCurrent.scrollIntoView = () => { staleScrolls += 1; entry.hooks.elements.readerViewport.scrollTop = 0; };
+  entry.context.window.innerWidth = 1440;
+  entry.hooks.handleReaderResize();
+  entry.clock.tick(0);
+  const resizedTop = entry.hooks.elements.readerViewport.scrollTop;
+  entry.clock.tick(200);
+  assert.equal(staleScrolls, 0, 'detached entry thumbnail cannot run a delayed scroll');
+  assert.equal(entry.hooks.elements.readerViewport.scrollTop, resizedTop,
+    'entry positioning cannot overwrite the resize anchor');
+  assert.ok(resizedTop > 1000, 'tail anchor survives the column change');
+}
+
+// resize 只在欄數真的改變時重算；同一 frame 的 5→8→5 與 no-op 不重建 DOM，
+// 欄數改變則以目錄可見列作 anchor，currentPageIndex 不得被改寫。
+{
+  const resize = createHarness({ width: 40 + (130 * 5) + (14 * 4) });
+  resize.context.IntersectionObserver = undefined;
+  resize.hooks.state.currentComic = { id: 'catalog-resize' };
+  resize.hooks.state.currentComicPages = Array.from({ length: 3016 }, (_, index) => `p${index}`);
+  resize.hooks.state.currentPageIndex = 17;
+  resize.hooks.state.readingMode = 'catalog';
+  resize.hooks.renderPages();
+  resize.hooks.elements.readerViewport.scrollTop = 60 + (Math.floor(1500 / 5) * 194) + 20;
+  const beforeResizeGrid = resize.hooks.elements.pagesContainer.children
+    .find(child => child.className === 'reader-catalog-grid');
+  const beforeGeneration = resize.hooks.getCatalogThumbnailLoadState().generation;
+  const originalReplaceChildren = resize.hooks.elements.pagesContainer.replaceChildren.bind(
+    resize.hooks.elements.pagesContainer,
+  );
+  resize.hooks.elements.pagesContainer.replaceChildren = (...children) => {
+    originalReplaceChildren(...children);
+    // Simulate WKWebView clamping scrollTop while a resize render replaces DOM.
+    resize.hooks.elements.readerViewport.scrollTop = 0;
+  };
+
+  resize.context.window.innerWidth = 40 + (130 * 8) + (14 * 7);
+  resize.hooks.handleReaderResize();
+  resize.clock.tick(0);
+  assert.equal(resize.hooks.state.catalogColumns, 8, 'resize applies the new catalog columns');
+  assert.equal(resize.hooks.state.currentPageIndex, 17, 'resize does not change reader current page');
+  assert.ok(resize.hooks.elements.readerViewport.scrollTop > 1000,
+    'mid catalog resize preserves a logical visible anchor');
+  assert.notEqual(resize.hooks.elements.pagesContainer.children
+    .find(child => child.className === 'reader-catalog-grid'), beforeResizeGrid,
+  'column change may rebuild the catalog grid');
+  assert.ok(resize.hooks.getCatalogThumbnailLoadState().generation > beforeGeneration,
+    'column change resets the thumbnail generation');
+
+  resize.context.window.innerWidth = 40 + (130 * 5) + (14 * 4);
+  resize.hooks.handleReaderResize();
+  resize.clock.tick(0);
+  assert.equal(resize.hooks.state.catalogColumns, 5, 'resize back restores the original columns');
+  assert.ok(resize.hooks.elements.readerViewport.scrollTop > 1000,
+    'resize back preserves the logical visible anchor');
+
+  const stableGrid = resize.hooks.elements.pagesContainer.children
+    .find(child => child.className === 'reader-catalog-grid');
+  const stableGeneration = resize.hooks.getCatalogThumbnailLoadState().generation;
+  resize.context.window.innerWidth = 40 + (130 * 8) + (14 * 7);
+  resize.hooks.handleReaderResize();
+  resize.context.window.innerWidth = 40 + (130 * 5) + (14 * 4);
+  resize.hooks.handleReaderResize();
+  resize.clock.tick(0);
+  assert.equal(resize.hooks.elements.pagesContainer.children
+    .find(child => child.className === 'reader-catalog-grid'), stableGrid,
+  'rapid same-frame resize coalesces without rebuilding');
+  assert.equal(resize.hooks.getCatalogThumbnailLoadState().generation, stableGeneration,
+    'rapid same-frame resize does not reset thumbnail loading');
+
+  resize.hooks.handleReaderResize();
+  resize.clock.tick(0);
+  assert.equal(resize.hooks.elements.pagesContainer.children
+    .find(child => child.className === 'reader-catalog-grid'), stableGrid,
+  'no-op resize preserves catalog node identity');
+  assert.equal(resize.hooks.getCatalogThumbnailLoadState().generation, stableGeneration,
+    'no-op resize does not reset thumbnail loading');
+
+  resize.hooks.elements.readerViewport.scrollTop = 60 + (Math.floor(1500 / 5) * 194) + 20;
+  resize.hooks.handleCatalogScroll();
+  resize.context.window.innerWidth = 40 + (130 * 8) + (14 * 7);
+  resize.hooks.handleReaderResize();
+  resize.clock.tick(0);
+  assert.equal(resize.hooks.state.catalogColumns, 8, 'scroll and resize same frame use resize path');
+  assert.ok(resize.hooks.elements.readerViewport.scrollTop > 1000,
+    'scroll and resize same frame restore the captured anchor after DOM clamp');
+}
+
+// 關閉 reader 後才執行的 resize/scroll RAF 不得搬移下一本漫畫的 catalog viewport。
+{
+  const stale = createHarness({ width: 40 + (130 * 5) + (14 * 4) });
+  stale.context.IntersectionObserver = undefined;
+  stale.hooks.state.currentComic = { id: 'stale-old' };
+  stale.hooks.state.currentComicPages = Array.from({ length: 3016 }, (_, index) => `old-${index}`);
+  stale.hooks.state.currentPageIndex = 0;
+  stale.hooks.state.readingMode = 'catalog';
+  stale.hooks.renderPages();
+  stale.context.window.innerWidth = 40 + (130 * 8) + (14 * 7);
+  stale.hooks.handleReaderResize();
+  stale.hooks.handleCatalogScroll();
+  await stale.hooks.closeReader();
+
+  stale.context.window.innerWidth = 40 + (130 * 5) + (14 * 4);
+  stale.hooks.state.currentComic = { id: 'stale-new' };
+  stale.hooks.state.currentComicPages = Array.from({ length: 80 }, (_, index) => `new-${index}`);
+  stale.hooks.state.currentPageIndex = 0;
+  stale.hooks.state.readingMode = 'catalog';
+  stale.hooks.renderPages();
+  const newGrid = stale.hooks.elements.pagesContainer.children
+    .find(child => child.className === 'reader-catalog-grid');
+  const newScrollTop = stale.hooks.elements.readerViewport.scrollTop;
+  stale.clock.tick(0);
+  assert.equal(stale.hooks.elements.pagesContainer.children
+    .find(child => child.className === 'reader-catalog-grid'), newGrid,
+  'closed reader cancels stale catalog RAF before reopening');
+  assert.equal(stale.hooks.state.catalogColumns, 5, 'stale resize cannot apply old columns to new comic');
+  assert.equal(stale.hooks.elements.readerViewport.scrollTop, newScrollTop,
+    'stale resize cannot move the new comic viewport');
+}
+
+// 前後按鈕依實際列容量接續；實際 click 往返時，所有視窗聯集不得漏頁。
+for (let columns = 1; columns <= 12; columns += 1) {
+  const width = 40 + (130 * columns) + (14 * (columns - 1));
+  for (const totalPages of [3016, 5000, 160, 161]) {
+    const catalog = createHarness({ width });
+    catalog.context.IntersectionObserver = undefined;
+    catalog.hooks.state.currentComic = { id: `buttons-${columns}-${totalPages}` };
+    catalog.hooks.state.currentComicPages = Array.from({ length: totalPages }, (_, index) => `p${index}`);
+    catalog.hooks.state.currentPageIndex = 0;
+    catalog.hooks.state.readingMode = 'catalog';
+    catalog.hooks.renderPages();
+    const capacity = Math.max(columns, Math.floor(160 / columns) * columns);
+    const forward = [];
+    let steps = 0;
+    while (steps < 100) {
+      const grid = catalog.hooks.elements.pagesContainer.children
+        .find(child => child.className === 'reader-catalog-grid');
+      const first = Number(grid.children[0].dataset.index);
+      const last = Number(grid.children.at(-1).dataset.index);
+      forward.push([first, last]);
+      const controls = catalog.hooks.elements.pagesContainer.children
+        .find(child => child.className === 'reader-catalog-window-controls');
+      const previous = controls.children.find(child => child.dataset.catalogWindowControl === 'previous');
+      const next = controls.children.find(child => child.dataset.catalogWindowControl === 'next');
+      if (steps === 0) assert.equal(previous.disabled, true, 'first catalog window disables previous');
+      if (next.disabled) {
+        assert.match(next.textContent, new RegExp(String(capacity)), 'next label uses row capacity');
+        break;
+      }
+      next.dispatch('click');
+      steps += 1;
+    }
+    assert.ok(steps < 100, `forward catalog navigation terminates for columns=${columns}, total=${totalPages}`);
+    assert.equal(forward[0][0], 0, 'forward navigation starts at page 1');
+    assert.equal(forward.at(-1)[1], totalPages - 1, 'forward navigation reaches final page');
+    for (let index = 1; index < forward.length; index += 1) {
+      assert.ok(forward[index][0] <= forward[index - 1][1] + 1,
+        `forward windows have no gap for columns=${columns}, total=${totalPages}`);
+    }
+
+    const backward = [];
+    steps = 0;
+    while (steps < 100) {
+      const grid = catalog.hooks.elements.pagesContainer.children
+        .find(child => child.className === 'reader-catalog-grid');
+      backward.push([Number(grid.children[0].dataset.index), Number(grid.children.at(-1).dataset.index)]);
+      const controls = catalog.hooks.elements.pagesContainer.children
+        .find(child => child.className === 'reader-catalog-window-controls');
+      const previous = controls.children.find(child => child.dataset.catalogWindowControl === 'previous');
+      if (previous.disabled) break;
+      previous.dispatch('click');
+      steps += 1;
+    }
+    assert.ok(steps < 100, `backward catalog navigation terminates for columns=${columns}, total=${totalPages}`);
+    assert.equal(backward.at(-1)[0], 0, 'backward navigation returns to page 1');
+    for (let index = 1; index < backward.length; index += 1) {
+      assert.ok(backward[index - 1][0] <= backward[index][1] + 1,
+        `backward windows have no gap for columns=${columns}, total=${totalPages}`);
+    }
   }
 }
 
@@ -787,6 +1232,151 @@ const makeCover = id => {
   assert.ok(oldActiveImages.every(img => img.src === ''), '切窗會取消舊世代圖片 src');
   oldActiveImages[0].dispatch('load');
   assert.equal(slowCatalog.hooks.getCatalogThumbnailLoadState().active, 8, '舊世代 load 不扣新世代槽位');
+}
+
+// 快速 fling 直接跳到不重疊尾窗時，必須先 detach 整批舊節點再取消 task；
+// 否則 active task 的同步 cancel callback 會先 pump 舊 queue，餓死新尾窗。
+{
+  const flingCatalog = createHarness({ width: 1000 });
+  flingCatalog.context.IntersectionObserver = undefined;
+  flingCatalog.hooks.state.currentComic = { id: 'fling-catalog' };
+  flingCatalog.hooks.state.currentComicPages = Array.from({ length: 500 }, (_, index) => `fling-${index}`);
+  flingCatalog.hooks.state.currentPageIndex = 0;
+  flingCatalog.hooks.state.readingMode = 'catalog';
+  flingCatalog.hooks.renderPages();
+  const firstGrid = flingCatalog.hooks.elements.pagesContainer.children
+    .find(child => child.className === 'reader-catalog-grid');
+  const oldActiveImage = firstGrid.children[0].children.find(child => child.tagName === 'IMG');
+  const oldQueuedThumb = firstGrid.children[8];
+  const oldQueuedImage = oldQueuedThumb.children.find(child => child.tagName === 'IMG');
+  const oldQueuedSource = oldQueuedImage.dataset.src;
+  assert.equal(oldActiveImage.loading, 'eager', 'catalog queue owns lazy scheduling');
+  assert.equal(flingCatalog.hooks.getCatalogThumbnailLoadState().active, 8);
+  assert.equal(oldQueuedImage.isConnected, true);
+  assert.equal(oldQueuedImage.dataset.catalogLoadQueued, 'true');
+
+  // 模擬一口氣滑到底，使用 incremental patch 路徑而非整批 reset。
+  flingCatalog.hooks.elements.readerViewport.scrollTop = 60 + (Math.floor(490 / 6) * 194);
+  flingCatalog.hooks.renderCatalogGrid({ fromScroll: true });
+  const tailGrid = flingCatalog.hooks.elements.pagesContainer.children
+    .find(child => child.className === 'reader-catalog-grid');
+  assert.equal(tailGrid.children[0].dataset.index, '344', 'fling 直接落在正確尾窗');
+  assert.equal(tailGrid.children.at(-1).dataset.index, '499');
+  assert.equal(oldQueuedThumb.isConnected, false, '舊 queued thumbnail 先 detach');
+  assert.equal(oldQueuedImage.dataset.catalogLoadQueued, undefined, '舊 queued task 已移除');
+  assert.equal(oldQueuedImage.dataset.src, oldQueuedSource, '舊 queued image 未曾被 pump 啟動');
+  assert.equal(oldActiveImage.src, '', '舊 active image 已取消');
+  assert.equal(flingCatalog.hooks.getCatalogThumbnailLoadState().active, 8,
+    '新尾窗補滿併發槽位');
+  assert.ok(tailGrid.children.slice(0, 8).every(thumb => thumb.children[0].src.includes('fling-')),
+    '新尾窗優先開始載入');
+  oldActiveImage.dispatch('load');
+  assert.equal(flingCatalog.hooks.getCatalogThumbnailLoadState().active, 8,
+    '舊 active late callback 不污染新尾窗');
+}
+
+// IntersectionObserver 在 detach 後仍可能送出已排程的 late entry；不可讓它把舊圖重新放回 queue。
+{
+  const observerCatalog = createHarness({ width: 1000 });
+  observerCatalog.hooks.state.currentComic = { id: 'observer-fling-catalog' };
+  observerCatalog.hooks.state.currentComicPages = Array.from({ length: 500 }, (_, index) => `observer-${index}`);
+  observerCatalog.hooks.state.currentPageIndex = 0;
+  observerCatalog.hooks.state.readingMode = 'catalog';
+  observerCatalog.hooks.renderPages();
+  const observer = observerCatalog.context.IntersectionObserver.instances.at(-1);
+  const firstGrid = observerCatalog.hooks.elements.pagesContainer.children
+    .find(child => child.className === 'reader-catalog-grid');
+  const oldQueuedImage = firstGrid.children[8].children.find(child => child.tagName === 'IMG');
+  const oldSource = oldQueuedImage.dataset.src;
+  observer.callback(firstGrid.children.slice(0, 8).map(thumb => ({
+    isIntersecting: true,
+    target: thumb.children.find(child => child.tagName === 'IMG'),
+  })));
+  assert.equal(observerCatalog.hooks.getCatalogThumbnailLoadState().active, 8);
+  observerCatalog.hooks.elements.readerViewport.scrollTop = 60 + (Math.floor(490 / 6) * 194);
+  observerCatalog.hooks.renderCatalogGrid({ fromScroll: true });
+  assert.equal(oldQueuedImage.isConnected, false);
+  observer.callback([{ isIntersecting: true, target: oldQueuedImage }]);
+  assert.equal(oldQueuedImage.dataset.src, oldSource, 'late entry 不會啟動 detached 舊圖');
+  assert.equal(oldQueuedImage.dataset.catalogLoadQueued, undefined, 'late entry 不會留下 stale queue flag');
+  const tailGrid = observerCatalog.hooks.elements.pagesContainer.children
+    .find(child => child.className === 'reader-catalog-grid');
+  observer.callback(tailGrid.children.map(thumb => ({
+    isIntersecting: true,
+    target: thumb.children.find(child => child.tagName === 'IMG'),
+  })));
+  assert.equal(observerCatalog.hooks.getCatalogThumbnailLoadState().active, 8,
+    '尾窗 entry 只啟動尾部圖片並填滿併發額度');
+  tailGrid.children[0].children.find(child => child.tagName === 'IMG').dispatch('load');
+  assert.equal(observerCatalog.hooks.getCatalogThumbnailLoadState().active, 8,
+    '尾窗 load 後會繼續補下一張 queued 圖');
+}
+
+// overlap 窗若剛好讓舊 8 active 全部離窗，保留區 queued task 沒有新的 IO entry
+// 也必須由 patch 完成後主動補泵，不能停在 active=0。
+{
+  const overlapCatalog = createHarness({ width: 1000 });
+  overlapCatalog.hooks.state.currentComic = { id: 'observer-overlap-catalog' };
+  overlapCatalog.hooks.state.currentComicPages = Array.from({ length: 500 }, (_, index) => `overlap-${index}`);
+  overlapCatalog.hooks.state.currentPageIndex = 0;
+  overlapCatalog.hooks.state.readingMode = 'catalog';
+  overlapCatalog.hooks.renderPages();
+  const observer = overlapCatalog.context.IntersectionObserver.instances.at(-1);
+  const firstGrid = overlapCatalog.hooks.elements.pagesContainer.children
+    .find(child => child.className === 'reader-catalog-grid');
+  observer.callback(firstGrid.children.map(thumb => ({
+    isIntersecting: true,
+    target: thumb.children.find(child => child.tagName === 'IMG'),
+  })));
+  assert.equal(overlapCatalog.hooks.getCatalogThumbnailLoadState().active, 8);
+  overlapCatalog.hooks.elements.readerViewport.scrollTop = 60 + (Math.floor(100 / 6) * 194);
+  overlapCatalog.hooks.renderCatalogGrid({ fromScroll: true });
+  const overlapGrid = overlapCatalog.hooks.elements.pagesContainer.children
+    .find(child => child.className === 'reader-catalog-grid');
+  assert.equal(overlapGrid.children[0].dataset.index, '78', 'overlap scroll 只平移到下一批');
+  assert.equal(overlapCatalog.hooks.getCatalogThumbnailLoadState().active, 8,
+    '舊 active 離窗後仍立即補滿保留 queue');
+}
+
+// closeReader 在 detach 前必須清空 catalog observer、queue 與 active task；
+// 舊圖片晚回呼也不得污染重新開啟的漫畫世代。
+{
+  const closingCatalog = createHarness();
+  closingCatalog.hooks.state.currentComic = { id: 'closing-catalog' };
+  closingCatalog.hooks.state.currentComicPages = Array.from({ length: 320 }, (_, index) => `closing-${index}`);
+  closingCatalog.hooks.state.currentPageIndex = 0;
+  closingCatalog.hooks.state.readingMode = 'catalog';
+  closingCatalog.hooks.renderPages();
+  const closingGrid = closingCatalog.hooks.elements.pagesContainer.children
+    .find(child => child.className === 'reader-catalog-grid');
+  const lateImage = closingGrid.children[0].children.find(child => child.tagName === 'IMG');
+  const observer = closingCatalog.context.IntersectionObserver.instances.at(-1);
+  observer.callback([{ isIntersecting: true, target: lateImage }]);
+  assert.equal(closingCatalog.hooks.getCatalogThumbnailLoadState().active, 1);
+  assert.equal(closingCatalog.hooks.getCatalogThumbnailLoadState().observerConnected, true);
+  await closingCatalog.hooks.closeReader();
+  const closedState = closingCatalog.hooks.getCatalogThumbnailLoadState();
+  assert.equal(closedState.active, 0, 'close clears active catalog image tasks');
+  assert.equal(closedState.queued, 0, 'close clears queued catalog images');
+  assert.equal(closedState.tasks, 0, 'close clears catalog task set');
+  assert.equal(closedState.observerConnected, false, 'close disconnects catalog observer');
+  lateImage.dispatch('load');
+
+  closingCatalog.hooks.state.currentComic = { id: 'reopened-catalog' };
+  closingCatalog.hooks.state.currentComicPages = Array.from({ length: 12 }, (_, index) => `reopened-${index}`);
+  closingCatalog.hooks.state.currentPageIndex = 0;
+  closingCatalog.hooks.state.readingMode = 'catalog';
+  closingCatalog.hooks.renderPages();
+  assert.equal(closingCatalog.hooks.state.currentComic.id, 'reopened-catalog');
+  assert.equal(closingCatalog.hooks.getCatalogThumbnailLoadState().active, 0,
+    'late closed callback cannot occupy reopened generation');
+  closingCatalog.hooks.state.readingMode = 'single';
+  closingCatalog.hooks.renderPages();
+  const switchedState = closingCatalog.hooks.getCatalogThumbnailLoadState();
+  assert.equal(switchedState.active, 0, 'leaving catalog clears active image tasks');
+  assert.equal(switchedState.queued, 0, 'leaving catalog clears queued images');
+  assert.equal(switchedState.tasks, 0, 'leaving catalog clears task set');
+  assert.equal(switchedState.observerConnected, false, 'leaving catalog disconnects observer');
 }
 
 // 書架重建取消 lazy-cover 載入時，queued/loading 卡片必須回到可重新排程的 idle。
@@ -914,13 +1504,130 @@ const makeCover = id => {
   assert.equal(navigation.hooks.elements.libraryUpBtn.disabled, true);
 }
 
+// PhotoKit 的 photos／photos:... 是虛擬來源；navigate/close 回到相簿根目錄時
+// 不得呼叫 filesystem visible scan，也不得把上一次錯誤留在 UI。
+{
+  const photoNavigation = createHarness();
+  const scanCalls = [];
+  photoNavigation.context.window.electronAPI.scanVisibleDirectory = (path, sourceId) => {
+    scanCalls.push({ path, sourceId });
+    return Promise.resolve();
+  };
+  vm.runInContext('filterAndRenderGrid = () => {}; renderSidebar = () => {}', photoNavigation.context);
+  for (const sourceId of ['photos:', 'photos:album-a', 'photos', 'builtin:landscapes']) {
+    photoNavigation.hooks.elements.visibleScanStatus.hidden = false;
+    photoNavigation.hooks.elements.visibleScanStatus.textContent = '舊的 filesystem 錯誤';
+    await photoNavigation.hooks.requestVisibleDirectoryScan('相簿', { sourceId });
+    assert.equal(photoNavigation.hooks.elements.visibleScanStatus.textContent, '',
+      `PhotoKit source ${sourceId} clears stale visible scan status`);
+    assert.equal(photoNavigation.hooks.elements.visibleScanStatus.hidden, true,
+      `PhotoKit source ${sourceId} hides visible scan status`);
+  }
+  assert.deepEqual(scanCalls, [], 'PhotoKit sources never call filesystem visible scan');
+
+  photoNavigation.hooks.navigateLibraryToPath('相簿', 'photos:album-a');
+  await Promise.resolve();
+  assert.deepEqual(scanCalls, [], 'PhotoKit navigation does not schedule filesystem scan');
+  photoNavigation.hooks.state.currentComic = { id: 'photos:album-a' };
+  photoNavigation.hooks.state.currentComicPages = [];
+  photoNavigation.hooks.state.readingMode = 'single';
+  photoNavigation.hooks.state.readerReturnComicFolder = photoNavigation.hooks.createDirectoryLocation('photos:', '');
+  await photoNavigation.hooks.closeReader();
+  assert.deepEqual(scanCalls, [], 'closing a PhotoKit reader does not scan its virtual folder');
+
+  for (const sourceId of ['local:library', 'smb', 'external:bookmark']) {
+    await photoNavigation.hooks.requestVisibleDirectoryScan('漫畫', { sourceId });
+  }
+  assert.deepEqual(scanCalls, [
+    { path: '漫畫', sourceId: 'local:library' },
+    { path: '漫畫', sourceId: 'smb' },
+    { path: '漫畫', sourceId: 'external:bookmark' },
+  ], 'local, SMB and external sources keep visible scan calls');
+}
+
+// catalog-thumb 的 pointerup 不得觸發閱讀器中間 tap／左右翻頁；原生 click
+// 與 Enter/Space 仍由 thumbnail 自己跳到對應頁面。
+{
+  const pointerCatalog = createHarness();
+  pointerCatalog.hooks.elements.readerOverlay.style.display = 'flex';
+  pointerCatalog.hooks.elements.readerOverlay.classList.add('reader-idle');
+  pointerCatalog.hooks.state.readingMode = 'catalog';
+  const thumbTarget = new FakeElement('div');
+  thumbTarget.classList.add('catalog-thumb');
+  const eventTarget = { closest: selector => selector.includes('.catalog-thumb') ? thumbTarget : null };
+  const mousemoveStart = appSource.indexOf("  elements.readerOverlay.addEventListener('mousemove', (e) => {");
+  const mousemoveEnd = appSource.indexOf('  let touchStartX = 0;', mousemoveStart);
+  assert.ok(mousemoveStart >= 0 && mousemoveEnd > mousemoveStart);
+  vm.runInContext(`{ let readerTouchActive = false; ${appSource.slice(mousemoveStart, mousemoveEnd)} }`,
+    pointerCatalog.context);
+  const hover = pointerCatalog.hooks.elements.readerOverlay.listeners.get('mousemove')[0].handler;
+  hover({ buttons: 0, clientY: 760, target: eventTarget });
+  assert.equal(pointerCatalog.hooks.elements.readerOverlay.classList.contains('reader-idle'), true,
+    'WebKit compatibility mousemove over an edge thumbnail does not reveal covering chrome');
+  pointerCatalog.document.elementFromPoint = () => eventTarget;
+  const retargeted = { buttons: 0, clientX: 410, clientY: 760, target: { closest: () => null } };
+  hover(retargeted);
+  assert.equal(pointerCatalog.hooks.elements.readerOverlay.classList.contains('reader-idle'), true,
+    'retargeted compatibility mousemove uses the actual thumbnail under the pointer');
+  pointerCatalog.hooks.handleReaderPointerClick({ ...retargeted, button: 0 });
+  assert.equal(pointerCatalog.hooks.elements.readerOverlay.classList.contains('reader-idle'), true,
+    'retargeted pointerup on a thumbnail preserves the native click target');
+  delete pointerCatalog.document.elementFromPoint;
+  hover({ buttons: 0, clientY: 760, target: { closest: () => null } });
+  assert.equal(pointerCatalog.hooks.elements.readerOverlay.classList.contains('reader-idle'), false,
+    'mousemove on the empty reader edge still reveals controls');
+  pointerCatalog.hooks.elements.readerOverlay.classList.add('reader-idle');
+  for (const bar of ['readerTopBar', 'readerBottomBar']) {
+    const leaveSection = appSource.match(new RegExp(`elements\\.${bar}\\.addEventListener\\('mouseleave', \\(\\) => \\{[\\s\\S]*?\\n  \\}\\);`));
+    assert.ok(leaveSection, `${bar} leave listener exists`);
+    vm.runInContext(leaveSection[0], pointerCatalog.context);
+    const leave = pointerCatalog.hooks.elements[bar].listeners.get('mouseleave')[0].handler;
+    leave();
+    assert.equal(pointerCatalog.hooks.elements.readerOverlay.classList.contains('reader-idle'), true,
+      `${bar} late leave cannot revive hidden chrome`);
+  }
+  pointerCatalog.hooks.handleReaderPointerClick({
+    button: 0,
+    clientX: 410,
+    target: eventTarget,
+  });
+  assert.equal(pointerCatalog.hooks.elements.readerOverlay.classList.contains('reader-idle'), true,
+    'catalog pointerup does not toggle reader chrome');
+
+  pointerCatalog.hooks.state.currentComic = { id: 'catalog-pointer' };
+  pointerCatalog.hooks.state.currentComicPages = Array.from({ length: 12 }, (_, index) => `p${index}`);
+  pointerCatalog.hooks.state.currentPageIndex = 0;
+  pointerCatalog.hooks.state.readingMode = 'catalog';
+  pointerCatalog.hooks.renderPages();
+  const grid = pointerCatalog.hooks.elements.pagesContainer.children
+    .find(child => child.className === 'reader-catalog-grid');
+  const thumb = grid.children[5];
+  assert.equal(typeof thumb.onclick, 'function', 'catalog click handler remains installed');
+  assert.equal(typeof thumb.onkeydown, 'function', 'catalog keyboard handler remains installed');
+  vm.runInContext(`
+    window.catalogModeSelections = [];
+    setReadingMode = mode => window.catalogModeSelections.push(mode);
+  `, pointerCatalog.context);
+  thumb.onclick();
+  assert.equal(pointerCatalog.hooks.state.currentPageIndex, 5, 'thumbnail click opens its own page');
+  assert.deepEqual(Array.from(pointerCatalog.context.window.catalogModeSelections), ['single'],
+    'thumbnail click changes mode exactly once');
+  for (const key of ['Enter', ' ']) {
+    pointerCatalog.hooks.state.currentPageIndex = 0;
+    thumb.onkeydown({ target: thumb, key, preventDefault() {}, stopPropagation() {} });
+    assert.equal(pointerCatalog.hooks.state.currentPageIndex, 5, 'keyboard activation opens the same page');
+  }
+  assert.deepEqual(Array.from(pointerCatalog.context.window.catalogModeSelections), ['single', 'single', 'single'],
+    'click, Enter and Space each activate exactly once');
+}
+
 // 一般漫畫第一次只開詳情，收合後第二次仍開啟原書，而非被抽屜狀態重置選取。
 {
   const selection = createHarness({ width: 820 });
   vm.runInContext(`
     syncLibraryPanelsForViewport({ initial: true });
     window.readerOpens = [];
-    openReader = id => window.readerOpens.push(id);
+    openReader = comic => window.readerOpens.push(comic.id || comic);
     renderComicInspector = comic => { state.selectedComicId = comic.id; };
     syncGridSelectionState = () => {};
     activateGridComic({ id: 'normal-book', title: '測試書' });
@@ -1382,18 +2089,162 @@ console.log('external bookmark intent queue tests passed');
   assert.equal(failedRead.context.localStorage.values.has('gai:smb'), false, 'failed SMB read still attempts to remove the legacy record');
 }
 
-// 初始化 restore 即使 localStorage 為空，也要以空全量清單清掉同 process
-// 可能殘留的 native 來源。
+// 原生書籤具有權威：瀏覽器為空／過期時仍保留原生來源；只有 backend
+// 確認尚未保存過原生設定，才會用傳入快取做一次舊版遷移。
+for (const browser of [[], [{ name: '過期來源', bookmark: 'stale' }], [null, { bookmark: 'invalid' }]]) {
+  const restore = createHarness();
+  const native = [{ name: '原生來源', bookmark: 'native' }];
+  restore.context.localStorage.setItem('gai:externalBookmarks', JSON.stringify(browser));
+  let restores = 0;
+  restore.context.window.electronAPI.restoreBookmarks = async legacy => {
+    restores += 1;
+    assert.deepEqual(JSON.parse(JSON.stringify(legacy)), browser.filter(item => item && typeof item.bookmark === 'string' && typeof item.name === 'string'));
+    return native;
+  };
+  restore.context.window.electronAPI.setBookmarks = () => { throw new Error('startup must not submit the browser list as an ordinary edit'); };
+  await restore.hooks.restoreExternalBookmarks();
+  assert.deepEqual(JSON.parse(restore.context.localStorage.getItem('gai:externalBookmarks')), native);
+  await restore.hooks.restoreExternalBookmarks();
+  assert.equal(restores, 1, 'initialization is shared and idempotent within the current session');
+}
+
+// 使用者已明確移除全部來源時，原生保存的 [] 不得被過期快取復活。
 {
   const restore = createHarness();
-  let restored;
-  restore.context.window.electronAPI.setBookmarks = async bookmarks => {
-    restored = Array.from(bookmarks);
-  };
+  restore.context.localStorage.setItem('gai:externalBookmarks', JSON.stringify([{ name: '已移除', bookmark: 'stale' }]));
+  restore.context.window.electronAPI.restoreBookmarks = async () => [];
   await restore.hooks.restoreExternalBookmarks();
-  assert.deepEqual(restored, [], 'empty restore must submit an empty native bookmark list');
+  assert.deepEqual(JSON.parse(restore.context.localStorage.getItem('gai:externalBookmarks')), []);
 }
-console.log('external bookmark identity and empty restore tests passed');
+
+// 快取空間不足時仍使用工作階段的原生 snapshot，新增不會漏掉原本來源。
+{
+  const restore = createHarness();
+  const native = [{ name: '原生來源', bookmark: 'native' }];
+  restore.context.window.electronAPI.restoreBookmarks = async () => native;
+  restore.context.localStorage.setItem = () => { throw new Error('storage full'); };
+  restore.context.window.electronAPI.openExternalFolder = async () => ({ name: '新增來源', bookmark: 'new' });
+  let committed;
+  restore.context.window.electronAPI.setBookmarks = async data => { committed = JSON.parse(JSON.stringify(data)); };
+  restore.context.showLoader = () => {};
+  restore.context.startScanStatusPolling = () => {};
+  restore.context.scheduleLibraryRefresh = () => {};
+  await restore.hooks.addIOSLibrarySource(); // 刻意先於 initApp 的 restore。
+  assert.deepEqual(committed, [...native, { name: '新增來源', bookmark: 'new' }]);
+  await restore.hooks.restoreExternalBookmarks();
+  assert.deepEqual(committed, [...native, { name: '新增來源', bookmark: 'new' }]);
+}
+
+// 原生讀取／格式失敗時，不得退回瀏覽器清單覆寫原生；下一個 intent 可重試。
+{
+  const restore = createHarness();
+  let attempts = 0;
+  restore.context.window.electronAPI.restoreBookmarks = async () => {
+    if (++attempts === 1) throw new Error('saved native bookmarks unreadable');
+    return [{ name: '原生來源', bookmark: 'native' }];
+  };
+  await assert.rejects(restore.hooks.restoreExternalBookmarks(), /unreadable/);
+  await restore.hooks.restoreExternalBookmarks();
+  assert.deepEqual(JSON.parse(restore.context.localStorage.getItem('gai:externalBookmarks')), [{ name: '原生來源', bookmark: 'native' }]);
+}
+{
+  const restore = createHarness();
+  restore.context.localStorage.getItem = () => { throw new Error('storage unavailable'); };
+  restore.context.window.electronAPI.restoreBookmarks = async (legacy, readable) => {
+    assert.deepEqual(Array.from(legacy), []);
+    assert.equal(readable, false, 'a failed storage read must defer legacy migration');
+    throw new Error('legacy migration deferred');
+  };
+  await assert.rejects(vm.runInContext('restoreExternalBookmarks()', restore.context), /migration deferred/);
+  restore.context.localStorage.getItem = () => '[]';
+  restore.context.window.electronAPI.restoreBookmarks = async (_legacy, readable) => {
+    assert.equal(readable, true, 'a successful empty read may migrate an empty list');
+    return [];
+  };
+  await vm.runInContext('restoreExternalBookmarks()', restore.context);
+}
+console.log('native bookmark authority, startup queue and storage failure tests passed');
+
+// 原生回報可讀但損壞的 JSON 時，前端只進入 blocked；重新加入必須先經過
+// 既有選檔器與明確確認，且 repair 不得使用過期的瀏覽器快取。
+{
+  const corrupt = createHarness();
+  const stale = [{ name: '過期來源', bookmark: 'stale' }];
+  corrupt.context.localStorage.setItem('gai:externalBookmarks', JSON.stringify(stale));
+  corrupt.context.window.electronAPI.restoreBookmarks = async () => {
+    throw new Error('BOOKMARKS_CORRUPT: saved list is malformed');
+  };
+  assert.equal(await corrupt.hooks.restoreExternalBookmarks(), 'BOOKMARKS_CORRUPT');
+  let repairCalls = 0;
+  let ordinarySetCalls = 0;
+  corrupt.context.window.electronAPI.openExternalFolder = async () => ({ name: '新來源', bookmark: 'new-bookmark' });
+  corrupt.context.confirm = () => true;
+  corrupt.context.window.electronAPI.repairExternalBookmarks = async data => {
+    repairCalls += 1;
+    assert.deepEqual(JSON.parse(JSON.stringify(data)), [{ name: '新來源', bookmark: 'new-bookmark' }]);
+  };
+  corrupt.context.window.electronAPI.setBookmarks = async () => { ordinarySetCalls += 1; };
+  corrupt.context.showLoader = () => {};
+  corrupt.context.startScanStatusPolling = () => {};
+  corrupt.context.scheduleLibraryRefresh = () => {};
+  await corrupt.hooks.addIOSLibrarySource();
+  assert.equal(repairCalls, 1, 'corrupt recovery must call the dedicated repair command once');
+  assert.equal(ordinarySetCalls, 0, 'corrupt recovery must not bypass repair with ordinary setBookmarks');
+  assert.deepEqual(JSON.parse(corrupt.context.localStorage.getItem('gai:externalBookmarks')), [
+    { name: '新來源', bookmark: 'new-bookmark' },
+  ], 'only the selected folder becomes the repaired frontend snapshot');
+}
+
+// 取消確認或 repair 失敗時，snapshot／瀏覽器快取都不能被前端先行更新。
+for (const mode of ['cancel', 'failure']) {
+  const recovery = createHarness();
+  const stale = [{ name: '過期來源', bookmark: 'stale' }];
+  recovery.context.localStorage.setItem('gai:externalBookmarks', JSON.stringify(stale));
+  recovery.context.window.electronAPI.restoreBookmarks = async () => {
+    throw new Error('BOOKMARKS_CORRUPT: saved list is malformed');
+  };
+  await recovery.hooks.restoreExternalBookmarks();
+  recovery.context.window.electronAPI.openExternalFolder = async () => ({ name: '新來源', bookmark: 'new-bookmark' });
+  recovery.context.confirm = () => mode !== 'cancel';
+  let repairCalls = 0;
+  recovery.context.window.electronAPI.repairExternalBookmarks = async () => {
+    repairCalls += 1;
+    throw new Error('repair failed before commit');
+  };
+  recovery.context.showLoader = () => {};
+  recovery.context.startScanStatusPolling = () => {};
+  recovery.context.scheduleLibraryRefresh = () => {};
+  if (mode === 'cancel') {
+    await recovery.hooks.addIOSLibrarySource();
+  } else {
+    await assert.rejects(recovery.hooks.addIOSLibrarySource(), /repair failed/);
+  }
+  assert.equal(repairCalls, mode === 'cancel' ? 0 : 1, `${mode} must not accidentally invoke repair`);
+  assert.deepEqual(JSON.parse(recovery.context.localStorage.getItem('gai:externalBookmarks')), stale,
+    `${mode} must retain the existing browser cache`);
+}
+
+// repair 若原生已提交清單、但後續權限清理部分失敗，沿用既有部分成功語意。
+{
+  const partial = createHarness();
+  partial.context.window.electronAPI.restoreBookmarks = async () => {
+    throw new Error('BOOKMARKS_CORRUPT: saved list is malformed');
+  };
+  await partial.hooks.restoreExternalBookmarks();
+  partial.context.window.electronAPI.openExternalFolder = async () => ({ name: '新來源', bookmark: 'new-bookmark' });
+  partial.context.confirm = () => true;
+  partial.context.window.electronAPI.repairExternalBookmarks = async () => {
+    throw new Error('清單已更新，部分舊來源清理未完成：權限釋放失敗');
+  };
+  partial.context.showLoader = () => {};
+  partial.context.startScanStatusPolling = () => {};
+  partial.context.scheduleLibraryRefresh = () => {};
+  await partial.hooks.addIOSLibrarySource();
+  assert.deepEqual(JSON.parse(partial.context.localStorage.getItem('gai:externalBookmarks')), [
+    { name: '新來源', bookmark: 'new-bookmark' },
+  ], 'a committed repair with cleanup warnings must retain the new snapshot');
+}
+console.log('corrupt external bookmark recovery tests passed');
 
 // 同一路徑的不同來源必須各自導覽；root 才能合併展示來源候選，避免在
 // 外部 H/HCG 中混入另一個 H/H漫畫/Alpha 的幽靈卡片。
@@ -1508,6 +2359,7 @@ console.log('rapid source navigation tests passed');
 for (const [nativeError, expectedCount] of [
   [null, 0],
   ['清單已更新，舊權限可能未完全釋放；無法釋放外部資料夾權限', 0],
+  ['清單已更新，部分舊來源清理未完成：舊來源目錄清理未完成', 0],
   ['無法更新來源清單', 1],
 ]) {
   const removal = createHarness();
@@ -1540,5 +2392,167 @@ console.log('bookmark removal persistence tests passed');
   assert.equal(finder.hooks.canShowFileLocation(local), false);
 }
 console.log('Finder platform boundary tests passed');
+
+// 探索入口共用書架篩選；不跨來源、不抽到離線作品，不另外發起掃描。
+{
+  const discovery = createHarness();
+  const { state, elements } = discovery.hooks;
+  const book = (id, path, extra = {}) => ({ id, title: id, relativePath: path, sourceId: 'local:A', series: 'Series', ...extra });
+  state.comics = [
+    book('one', 'Shelf/One'), book('two', 'Shelf/Sub/Two'), book('outside', 'Other/Outside'),
+    book('foreign', 'Shelf/Foreign', { sourceId: 'local:B' }),
+    book('offline', 'Shelf/Offline', { offline: true }),
+    book('folder', 'Shelf/Folder', { isDirectory: true }),
+  ];
+  state.currentPath = 'Shelf';
+  state.currentSourceId = 'local:A';
+  elements.searchInput.value = '';
+  assert.deepEqual(Array.from(discovery.hooks.getDiscoveryCandidates(), comic => comic.id), ['one', 'two']);
+  state.activeSeries = 'Other';
+  assert.equal(discovery.hooks.getDiscoveryCandidates().length, 0);
+  state.activeSeries = 'all';
+  discovery.hooks.setFavorites(['two']);
+  state.activeFilter = 'favorite';
+  assert.deepEqual(Array.from(discovery.hooks.getDiscoveryCandidates(), comic => comic.id), ['two']);
+  state.activeFilter = 'all';
+  elements.searchInput.value = 'outside';
+  assert.deepEqual(Array.from(discovery.hooks.getDiscoveryCandidates(), comic => comic.id), ['outside'], '搜尋沿用書架的目前來源全庫範圍');
+  state.catalogSearchItems.set('outside', { offline: true });
+  assert.equal(discovery.hooks.getDiscoveryCandidates().length, 0, '搜尋結果的離線 metadata 不能被忽略');
+  state.catalogSearchItems.clear();
+  elements.searchInput.value = '';
+  const candidates = discovery.hooks.getDiscoveryCandidates();
+  assert.equal(discovery.hooks.pickDiscoveryComic(candidates, 'one', () => 0).id, 'two');
+  assert.equal(discovery.hooks.pickDiscoveryComic([candidates[0]], 'one', () => 0).id, 'one');
+  assert.equal(discovery.hooks.pickDiscoveryComic([], null, () => 0), null);
+  assert.equal(discovery.hooks.pickDiscoveryComic(candidates, null, () => 0.999).id, 'two');
+  state.filteredComics = [{ isDirectory: true, comicsCount: 2 }];
+  discovery.hooks.syncDiscoveryButton();
+  assert.equal(elements.libraryDiscoveryBtn.disabled, false, '目前資料夾的子資料夾有已載入作品也可探索');
+  vm.runInContext(`
+    window.discoveryOpens = [];
+    openReader = async comic => {
+      const id = comic.id || comic;
+      window.discoveryOpens.push(id);
+      await new Promise(resolve => { window.finishDiscovery = () => {
+        state.currentComic = state.comics.find(comic => comic.id === id);
+        resolve();
+      }; });
+    };
+  `, discovery.context);
+  const opening = discovery.hooks.openDiscoveryComic(() => 0);
+  assert.equal(elements.libraryDiscoveryBtn.disabled, true);
+  await discovery.hooks.openDiscoveryComic(() => 0);
+  assert.equal(discovery.context.window.discoveryOpens.length, 1, '快速連點只能發起一次開書');
+  discovery.context.window.finishDiscovery();
+  await opening;
+  state.currentComic = null;
+  vm.runInContext('openReader = async comic => { const id = comic.id || comic; window.discoveryOpens.push(id); state.currentComic = state.comics.find(item => item.id === id); };', discovery.context);
+  await discovery.hooks.openDiscoveryComic(() => 0);
+  assert.deepEqual(Array.from(discovery.context.window.discoveryOpens), ['one', 'two'], '成功開書後下一次避開上一本');
+  state.currentComic = null;
+  vm.runInContext('openReader = async () => { throw new Error("temporary source loss"); };', discovery.context);
+  await discovery.hooks.openDiscoveryComic(() => 0);
+  assert.equal(elements.libraryDiscoveryBtn.disabled, false, '開書失敗不能永久鎖住探索按鈕');
+  assert.match(elements.libraryDiscoveryStatus.textContent, /這本暫時打不開/);
+  assert.equal(elements.libraryDiscoveryStatus.hidden, false);
+  state.activeSeries = 'missing';
+  await discovery.hooks.openDiscoveryComic(() => 0);
+  assert.match(elements.libraryDiscoveryStatus.textContent, /目前範圍沒有可讀漫畫/);
+  state.filteredComics = [];
+  discovery.hooks.syncDiscoveryButton();
+  assert.equal(elements.libraryDiscoveryBtn.disabled, true);
+}
+
+{
+  const html = fs.readFileSync(new URL('../public/index.html', import.meta.url), 'utf8');
+  const startPanel = html.slice(html.indexOf('id="library-start-panel"'), html.indexOf('class="scan-recovery-panel"'));
+  assert.ok(startPanel.indexOf('id="library-start-demo"') < startPanel.indexOf('id="library-start-choose"'), '原創風景試讀是首次入口的第一個操作');
+  assert.match(startPanel, /id="library-start-demo" class="library-start-primary"/);
+  const dictionary = {};
+  vm.runInNewContext(fs.readFileSync(new URL('../public/locales/reader-messages.js', import.meta.url), 'utf8'), {
+    window: { GAIL10n: { register: entries => Object.assign(dictionary, entries) } },
+  });
+  for (const message of ['找漫畫像考古？先翻一本。', '試讀原創風景', '加入漫畫資料夾', '隨手翻一本', '從目前資料夾與篩選結果挑一本，再點會盡量換一本。', '目前範圍沒有可讀漫畫，試著換個資料夾或清除篩選。']) {
+    assert.ok(dictionary[message]?.en && dictionary[message]?.ja, `新增入口缺少翻譯：${message}`);
+  }
+}
+console.log('discovery scope, repeat, rapid activation and first-use copy tests passed');
+
+{
+  const h = createHarness();
+  const { state, elements } = h.hooks;
+  state.comics = ['one', 'two'].map(id => ({ id, title: id, relativePath: id, series: 'Series' }));
+  elements.searchInput.value = '';
+  const groups = [
+    { namespace: 'general', value: 'Adventure', comicIds: ['one', 'foreign', 'one'] },
+    { namespace: 'general', value: 'Adventure', comicIds: ['two'] },
+    { namespace: 'genre', value: 'Comedy', comicIds: ['two'] },
+    { namespace: 'general', value: 'Empty', comicIds: ['foreign'] },
+  ];
+  const normalized = h.hooks.normalizeDiscoveryTagGroups(groups, state.comics);
+  assert.equal(normalized.length, 2);
+  assert.deepEqual(Array.from(normalized.find(group => group.value === 'Adventure').comicIds), ['one', 'two']);
+  const previous = JSON.stringify(['general', 'Adventure']);
+  assert.equal(h.hooks.pickDiscoveryTag(normalized, previous, () => 0).value, 'Comedy');
+  assert.equal(h.hooks.pickDiscoveryTag([], '', () => 0), null);
+  h.context.window.electronAPI.getDiscoveryTags = async ids => {
+    assert.deepEqual(Array.from(ids), ['one', 'two']);
+    return groups;
+  };
+  elements.libraryTagDiscoveryPanel.hidden = true;
+  await h.hooks.toggleDiscoveryTags();
+  assert.equal(elements.libraryTagDiscoveryPanel.hidden, false);
+  assert.equal(elements.discoveryTagPick.disabled, false);
+  assert.match(elements.discoveryTagSelect.innerHTML, /Adventure/);
+  vm.runInContext('openReader = async comic => { const id = comic.id || comic; state.currentComic = state.comics.find(item => item.id === id); };', h.context);
+  elements.discoveryTagSelect.value = String(normalized.findIndex(group => group.value === 'Comedy'));
+  await h.hooks.openDiscoveryTag(false, () => 0);
+  assert.equal(state.currentComic.id, 'two', '自選 TAG 只能抽該 TAG 內作品');
+  state.currentComic = null;
+  await h.hooks.openDiscoveryTag(true, () => 0);
+  assert.equal(state.currentComic.id, 'one', '隨機 TAG 避開上一類型，也避開上一冊');
+  state.currentComic = null;
+  state.activeSeries = 'missing';
+  await h.hooks.openDiscoveryTag(false, () => 0);
+  assert.equal(state.currentComic, null, '候選範圍變更後舊 TAG 不能開書');
+  assert.equal(elements.libraryTagDiscoveryPanel.hidden, true);
+  state.activeSeries = 'all';
+  let finish;
+  h.context.window.electronAPI.getDiscoveryTags = () => new Promise(resolve => { finish = resolve; });
+  const pending = h.hooks.toggleDiscoveryTags();
+  h.hooks.closeDiscoveryTags();
+  finish(groups);
+  await pending;
+  assert.equal(elements.libraryTagDiscoveryPanel.hidden, true, '關閉後遲到回覆不能重開面板');
+  h.context.window.electronAPI.getDiscoveryTags = async () => [];
+  await h.hooks.toggleDiscoveryTags();
+  assert.equal(elements.discoveryTagRandom.disabled, true);
+  assert.match(elements.discoveryTagStatus.textContent, /還沒有可用標籤/);
+  h.hooks.closeDiscoveryTags();
+  h.context.window.electronAPI.getDiscoveryTags = async () => { throw new Error('temporary catalog outage'); };
+  await h.hooks.toggleDiscoveryTags();
+  assert.match(elements.discoveryTagStatus.textContent, /標籤暫時讀不到/);
+  assert.equal(elements.discoveryTagPick.disabled, true);
+  assert.equal(elements.libraryTagDiscoveryPanel.hidden, false);
+}
+{
+  const h = createHarness();
+  const { state, elements } = h.hooks;
+  elements.searchInput.value = '';
+  elements.libraryTagDiscoveryPanel.hidden = true;
+  state.comics = Array.from({ length: 1001 }, (_, i) => ({ id: `book-${i}`, title: `Book ${i}`, relativePath: `Book${i}` }));
+  const batches = [];
+  h.context.window.electronAPI.getDiscoveryTags = async ids => {
+    batches.push(ids.length);
+    return [{ namespace: 'general', value: '<unsafe & tag>', comicIds: Array.from(ids) }];
+  };
+  await h.hooks.toggleDiscoveryTags();
+  assert.deepEqual(batches, [1000, 1], '超過1000本分批取得標籤，不能只看第一頁');
+  assert.match(elements.discoveryTagSelect.innerHTML, /1001/);
+  assert.match(elements.discoveryTagSelect.innerHTML, /&lt;unsafe &amp; tag&gt;/);
+  assert.doesNotMatch(elements.discoveryTagSelect.innerHTML, /<unsafe/);
+}
+console.log('tag discovery selection, scope, stale response and empty/failure tests passed');
 
 assert.equal(hooks.getCoverUrl('photos:YWxidW0'), 'gai://cover/photos:YWxidW0', '照片封面ID保留protocol可識別的冒號');

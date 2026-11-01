@@ -186,6 +186,36 @@ const nativeErrorMessages = Object.freeze({
     en: 'The operation failed. Please try again.',
     ja: '操作に失敗しました。後でもう一度お試しください。',
   },
+  SMB_DOWNLOAD_CAPACITY: {
+    'zh-Hant': 'SMB 漫畫過大或可用空間不足（需保留 256 MiB）。',
+    en: 'The SMB comic is too large or there is not enough free space (256 MiB must remain).',
+    ja: 'SMB の作品が大きすぎるか、空き容量が不足しています（256 MiB を確保してください）。',
+  },
+  SMB_DOWNLOAD_SIZE_MISMATCH: {
+    'zh-Hant': 'SMB 傳輸超過宣告大小或下載上限。',
+    en: 'The SMB transfer exceeded the declared size or download limit.',
+    ja: 'SMB 転送が宣言されたサイズまたはダウンロード上限を超えました。',
+  },
+  SMB_SPACE_CHECK_FAILED: {
+    'zh-Hant': '無法檢查可用儲存空間，請稍後再試。',
+    en: 'Could not check available storage space. Try again later.',
+    ja: '空き容量を確認できません。後でもう一度お試しください。',
+  },
+  SMB_OPEN_TIMEOUT: {
+    'zh-Hant': 'SMB 開啟檔案逾時（30 秒）。',
+    en: 'Timed out opening the SMB file (30 seconds).',
+    ja: 'SMB ファイルのオープンがタイムアウトしました（30 秒）。',
+  },
+  SMB_DOWNLOAD_NO_SPACE: {
+    'zh-Hant': 'SMB 下載已停止：可用空間不足（需保留 256 MiB）。',
+    en: 'SMB download stopped: not enough free space (256 MiB must remain).',
+    ja: 'SMB ダウンロードを停止しました：空き容量が不足しています（256 MiB を確保してください）。',
+  },
+  SMB_DOWNLOAD_INCOMPLETE: {
+    'zh-Hant': 'SMB 傳輸未完成，請重新開啟漫畫。',
+    en: 'The SMB transfer did not complete. Reopen the comic.',
+    ja: 'SMB 転送が完了しませんでした。作品をもう一度開いてください。',
+  },
 });
 
 function localizedNativeError(error) {
@@ -196,7 +226,7 @@ function localizedNativeError(error) {
     '照片相簿識別碼無效': 'PHOTO_LIBRARY_INVALID_ARGUMENTS',
     '照片相簿目前不可用': 'PHOTO_ALBUM_NOT_ACCESSIBLE',
   };
-  const code = raw.trim().match(/((?:FOLDER|AI|PHOTO|IOS_FOLDER)_[A-Z0-9_]+)$/)?.[1]
+  const code = raw.trim().match(/((?:FOLDER|AI|PHOTO|IOS_FOLDER|SMB)_[A-Z0-9_]+)$/)?.[1]
     || legacyPhotoCodes[raw.trim()]
     || '';
   const messages = nativeErrorMessages[code];
@@ -215,6 +245,11 @@ function localizedNativeError(error) {
  */
 
 const authoritativeProgressById = new Map();
+
+function progressIdentityKey(id, sourceId) {
+  const source = typeof sourceId === 'string' ? sourceId.trim() : '';
+  return source && typeof id === 'string' && id ? `${source}\u0000${id}` : null;
+}
 
 const VIRTUAL_PHOTO_TITLES = Object.freeze({
   'photos:cGhvdG8tbGlicmFyeQ': '所有照片（照片圖庫）',
@@ -265,7 +300,20 @@ function normalizeProgressPayload(data) {
   const currentPage = totalPages > 0
     ? Math.min(maxIndex, Math.max(0, Math.trunc(rawPage)))
     : 0;
-  return { id: data.id, currentPage, totalPages };
+  const normalized = { id: data.id, currentPage, totalPages };
+  if (Object.prototype.hasOwnProperty.call(data, 'sourceId')) {
+    if (typeof data.sourceId !== 'string' || !data.sourceId.trim()) {
+      throw new Error(bridgeText("閱讀進度來源格式不正確。"));
+    }
+    normalized.sourceId = data.sourceId.trim();
+  }
+  if (Object.prototype.hasOwnProperty.call(data, 'sequence')) {
+    if (!Number.isSafeInteger(data.sequence) || data.sequence < 0) {
+      throw new Error(bridgeText("閱讀進度序號格式不正確。"));
+    }
+    normalized.sequence = data.sequence;
+  }
+  return normalized;
 }
 
 function progressTimestamp(progress) {
@@ -275,25 +323,30 @@ function progressTimestamp(progress) {
 
 function rememberAuthoritativeLibraryProgress(items) {
   if (!Array.isArray(items)) return items;
-  const present = new Set();
   const mergedItems = items.map((item) => {
     if (!item || typeof item.id !== 'string') return item;
-    present.add(item.id);
+    const key = progressIdentityKey(item.id, item.sourceId || item.source_id);
+    if (!key) return item;
     const incoming = item.progress && typeof item.progress === 'object'
       ? { ...item.progress }
       : null;
-    const remembered = authoritativeProgressById.get(item.id);
+    const remembered = authoritativeProgressById.get(key);
     const chosen = remembered && (!incoming || progressTimestamp(remembered) > progressTimestamp(incoming))
       ? remembered
       : incoming;
-    if (chosen) authoritativeProgressById.set(item.id, { ...chosen });
+    if (chosen) {
+      authoritativeProgressById.delete(key);
+      authoritativeProgressById.set(key, { ...chosen });
+    }
     return chosen && chosen !== incoming
       ? { ...item, progress: { ...chosen } }
       : item;
   });
 
-  for (const id of authoritativeProgressById.keys()) {
-    if (!present.has(id)) authoritativeProgressById.delete(id);
+  // A scan can temporarily omit a source, so absence is not deletion.
+  // Bound the cache while retaining recently observed or saved progress.
+  while (authoritativeProgressById.size > 10000) {
+    authoritativeProgressById.delete(authoritativeProgressById.keys().next().value);
   }
   return mergedItems;
 }
@@ -301,16 +354,18 @@ function rememberAuthoritativeLibraryProgress(items) {
 function overlayAuthoritativeLibraryProgress(items) {
   if (!Array.isArray(items)) return items;
   return items.map(item => {
-    const remembered = item && authoritativeProgressById.get(item.id);
+    const key = item && progressIdentityKey(item.id, item.sourceId || item.source_id);
+    const remembered = key ? authoritativeProgressById.get(key) : null;
     if (!remembered || progressTimestamp(remembered) <= progressTimestamp(item.progress)) return item;
     return { ...item, progress: { ...remembered } };
   });
 }
 
-function readerDataWithAuthoritativeProgress(id, data) {
+function readerDataWithAuthoritativeProgress(id, data, sourceId) {
   if (!data || typeof data !== 'object') return data;
-  const authoritative = authoritativeProgressById.get(id);
-  if (!authoritative) return data;
+  const key = progressIdentityKey(id, data.sourceId || data.source_id || sourceId);
+  const authoritative = key ? authoritativeProgressById.get(key) : null;
+  if (!authoritative || progressTimestamp(authoritative) <= progressTimestamp(data.progress)) return data;
   return {
     ...data,
     progress: {
@@ -322,7 +377,11 @@ function readerDataWithAuthoritativeProgress(id, data) {
 
 function rememberSavedProgress(data) {
   const normalized = normalizeProgressPayload(data);
-  authoritativeProgressById.set(normalized.id, {
+  const key = progressIdentityKey(normalized.id, normalized.sourceId);
+  if (!key) return normalized;
+  authoritativeProgressById.delete(key);
+  authoritativeProgressById.set(key, {
+    ...(normalized.sourceId ? { sourceId: normalized.sourceId } : {}),
     currentPage: normalized.currentPage,
     totalPages: normalized.totalPages,
     percent: progressPercent(normalized.currentPage, normalized.totalPages),
@@ -331,10 +390,13 @@ function rememberSavedProgress(data) {
   return normalized;
 }
 
-async function openComicWithAuthoritativeProgress(invoke, id) {
-  const nativeData = await invoke('open_comic', { id });
+async function openComicWithAuthoritativeProgress(invoke, id, sourceId) {
+  const nativeData = await invoke('open_comic', {
+    id,
+    ...(typeof sourceId === 'string' && sourceId.trim() ? { sourceId: sourceId.trim() } : {}),
+  });
   const nativeNormalized = normalizeReaderData(nativeData);
-  const normalized = normalizeReaderData(readerDataWithAuthoritativeProgress(id, nativeData));
+  const normalized = normalizeReaderData(readerDataWithAuthoritativeProgress(id, nativeData, sourceId));
   const nativePage = nativeNormalized?.progress?.currentPage;
   const resumePage = normalized?.progress?.currentPage;
 
@@ -471,7 +533,7 @@ if (window.__TAURI__) {
     },
     overlayLibraryProgress: overlayAuthoritativeLibraryProgress,
     getScanStatus: () => invoke('get_scan_status'),
-    openComic: (id) => openComicWithAuthoritativeProgress(invoke, id),
+    openComic: (id, sourceId) => openComicWithAuthoritativeProgress(invoke, id, sourceId),
     updateReaderCacheWindow: (comicId, pageIndex) => invoke('update_reader_cache_window', { comicId, pageIndex }),
     closeComic: (comicId) => invoke('close_comic', { comicId }),
     saveProgress: async (data) => {
@@ -513,6 +575,19 @@ if (window.__TAURI__) {
     getCatalogExportPath: (filename) => invoke('default_catalog_export_path', { filename }),
     getBookmarks: () => invoke('get_bookmarks'),
     setBookmarks: (data) => invoke('set_bookmarks', { data }),
+    restoreBookmarks: (data, legacyCacheReadable) => invoke('set_bookmarks', { data, restoreFromSaved: true, legacyCacheReadable }),
+    repairExternalBookmarks: (data) => invoke('repair_external_bookmarks', { data }),
+    saveImportedPhoto: (filename, data) => {
+      if (!(data instanceof Uint8Array) || data.byteLength === 0 || data.byteLength > 64 * 1024 * 1024) {
+        return Promise.reject(new Error(bridgeText('匯入圖片必須介於 1 byte 與 64 MiB。')));
+      }
+      const nameBytes = new TextEncoder().encode(filename);
+      if (nameBytes.byteLength > 200) {
+        return Promise.reject(new Error(bridgeText('匯入檔名過長。')));
+      }
+      const encodedName = btoa(String.fromCharCode(...nameBytes));
+      return invoke('import_photo_bytes', data, { headers: { 'x-gai-filename': encodedName } });
+    },
     openExternalFolder: () => invoke('plugin:ios-folder|pick_folder'),
     openFolderDialog: async (defaultPath) => {
       const selected = await invoke('plugin:dialog|open', {
@@ -563,6 +638,7 @@ if (window.__TAURI__) {
       ...(sourceId ? { sourceId } : {}),
     }),
     searchCatalog: (query) => invoke('search_catalog', { query }),
+    getDiscoveryTags: (runtimeIds) => invoke('get_discovery_tags', { runtimeIds }),
     getComicMetadata: (id) => invoke('get_comic_metadata', { id }),
     applyBatchMetadata: (request) => invoke('apply_batch_metadata', { request }),
     undoBatchMetadata: (token) => invoke('undo_batch_metadata', { token }),

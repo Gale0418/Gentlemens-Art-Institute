@@ -1,4 +1,6 @@
+use cap_fs_ext::DirExt;
 pub mod archive_reader;
+mod bookmark_recovery;
 pub mod cache;
 pub mod cache_policy;
 pub mod catalog;
@@ -16,7 +18,7 @@ pub mod utils;
 use state::{AppState, ComicItem, Progress};
 use std::collections::BTreeSet;
 use std::io::Write;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::sync::{Arc, OnceLock};
 use tauri::{AppHandle, Manager, State};
 
@@ -31,6 +33,36 @@ const MAX_AI_METADATA_IMAGE_COUNT: usize = 6;
 const MAX_AI_METADATA_IMAGE_BYTES: usize = 2 * 1024 * 1024;
 const MAX_AI_METADATA_TOTAL_IMAGE_BYTES: usize = 10 * 1024 * 1024;
 const MAX_AI_RESPONSE_BYTES: usize = 1024 * 1024;
+const SMB_DISK_RESERVE_BYTES: u64 = 256 * 1024 * 1024;
+const SMB_SPACE_CHECK_INTERVAL_BYTES: u64 = 16 * 1024 * 1024;
+
+fn smb_download_budget(declared_bytes: u64, available_bytes: u64) -> Result<u64, String> {
+    let budget = archive_reader::MAX_ARCHIVE_BYTES
+        .min(available_bytes.saturating_sub(SMB_DISK_RESERVE_BYTES));
+    if declared_bytes == 0 || declared_bytes > budget {
+        return Err("SMB_DOWNLOAD_CAPACITY".into());
+    }
+    Ok(budget)
+}
+
+fn checked_smb_download_size(
+    received: u64,
+    chunk_bytes: usize,
+    declared_bytes: u64,
+    budget: u64,
+) -> Result<u64, String> {
+    received
+        .checked_add(chunk_bytes as u64)
+        .filter(|total| *total <= declared_bytes && *total <= budget)
+        .ok_or_else(|| "SMB_DOWNLOAD_SIZE_MISMATCH".into())
+}
+
+async fn smb_available_space(path: std::path::PathBuf) -> Result<u64, String> {
+    tokio::task::spawn_blocking(move || fs4::available_space(path))
+        .await
+        .map_err(|_| "SMB_SPACE_CHECK_FAILED".to_string())?
+        .map_err(|_| "SMB_SPACE_CHECK_FAILED".to_string())
+}
 
 static AI_HTTP_CLIENT: OnceLock<Result<reqwest::Client, String>> = OnceLock::new();
 
@@ -70,7 +102,7 @@ fn normalize_runtime_item(mut item: ComicItem) -> ComicItem {
     }
     let is_folder = item.r#type.contains("folder");
     let is_image = item.r#type.contains("image");
-    item.r#type = if item.source_id == "smb" {
+    item.r#type = if state::is_smb_source_id(&item.source_id) {
         "smb-archive"
     } else if item.source_id.starts_with("external:") {
         if is_folder {
@@ -174,7 +206,7 @@ fn normalize_progress_values(
     } else {
         current_page.min(total_pages - 1)
     };
-    let percent = if current_page > 0 && total_pages > 0 {
+    let percent = if total_pages > 0 && (current_page > 0 || total_pages == 1) {
         ((current_page + 1) as f64 / total_pages as f64) * 100.0
     } else {
         0.0
@@ -192,6 +224,16 @@ fn authoritative_total_pages(
     }
 }
 
+fn runtime_id_has_multiple_sources(comics: &[ComicItem], id: &str) -> bool {
+    comics
+        .iter()
+        .filter(|comic| comic.id == id)
+        .map(|comic| comic.source_id.as_str())
+        .collect::<std::collections::BTreeSet<_>>()
+        .len()
+        > 1
+}
+
 fn reader_generation_is_current(state: &AppState, generation: u64) -> bool {
     state
         .reader_generation
@@ -199,9 +241,64 @@ fn reader_generation_is_current(state: &AppState, generation: u64) -> bool {
         == generation
 }
 
+fn open_smb_temp_root(temp_base: &Path, source_id: &str) -> Result<cap_std::fs::Dir, String> {
+    std::fs::create_dir_all(temp_base)
+        .map_err(|error| format!("無法建立 SMB 暫存根目錄: {error}"))?;
+    let base = cap_std::fs::Dir::open_ambient_dir(temp_base, cap_std::ambient_authority())
+        .map_err(|error| format!("無法開啟 SMB 暫存根目錄: {error}"))?;
+    base.create_dir_all("ComicTemp")
+        .map_err(|error| format!("無法建立 SMB 暫存目錄: {error}"))?;
+    let comic_temp = base
+        .open_dir_nofollow("ComicTemp")
+        .map_err(|error| format!("無法開啟 SMB 暫存目錄: {error}"))?;
+    let namespace = protocol::smb_cache_root_path(Path::new("."), source_id);
+    let namespace = namespace
+        .file_name()
+        .ok_or_else(|| "SMB 暫存來源識別碼無效".to_string())?;
+    comic_temp
+        .create_dir_all(namespace)
+        .map_err(|error| format!("無法建立 SMB 來源暫存目錄: {error}"))?;
+    comic_temp
+        .open_dir_nofollow(namespace)
+        .map_err(|error| format!("無法開啟 SMB 暫存目錄: {error}"))
+}
+
+fn remove_smb_temp_entry(temp_base: &Path, source_id: &str, relative: &Path) -> Result<(), String> {
+    let base = match cap_std::fs::Dir::open_ambient_dir(temp_base, cap_std::ambient_authority()) {
+        Ok(base) => base,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(()),
+        Err(error) => return Err(format!("無法開啟 SMB 暫存根目錄: {error}")),
+    };
+    let comic_temp = match base.open_dir_nofollow("ComicTemp") {
+        Ok(root) => root,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(()),
+        Err(error) => return Err(format!("無法開啟 SMB 暫存目錄: {error}")),
+    };
+    let namespace = protocol::smb_cache_root_path(Path::new("."), source_id);
+    let namespace = namespace
+        .file_name()
+        .ok_or_else(|| "SMB 暫存來源識別碼無效".to_string())?;
+    let temp_root = match comic_temp.open_dir_nofollow(namespace) {
+        Ok(root) => root,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(()),
+        Err(error) => return Err(format!("無法開啟 SMB 來源暫存目錄: {error}")),
+    };
+    match temp_root.symlink_metadata(relative) {
+        Ok(metadata) if metadata.file_type().is_dir() => temp_root
+            .remove_dir_all(relative)
+            .map_err(|error| format!("無法清除 SMB 暫存目錄: {error}")),
+        Ok(_) => temp_root
+            .remove_file(relative)
+            .map_err(|error| format!("無法清除 SMB 暫存檔: {error}")),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),
+        Err(error) => Err(format!("無法檢查 SMB 暫存檔: {error}")),
+    }
+}
+
 fn commit_smb_download_if_current(
     state: &AppState,
     generation: u64,
+    temp_root: &cap_std::fs::Dir,
     partial_path: &Path,
     final_path: &Path,
 ) -> Result<(), String> {
@@ -216,7 +313,8 @@ fn commit_smb_download_if_current(
     if !reader_generation_is_current(state, generation) {
         return Err("開啟漫畫已取消".into());
     }
-    std::fs::rename(partial_path, final_path)
+    temp_root
+        .rename(partial_path, temp_root, final_path)
         .map_err(|error| format!("SMB 暫存檔提交失敗: {error}"))
 }
 
@@ -251,15 +349,61 @@ fn persist_external_bookmarks(
         .map_err(|error| format!("無法建立 App 設定目錄：{error}"))?;
     let data =
         serde_json::to_vec(bookmarks).map_err(|error| format!("外部來源格式錯誤：{error}"))?;
-    std::fs::write(settings_dir.join(EXTERNAL_BOOKMARKS_SETTINGS_FILE), data)
+    persist_settings_file_atomically(&settings_dir, EXTERNAL_BOOKMARKS_SETTINGS_FILE, &data)
         .map_err(|error| format!("無法儲存外部資料夾授權：{error}"))
 }
 
-fn load_persisted_external_bookmarks(settings_dir: &Path) -> Vec<state::ExternalBookmark> {
-    std::fs::read(settings_dir.join(EXTERNAL_BOOKMARKS_SETTINGS_FILE))
-        .ok()
-        .and_then(|data| serde_json::from_slice(&data).ok())
-        .unwrap_or_default()
+fn persist_settings_file_atomically(
+    settings_dir: &Path,
+    file_name: &str,
+    data: &[u8],
+) -> std::io::Result<()> {
+    let destination = settings_dir.join(file_name);
+    let temporary = settings_dir.join(format!("{file_name}.tmp-{}", uuid::Uuid::new_v4()));
+    let result = (|| {
+        let mut file = std::fs::OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(&temporary)?;
+        file.write_all(data)?;
+        file.sync_all()?;
+        drop(file);
+        std::fs::rename(&temporary, &destination)?;
+        #[cfg(unix)]
+        std::fs::File::open(settings_dir)?.sync_all()?;
+        Ok(())
+    })();
+    if result.is_err() {
+        let _ = std::fs::remove_file(temporary);
+    }
+    result
+}
+
+fn load_persisted_external_bookmarks(
+    settings_dir: &Path,
+) -> Result<Vec<state::ExternalBookmark>, String> {
+    external_bookmarks_for_restore(settings_dir, Vec::new(), true)
+}
+
+fn external_bookmarks_for_restore(
+    settings_dir: &Path,
+    legacy_bookmarks: Vec<state::ExternalBookmark>,
+    legacy_cache_readable: bool,
+) -> Result<Vec<state::ExternalBookmark>, String> {
+    match std::fs::read(settings_dir.join(EXTERNAL_BOOKMARKS_SETTINGS_FILE)) {
+        Ok(data) => serde_json::from_slice(&data)
+            .map_err(|error| format!("BOOKMARKS_CORRUPT: 無法讀取已保存的外部資料夾授權：{error}")),
+        // 只允許未保存過原生設定的舊版遷移。保存的空清單也具有權威，
+        // 不可因瀏覽器殘留快取而重新加入已被使用者移除的來源。
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+            if legacy_cache_readable {
+                Ok(legacy_bookmarks)
+            } else {
+                Err("舊外部資料夾清單暫時無法讀取，未保存任何變更；請稍後重試".into())
+            }
+        }
+        Err(error) => Err(format!("無法讀取已保存的外部資料夾授權：{error}")),
+    }
 }
 
 // iOS 更新 App 後容器 UUID 可能改變；只重定位內建 Documents，不改外部來源。
@@ -309,6 +453,17 @@ async fn search_catalog(
 ) -> Result<catalog::CatalogSearchResult, String> {
     let store = catalog_store(&state)?;
     tokio::task::spawn_blocking(move || store.search(query))
+        .await
+        .map_err(|error| error.to_string())?
+}
+
+#[tauri::command]
+async fn get_discovery_tags(
+    runtime_ids: Vec<String>,
+    state: State<'_, Arc<AppState>>,
+) -> Result<Vec<catalog::DiscoveryTagGroup>, String> {
+    let store = catalog_store(&state)?;
+    tokio::task::spawn_blocking(move || store.discovery_tags(&runtime_ids))
         .await
         .map_err(|error| error.to_string())?
 }
@@ -404,6 +559,7 @@ async fn reimport_metadata(
     if request.comic_ids.is_empty() || commerce::is_batch(&request.comic_ids) {
         commerce::require_pro(&app_handle).await?;
     }
+    let _catalog_sync = state.catalog_sync.lock().await;
     let store = catalog_store(&state)?;
     tokio::task::spawn_blocking(move || store.reimport(request))
         .await
@@ -714,12 +870,19 @@ async fn get_library(
     drop(comics);
     if let Ok(store) = catalog_store(&state) {
         let scan_dir = state.scan_dir.read().unwrap().clone();
+        let external_bookmarks_readable = state
+            .external_bookmarks_readable
+            .load(std::sync::atomic::Ordering::Acquire);
         items = tokio::task::spawn_blocking(move || {
             let mut catalog_only_sources = BTreeSet::new();
             if !scan_dir.is_empty() && !Path::new(&scan_dir).exists() {
                 catalog_only_sources.insert(scanner::local_source_id(Path::new(&scan_dir)));
             }
-            store.overlay_library(items, &catalog_only_sources)
+            store.overlay_library_with_options(
+                items,
+                &catalog_only_sources,
+                !external_bookmarks_readable,
+            )
         })
         .await
         .map_err(|error| error.to_string())??;
@@ -757,6 +920,7 @@ async fn scan_priority_library(
 #[tauri::command]
 async fn open_comic(
     id: String,
+    source_id: Option<String>,
     state: State<'_, Arc<AppState>>,
     app_handle: tauri::AppHandle,
 ) -> Result<serde_json::Value, String> {
@@ -806,6 +970,7 @@ async fn open_comic(
             .collect::<Vec<_>>();
         return Ok(serde_json::json!({
             "id": id,
+            "sourceId": item.source_id,
             "type": item.r#type,
             "title": item.title,
             "isDir": false,
@@ -814,18 +979,58 @@ async fn open_comic(
             "preloadGeneration": preload_generation
         }));
     }
+    let requested_source_id = source_id
+        .as_deref()
+        .map(str::trim)
+        .filter(|source| !source.is_empty())
+        .map(str::to_owned);
+    if source_id.is_some() && requested_source_id.is_none() {
+        return Err("漫畫來源識別碼格式不正確".into());
+    }
     let comic_info = if let Some(item) = {
         let comics = state.comics.lock().await;
-        comics.iter().find(|comic| comic.id == id).cloned()
+        // Page URLs and the native reader cache still use the runtime ID.
+        // Until those surfaces also carry a source, an ambiguous live ID
+        // must fail closed even when the caller supplied the intended source.
+        if runtime_id_has_multiple_sources(&comics, &id) {
+            return Err("不同書庫的漫畫識別碼衝突，請先只連接其中一個書庫".into());
+        }
+        let matching = comics
+            .iter()
+            .filter(|comic| {
+                comic.id == id
+                    && requested_source_id
+                        .as_deref()
+                        .map(|source| comic.source_id == source)
+                        .unwrap_or(true)
+            })
+            .collect::<Vec<_>>();
+        if requested_source_id.is_none()
+            && matching
+                .iter()
+                .map(|comic| comic.source_id.as_str())
+                .collect::<std::collections::BTreeSet<_>>()
+                .len()
+                > 1
+        {
+            return Err("漫畫識別碼不唯一，請提供 sourceId".into());
+        }
+        matching.first().copied().cloned()
     } {
         item
     } else {
         let store = catalog_store(&state)?;
         let lookup_id = id.clone();
-        tokio::task::spawn_blocking(move || store.get_runtime_item(&lookup_id))
-            .await
-            .map_err(|error| error.to_string())??
-            .ok_or_else(|| "找不到漫畫資料，請重新掃描書庫".to_string())?
+        let lookup_source_id = requested_source_id.clone();
+        tokio::task::spawn_blocking(move || {
+            lookup_source_id.as_deref().map_or_else(
+                || store.get_runtime_item(&lookup_id),
+                |source| store.get_runtime_item_for_source(&lookup_id, source),
+            )
+        })
+        .await
+        .map_err(|error| error.to_string())??
+        .ok_or_else(|| "找不到漫畫資料，請重新掃描書庫".to_string())?
     };
     let comic_info = normalize_runtime_item(comic_info);
     if commerce::is_direct_smb(&comic_info.source_id, &comic_info.r#type) {
@@ -846,12 +1051,18 @@ async fn open_comic(
         generation
     };
 
-    let is_smb = comic_info.source_id == "smb" || comic_info.r#type == "smb-archive";
+    let is_smb =
+        state::is_smb_source_id(&comic_info.source_id) || comic_info.r#type == "smb-archive";
     let is_external =
         comic_info.source_id.starts_with("external:") || comic_info.r#type.starts_with("external-");
 
-    let full_path;
-    let is_dir;
+    let full_path: PathBuf;
+    let is_dir: bool;
+    // Every local, external, offline and SMB open keeps the capability root
+    // used for discovery alive through page enumeration.  Later protocol
+    // reads independently reacquire the same root and remain descriptor based.
+    let authorized_root: Option<cap_std::fs::Dir>;
+    let authorized_relative: Option<PathBuf>;
 
     if is_smb {
         let relative = Path::new(&relative_path_str);
@@ -869,24 +1080,33 @@ async fn open_comic(
         }
         let smb_cfg = state.smb_config.read().unwrap().clone();
         if let Some(cfg) = smb_cfg {
+            if !state::smb_source_matches_config(&comic_info.source_id, &cfg) {
+                return Err("舊版或其他 NAS 來源未確認端點，已拒絕開啟".into());
+            }
             use tauri::Emitter;
             let _ = app_handle.emit("smb-download-start", serde_json::json!({"id": id}));
 
             println!("🌐 準備下載 SMB 漫畫: {relative_path_str}");
-            let temp_dir = app_handle
+            let temp_base = app_handle
                 .path()
                 .app_local_data_dir()
-                .unwrap_or_else(|_| std::env::temp_dir())
-                .join("ComicTemp");
-            if let Err(error) = std::fs::create_dir_all(&temp_dir) {
-                let _ = app_handle.emit("smb-download-end", serde_json::json!({"id": id}));
-                return Err(format!("無法建立 SMB 暫存目錄: {error}"));
-            }
-            full_path = temp_dir.join(relative);
-            if let Some(parent) = full_path.parent() {
-                if let Err(error) = std::fs::create_dir_all(parent) {
+                .unwrap_or_else(|_| std::env::temp_dir());
+            let temp_root = match open_smb_temp_root(&temp_base, &comic_info.source_id) {
+                Ok(root) => root,
+                Err(error) => {
                     let _ = app_handle.emit("smb-download-end", serde_json::json!({"id": id}));
-                    return Err(format!("無法建立 SMB 暫存目錄: {error}"));
+                    return Err(error);
+                }
+            };
+            let temp_dir =
+                protocol::smb_cache_root_path(&temp_base.join("ComicTemp"), &comic_info.source_id);
+            full_path = temp_dir.join(relative);
+            if let Some(parent) = relative.parent() {
+                if !parent.as_os_str().is_empty() {
+                    if let Err(error) = temp_root.create_dir_all(parent) {
+                        let _ = app_handle.emit("smb-download-end", serde_json::json!({"id": id}));
+                        return Err(format!("無法建立 SMB 暫存目錄: {error}"));
+                    }
                 }
             }
             if !reader_generation_is_current(state.inner(), reader_generation) {
@@ -933,24 +1153,39 @@ async fn open_comic(
                 .duration_since(std::time::UNIX_EPOCH)
                 .unwrap_or_default()
                 .as_nanos();
-            let partial_path = full_path.with_extension(format!(
+            let partial_path = relative.with_file_name(format!(
                 "{}.part-{}-{nonce}",
-                full_path
-                    .extension()
-                    .and_then(|extension| extension.to_str())
+                relative
+                    .file_name()
+                    .and_then(|name| name.to_str())
                     .unwrap_or("download"),
                 std::process::id()
             ));
             let download_result: Result<(), String> = async {
                 use tokio::io::AsyncWriteExt;
 
-                let mut download = client
-                    .download(&tree, &smb_path)
-                    .await
-                    .map_err(|error| format!("SMB 讀取錯誤: {error:?}"))?;
-                let mut file = tokio::fs::File::create(&partial_path)
-                    .await
+                let mut download = tokio::time::timeout(
+                    std::time::Duration::from_secs(30),
+                    client.download(&tree, &smb_path),
+                )
+                .await
+                .map_err(|_| "SMB_OPEN_TIMEOUT".to_string())?
+                .map_err(|error| format!("SMB 讀取錯誤: {error:?}"))?;
+                // CREATE supplies the size before any data chunk is received.
+                let declared_bytes = download.size();
+                let budget = smb_download_budget(
+                    declared_bytes,
+                    smb_available_space(temp_dir.clone()).await?,
+                )?;
+                let mut received = 0_u64;
+                let mut next_space_check = SMB_SPACE_CHECK_INTERVAL_BYTES;
+                let partial_file = temp_root
+                    .open_with(
+                        &partial_path,
+                        cap_std::fs::OpenOptions::new().write(true).create_new(true),
+                    )
                     .map_err(|error| format!("無法建立 SMB 暫存檔: {error}"))?;
+                let mut file = tokio::fs::File::from_std(partial_file.into_std());
                 loop {
                     if !reader_generation_is_current(state.inner(), reader_generation) {
                         return Err("開啟漫畫已取消".into());
@@ -966,9 +1201,23 @@ async fn open_comic(
                     }
                     let Some(chunk) = next else { break };
                     let bytes = chunk.map_err(|error| format!("SMB 傳輸錯誤: {error:?}"))?;
+                    let next_received =
+                        checked_smb_download_size(received, bytes.len(), declared_bytes, budget)?;
+                    if next_received >= next_space_check {
+                        let available = smb_available_space(temp_dir.clone()).await?;
+                        if available.saturating_sub(SMB_DISK_RESERVE_BYTES) < bytes.len() as u64 {
+                            return Err("SMB_DOWNLOAD_NO_SPACE".into());
+                        }
+                        next_space_check =
+                            next_received.saturating_add(SMB_SPACE_CHECK_INTERVAL_BYTES);
+                    }
                     file.write_all(&bytes)
                         .await
                         .map_err(|error| format!("SMB 暫存檔寫入失敗: {error}"))?;
+                    received = next_received;
+                }
+                if received != declared_bytes {
+                    return Err("SMB_DOWNLOAD_INCOMPLETE".into());
                 }
                 file.sync_all()
                     .await
@@ -977,18 +1226,21 @@ async fn open_comic(
                 commit_smb_download_if_current(
                     state.inner(),
                     reader_generation,
+                    &temp_root,
                     &partial_path,
-                    &full_path,
+                    relative,
                 )?;
                 Ok(())
             }
             .await;
             let _ = app_handle.emit("smb-download-end", serde_json::json!({"id": id}));
             if let Err(error) = download_result {
-                let _ = tokio::fs::remove_file(&partial_path).await;
+                let _ = temp_root.remove_file(&partial_path);
                 return Err(error);
             }
             println!("✅ SMB 下載完成");
+            authorized_root = Some(temp_root);
+            authorized_relative = Some(relative.to_path_buf());
             is_dir = false;
         } else {
             return Err("未設定 SMB 連線".into());
@@ -997,91 +1249,147 @@ async fn open_comic(
         full_path = comic_info
             .source_path
             .as_deref()
-            .map(std::path::PathBuf::from)
-            .unwrap_or_else(|| Path::new(&relative_path_str).to_path_buf());
-        #[cfg(target_os = "ios")]
-        {
-            use tauri_plugin_ios_folder::{EnsureAvailableRequest, TauriPluginIosFolderExt};
+            .map(PathBuf::from)
+            .ok_or_else(|| "漫畫來源位置已遺失，請重新加入或重新掃描書庫".to_string())?;
+        if is_external {
+            #[cfg(target_os = "ios")]
+            {
+                use tauri_plugin_ios_folder::{EnsureAvailableRequest, TauriPluginIosFolderExt};
 
-            let bookmark = comic_info
-                .external_bookmark
-                .as_ref()
-                .ok_or_else(|| "外部漫畫缺少資料夾權限關聯，請重新掃描書庫".to_string())?;
-            let active_root = state
-                .active_bookmarks
-                .lock()
-                .unwrap()
-                .get(bookmark)
-                .cloned()
-                .ok_or_else(|| "外部資料夾權限尚未啟用，請重新加入資料夾".to_string())?;
-            let root_path = Path::new(&active_root);
-            if !full_path.starts_with(root_path) {
-                return Err("外部漫畫不屬於原先授權的資料夾".into());
+                let bookmark = comic_info
+                    .external_bookmark
+                    .as_ref()
+                    .ok_or_else(|| "外部漫畫缺少資料夾權限關聯，請重新掃描書庫".to_string())?;
+                let active_root = state
+                    .active_bookmarks
+                    .lock()
+                    .unwrap()
+                    .get(bookmark)
+                    .cloned()
+                    .ok_or_else(|| "外部資料夾權限尚未啟用，請重新加入資料夾".to_string())?;
+                let root_path = Path::new(&active_root);
+                if !full_path.starts_with(root_path) {
+                    return Err("外部漫畫不屬於原先授權的資料夾".into());
+                }
+                app_handle
+                    .tauri_plugin_ios_folder()
+                    .ensure_available(EnsureAvailableRequest {
+                        bookmark: bookmark.clone(),
+                        path: full_path.to_string_lossy().into_owned(),
+                    })
+                    .map_err(|error| format!("外部漫畫尚未下載完成或無法讀取：{error}"))?;
             }
-            app_handle
-                .tauri_plugin_ios_folder()
-                .ensure_available(EnsureAvailableRequest {
-                    bookmark: bookmark.clone(),
-                    path: full_path.to_string_lossy().into_owned(),
-                })
-                .map_err(|error| format!("外部漫畫尚未下載完成或無法讀取：{error}"))?;
-            let canonical = full_path
-                .canonicalize()
-                .map_err(|error| format!("外部漫畫路徑無效: {error}"))?;
-            let canonical_root = root_path
-                .canonicalize()
-                .map_err(|error| format!("外部資料夾路徑無效: {error}"))?;
-            if !canonical.starts_with(canonical_root) {
-                return Err("外部漫畫路徑超出授權範圍".into());
+            let (root, relative) =
+                protocol::external_bookmark_capability(&comic_info, &full_path, state.inner())
+                    .map_err(|_| {
+                        "外部資料夾權限尚未啟用或漫畫已超出授權範圍，請重新加入資料夾".to_string()
+                    })?;
+            if !root.try_exists(&relative).unwrap_or(false) {
+                return Err(format!(
+                    "漫畫來源目前離線：{}。請重新連線原本的磁碟，或在設定中選擇新的漫畫目錄後重新掃描。",
+                    full_path.display()
+                ));
             }
+            is_dir = root.is_dir(&relative);
+            authorized_root = Some(root);
+            authorized_relative = Some(relative);
+        } else {
+            // Offline entries without a bookmark are valid only while their
+            // original source still belongs to the current local scan root.
+            let scan_dir = state.scan_dir.read().unwrap().clone();
+            if scan_dir.is_empty() {
+                return Err("離線漫畫不屬於目前的掃描目錄，請重新加入或重新掃描書庫".into());
+            }
+            let root = cap_std::fs::Dir::open_ambient_dir(&scan_dir, cap_std::ambient_authority())
+                .map_err(|_| "目前掃描目錄無法開啟，請重新加入漫畫目錄".to_string())?;
+            let relative = full_path.strip_prefix(Path::new(&scan_dir)).map_err(|_| {
+                "離線漫畫不屬於目前的掃描目錄，請重新加入或重新掃描書庫".to_string()
+            })?;
+            if relative.components().any(|component| {
+                matches!(
+                    component,
+                    std::path::Component::ParentDir
+                        | std::path::Component::RootDir
+                        | std::path::Component::Prefix(_)
+                )
+            }) || !root.try_exists(relative).unwrap_or(false)
+            {
+                return Err("離線漫畫不屬於目前的掃描目錄，請重新加入或重新掃描書庫".into());
+            }
+            is_dir = root.is_dir(relative);
+            authorized_root = Some(root);
+            authorized_relative = Some(relative.to_path_buf());
         }
-        if !full_path.exists() {
-            return Err(format!(
-                "漫畫來源目前離線：{}。請重新連線原本的磁碟，或在設定中選擇新的漫畫目錄後重新掃描。",
-                full_path.display()
-            ));
-        }
-        is_dir = full_path.is_dir();
     } else {
         let scan_dir = state.scan_dir.read().unwrap().clone();
         if scan_dir.is_empty() {
             return Err("漫畫目錄尚未設定".into());
         }
-        full_path = Path::new(&scan_dir).join(&relative_path_str);
-
-        if !full_path.exists() {
-            return Err("找不到漫畫！".into());
+        let root = cap_std::fs::Dir::open_ambient_dir(&scan_dir, cap_std::ambient_authority())
+            .map_err(|error| format!("掃描目錄無法開啟: {error}"))?;
+        let relative = PathBuf::from(&relative_path_str);
+        if relative.is_absolute()
+            || relative.components().any(|component| {
+                matches!(
+                    component,
+                    std::path::Component::ParentDir
+                        | std::path::Component::RootDir
+                        | std::path::Component::Prefix(_)
+                )
+            })
+            || !root.try_exists(&relative).unwrap_or(false)
+        {
+            return Err("找不到漫畫或路徑越權！".into());
         }
-
-        let canon_scan = Path::new(&scan_dir)
-            .canonicalize()
-            .map_err(|error| format!("掃描目錄無效: {error}"))?;
-        let canon_full = full_path
-            .canonicalize()
-            .map_err(|error| format!("無效路徑: {error}"))?;
-        if !canon_full.starts_with(&canon_scan) {
-            return Err("路徑越權！禁止存取掃描目錄外的檔案！".into());
-        }
-
-        is_dir = full_path.is_dir();
+        full_path = Path::new(&scan_dir).join(&relative);
+        is_dir = root.is_dir(&relative);
+        authorized_root = Some(root);
+        authorized_relative = Some(relative);
     }
 
     let mut pages = Vec::new();
     let opened_files = if is_dir {
-        let images = crate::utils::get_folder_images(&full_path);
+        let root = authorized_root
+            .as_ref()
+            .ok_or_else(|| "漫畫缺少授權目錄".to_string())?;
+        let relative = authorized_relative
+            .as_deref()
+            .ok_or_else(|| "漫畫缺少授權路徑".to_string())?;
+        let folder = root
+            .open_dir(relative)
+            .map_err(|error| format!("無法開啟漫畫資料夾: {error}"))?;
+        let image_names = crate::utils::get_folder_image_names_from_dir(&folder);
         let mut cached_files = Vec::new();
-        for (index, path) in images.iter().enumerate() {
+        for (index, name) in image_names.iter().enumerate() {
             pages.push(format!("gai://folder/{}/{}", id, index));
-            cached_files.push(path.to_string_lossy().to_string());
+            cached_files.push(full_path.join(name).to_string_lossy().to_string());
         }
         cached_files
     } else if comic_info.r#type.contains("image") {
+        let root = authorized_root
+            .as_ref()
+            .ok_or_else(|| "漫畫缺少授權目錄".to_string())?;
+        let relative = authorized_relative
+            .as_deref()
+            .ok_or_else(|| "漫畫缺少授權路徑".to_string())?;
+        root.open(relative)
+            .map_err(|error| format!("無法開啟漫畫圖片: {error}"))?;
         pages.push(format!("gai://page/{id}/0"));
         vec![full_path.to_string_lossy().into_owned()]
     } else {
+        let root = authorized_root
+            .as_ref()
+            .ok_or_else(|| "漫畫缺少授權目錄".to_string())?;
+        let relative = authorized_relative
+            .as_deref()
+            .ok_or_else(|| "漫畫缺少授權路徑".to_string())?;
+        let archive_file = root
+            .open(relative)
+            .map_err(|error| format!("無法開啟漫畫封存檔: {error}"))?
+            .into_std();
         let archive_path = full_path.clone();
         let entry_names = tauri::async_runtime::spawn_blocking(move || {
-            crate::utils::get_archive_images(&archive_path)
+            crate::utils::get_archive_images_from_file(&archive_path, archive_file)
         })
         .await
         .map_err(|error| format!("讀取漫畫封存檔的背景工作失敗：{error}"))?
@@ -1123,6 +1431,7 @@ async fn open_comic(
 
     Ok(serde_json::json!({
         "id": id,
+        "sourceId": comic_info.source_id,
         "type": r#type,
         "title": title,
         "isDir": is_dir,
@@ -1143,14 +1452,19 @@ async fn close_comic(
     state: State<'_, Arc<AppState>>,
     app_handle: tauri::AppHandle,
 ) -> Result<(), String> {
-    use base64::{engine::general_purpose, Engine as _};
     if let Some(ref id) = comic_id {
-        let is_smb = {
+        let (is_smb, source_id) = {
             let comics = state.comics.lock().await;
             comics
                 .iter()
                 .find(|comic| comic.id == *id)
-                .is_some_and(|comic| comic.source_id == "smb" || comic.r#type == "smb-archive")
+                .map(|comic| {
+                    (
+                        state::is_smb_source_id(&comic.source_id) || comic.r#type == "smb-archive",
+                        comic.source_id.clone(),
+                    )
+                })
+                .unwrap_or((false, String::new()))
         };
         let _lifecycle = state.comic_lifecycle.lock().unwrap();
         let mut active_id = state.active_comic_id.lock().unwrap();
@@ -1179,33 +1493,25 @@ async fn close_comic(
         state.ram_cache_pool.lock().unwrap().remove(id);
         state.opened_comic_files.write().unwrap().remove(id);
         if is_smb {
-            if let Ok(relative_bytes) = general_purpose::URL_SAFE_NO_PAD.decode(id) {
-                if let Ok(relative_text) = String::from_utf8(relative_bytes) {
-                    let temp_dir = app_handle
-                        .path()
-                        .app_local_data_dir()
-                        .unwrap_or_else(|_| std::env::temp_dir())
-                        .join("ComicTemp");
-                    let relative = Path::new(&relative_text);
-                    if relative.is_absolute()
-                        || relative.components().any(|part| {
-                            matches!(
-                                part,
-                                std::path::Component::ParentDir
-                                    | std::path::Component::RootDir
-                                    | std::path::Component::Prefix(_)
-                            )
-                        })
-                    {
-                        return Err("拒絕清除不安全的 SMB 暫存路徑".into());
-                    }
-                    let item_temp = temp_dir.join(relative);
-                    if item_temp.is_dir() {
-                        let _ = std::fs::remove_dir_all(&item_temp);
-                    } else if item_temp.is_file() {
-                        let _ = std::fs::remove_file(&item_temp);
-                    }
+            if let Ok(relative_text) = protocol::decode_capability_path(id) {
+                let temp_base = app_handle
+                    .path()
+                    .app_local_data_dir()
+                    .unwrap_or_else(|_| std::env::temp_dir());
+                let relative = Path::new(&relative_text);
+                if relative.is_absolute()
+                    || relative.components().any(|part| {
+                        matches!(
+                            part,
+                            std::path::Component::ParentDir
+                                | std::path::Component::RootDir
+                                | std::path::Component::Prefix(_)
+                        )
+                    })
+                {
+                    return Err("拒絕清除不安全的 SMB 暫存路徑".into());
                 }
+                let _ = remove_smb_temp_entry(&temp_base, &source_id, relative);
             }
         }
     } else {
@@ -1362,6 +1668,7 @@ async fn set_config(
     let _scan_lifecycle = state.scan_lifecycle.lock().await;
     *state.scan_dir.write().unwrap() = scan_dir.clone();
     state.comics.lock().await.clear();
+    state.invalidate_reader_cache();
     let generation = state
         .scan_generation
         .fetch_add(1, std::sync::atomic::Ordering::SeqCst)
@@ -1388,6 +1695,7 @@ async fn set_smb_config(
     let _scan_lifecycle = state.scan_lifecycle.lock().await;
     *state.smb_config.write().unwrap() = data;
     state.comics.lock().await.clear();
+    state.invalidate_reader_cache();
     let generation = state
         .scan_generation
         .fetch_add(1, std::sync::atomic::Ordering::SeqCst)
@@ -1516,6 +1824,11 @@ struct AiMetadataSuggestion {
 #[serde(rename_all = "camelCase")]
 struct SaveProgressRequest {
     id: String,
+    /// Source identity returned by `open_comic`. Runtime IDs are only unique
+    /// within a source; omitting this keeps legacy clients working when the
+    /// catalog can prove that the ID has one unambiguous comic identity.
+    #[serde(default)]
+    source_id: Option<String>,
     current_page: u64,
     total_pages: u64,
     /// Optional during the migration; UI clients should send a strictly
@@ -2465,22 +2778,124 @@ async fn suggest_comic_metadata(
     Ok(suggestions)
 }
 
+fn reconcile_bookmark_reader_cache(
+    state: &AppState,
+    removed_bookmarks: bool,
+    removed_comics: bool,
+) {
+    if removed_bookmarks || removed_comics {
+        state.invalidate_reader_cache();
+    }
+}
+
 #[tauri::command]
 async fn set_bookmarks(
     data: Vec<crate::state::ExternalBookmark>,
+    restore_from_saved: Option<bool>,
+    legacy_cache_readable: Option<bool>,
     state: State<'_, Arc<AppState>>,
     app_handle: tauri::AppHandle,
-) -> Result<(), String> {
+) -> Result<Vec<crate::state::ExternalBookmark>, String> {
+    update_bookmarks(
+        data,
+        restore_from_saved,
+        legacy_cache_readable,
+        false,
+        state,
+        app_handle,
+    )
+    .await
+}
+
+#[tauri::command]
+async fn repair_external_bookmarks(
+    data: Vec<crate::state::ExternalBookmark>,
+    state: State<'_, Arc<AppState>>,
+    app_handle: tauri::AppHandle,
+) -> Result<Vec<crate::state::ExternalBookmark>, String> {
+    update_bookmarks(data, None, None, true, state, app_handle).await
+}
+
+async fn update_bookmarks(
+    data: Vec<crate::state::ExternalBookmark>,
+    restore_from_saved: Option<bool>,
+    legacy_cache_readable: Option<bool>,
+    repair_corrupt: bool,
+    state: State<'_, Arc<AppState>>,
+    app_handle: tauri::AppHandle,
+) -> Result<Vec<crate::state::ExternalBookmark>, String> {
     // Serialize disk persistence with the matching in-memory update. Otherwise
     // an older request can finish writing after a newer request has applied.
     let _bookmark_lifecycle = state.bookmark_lifecycle.lock().await;
+    let data = if restore_from_saved.unwrap_or(false) {
+        let settings_dir = app_handle
+            .path()
+            .app_local_data_dir()
+            .map_err(|error| format!("無法取得 App 設定目錄：{error}"))?;
+        let restored = tokio::task::spawn_blocking(move || {
+            external_bookmarks_for_restore(
+                &settings_dir,
+                data,
+                legacy_cache_readable.unwrap_or(true),
+            )
+        })
+        .await
+        .map_err(|error| format!("外部來源還原工作失敗：{error}"))?;
+        match restored {
+            Ok(bookmarks) => bookmarks,
+            Err(error) => {
+                state
+                    .external_bookmarks_readable
+                    .store(false, std::sync::atomic::Ordering::Release);
+                return Err(error);
+            }
+        }
+    } else {
+        data
+    };
+    let committed_bookmarks = data.clone();
     let bookmarks_to_persist = data.clone();
     let settings_handle = app_handle.clone();
-    tokio::task::spawn_blocking(move || {
-        persist_external_bookmarks(&settings_handle, &bookmarks_to_persist)
-    })
-    .await
-    .map_err(|error| format!("外部來源設定工作失敗：{error}"))??;
+    let recovery_warning =
+        tokio::task::spawn_blocking(move || -> Result<Option<String>, String> {
+            if !repair_corrupt {
+                persist_external_bookmarks(&settings_handle, &bookmarks_to_persist)?;
+                return Ok(None);
+            }
+            let settings_dir = settings_handle
+                .path()
+                .app_local_data_dir()
+                .map_err(|error| format!("無法取得 App 設定目錄：{error}"))?;
+            let path = settings_dir.join(EXTERNAL_BOOKMARKS_SETTINGS_FILE);
+            let outcome = bookmark_recovery::recover_external_bookmarks(
+                &path,
+                bookmark_recovery::RecoveryRequest {
+                    user_confirmed: true,
+                    new_sources: bookmarks_to_persist,
+                },
+            )
+            .map_err(|error| format!("無法備份或重建外部來源清單：{error}"))?;
+            match &outcome {
+                bookmark_recovery::RecoveryOutcome::AlreadyValid(bookmarks) => {
+                    log::warn!("外部來源清單已變更，包含 {} 個來源", bookmarks.len());
+                    return Err("外部來源清單已改變，請重新整理後再試。".into());
+                }
+                bookmark_recovery::RecoveryOutcome::NotFound => {
+                    return Err("外部來源清單已改變，請重新整理後再試。".into());
+                }
+                _ => {}
+            }
+            let count = outcome.committed_bookmarks().map_or(0, |items| items.len());
+            log::info!(
+                "已重建 {count} 個外部來源；損壞清單備份：{:?}",
+                outcome.backup_path()
+            );
+            Ok(outcome
+                .warning()
+                .map(|warning| format!("重建後的保存確認未完成：{warning}")))
+        })
+        .await
+        .map_err(|error| format!("外部來源設定工作失敗：{error}"))??;
 
     let old_bookmarks = state.external_bookmarks.read().unwrap().clone();
     let removed_bookmarks: Vec<_> = old_bookmarks
@@ -2491,14 +2906,14 @@ async fn set_bookmarks(
                 .any(|new_bookmark| new_bookmark.bookmark == old.bookmark)
         })
         .collect();
-    let removed_source_ids = removed_bookmarks
+    let selected_source_ids = data
         .iter()
         .map(|bookmark| scanner::external_source_id(&bookmark.bookmark))
         .collect::<BTreeSet<_>>();
-    #[cfg(any(target_os = "ios", target_os = "macos"))]
-    let mut stop_accessing_errors: Vec<String> = Vec::new();
-    #[cfg(not(any(target_os = "ios", target_os = "macos")))]
-    let stop_accessing_errors: Vec<String> = Vec::new();
+    let mut cleanup_errors: Vec<String> = Vec::new();
+    if let Some(warning) = recovery_warning {
+        cleanup_errors.push(warning);
+    }
 
     #[cfg(any(target_os = "ios", target_os = "macos"))]
     for removed in &removed_bookmarks {
@@ -2510,27 +2925,27 @@ async fn set_bookmarks(
                 bookmark: removed.bookmark.clone(),
             })
             .unwrap_or_else(|error| {
-                stop_accessing_errors.push(format!("{}: {error}", removed.name));
+                cleanup_errors.push(format!("無法釋放 {} 的舊權限：{error}", removed.name));
             });
     }
 
     {
         let _catalog_sync = state.catalog_sync.lock().await;
         let _scan_lifecycle = state.scan_lifecycle.lock().await;
-        if !removed_source_ids.is_empty() {
+        // Persistence has committed. Reconcile the durable catalog on every
+        // call so a previous cleanup failure is retryable with the same list.
+        let cleanup_result = async {
             let store = catalog_store(&state)?;
-            let source_ids = removed_source_ids.iter().cloned().collect::<Vec<_>>();
+            let selected = selected_source_ids.clone();
             tokio::task::spawn_blocking(move || {
-                source_ids
-                    .into_iter()
-                    .try_fold(0usize, |removed, source_id| {
-                        store
-                            .forget_source_locations(&source_id)
-                            .map(|count| removed + count)
-                    })
+                store.reconcile_external_source_locations(&selected)
             })
             .await
-            .map_err(|error| error.to_string())??;
+            .map_err(|error| error.to_string())?
+        }
+        .await;
+        if let Err(error) = cleanup_result {
+            cleanup_errors.push(format!("舊來源目錄清理未完成：{error}"));
         }
         {
             let mut active = state.active_bookmarks.lock().unwrap();
@@ -2539,8 +2954,18 @@ async fn set_bookmarks(
             }
         }
         let mut comics = state.comics.lock().await;
-        comics.retain(|comic| !removed_source_ids.contains(&comic.source_id));
+        let previous_comic_count = comics.len();
+        comics.retain(|comic| {
+            !comic.source_id.starts_with("external:")
+                || selected_source_ids.contains(&comic.source_id)
+        });
+        let removed_comics = comics.len() != previous_comic_count;
         *state.external_bookmarks.write().unwrap() = data;
+        state
+            .external_bookmarks_readable
+            .store(true, std::sync::atomic::Ordering::Release);
+        drop(comics);
+        reconcile_bookmark_reader_cache(&state, !removed_bookmarks.is_empty(), removed_comics);
         state
             .scan_generation
             .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
@@ -2549,12 +2974,12 @@ async fn set_bookmarks(
     tauri::async_runtime::spawn(async move {
         crate::scanner::start_background_scan(state_clone, app_handle).await;
     });
-    if stop_accessing_errors.is_empty() {
-        Ok(())
+    if cleanup_errors.is_empty() {
+        Ok(committed_bookmarks)
     } else {
         Err(format!(
-            "清單已更新，舊權限可能未完全釋放；無法釋放外部資料夾權限: {}",
-            stop_accessing_errors.join("; ")
+            "清單已更新，部分舊來源清理未完成：{}",
+            cleanup_errors.join("; ")
         ))
     }
 }
@@ -2584,35 +3009,38 @@ async fn show_item_in_folder(
         let _ = state;
         return Err("目前平台不支援在檔案管理器顯示漫畫".into());
     }
-    let store = catalog_store(&state)?;
-    let item = tokio::task::spawn_blocking(move || store.get_runtime_item(&comic_id))
-        .await
-        .map_err(|error| format!("漫畫位置查詢失敗: {error}"))??
-        .map(normalize_runtime_item)
-        .ok_or_else(|| "找不到已登記的漫畫位置".to_string())?;
-    if item.r#type == "offline" {
-        return Err("漫畫來源目前離線".into());
-    }
-    let path = item
-        .source_path
-        .ok_or_else(|| "漫畫沒有可顯示的已登記位置".to_string())?;
-    #[cfg(target_os = "macos")]
+    #[cfg(any(target_os = "macos", target_os = "windows"))]
     {
-        std::process::Command::new("open")
-            .arg("-R")
-            .arg(&path)
-            .spawn()
-            .map_err(|error| error.to_string())?;
+        let store = catalog_store(&state)?;
+        let item = tokio::task::spawn_blocking(move || store.get_runtime_item(&comic_id))
+            .await
+            .map_err(|error| format!("漫畫位置查詢失敗: {error}"))??
+            .map(normalize_runtime_item)
+            .ok_or_else(|| "找不到已登記的漫畫位置".to_string())?;
+        if item.r#type == "offline" {
+            return Err("漫畫來源目前離線".into());
+        }
+        let path = item
+            .source_path
+            .ok_or_else(|| "漫畫沒有可顯示的已登記位置".to_string())?;
+        #[cfg(target_os = "macos")]
+        {
+            std::process::Command::new("open")
+                .arg("-R")
+                .arg(&path)
+                .spawn()
+                .map_err(|error| error.to_string())?;
+        }
+        #[cfg(target_os = "windows")]
+        {
+            std::process::Command::new("explorer")
+                .arg("/select,")
+                .arg(&path)
+                .spawn()
+                .map_err(|error| error.to_string())?;
+        }
+        Ok(())
     }
-    #[cfg(target_os = "windows")]
-    {
-        std::process::Command::new("explorer")
-            .arg("/select,")
-            .arg(&path)
-            .spawn()
-            .map_err(|error| error.to_string())?;
-    }
-    Ok(())
 }
 
 #[tauri::command]
@@ -2630,12 +3058,12 @@ async fn get_file_capability(
         .read()
         .map_err(|_| "NAS 設定鎖定失敗")?
         .clone();
-    if location.source_id == "smb" {
+    if state::is_smb_source_id(&location.source_id) {
         if let Err(reason) = commerce::require_pro(&app_handle).await {
             // Inspecting the library must not trigger a purchase sheet or a NAS probe.
             // Recovery remains available through its separate, ungated command.
             return Ok(file_ops::FileCapability {
-                source_kind: "smb".into(),
+                source_kind: location.source_id.clone(),
                 online: location.online,
                 expected_fingerprint: None,
                 can_reveal: false,
@@ -2669,7 +3097,7 @@ async fn mutate_comic_file(
     let location = tokio::task::spawn_blocking(move || location_store.get_location(&location_id))
         .await
         .map_err(|error| error.to_string())??;
-    if location.source_id == "smb" {
+    if state::is_smb_source_id(&location.source_id) {
         commerce::require_pro(&app_handle).await?;
     }
     let result = file_ops::mutate(&store, smb, request).await?;
@@ -2774,6 +3202,8 @@ async fn trash_page(
     page_index: usize,
     state: State<'_, Arc<AppState>>,
 ) -> Result<serde_json::Value, String> {
+    let _bookmark_lifecycle = state.bookmark_lifecycle.lock().await;
+    let _file_lifecycle = state.file_lifecycle.lock().await;
     let store = catalog_store(&state)?;
     let lookup_id = comic_id.clone();
     let item = tokio::task::spawn_blocking(move || store.get_runtime_item(&lookup_id))
@@ -2784,87 +3214,133 @@ async fn trash_page(
     if item.r#type == "offline" {
         return Err("漫畫來源目前離線".into());
     }
-    if item.source_id == "smb" {
+    if state::is_smb_source_id(&item.source_id) {
         return Err("NAS 壓縮檔不支援刪除單頁".into());
     }
-    let full_path = item
-        .source_path
-        .map(std::path::PathBuf::from)
-        .ok_or_else(|| "漫畫沒有可修改的已登記位置".to_string())?;
-    let _lifecycle = state.comic_lifecycle.lock().unwrap();
-    let canon_full = full_path
-        .canonicalize()
-        .map_err(|error| format!("無效路徑: {error}"))?;
-
-    if canon_full.is_dir() {
-        let images = crate::utils::get_folder_images(&canon_full);
-        if page_index < images.len() {
-            let canonical_target = images[page_index]
-                .canonicalize()
-                .map_err(|error| format!("頁面路徑無效: {error}"))?;
-            if !canonical_target.starts_with(&canon_full) || !canonical_target.is_file() {
-                return Err("頁面超出已登記漫畫資料夾".into());
-            }
-            #[cfg(not(target_os = "ios"))]
-            trash::delete(&canonical_target).map_err(|error| error.to_string())?;
-            #[cfg(target_os = "ios")]
+    // Source changes and bookmark removal share this gate. Keep permission
+    // validation and deletion in the same lifecycle, including blocking I/O.
+    let _scan_lifecycle = state.scan_lifecycle.lock().await;
+    let state = state.inner().clone();
+    tokio::task::spawn_blocking(move || {
+        let _lifecycle = state.comic_lifecycle.lock().unwrap();
+        let scan_dir = state.scan_dir.read().unwrap().clone();
+        let bookmarks = state.external_bookmarks.read().unwrap().clone();
+        let active = state.active_bookmarks.lock().unwrap().clone();
+        let canon_full = authorized_page_comic_path(&item, &scan_dir, &bookmarks, &active)?;
+        if canon_full.is_dir() {
+            let images = crate::utils::get_folder_images(&canon_full);
+            let opened = state.opened_comic_files.read().unwrap();
+            let registered_pages = opened.get(&comic_id).ok_or("請先開啟漫畫再刪除頁面")?;
+            if registered_pages.len() != images.len()
+                || registered_pages
+                    .iter()
+                    .zip(&images)
+                    .any(|(registered, current)| {
+                        Path::new(registered).canonicalize().ok().as_ref()
+                            != current.canonicalize().ok().as_ref()
+                    })
             {
-                let parent = canon_full.parent().ok_or("漫畫資料夾沒有可用父層")?;
-                let parent_dir =
-                    cap_std::fs::Dir::open_ambient_dir(parent, cap_std::ambient_authority())
-                        .map_err(|error| format!("無法開啟漫畫父資料夾: {error}"))?;
-                let quarantine_path = Path::new(".gai-quarantine").join("pages");
-                parent_dir
-                    .create_dir_all(&quarantine_path)
-                    .map_err(|error| format!("無法建立隔離區: {error}"))?;
-                let quarantine_dir = parent_dir
-                    .open_dir(&quarantine_path)
-                    .map_err(|error| format!("隔離區無效: {error}"))?;
-                let source_dir =
-                    cap_std::fs::Dir::open_ambient_dir(&canon_full, cap_std::ambient_authority())
-                        .map_err(|error| format!("無法開啟漫畫資料夾: {error}"))?;
-                let filename = canonical_target.file_name().ok_or("頁面檔名無效")?;
-                let display_name = filename.to_string_lossy();
-                let destination = format!("{}-{display_name}", uuid::Uuid::new_v4());
-                source_dir
-                    .rename(filename, &quarantine_dir, &destination)
-                    .map_err(|error| format!("無法將頁面移入隔離區: {error}"))?;
+                return Err("漫畫頁面已變更，請重新開啟後再刪除".into());
             }
+            drop(opened);
+            if page_index < images.len() {
+                let canonical_target = images[page_index]
+                    .canonicalize()
+                    .map_err(|error| format!("頁面路徑無效: {error}"))?;
+                if !canonical_target.starts_with(&canon_full) || !canonical_target.is_file() {
+                    return Err("頁面超出已登記漫畫資料夾".into());
+                }
+                #[cfg(not(target_os = "ios"))]
+                trash::delete(&canonical_target).map_err(|error| error.to_string())?;
+                #[cfg(target_os = "ios")]
+                {
+                    let parent = canon_full.parent().ok_or("漫畫資料夾沒有可用父層")?;
+                    let parent_dir =
+                        cap_std::fs::Dir::open_ambient_dir(parent, cap_std::ambient_authority())
+                            .map_err(|error| format!("無法開啟漫畫父資料夾: {error}"))?;
+                    let quarantine_path = Path::new(".gai-quarantine").join("pages");
+                    parent_dir
+                        .create_dir_all(&quarantine_path)
+                        .map_err(|error| format!("無法建立隔離區: {error}"))?;
+                    let quarantine_dir = parent_dir
+                        .open_dir(&quarantine_path)
+                        .map_err(|error| format!("隔離區無效: {error}"))?;
+                    let source_dir = cap_std::fs::Dir::open_ambient_dir(
+                        &canon_full,
+                        cap_std::ambient_authority(),
+                    )
+                    .map_err(|error| format!("無法開啟漫畫資料夾: {error}"))?;
+                    let filename = canonical_target.file_name().ok_or("頁面檔名無效")?;
+                    let display_name = filename.to_string_lossy();
+                    let destination = format!("{}-{display_name}", uuid::Uuid::new_v4());
+                    source_dir
+                        .rename(filename, &quarantine_dir, &destination)
+                        .map_err(|error| format!("無法將頁面移入隔離區: {error}"))?;
+                }
 
-            {
-                let mut opened = state.opened_comic_files.write().unwrap();
-                if let Some(files) = opened.get_mut(&comic_id) {
-                    if page_index < files.len() {
-                        files.remove(page_index);
+                {
+                    let mut opened = state.opened_comic_files.write().unwrap();
+                    if let Some(files) = opened.get_mut(&comic_id) {
+                        if page_index < files.len() {
+                            files.remove(page_index);
+                        }
                     }
                 }
-            }
-            {
-                let mut pool = state.ram_cache_pool.lock().unwrap();
-                if let Some(book_cache) = pool.get_mut(&comic_id) {
-                    let new_cache: std::collections::HashMap<usize, Vec<u8>> = book_cache
-                        .iter()
-                        .filter_map(|(index, data)| {
-                            if *index < page_index {
-                                Some((*index, data.clone()))
-                            } else if *index > page_index {
-                                Some((*index - 1, data.clone()))
-                            } else {
-                                None
-                            }
-                        })
-                        .collect();
-                    *book_cache = new_cache;
-                }
-            }
+                // An in-flight preload still uses the old page indexes. Cancel it
+                // before clearing rather than cloning/reindexing up to a GiB of data.
+                state
+                    .preload_generation
+                    .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                state.ram_cache_pool.lock().unwrap().remove(&comic_id);
 
-            return Ok(serde_json::json!({ "success": true }));
+                return Ok(serde_json::json!({ "success": true }));
+            }
+        } else {
+            return Err("無法刪除壓縮檔內的單一頁面！".into());
         }
-    } else {
-        return Err("無法刪除壓縮檔內的單一頁面！".into());
-    }
 
-    Ok(serde_json::json!({ "success": false }))
+        Ok(serde_json::json!({ "success": false }))
+    })
+    .await
+    .map_err(|error| format!("刪除頁面背景工作失敗: {error}"))?
+}
+
+fn authorized_page_comic_path(
+    item: &ComicItem,
+    scan_dir: &str,
+    bookmarks: &[state::ExternalBookmark],
+    active: &std::collections::HashMap<String, String>,
+) -> Result<std::path::PathBuf, String> {
+    let root = if let Some(bookmark) = item.external_bookmark.as_deref() {
+        if !bookmarks.iter().any(|entry| entry.bookmark == bookmark)
+            || item.source_id != scanner::external_source_id(bookmark)
+        {
+            return Err("外部漫畫來源已移除，請重新加入資料夾".into());
+        }
+        active
+            .get(bookmark)
+            .ok_or("外部資料夾權限尚未啟用")?
+            .as_str()
+    } else {
+        if scan_dir.is_empty() || item.source_id != scanner::local_source_id(Path::new(scan_dir)) {
+            return Err("漫畫已不屬於目前的掃描目錄".into());
+        }
+        scan_dir
+    };
+    let root = Path::new(root)
+        .canonicalize()
+        .map_err(|error| format!("授權目錄無效: {error}"))?;
+    let path = item
+        .source_path
+        .as_deref()
+        .ok_or("漫畫沒有可修改的已登記位置")?;
+    let path = Path::new(path)
+        .canonicalize()
+        .map_err(|error| format!("漫畫路徑無效: {error}"))?;
+    if !path.starts_with(&root) {
+        return Err("漫畫路徑超出目前授權範圍".into());
+    }
+    Ok(path)
 }
 
 fn save_imported_photo_to_root(
@@ -2889,6 +3365,43 @@ fn save_imported_photo_to_root(
         .open_dir(&import_dir)
         .map_err(|error| format!("無法開啟匯入目錄: {error}"))?;
     write_import_file(&import_handle, filename, data, timestamp_micros)
+}
+
+fn import_photo_payload(filename_header: &str, bytes: &[u8]) -> Result<(String, Vec<u8>), String> {
+    use base64::Engine as _;
+    if bytes.is_empty() || bytes.len() > MAX_IMPORTED_PHOTO_BYTES {
+        return Err("匯入圖片必須介於 1 byte 與 64 MiB".into());
+    }
+    if filename_header.len() > 512 {
+        return Err("匯入檔名過長".into());
+    }
+    let filename = base64::engine::general_purpose::STANDARD
+        .decode(filename_header)
+        .map_err(|_| "匯入檔名格式無效")?;
+    let filename = String::from_utf8(filename).map_err(|_| "匯入檔名必須使用 UTF-8")?;
+    if filename.len() > 200 || !is_safe_import_filename(&filename) {
+        return Err("匯入檔名不安全或過長".into());
+    }
+    Ok((filename, bytes.to_vec()))
+}
+
+#[tauri::command]
+async fn import_photo_bytes(
+    state: State<'_, Arc<AppState>>,
+    request: tauri::ipc::Request<'_>,
+) -> Result<(), String> {
+    let tauri::ipc::InvokeBody::Raw(bytes) = request.body() else {
+        return Err("匯入圖片需要二進位資料".into());
+    };
+    let filename_header = request
+        .headers()
+        .get("x-gai-filename")
+        .and_then(|value| value.to_str().ok())
+        .ok_or("匯入圖片缺少檔名")?;
+    // Validate the borrowed transport body before making the one owned copy
+    // needed by the background writer.
+    let (filename, data) = import_photo_payload(filename_header, bytes)?;
+    save_imported_photo(state, filename, data).await
 }
 
 #[tauri::command]
@@ -3053,9 +3566,22 @@ async fn save_progress(
     if id.is_empty() || id.len() > 4096 {
         return Err("閱讀進度漫畫識別碼格式不正確".into());
     }
-    let progress_lock = comic_progress_lock(state.inner(), &id).await;
+    let requested_source_id = data
+        .source_id
+        .as_deref()
+        .map(str::trim)
+        .filter(|source_id| !source_id.is_empty())
+        .map(str::to_owned);
+    if data.source_id.is_some() && requested_source_id.is_none() {
+        return Err("閱讀進度來源識別碼格式不正確".into());
+    }
+    let progress_identity = requested_source_id
+        .as_deref()
+        .map(|source_id| format!("{source_id}\0{id}"))
+        .unwrap_or_else(|| id.clone());
+    let progress_lock = comic_progress_lock(state.inner(), &progress_identity).await;
     let _progress_lifecycle = progress_lock.lock().await;
-    progress_sequence_is_current(state.inner(), &id, data.sequence).await?;
+    progress_sequence_is_current(state.inner(), &progress_identity, data.sequence).await?;
     let opened_total_pages = state
         .opened_comic_files
         .read()
@@ -3090,17 +3616,39 @@ async fn save_progress(
         .await
         .map_err(|error| format!("照片進度背景工作失敗：{error}"))??;
         *state.photo_progress.lock().await = photo_progress;
-        commit_progress_sequence(state.inner(), &id, data.sequence).await;
+        commit_progress_sequence(state.inner(), &progress_identity, data.sequence).await;
         return Ok(());
     }
     let scan_dir = state.scan_dir.read().unwrap().clone();
     let now = chrono::Utc::now().to_rfc3339();
     let (progress, is_local_source) = {
         let comics = state.comics.lock().await;
-        let comic = comics
-            .iter()
-            .find(|comic| comic.id == id)
-            .ok_or_else(|| "找不到閱讀中的漫畫，已拒絕寫入孤兒進度".to_string())?;
+        let matching = comics.iter().filter(|comic| {
+            comic.id == id
+                && requested_source_id
+                    .as_deref()
+                    .map(|source_id| comic.source_id == source_id)
+                    .unwrap_or(true)
+        });
+        let matching = matching.collect::<Vec<_>>();
+        if matching.is_empty() {
+            return Err(if requested_source_id.is_some() {
+                "漫畫來源與閱讀進度來源不匹配，已拒絕寫入".into()
+            } else {
+                "找不到閱讀中的漫畫，已拒絕寫入孤兒進度".into()
+            });
+        }
+        if requested_source_id.is_none()
+            && matching
+                .iter()
+                .map(|comic| comic.source_id.as_str())
+                .collect::<std::collections::BTreeSet<_>>()
+                .len()
+                > 1
+        {
+            return Err("閱讀進度漫畫識別碼不唯一，請提供 sourceId".into());
+        }
+        let comic = matching[0];
         let progress = Progress {
             current_page,
             total_pages,
@@ -3112,23 +3660,40 @@ async fn save_progress(
 
     let store = catalog_store(&state)?;
     let identifier = id.clone();
+    let source_id_for_save = requested_source_id.clone();
     let sqlite_progress = progress.clone();
-    tokio::task::spawn_blocking(move || store.save_progress(&identifier, &sqlite_progress))
-        .await
-        .map_err(|error| format!("穩定進度儲存工作失敗: {error}"))??;
+    tokio::task::spawn_blocking(move || {
+        if let Some(source_id) = source_id_for_save.as_deref() {
+            store.save_progress_for_source(&identifier, source_id, &sqlite_progress)
+        } else {
+            store.save_progress(&identifier, &sqlite_progress)
+        }
+    })
+    .await
+    .map_err(|error| format!("穩定進度儲存工作失敗: {error}"))??;
 
     // SQLite is authoritative. Only publish to the in-memory catalogue after
     // persistence succeeds, otherwise a failed write would display fake
     // progress until the next scan.
     {
         let mut comics = state.comics.lock().await;
-        if let Some(comic) = comics.iter_mut().find(|comic| comic.id == id) {
+        if let Some(comic) = comics.iter_mut().find(|comic| {
+            comic.id == id
+                && requested_source_id
+                    .as_deref()
+                    .map(|source_id| comic.source_id == source_id)
+                    .unwrap_or(true)
+        }) {
             comic.progress = progress.clone();
             comic.page_count = total_pages;
         }
     }
 
-    if is_local_source && !scan_dir.is_empty() {
+    let sidecar_matches_source = requested_source_id
+        .as_deref()
+        .map(|source_id| source_id == scanner::local_source_id(Path::new(&scan_dir)))
+        .unwrap_or(true);
+    if is_local_source && !scan_dir.is_empty() && sidecar_matches_source {
         let _file_guard = state.progress_file_lock.lock().await;
         let scan_dir = std::path::PathBuf::from(scan_dir);
         let progress_id = id.clone();
@@ -3141,7 +3706,7 @@ async fn save_progress(
             eprintln!("⚠️ SQLite 進度已儲存，但相容 sidecar 寫入失敗：{error}");
         }
     }
-    commit_progress_sequence(state.inner(), &id, data.sequence).await;
+    commit_progress_sequence(state.inner(), &progress_identity, data.sequence).await;
     Ok(())
 }
 
@@ -3170,9 +3735,7 @@ pub fn run() {
         .manage(app_state.clone())
         .register_asynchronous_uri_scheme_protocol("gai", move |app, request, responder| {
             let handle = app.app_handle().clone();
-            let workers = if request.uri().host() == Some("cover")
-                || request.uri().path().starts_with("/cover/")
-            {
+            let workers = if protocol::is_thumbnail_request(request.uri()) {
                 cover_workers.clone()
             } else {
                 page_workers.clone()
@@ -3221,11 +3784,20 @@ pub fn run() {
                     .write()
                     .map_err(|_| std::io::Error::other("無法載入漫畫目錄設定"))? = scan_dir;
             }
-            *app_state
-                .external_bookmarks
-                .write()
-                .map_err(|_| std::io::Error::other("無法載入外部資料夾授權"))? =
-                load_persisted_external_bookmarks(&catalog_dir);
+            match load_persisted_external_bookmarks(&catalog_dir) {
+                Ok(bookmarks) => {
+                    *app_state
+                        .external_bookmarks
+                        .write()
+                        .map_err(|_| std::io::Error::other("無法載入外部資料夾授權"))? = bookmarks;
+                }
+                Err(error) => {
+                    app_state
+                        .external_bookmarks_readable
+                        .store(false, std::sync::atomic::Ordering::Release);
+                    log::warn!("外部來源清單暫時不可讀，保留現有目錄狀態：{error}");
+                }
+            }
             #[cfg(target_os = "ios")]
             {
                 if let Ok(document_dir) = app.path().document_dir() {
@@ -3281,6 +3853,7 @@ pub fn run() {
             set_linked_photo_albums,
             set_photo_network_allowed,
             set_bookmarks,
+            repair_external_bookmarks,
             get_bookmarks,
             open_folder_dialog,
             browse_folders,
@@ -3290,8 +3863,10 @@ pub fn run() {
             undo_comic_file_operation,
             trash_page,
             save_imported_photo,
+            import_photo_bytes,
             scan_library,
             search_catalog,
+            get_discovery_tags,
             get_comic_metadata,
             apply_batch_metadata,
             undo_batch_metadata,
@@ -3322,7 +3897,172 @@ pub fn run() {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[cfg(unix)]
+    #[test]
+    fn smb_temp_root_symlink_is_rejected_even_inside_temp_base() {
+        let root = std::env::temp_dir().join(format!("gai_smb_root_link_{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(root.join("other-cache")).unwrap();
+        std::os::unix::fs::symlink("other-cache", root.join("ComicTemp")).unwrap();
+        std::fs::write(root.join("other-cache/book.cbz"), b"keep").unwrap();
+        assert!(open_smb_temp_root(&root, "smb:v1:test").is_err());
+        assert!(remove_smb_temp_entry(&root, "smb:v1:test", Path::new("book.cbz")).is_err());
+        assert_eq!(
+            std::fs::read(root.join("other-cache/book.cbz")).unwrap(),
+            b"keep"
+        );
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn smb_download_limits_reject_oversize_low_space_and_invalid_stream_lengths() {
+        let reserve = SMB_DISK_RESERVE_BYTES;
+        assert!(smb_download_budget(1, reserve).is_err());
+        assert!(smb_download_budget(0, reserve + 100).is_err());
+        assert_eq!(smb_download_budget(100, reserve + 100).unwrap(), 100);
+        assert!(smb_download_budget(101, reserve + 100).is_err());
+        assert!(smb_download_budget(archive_reader::MAX_ARCHIVE_BYTES + 1, u64::MAX).is_err());
+        assert_eq!(checked_smb_download_size(90, 10, 100, 100).unwrap(), 100);
+        assert!(checked_smb_download_size(90, 11, 100, 100).is_err());
+        assert!(checked_smb_download_size(90, 10, 200, 99).is_err());
+        assert!(checked_smb_download_size(u64::MAX, 1, u64::MAX, u64::MAX).is_err());
+    }
     use std::fs;
+
+    #[test]
+    fn bookmark_additions_preserve_reader_but_removals_invalidate_it() {
+        for (removed_bookmark, removed_comic, should_invalidate) in [
+            (false, false, false),
+            (true, false, true),
+            (false, true, true),
+        ] {
+            let state = AppState::new();
+            *state.active_comic_id.lock().unwrap() = Some("reading".into());
+            state
+                .opened_comic_files
+                .write()
+                .unwrap()
+                .insert("reading".into(), vec!["page.jpg".into()]);
+            let before = state
+                .reader_generation
+                .load(std::sync::atomic::Ordering::SeqCst);
+            reconcile_bookmark_reader_cache(&state, removed_bookmark, removed_comic);
+            assert_eq!(
+                state.active_comic_id.lock().unwrap().is_none(),
+                should_invalidate
+            );
+            assert_eq!(
+                state.opened_comic_files.read().unwrap().is_empty(),
+                should_invalidate
+            );
+            assert_eq!(
+                state
+                    .reader_generation
+                    .load(std::sync::atomic::Ordering::SeqCst),
+                before + u64::from(should_invalidate)
+            );
+        }
+    }
+
+    #[test]
+    fn atomically_replaces_settings_without_leaving_temporary_files() {
+        let settings_dir =
+            std::env::temp_dir().join(format!("gai-settings-write-test-{}", uuid::Uuid::new_v4()));
+        fs::create_dir_all(&settings_dir).unwrap();
+        let destination = settings_dir.join(EXTERNAL_BOOKMARKS_SETTINGS_FILE);
+        fs::write(&destination, br#"[{"bookmark":"old"}]"#).unwrap();
+
+        persist_settings_file_atomically(
+            &settings_dir,
+            EXTERNAL_BOOKMARKS_SETTINGS_FILE,
+            br#"[{"bookmark":"new"}]"#,
+        )
+        .unwrap();
+
+        assert_eq!(fs::read(&destination).unwrap(), br#"[{"bookmark":"new"}]"#);
+        assert_eq!(fs::read_dir(&settings_dir).unwrap().count(), 1);
+        fs::remove_dir_all(settings_dir).unwrap();
+    }
+
+    #[test]
+    fn bookmark_restore_migrates_legacy_only_when_native_file_is_missing() {
+        let dir =
+            std::env::temp_dir().join(format!("gai-bookmark-restore-{}", uuid::Uuid::new_v4()));
+        fs::create_dir_all(&dir).unwrap();
+        let legacy = vec![state::ExternalBookmark {
+            bookmark: "legacy-grant".into(),
+            name: "Legacy".into(),
+        }];
+        let migrated = external_bookmarks_for_restore(&dir, legacy.clone(), true).unwrap();
+        assert_eq!(migrated[0].bookmark, "legacy-grant");
+        assert!(!dir.join(EXTERNAL_BOOKMARKS_SETTINGS_FILE).exists());
+
+        fs::write(
+            dir.join(EXTERNAL_BOOKMARKS_SETTINGS_FILE),
+            br#"[{"bookmark":"native-grant","name":"Native"}]"#,
+        )
+        .unwrap();
+        for browser in [Vec::new(), legacy] {
+            let restored = external_bookmarks_for_restore(&dir, browser, true).unwrap();
+            assert_eq!(restored.len(), 1);
+            assert_eq!(restored[0].bookmark, "native-grant");
+        }
+        fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn bookmark_restore_defers_migration_when_legacy_cache_cannot_be_read() {
+        let dir =
+            std::env::temp_dir().join(format!("gai-bookmark-cache-read-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&dir).unwrap();
+        assert!(external_bookmarks_for_restore(&dir, Vec::new(), false).is_err());
+        assert!(!dir.join(EXTERNAL_BOOKMARKS_SETTINGS_FILE).exists());
+        std::fs::write(dir.join(EXTERNAL_BOOKMARKS_SETTINGS_FILE), b"[]").unwrap();
+        assert!(external_bookmarks_for_restore(&dir, Vec::new(), false)
+            .unwrap()
+            .is_empty());
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn bookmark_restore_preserves_an_explicitly_saved_empty_native_list() {
+        let dir = std::env::temp_dir().join(format!("gai-bookmark-empty-{}", uuid::Uuid::new_v4()));
+        fs::create_dir_all(&dir).unwrap();
+        fs::write(dir.join(EXTERNAL_BOOKMARKS_SETTINGS_FILE), b"[]").unwrap();
+        let stale = vec![state::ExternalBookmark {
+            bookmark: "removed-grant".into(),
+            name: "Removed".into(),
+        }];
+        assert!(external_bookmarks_for_restore(&dir, stale, true)
+            .unwrap()
+            .is_empty());
+        fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn bookmark_restore_never_treats_corrupt_or_unreadable_native_data_as_missing() {
+        let dir =
+            std::env::temp_dir().join(format!("gai-bookmark-invalid-{}", uuid::Uuid::new_v4()));
+        fs::create_dir_all(&dir).unwrap();
+        let file = dir.join(EXTERNAL_BOOKMARKS_SETTINGS_FILE);
+        let legacy = vec![state::ExternalBookmark {
+            bookmark: "legacy-grant".into(),
+            name: "Legacy".into(),
+        }];
+        for invalid in [
+            b"not JSON".as_slice(),
+            br#"[{"bookmark":"missing-name"}]"#.as_slice(),
+        ] {
+            fs::write(&file, invalid).unwrap();
+            assert!(external_bookmarks_for_restore(&dir, legacy.clone(), true).is_err());
+            assert_eq!(fs::read(&file).unwrap(), invalid);
+        }
+        fs::remove_file(&file).unwrap();
+        fs::create_dir(&file).unwrap();
+        assert!(external_bookmarks_for_restore(&dir, legacy, true).is_err());
+        assert!(file.is_dir());
+        fs::remove_dir_all(dir).unwrap();
+    }
 
     fn capability_comic(id: &str, title: &str) -> ComicItem {
         ComicItem {
@@ -3344,6 +4084,18 @@ mod tests {
             source_id: "local:test".into(),
             source_path: Some("/tmp/book.zip".into()),
         }
+    }
+
+    #[test]
+    fn duplicate_runtime_ids_from_different_sources_cannot_open() {
+        let first = capability_comic("shared", "A");
+        let mut second = capability_comic("shared", "B");
+        assert!(!runtime_id_has_multiple_sources(
+            &[first.clone(), second.clone()],
+            "shared"
+        ));
+        second.source_id = "external:other".into();
+        assert!(runtime_id_has_multiple_sources(&[first, second], "shared"));
     }
 
     #[test]
@@ -3418,6 +4170,7 @@ mod tests {
     fn progress_values_clamp_stale_indexes_and_finish_on_the_last_page() {
         assert_eq!(normalize_progress_values(99, 3).unwrap(), (2, 3, 100.0));
         assert_eq!(normalize_progress_values(0, 3).unwrap(), (0, 3, 0.0));
+        assert_eq!(normalize_progress_values(0, 1).unwrap(), (0, 1, 100.0));
         assert_eq!(normalize_progress_values(5, 0).unwrap(), (0, 0, 0.0));
         assert_eq!(authoritative_total_pages(Some(7), 999).unwrap(), 7);
         assert_eq!(authoritative_total_pages(None, 9).unwrap(), 9);
@@ -3434,24 +4187,82 @@ mod tests {
                 .as_nanos()
         ));
         fs::create_dir_all(&root).unwrap();
-        let partial = root.join("book.part");
-        let final_path = root.join("book.cbz");
-        fs::write(&partial, b"complete").unwrap();
+        let source_id = "smb:v1:test";
+        let temp_root = open_smb_temp_root(&root, source_id).unwrap();
+        let partial = Path::new("book.part");
+        let final_path = Path::new("book.cbz");
+        let mut partial_file = temp_root
+            .open_with(
+                partial,
+                cap_std::fs::OpenOptions::new().write(true).create_new(true),
+            )
+            .unwrap()
+            .into_std();
+        partial_file.write_all(b"complete").unwrap();
         let state = AppState::new();
         state
             .reader_generation
             .store(4, std::sync::atomic::Ordering::Release);
-        commit_smb_download_if_current(&state, 4, &partial, &final_path).unwrap();
-        assert_eq!(fs::read(&final_path).unwrap(), b"complete");
+        commit_smb_download_if_current(&state, 4, &temp_root, partial, final_path).unwrap();
+        assert_eq!(
+            fs::read(
+                root.join("ComicTemp")
+                    .join(source_id.replace(':', "_"))
+                    .join("book.cbz"),
+            )
+            .unwrap(),
+            b"complete"
+        );
 
-        let stale_partial = root.join("stale.part");
-        fs::write(&stale_partial, b"stale").unwrap();
+        let stale_partial = Path::new("stale.part");
+        let mut stale_file = temp_root
+            .open_with(
+                stale_partial,
+                cap_std::fs::OpenOptions::new().write(true).create_new(true),
+            )
+            .unwrap()
+            .into_std();
+        stale_file.write_all(b"stale").unwrap();
         state
             .reader_generation
             .store(5, std::sync::atomic::Ordering::Release);
-        assert!(commit_smb_download_if_current(&state, 4, &stale_partial, &final_path).is_err());
-        assert!(stale_partial.exists());
-        assert_eq!(fs::read(&final_path).unwrap(), b"complete");
+        assert!(
+            commit_smb_download_if_current(&state, 4, &temp_root, stale_partial, final_path)
+                .is_err()
+        );
+        assert!(temp_root.try_exists(stale_partial).unwrap());
+        temp_root.remove_file(stale_partial).unwrap();
+        assert!(!temp_root.try_exists(stale_partial).unwrap());
+        assert_eq!(
+            fs::read(
+                root.join("ComicTemp")
+                    .join(source_id.replace(':', "_"))
+                    .join("book.cbz"),
+            )
+            .unwrap(),
+            b"complete"
+        );
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn smb_temp_root_rejects_symlink_escape() {
+        use std::os::unix::fs::symlink;
+
+        let root = std::env::temp_dir().join(format!(
+            "gai-smb-symlink-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap_or_default()
+                .as_nanos()
+        ));
+        let outside = root.join("outside");
+        fs::create_dir_all(&outside).unwrap();
+        symlink(&outside, root.join("ComicTemp")).unwrap();
+
+        assert!(open_smb_temp_root(&root, "smb:v1:test").is_err());
         fs::remove_dir_all(root).unwrap();
     }
 
@@ -3606,6 +4417,56 @@ mod tests {
         );
         assert_eq!(fs::read(temp_dir.join("123_1_photo.jpg")).unwrap(), b"new");
         fs::remove_dir_all(temp_dir).unwrap_or_default();
+    }
+
+    #[test]
+    fn binary_photo_payload_validates_filename_before_copy() {
+        use base64::Engine as _;
+        let encode = |name: &str| base64::engine::general_purpose::STANDARD.encode(name);
+        let (name, bytes) = import_photo_payload(&encode("照片.png"), b"image").unwrap();
+        assert_eq!(name, "照片.png");
+        assert_eq!(bytes, b"image");
+        assert!(import_photo_payload(&encode("../escape.png"), b"image").is_err());
+        assert!(import_photo_payload(&encode("photo.png"), b"").is_err());
+        assert!(import_photo_payload("invalid*base64", b"image").is_err());
+        assert!(import_photo_payload(&encode(&"x".repeat(201)), b"image").is_err());
+        let oversized = vec![0; MAX_IMPORTED_PHOTO_BYTES + 1];
+        assert!(import_photo_payload(&encode("photo.png"), &oversized).is_err());
+    }
+
+    #[test]
+    fn page_deletion_requires_current_source_and_active_bookmark() {
+        let temp = std::env::temp_dir().join(format!("gai-page-auth-{}", uuid::Uuid::new_v4()));
+        let old = temp.join("old");
+        let new = temp.join("new");
+        fs::create_dir_all(old.join("book")).unwrap();
+        fs::create_dir_all(&new).unwrap();
+        let mut item = capability_comic("book", "Book");
+        item.source_id = scanner::local_source_id(&old);
+        item.source_path = Some(old.join("book").to_string_lossy().into_owned());
+        let mut active = std::collections::HashMap::new();
+        assert!(authorized_page_comic_path(&item, old.to_str().unwrap(), &[], &active).is_ok());
+        assert!(authorized_page_comic_path(&item, new.to_str().unwrap(), &[], &active).is_err());
+        item.source_path = Some(new.to_string_lossy().into_owned());
+        assert!(authorized_page_comic_path(&item, old.to_str().unwrap(), &[], &active).is_err());
+        item.source_path = Some(old.join("book").to_string_lossy().into_owned());
+        item.external_bookmark = Some("grant".into());
+        item.source_id = scanner::external_source_id("grant");
+        let bookmarks = vec![state::ExternalBookmark {
+            bookmark: "grant".into(),
+            name: "Old".into(),
+        }];
+        assert!(authorized_page_comic_path(&item, "", &bookmarks, &active).is_err());
+        active.insert("grant".into(), old.to_string_lossy().into_owned());
+        assert!(authorized_page_comic_path(&item, "", &bookmarks, &active).is_ok());
+        assert!(authorized_page_comic_path(&item, "", &[], &active).is_err());
+        #[cfg(unix)]
+        {
+            std::os::unix::fs::symlink(&new, old.join("escape")).unwrap();
+            item.source_path = Some(old.join("escape").to_string_lossy().into_owned());
+            assert!(authorized_page_comic_path(&item, "", &bookmarks, &active).is_err());
+        }
+        fs::remove_dir_all(temp).unwrap();
     }
 
     #[test]

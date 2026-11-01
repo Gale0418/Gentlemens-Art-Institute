@@ -169,11 +169,11 @@ fn build_libarchive() {
             .define("ENABLE_ZSTD", "ON")
             .define("ENABLE_LZ4", "ON");
     } else if target.contains("wasm") {
-        // WASM is not fully supported by libarchive v3.8.1
+        // WASM is not fully supported by libarchive v3.8.9
         // The library requires POSIX types (pid_t, uid_t, gid_t, etc.) that don't exist in WASM
         // CMake configuration fails when trying to detect these types
         panic!(
-            "WASM target is not supported by libarchive v3.8.1. \
+            "WASM target is not supported by libarchive v3.8.9. \
                 The library requires POSIX types and system calls that are not available in WebAssembly. \
                 Supported platforms: macOS, Windows, Linux, iOS, Android"
         );

@@ -1,5 +1,5 @@
 use crate::scanner::{merge_discovered_comics, LibraryBatch};
-use crate::state::{AppState, ComicItem, Progress, SmbConfig};
+use crate::state::{self, AppState, ComicItem, Progress, SmbConfig};
 use base64::{engine::general_purpose, Engine as _};
 use std::path::Path;
 use std::sync::Arc;
@@ -12,15 +12,18 @@ const UNKNOWN_SMB_TIME: &str = "1970-01-01T00:00:00+00:00";
 const SMB_PROGRESS_BATCH: usize = 64;
 const SMB_PROGRESS_INTERVAL: Duration = Duration::from_millis(400);
 
-fn smb_runtime_id(relative_path: &str) -> String {
-    // Prefix the decoded capability path with "./" so an SMB item cannot
-    // collide with a local item that has the same relative path. Existing
-    // path consumers still resolve "./series/book.cbz" to the same temp file.
-    general_purpose::URL_SAFE_NO_PAD.encode(format!("./{relative_path}").as_bytes())
+#[cfg(test)]
+fn legacy_smb_runtime_id(relative_path: &str) -> String {
+    general_purpose::URL_SAFE_NO_PAD.encode(relative_path.as_bytes())
 }
 
-fn legacy_runtime_id(relative_path: &str) -> String {
-    general_purpose::URL_SAFE_NO_PAD.encode(relative_path.as_bytes())
+fn smb_runtime_id(source_id: &str, relative_path: &str) -> String {
+    // Prefix the decoded capability path with "./" so an SMB item cannot
+    // collide with a local item that has the same relative path. The source
+    // envelope keeps two SMB endpoints with the same path distinct while the
+    // protocol strips the envelope before opening the cached file.
+    general_purpose::URL_SAFE_NO_PAD
+        .encode(format!("gai-smb-v1\0{source_id}\0./{relative_path}").as_bytes())
 }
 
 fn safe_smb_entry_name(name: &str) -> bool {
@@ -59,6 +62,7 @@ pub async fn scan_smb(
     app_handle: tauri::AppHandle,
 ) -> Result<(), String> {
     crate::commerce::require_pro(&app_handle).await?;
+    let source_id = state::smb_source_id(&config);
     let addr = format!("{}:445", config.host);
     let username = config.username.unwrap_or_else(|| "guest".to_string());
     let password = config.password.unwrap_or_default();
@@ -107,7 +111,7 @@ pub async fn scan_smb(
         let comics = state.comics.lock().await;
         comics
             .iter()
-            .filter(|comic| comic.source_id != "smb")
+            .filter(|comic| comic.source_id != source_id.as_str())
             .count()
     };
     let mut new_comics = Vec::new();
@@ -118,6 +122,7 @@ pub async fn scan_smb(
         &mut client,
         &mut tree,
         "",
+        &source_id,
         &progress_map,
         &mut new_comics,
         &mut directories,
@@ -174,6 +179,7 @@ pub(crate) async fn scan_visible_smb(
 
     crate::commerce::require_pro(&app_handle).await?;
 
+    let source_id = state::smb_source_id(&config);
     let addr = format!("{}:445", config.host);
     let username = config.username.unwrap_or_else(|| "guest".to_string());
     let password = config.password.unwrap_or_default();
@@ -229,6 +235,7 @@ pub(crate) async fn scan_visible_smb(
         &mut client,
         &mut tree,
         &relative_path,
+        &source_id,
         &progress_map,
         &mut results,
         &mut directories,
@@ -268,7 +275,7 @@ pub(crate) async fn scan_visible_smb(
                 found: 0,
                 visible: true,
                 visible_path: Some(relative_path),
-                visible_source_id: Some("smb".to_string()),
+                visible_source_id: Some(source_id.clone()),
                 directories: Some(directories),
             },
         );
@@ -281,6 +288,7 @@ async fn scan_smb_dir(
     client: &mut smb2::SmbClient,
     tree: &mut smb2::Tree,
     dir_path: &str,
+    source_id: &str,
     progress_map: &std::collections::HashMap<String, Progress>,
     results: &mut Vec<ComicItem>,
     directories: &mut Vec<String>,
@@ -352,6 +360,7 @@ async fn scan_smb_dir(
                 client,
                 tree,
                 &full_rel_path,
+                source_id,
                 progress_map,
                 results,
                 directories,
@@ -377,23 +386,18 @@ async fn scan_smb_dir(
             continue;
         }
 
-        let id = smb_runtime_id(&full_rel_path);
-        let legacy_id = legacy_runtime_id(&full_rel_path);
+        let id = smb_runtime_id(source_id, &full_rel_path);
         let title = std::path::Path::new(&name)
             .file_stem()
             .and_then(|value| value.to_str())
             .unwrap_or(&name)
             .to_string();
-        let progress = progress_map
-            .get(&id)
-            .or_else(|| progress_map.get(&legacy_id))
-            .cloned()
-            .unwrap_or(Progress {
-                current_page: 0,
-                total_pages: 0,
-                percent: 0.0,
-                updated_at: None,
-            });
+        let progress = progress_map.get(&id).cloned().unwrap_or(Progress {
+            current_page: 0,
+            total_pages: 0,
+            percent: 0.0,
+            updated_at: None,
+        });
         let series = if dir_path.is_empty() {
             "SMB Cloud".to_string()
         } else {
@@ -410,7 +414,7 @@ async fn scan_smb_dir(
             updated_at: smb_filetime_rfc3339(entry.modified),
             page_count: 0,
             progress,
-            source_id: "smb".to_string(),
+            source_id: source_id.to_string(),
             source_path: None,
             external_bookmark: None,
         });
@@ -573,11 +577,15 @@ mod tests {
     #[test]
     fn smb_runtime_id_is_source_scoped_but_decodes_to_same_path() {
         let relative = "series/book.cbz";
-        let smb_id = smb_runtime_id(relative);
-        let local_id = legacy_runtime_id(relative);
+        let source_id = "smb:v1:test";
+        let smb_id = smb_runtime_id(source_id, relative);
+        let local_id = legacy_smb_runtime_id(relative);
         assert_ne!(smb_id, local_id);
         let decoded = general_purpose::URL_SAFE_NO_PAD.decode(smb_id).unwrap();
-        assert_eq!(String::from_utf8(decoded).unwrap(), "./series/book.cbz");
+        assert_eq!(
+            String::from_utf8(decoded).unwrap(),
+            format!("gai-smb-v1\0{source_id}\0./series/book.cbz")
+        );
     }
 
     #[test]

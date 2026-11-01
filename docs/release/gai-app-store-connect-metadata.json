@@ -9,13 +9,13 @@
     "appStoreConnectAppId": "6809937717",
     "bundleId": "com.windsheep.gai",
     "version": "1.0.0",
-    "build": "36; processed VALID by App Store Connect 2026-09-27",
+    "build": "42; App Store Connect processingState VALID; attached to iOS version 1.0 on 2026-09-28",
     "minimumOS": "15.0",
     "rustToolchain": "1.98.1",
     "supportedDevices": [
       "iPhone and iPad in the processed iOS build; physical final-package checks pending"
     ],
-    "signingAndArtifactEvidence": "App Store build 667ce7d0-0319-490e-bde2-cf8af78a0d5d processed VALID; signed IPA SHA-256 2b4432ed679b523cfb7e68150724365436e313d15d2ce35fe253dd4850ca333f; private signing material stays outside repository",
+    "signingAndArtifactEvidence": "App Store Connect build b0d10edc-d86d-4ca2-bc54-425f611cc4ec (42) processed VALID and attached to version 1.0; minimum iOS 15.0. A local signed IPA hash was not independently reread this turn.",
     "launchLocales": [
       "zh-Hant",
       "en-US",
@@ -58,19 +58,29 @@
   },
   "storeListing": {
     "appName": "紳士藝術研究所",
-    "subtitle": "漫畫太多？滑成條漫就好",
-    "promotionalText": "把你本機、外接硬碟或 NAS 上的圖片與 ZIP／CBZ、RAR／CBR、7z／CB7 放進自己的漫畫書架。條漫、單頁、雙頁都能看；App 不附漫畫，也不提供下載。",
+    "subtitle": "專門整理本機漫畫的好用閱讀器",
+    "promotionalText": "漫畫散落在資料夾和壓縮檔，找書找得像在考古？G.A.I 幫你整理自有收藏，條漫、單頁、雙頁都能看。v1 Pro 一次買斷 NT$150，沒有訂閱。App 不附漫畫、不提供下載。",
     "keywords": [
-      "漫畫",
-      "閱讀器",
+      "CBZ",
+      "CBR",
+      "ZIP",
+      "RAR",
+      "7z",
+      "CB7",
       "條漫",
-      "書架",
-      "本機",
+      "雙頁",
+      "相簿",
+      "圖集",
+      "看圖",
       "NAS",
       "SMB",
-      "收藏"
+      "自炊",
+      "離線",
+      "書庫",
+      "匯入",
+      "標籤"
     ],
-    "description": "漫畫堆成山，找一本像在考古？你的收藏值得一個真正好用的書架。\n\nG.A.I 是閱讀你自己已存在本機、外接硬碟或 NAS 上的圖片與漫畫檔的工具。App 不附漫畫，也不提供下載。先選自己的資料夾，就能開始整理與閱讀。\n\nG.A.I 直接讀取圖片資料夾與 ZIP／CBZ、RAR／CBR、7z／CB7，照順序排好頁面。想一路滑，就用條漫；想慢慢翻，就切單頁或雙頁。不必事先把原圖合併成巨圖。\n\n點進資料夾，先看眼前這一層；整個書庫在背景繼續掃。搜尋、收藏、閱讀進度與基本標籤幫你找回「上次看到哪本」。NAS 暫時離線，已整理的書庫紀錄也會留著。\n\n基本閱讀免費：本機檔案、三種閱讀模式、進度、收藏、搜尋、基本標籤、資料匯出與基本復原都能用。透過系統檔案選擇器開啟已掛載的 NAS 資料夾，也在免費範圍。\n\n想整理得更痛快？v1 Pro 一次買斷，沒有訂閱。解鎖直接 SMB／NAS 連線、批次標籤、進階整理、重複作品候選與 AI 解說／整理工具。\n\nAI 是選用功能，須自備 OpenAI 或 Google API Key，確認供應商與傳送內容並同意後才會送出選取頁面與提示文字。Pro 不附 API 額度，供應商費用另計；AI 建議由你審核，不會直接蓋掉人工整理。\n\nG.A.I 不提供漫畫下載、來源爬取或內容訂閱。請使用自己有權使用的檔案。",
+    "description": "你的硬碟裡是不是也塞滿漫畫？有的在資料夾，有的壓成 ZIP 或 CBZ，常常找不到上次看到哪裡。G.A.I 是整理和閱讀自己漫畫檔的書架工具。\n\n【先說清楚：漫畫檔要自己準備】\nG.A.I 不附漫畫、不提供下載、不抓網路圖，也沒有內容訂閱。請放進自己擁有或有權使用的圖片和漫畫檔。\n\n【常見格式都能讀，想怎麼看自己選】\n圖片資料夾、ZIP／CBZ、RAR／CBR、7z／CB7 都能開。想一路往下滑，就用條漫模式；想翻頁，有單頁和雙頁模式。\n\n【基本閱讀免費】\n本機閱讀、閱讀進度、收藏、搜尋和基本標籤都能免費用。還能匯出整理資料，需要時做基本復原。已經用系統檔案工具掛載的 NAS 資料夾，也可以免費開啟。\n\n【想整理更多？v1 Pro 一次買斷 NT$150】\n不用每月付訂閱費。Pro 可以直接連 SMB／NAS、批次加標籤、進階整理，還能找出可能重複的作品，讓你確認後再處理。也有 AI 解說和整理工具。\n\n【AI 需要自備金鑰】\nAI 是選用功能。你要自備 OpenAI 或 Google API Key。Pro 不含 AI 額度，服務商費用另計。選好服務商和內容並按下同意後，App 才會送出你選的頁面和提示文字。AI 結果會先讓你確認，再決定是否採用，不會直接蓋掉手動整理的資料。\n\n自己的收藏自己管。把那一堆「我記得有存」的漫畫找回來吧！",
     "locales": {
       "primary": "zh-Hant",
       "additional": [
@@ -78,7 +88,7 @@
         "ja"
       ]
     },
-    "metadataSyncStatus": "uploaded-read-back iOS and macOS 2026-09-28"
+    "metadataSyncStatus": "uploaded-read-back zh-Hant iOS and macOS 2026-09-28; en-US and ja unchanged"
   },
   "reviewInformation": {
     "sevenRequiredCategories": {
@@ -89,8 +99,8 @@
       },
       "deviceAndOperatingSystem": {
         "status": "partially-known",
-        "value": "Processed App Store Connect build 1.0.0 (36) reports minimum iOS 15.0. Physical review device model and OS evidence remain pending.",
-        "evidence": "App Store Connect build 667ce7d0-0319-490e-bde2-cf8af78a0d5d; physical-device checks pending"
+        "value": "Processed App Store Connect build 1.0 (42) reports minimum iOS 15.0. Physical review device model, OS, and recording evidence for this final package remain pending.",
+        "evidence": "App Store Connect build b0d10edc-d86d-4ca2-bc54-425f611cc4ec; physical-device checks pending"
       },
       "purposeAndTargetAudience": {
         "status": "drafted",
@@ -130,7 +140,9 @@
       "If demonstrating AI, first show that it is optional, show the selected provider and the page-image/prompt disclosure, then explicitly consent. Switch providers once to demonstrate that the previous consent is revoked. Use only a synthetic or authorized page. Do not demonstrate AI if the release build or reviewer notes do not declare the provider path.",
       "If demonstrating direct SMB, state that the server is user-selected and show only a disposable review share; confirm the core reader also works with a local or mounted folder.",
       "End in the app and inspect the exported movie for readable text, continuous physical-device evidence, no secrets, no private metadata, and no unlicensed or age-restricted review material."
-    ]
+    ],
+    "submissionStatus": "Existing draft c6e3d075-2fb5-4958-8334-2717254ddeb9 is READY_FOR_REVIEW and contains the Pro IAP only; app version 1.0 is not attached. Do not create a duplicate submission.",
+    "exportCompliance": "Declaration d6b66a68-a11c-4fd9-93cc-0ee6b994a6b0 exists with availableOnFrenchStore=true and state CREATED. On 2026-09-28 its builds relationship was empty, its French declaration document relationship was null, and asc validate blocked build 42 with build.encryption.declaration_missing."
   },
   "privacyAndCompliance": {
     "privacyPolicyURL": "https://github.com/Gale0418/Gentlemens-Art-Institute/blob/main/README.md#隱私政策",
@@ -139,16 +151,22 @@
     "appPrivacyQuestionnaire": "TODO: complete from the processed release build. Explicitly assess local catalog data, selected page images/prompts sent to optional AI providers, SMB connection data, diagnostics, and whether any data is linked to the user or used for tracking.",
     "ageRating": "App Store Connect questionnaire completed 2026-09-27: FOUR_PLUS for bundled all-ages demo and reader features",
     "copyrightAndContentReview": "App Store Connect declaration DOES_NOT_USE_THIRD_PARTY_CONTENT; bundled reviewer demo is original all-ages landscape artwork. User-provided files remain user responsibility.",
-    "exportCompliance": "App Store Connect declaration d6b66a68-a11c-4fd9-93cc-0ee6b994a6b0 created 2026-09-27 for third-party standard cryptography and France; still CREATED and build validation still reports missing declaration. Resolve documentation/approval before submission.",
+    "exportCompliance": "Standard third-party cryptography declaration d6b66a68-a11c-4fd9-93cc-0ee6b994a6b0 remains CREATED and is not linked to build 42; App Store Connect availability for France was set to unavailable on 2026-09-28 and read back as FRA=false, so French-store declaration paperwork is not being pursued. General export-compliance declaration/build linkage remains required and unresolved.",
     "openSourceNotices": "docs/release/THIRD_PARTY_NOTICES.md; original vendor notices are retained under src-tauri/vendor/; verify shipping or public-link placement before submission",
-    "supportContactEvidence": "Public support address approved for this project."
+    "supportContactEvidence": "Public support address approved for this project.",
+    "frenchStoreAvailability": {
+      "available": false,
+      "updatedAt": "2026-09-28",
+      "readback": "asc pricing availability territory-availabilities returned FRA available=false, contentStatus=CANNOT_SELL",
+      "note": "France removed at owner direction to avoid ANSSI declaration paperwork; other territories were unchanged."
+    }
   },
   "testFlightGate": [
     {
       "id": "artifact",
       "check": "Signed IPA is built from the intended commit with Rust 1.98.1 and processed by Apple",
       "status": "processed-valid",
-      "evidence": "App Store Connect 1.0.0 (36), build 667ce7d0-0319-490e-bde2-cf8af78a0d5d, VALID; signed IPA SHA-256 2b4432ed679b523cfb7e68150724365436e313d15d2ce35fe253dd4850ca333f"
+      "evidence": "App Store Connect version 1.0, build b0d10edc-d86d-4ca2-bc54-425f611cc4ec (42), processingState VALID on 2026-09-28; local signed IPA SHA-256 not independently reread this turn."
     },
     {
       "id": "physical-device",
@@ -207,5 +225,13 @@
     "stageDryRun": "asc release stage --app TODO_APP_ID --version TODO_VERSION --build-id TODO_BUILD_ID --metadata-dir ./metadata/version/TODO_VERSION --dry-run --output table",
     "reviewDryRun": "asc review submit --app TODO_APP_ID --version TODO_VERSION --build-id TODO_BUILD_ID --dry-run --output table",
     "confirmationRule": "Do not add --confirm until the owner has reviewed the local evidence, the remote dry-run output, and all TODOs are resolved."
+  },
+  "macOSRelease": {
+    "appStoreVersionId": "6bbb5919-ea45-4234-b4a3-627b6889bcd8",
+    "version": "1.0",
+    "state": "PREPARE_FOR_SUBMISSION",
+    "build": "Upload attempt 0b6521e2-4540-43d1-80a5-6c20c0f39723 rejected by Apple with ITMS-90242 missing LSApplicationCategoryType, ITMS-90869 arm64-only architecture at macOS 10.13 minimum, and ITMS-90255 icon.icns mode 0700. Rebuilding universal arm64+x86_64 after adding public.app-category.entertainment and correcting icon resource readability.",
+    "metadataSyncStatus": "uploaded-read-back zh-Hant 2026-09-28; en-US and ja unchanged",
+    "screenshots": "none found for this version; App Store validation reports screenshots.required.any"
   }
 }

@@ -1,4 +1,72 @@
 window.GAIL10n.register({
+  "有 {count} 本漫畫的閱讀進度尚未保存。": {
+    "en": "Reading progress for {count} comic(s) is still pending.",
+    "ja": "{count}作品の読書進捗がまだ保存されていません。"
+  },
+  "重試保存閱讀進度": {
+    "en": "Retry saving reading progress",
+    "ja": "読書進捗の保存を再試行"
+  },
+  "放棄未保存進度": {
+    "en": "Discard unsaved progress",
+    "ja": "未保存の進捗を破棄"
+  },
+  "要放棄全部 {count} 筆未保存的閱讀進度嗎？\n這些進度將無法重試；已保存的進度和漫畫檔案不會刪除。": {
+    "en": "Discard all {count} unsaved reading progress entries?\nYou cannot retry these entries. Saved progress and comic files will not be deleted.",
+    "ja": "未保存の読書進捗 {count} 件をすべて破棄しますか？\nこれらの進捗は再試行できなくなります。保存済みの進捗と漫画ファイルは削除されません。"
+  },
+  "無法清除未保存進度，請確認裝置儲存空間後再試。": {
+    "en": "Could not clear unsaved progress. Check your device storage and try again.",
+    "ja": "未保存の進捗を消去できませんでした。端末の空き容量を確認してから再試行してください。"
+  },
+  "此 App session 可重試，尚未可靠備份。": {
+    "en": "This app session can retry, but the progress is not reliably backed up yet.",
+    "ja": "このアプリセッションでは再試行できますが、進捗はまだ確実にバックアップされていません。"
+  },
+  "部分舊進度無法確認來源，無法自動重試。": {
+    "en": "Some older progress has an unknown source and cannot be retried automatically.",
+    "ja": "一部の古い進捗は保存元を確認できないため、自動的に再試行できません。"
+  },
+  "閱讀進度來源格式不正確。": {
+    "en": "The reading progress source is invalid.",
+    "ja": "読書進捗の保存元が無効です。"
+  },
+  "匯入圖片必須介於 1 byte 與 64 MiB。": {
+    "en": "Imported images must be between 1 byte and 64 MiB.",
+    "ja": "読み込む画像は1バイト以上64 MiB以下にしてください。"
+  },
+  "匯入檔名過長。": {
+    "en": "The import filename is too long.",
+    "ja": "読み込むファイル名が長すぎます。"
+  },
+  "閱讀進度序號格式不正確。": {
+    "en": "The reading progress sequence is invalid.",
+    "ja": "読書進捗のシーケンスが無効です。"
+  },
+  "第 {pages} 頁載入失敗，請重試。": {
+    "en": "Page {pages} failed to load. Retry.",
+    "ja": "{pages}ページ目の読み込みに失敗しました。再試行してください。"
+  },
+  "正在重試…": {
+    "en": "Retrying…",
+    "ja": "再試行中…"
+  },
+  "匯入結果：成功 {success} 張，失敗 {failed} 張，未處理 {pending} 張。": {
+    "en": "Import result: {success} succeeded, {failed} failed, {pending} pending.",
+    "ja": "読み込み結果：成功 {success} 枚、失敗 {failed} 枚、未処理 {pending} 枚。"
+  },
+  "重試未匯入的 {count} 張": {
+    "en": "Retry {count} pending photos",
+    "ja": "未処理の写真 {count} 枚を再試行"
+  },
+  "已成功寫入的圖片會保留；請按「重試未匯入的圖片」再次處理失敗項。": {
+    "en": "Successfully imported photos are kept. Use the retry button to process the failed items.",
+    "ja": "正常に読み込めた写真は保持されます。再試行ボタンで失敗した項目を処理してください。"
+  },
+  "正在重試匯入 {count} 張圖片…": {
+    "en": "Retrying import of {count} photos…",
+    "ja": "写真 {count} 枚の読み込みを再試行中…"
+  },
   "購買功能需要 iOS 15 或更新版本": {
     "en": "Purchases require iOS 15 or later.",
     "ja": "購入には iOS 15 以降が必要です。"
@@ -394,5 +462,33 @@ window.GAIL10n.register({
   "使用已儲存 {provider} Key 前，請先明確同意將選定的頁面影像（AI 掃描最多六頁）與提示文字傳送至該第三方 AI 供應商。": {
     "en": "Before using the saved {provider} key, explicitly consent to sending selected page images (up to six for AI Scan) and the prompt to this third-party AI provider.",
     "ja": "保存済みの{provider}キーを使用する前に、選択したページ画像（AIスキャンでは最大6ページ）とプロンプトをこの第三者AIに送信することに明示的に同意してください。"
+  },
+  "已保存的外部資料夾清單損壞；現有來源不會被清除。請重新選取資料夾後修復。": {
+    "en": "The saved external folder list is damaged; existing sources will not be removed. Select a folder again to repair it.",
+    "ja": "保存済みの外部フォルダー一覧が壊れています。既存のソースは削除されません。修復するにはフォルダーをもう一度選択してください。"
+  },
+  "外部資料夾清單需要修復；現有來源不會被清除。請重新選取資料夾。": {
+    "en": "The external folder list needs repair; existing sources will not be removed. Select a folder again.",
+    "ja": "外部フォルダー一覧の修復が必要です。既存のソースは削除されません。フォルダーをもう一度選択してください。"
+  },
+  "外部資料夾清單需要先修復；現有來源沒有變更。": {
+    "en": "Repair the external folder list first. Existing sources are unchanged.",
+    "ja": "先に外部フォルダー一覧を修復してください。既存のソースは変更されていません。"
+  },
+  "先備份損壞清單、重建為已選來源，其他來源需重新加入。確定要繼續嗎？": {
+    "en": "Back up the damaged list first, rebuild it with the selected source, and re-add other sources later. Continue?",
+    "ja": "壊れた一覧を先にバックアップし、選択したソースで再構築します。他のソースは後で再追加する必要があります。続行しますか？"
+  },
+  "選取的外部資料夾授權無效，來源清單沒有變更。": {
+    "en": "The selected external folder authorization is invalid. The source list was not changed.",
+    "ja": "選択した外部フォルダーの認証が無効です。ソース一覧は変更されていません。"
+  },
+  "目前版本不支援修復損壞的外部資料夾清單。": {
+    "en": "This version cannot repair a damaged external folder list.",
+    "ja": "このバージョンは壊れた外部フォルダー一覧を修復できません。"
+  },
+  "已修復並加入：{name}，正在重新掃描。": {
+    "en": "Repaired and added: {name}. Rescanning now.",
+    "ja": "修復して追加しました：{name}。再スキャンしています。"
   }
 });

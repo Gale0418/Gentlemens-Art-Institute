@@ -880,6 +880,17 @@ DEFINE_TEST(test_entry)
 	if (pst == NULL)
 		return;
 	assertEqualInt(pst->st_uid, 22);
+
+	/* Check behavior with large sizes. */
+	archive_entry_set_size(e, INT64_MAX - 1);
+	assert((pst = archive_entry_stat(e)) != NULL);
+	if (pst == NULL)
+		return;
+	if (sizeof(pst->st_size) < sizeof(int64_t))
+		assertEqualInt(pst->st_size, 0);
+	else
+		assertEqualInt(pst->st_size, INT64_MAX - 1);
+
 	/* We don't need to check high-res fields here. */
 
 	/*
@@ -976,4 +987,32 @@ DEFINE_TEST(test_entry)
 
 	/* Release the experimental entry. */
 	archive_entry_free(e);
+}
+
+DEFINE_TEST(test_entry_mac_metadata_self_copy)
+{
+	static const unsigned char metadata[64] = {
+		0x41, 0x42, 0x43, 0x44
+	};
+	struct archive_entry *entry;
+	const void *copy;
+	size_t copy_size;
+
+	assert((entry = archive_entry_new()) != NULL);
+	archive_entry_copy_mac_metadata(entry, metadata, sizeof(metadata));
+	copy = archive_entry_mac_metadata(entry, &copy_size);
+	assertEqualInt(sizeof(metadata), copy_size);
+
+	archive_entry_copy_mac_metadata(entry, copy, copy_size);
+	copy = archive_entry_mac_metadata(entry, &copy_size);
+	assertEqualInt(sizeof(metadata), copy_size);
+	assertEqualMem(metadata, copy, sizeof(metadata));
+
+	archive_entry_copy_mac_metadata(entry,
+	    (const unsigned char *)copy + 1, copy_size - 1);
+	copy = archive_entry_mac_metadata(entry, &copy_size);
+	assertEqualInt(sizeof(metadata) - 1, copy_size);
+	assertEqualMem(metadata + 1, copy, sizeof(metadata) - 1);
+
+	archive_entry_free(entry);
 }

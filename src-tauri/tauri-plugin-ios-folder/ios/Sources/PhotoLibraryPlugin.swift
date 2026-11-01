@@ -112,12 +112,17 @@ private final class PhotoLibraryCache {
   private let fileManager = FileManager.default
   private let cacheQueue = DispatchQueue(label: "com.windsheep.gai.photo-library.cache", qos: .utility)
   private let maxBytes: UInt64 = 128 * 1024 * 1024
+  private var generation: UInt64 = 0
   // FileManager.cachesDirectory resolves to the app sandbox's Library/Caches.
   // Keep all generated files below this dedicated root so the Rust side can
   // validate returned paths without accepting arbitrary filesystem paths.
   private let directoryName = "GAIPhotoLibrary"
 
   private init() {}
+
+  func currentGeneration() -> UInt64 {
+    cacheQueue.sync { generation }
+  }
 
   func cachedImage(for key: String, assetID: String) -> URL? {
     cacheQueue.sync {
@@ -133,7 +138,19 @@ private final class PhotoLibraryCache {
   }
 
   func storeJPEG(_ data: Data, for key: String, assetID: String) -> URL? {
+    storeJPEG(data, for: key, assetID: assetID, expectedGeneration: nil)
+  }
+
+  func storeJPEG(
+    _ data: Data,
+    for key: String,
+    assetID: String,
+    expectedGeneration: UInt64?
+  ) -> URL? {
     cacheQueue.sync {
+      if let expectedGeneration, expectedGeneration != generation {
+        return nil
+      }
       guard let directory = ensureDirectory() else { return nil }
       let url = directory.appendingPathComponent(cacheFileName(for: key, assetID: assetID), isDirectory: false)
       do {
@@ -151,6 +168,7 @@ private final class PhotoLibraryCache {
   func removeAssets(_ assetIDs: Set<String>) {
     guard !assetIDs.isEmpty else { return }
     cacheQueue.sync {
+      generation &+= 1
       guard let directory = self.ensureDirectory(),
             let urls = try? self.fileManager.contentsOfDirectory(
               at: directory,
@@ -167,11 +185,46 @@ private final class PhotoLibraryCache {
     }
   }
 
+  /// Remove cached variants whose asset is no longer in any currently visible
+  /// linked album. Hash prefixes keep the cache opaque while allowing this
+  /// membership reconciliation to work across app launches.
+  func removeAssetsNotIn(_ assetIDs: Set<String>) {
+    cacheQueue.sync {
+      guard let directory = self.ensureDirectory(),
+            let urls = try? self.fileManager.contentsOfDirectory(
+              at: directory,
+              includingPropertiesForKeys: nil,
+              options: [.skipsHiddenFiles]
+            ) else {
+        return
+      }
+
+      let prefixes = Set(assetIDs.map { self.assetPrefix(for: $0) })
+      var removedAny = false
+      for url in urls {
+        let cacheAssetPrefix = url.lastPathComponent
+          .split(separator: "_", maxSplits: 1, omittingEmptySubsequences: false)
+          .first
+          .map(String.init)
+        guard let cacheAssetPrefix, prefixes.contains(cacheAssetPrefix) else {
+          if (try? self.fileManager.removeItem(at: url)) != nil {
+            removedAny = true
+          }
+          continue
+        }
+      }
+      if removedAny {
+        generation &+= 1
+      }
+    }
+  }
+
   /// Remove every generated file below the private cache root. This is used
   /// when permission revocation or an unavailable album makes asset membership
   /// unknowable. It never touches the user's Photos library.
   func removeAll() {
     cacheQueue.sync {
+      generation &+= 1
       guard let directory = self.ensureDirectory(),
             let urls = try? self.fileManager.contentsOfDirectory(
               at: directory,
@@ -254,6 +307,7 @@ private final class PhotoImageRequestCoordinator {
     let targetSize: CGSize
     let maxDimension: CGFloat
     let allowNetwork: Bool
+    let cacheGeneration: UInt64
     var waiters: [Waiter] = []
     var requestID: PHImageRequestID?
     var timeoutWorkItem: DispatchWorkItem?
@@ -265,6 +319,7 @@ private final class PhotoImageRequestCoordinator {
       targetSize: CGSize,
       maxDimension: CGFloat,
       allowNetwork: Bool,
+      cacheGeneration: UInt64,
       waiter: Waiter
     ) {
       self.key = key
@@ -272,6 +327,7 @@ private final class PhotoImageRequestCoordinator {
       self.targetSize = targetSize
       self.maxDimension = maxDimension
       self.allowNetwork = allowNetwork
+      self.cacheGeneration = cacheGeneration
       self.waiters = [waiter]
     }
   }
@@ -290,6 +346,7 @@ private final class PhotoImageRequestCoordinator {
     targetSize: CGSize,
     maxDimension: CGFloat,
     allowNetwork: Bool,
+    cacheGeneration: UInt64,
     resolve: @escaping (URL) -> Void,
     reject: @escaping (PhotoLibraryBridgeError) -> Void
   ) {
@@ -304,6 +361,7 @@ private final class PhotoImageRequestCoordinator {
           targetSize: targetSize,
           maxDimension: maxDimension,
           allowNetwork: allowNetwork,
+          cacheGeneration: cacheGeneration,
           waiter: waiter
         )
       }
@@ -396,6 +454,9 @@ private final class PhotoImageRequestCoordinator {
   }
 
   private func writeImage(_ image: UIImage, request: PendingRequest) -> Result<URL, PhotoLibraryBridgeError> {
+    guard PhotoLibraryCache.shared.currentGeneration() == request.cacheGeneration else {
+      return .failure(.imageCancelled)
+    }
     guard let normalized = normalizedImage(image, maxDimension: request.maxDimension),
           let jpeg = normalized.jpegData(compressionQuality: 0.88) else {
       return .failure(.imageEncodingFailed)
@@ -408,7 +469,12 @@ private final class PhotoImageRequestCoordinator {
     if let existing = PhotoLibraryCache.shared.cachedImage(for: cacheKey, assetID: request.asset.localIdentifier) {
       return .success(existing)
     }
-    guard let url = PhotoLibraryCache.shared.storeJPEG(jpeg, for: cacheKey, assetID: request.asset.localIdentifier) else {
+    guard let url = PhotoLibraryCache.shared.storeJPEG(
+      jpeg,
+      for: cacheKey,
+      assetID: request.asset.localIdentifier,
+      expectedGeneration: request.cacheGeneration
+    ) else {
       return .failure(.imageEncodingFailed)
     }
     return .success(url)
@@ -454,8 +520,6 @@ private final class PhotoLibraryBridge {
 
   private let operationQueue = DispatchQueue(label: "com.windsheep.gai.photo-library.operations", qos: .userInitiated)
   private let defaults = UserDefaults.standard
-  // Accessed only on operationQueue; repeated snapshots must not evict valid images.
-  private var unavailableLinkedAlbumIDs = Set<String>()
 
   private init() {}
 
@@ -576,6 +640,10 @@ private final class PhotoLibraryBridge {
       let sourceKey = "\(asset.localIdentifier)|\(modification)|\(Int(maxDimension))"
       let cacheKey = self.sha256Hex(sourceKey)
       if let cached = PhotoLibraryCache.shared.cachedImage(for: cacheKey, assetID: asset.localIdentifier) {
+        guard self.currentAssetIfReadable(assetID: assetID, albumID: albumID) != nil else {
+          reject(self.unreadableAssetError(assetID: assetID, albumID: albumID))
+          return
+        }
         resolve(cached)
         return
       }
@@ -586,6 +654,7 @@ private final class PhotoLibraryBridge {
         targetSize: targetSize,
         maxDimension: maxDimension,
         allowNetwork: allowNetwork,
+        cacheGeneration: PhotoLibraryCache.shared.currentGeneration(),
         resolve: { [weak self] url in
           guard let self = self else { return }
           self.operationQueue.async {
@@ -593,16 +662,8 @@ private final class PhotoLibraryBridge {
               assetID: assetID,
               albumID: albumID
             ) else {
-              let status = PHPhotoLibrary.authorizationStatus(for: .readWrite)
-              if status != .authorized && status != .limited {
-                reject(.authorizationRequired)
-              } else if !self.linkedAlbumIDs().contains(albumID) {
-                reject(.albumNotLinked)
-              } else if PHAsset.fetchAssets(withLocalIdentifiers: [assetID], options: nil).firstObject == nil {
-                reject(.assetNotFound)
-              } else {
-                reject(.assetNotInAlbum)
-              }
+              PhotoLibraryCache.shared.removeAssets([assetID])
+              reject(self.unreadableAssetError(assetID: assetID, albumID: albumID))
               return
             }
             // The re-fetch above also proves the current authorization range
@@ -643,13 +704,7 @@ private final class PhotoLibraryBridge {
   private func snapshotPayload() -> [String: Any] {
     let status = PHPhotoLibrary.authorizationStatus(for: .readWrite)
     let linked = linkedAlbumIDs()
-    let unavailable = Set(linked).subtracting(availableAlbumIDs(for: status))
-    if !unavailable.subtracting(unavailableLinkedAlbumIDs).isEmpty {
-      // Invalidate once when another linked album becomes inaccessible.
-      // Later limited-access snapshots can retain newly generated valid images.
-      PhotoLibraryCache.shared.removeAll()
-    }
-    unavailableLinkedAlbumIDs = unavailable
+    var currentAssetIDs = Set<String>()
     let albums: [[String: Any]] = linked.map { identifier in
       guard status == .authorized || status == .limited else {
         return ["id": identifier, "title": "相簿目前不可用", "available": false, "assetIds": []]
@@ -660,6 +715,7 @@ private final class PhotoLibraryBridge {
           return ["id": identifier, "title": "相簿目前不可用（有限存取）", "available": false, "assetIds": []]
         }
         let assets = sortedAssetReferences(PHAsset.fetchAssets(with: .image, options: nil))
+        currentAssetIDs.formUnion(assets.map(\.identifier))
         return [
           "id": identifier,
           "title": "已選照片（有限存取）",
@@ -670,6 +726,7 @@ private final class PhotoLibraryBridge {
 
       if identifier == "photo-library" {
         let assets = sortedAssetReferences(PHAsset.fetchAssets(with: .image, options: nil))
+        currentAssetIDs.formUnion(assets.map(\.identifier))
         return [
           "id": identifier,
           "title": "所有照片（照片圖庫）",
@@ -683,12 +740,21 @@ private final class PhotoLibraryBridge {
         return ["id": identifier, "title": "相簿目前不可用", "available": false, "assetIds": []]
       }
       let assets = sortedAssetReferences(PHAsset.fetchAssets(in: collection, options: imageFetchOptions()))
+      currentAssetIDs.formUnion(assets.map(\.identifier))
       return [
         "id": identifier,
         "title": collection.localizedTitle ?? "未命名相簿",
         "available": true,
         "assetIds": assets.map(\.identifier)
       ]
+    }
+
+    if status == .authorized || status == .limited {
+      PhotoLibraryCache.shared.removeAssetsNotIn(currentAssetIDs)
+    } else {
+      // When authorization is denied/restricted, membership is unknowable;
+      // clear the whole private cache rather than trusting an old membership.
+      PhotoLibraryCache.shared.removeAll()
     }
 
     return [
@@ -780,6 +846,20 @@ private final class PhotoLibraryBridge {
       return nil
     }
     return asset(assetID, inAlbum: albumID, status: status)
+  }
+
+  private func unreadableAssetError(assetID: String, albumID: String) -> PhotoLibraryBridgeError {
+    let status = PHPhotoLibrary.authorizationStatus(for: .readWrite)
+    if status != .authorized && status != .limited {
+      return .authorizationRequired
+    }
+    if !linkedAlbumIDs().contains(albumID) {
+      return .albumNotLinked
+    }
+    if PHAsset.fetchAssets(withLocalIdentifiers: [assetID], options: nil).firstObject == nil {
+      return .assetNotFound
+    }
+    return .assetNotInAlbum
   }
 
   private func linkedAlbumIDs() -> [String] {

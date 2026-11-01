@@ -4,8 +4,8 @@ dnl First, define all of the version numbers up front.
 dnl In particular, this allows the version macro to be used in AC_INIT
 
 dnl These first two version numbers are updated automatically on each release.
-m4_define([LIBARCHIVE_VERSION_S],[3.8.1])
-m4_define([LIBARCHIVE_VERSION_N],[3008001])
+m4_define([LIBARCHIVE_VERSION_S],[3.8.9])
+m4_define([LIBARCHIVE_VERSION_N],[3008009])
 
 dnl bsdtar and bsdcpio versioning tracks libarchive
 m4_define([BSDTAR_VERSION_S],LIBARCHIVE_VERSION_S())
@@ -100,6 +100,9 @@ case "$host_os" in
 esac
 AM_CONDITIONAL([INC_WINDOWS_FILES], [test $inc_windows_files = yes])
 AM_CONDITIONAL([INC_CYGWIN_FILES], [test $inc_cygwin_files = yes])
+
+dnl On native Windows (MinGW), embedding the manifest needs windres
+AS_IF([test $inc_windows_files = yes], [AC_CHECK_TOOL([WINDRES], [windres])])
 
 dnl Defines that are required for specific platforms (e.g. -D_POSIX_SOURCE, etc)
 PLATFORMCPPFLAGS=
@@ -365,9 +368,9 @@ AS_VAR_IF([ac_cv_have_decl_FS_IOC_GETFLAGS], [yes],
     [AC_DEFINE_UNQUOTED([HAVE_WORKING_FS_IOC_GETFLAGS], [1],
                     [Define to 1 if you have a working FS_IOC_GETFLAGS])])
 
-AC_CHECK_HEADERS([locale.h membership.h paths.h poll.h pthread.h pwd.h])
-AC_CHECK_HEADERS([readpassphrase.h signal.h spawn.h])
-AC_CHECK_HEADERS([stdarg.h stdint.h stdlib.h string.h])
+AC_CHECK_HEADERS([intsafe.h locale.h membership.h paths.h poll.h pthread.h])
+AC_CHECK_HEADERS([pwd.h readpassphrase.h signal.h spawn.h])
+AC_CHECK_HEADERS([stdarg.h stdckdint.h stdint.h stdlib.h string.h])
 AC_CHECK_HEADERS([sys/acl.h sys/cdefs.h sys/ea.h sys/extattr.h])
 AC_CHECK_HEADERS([sys/ioctl.h sys/mkdev.h sys/mount.h])
 AC_CHECK_HEADERS([sys/param.h sys/poll.h sys/richacl.h])
@@ -377,7 +380,7 @@ AC_CHECK_HEADERS([time.h unistd.h utime.h wchar.h wctype.h])
 AC_CHECK_TYPE([suseconds_t])
 AC_CHECK_HEADERS([windows.h])
 # check windows.h first; the other headers require it.
-AC_CHECK_HEADERS([wincrypt.h winioctl.h],[],[],
+AC_CHECK_HEADERS([winioctl.h],[],[],
 [[#ifdef HAVE_WINDOWS_H
 # include <windows.h>
 #endif
@@ -821,16 +824,20 @@ AC_FUNC_VPRINTF
 # To avoid necessity for including windows.h or special forward declaration
 # workarounds, we use 'void *' for 'struct SECURITY_ATTRIBUTES *'
 AC_CHECK_STDCALL_FUNC([CreateHardLinkA],[const char *, const char *, void *])
-AC_CHECK_FUNCS([arc4random_buf chflags chown chroot ctime_r])
+AC_CHECK_FUNCS([arc4random_buf chflags chown chroot])
+AC_CHECK_FUNCS([closefrom close_range ctime_r])
 AC_CHECK_FUNCS([fchdir fchflags fchmod fchown fcntl fdopendir fnmatch fork])
 AC_CHECK_FUNCS([fstat fstatat fstatfs fstatvfs ftruncate])
 AC_CHECK_FUNCS([futimens futimes futimesat])
-AC_CHECK_FUNCS([geteuid getline getpid getgrgid_r getgrnam_r])
-AC_CHECK_FUNCS([getpwnam_r getpwuid_r getvfsbyname gmtime_r])
+AC_CHECK_FUNCS([getegid geteuid getline getpid getresgid getresuid])
+AC_CHECK_FUNCS([getgrgid_r getgrnam_r getpwnam_r getpwuid_r])
+AC_CHECK_FUNCS([gettimeofday getvfsbyname gmtime_r])
+AC_CHECK_FUNCS([issetugid])
 AC_CHECK_FUNCS([lchflags lchmod lchown link linkat localtime_r lstat lutimes])
 AC_CHECK_FUNCS([mbrtowc memmove memset])
 AC_CHECK_FUNCS([mkdir mkfifo mknod mkstemp])
-AC_CHECK_FUNCS([nl_langinfo openat pipe poll posix_spawnp readlink readlinkat])
+AC_CHECK_FUNCS([nl_langinfo openat pipe poll posix_spawn posix_spawnp])
+AC_CHECK_FUNCS([readlink readlinkat])
 AC_CHECK_FUNCS([readpassphrase])
 AC_CHECK_FUNCS([select setenv setlocale sigaction statfs statvfs])
 AC_CHECK_FUNCS([strchr strdup strerror strncpy_s strnlen strrchr symlink])
@@ -881,14 +888,6 @@ AC_CHECK_TYPES(struct statfs,,,
 	#include <sys/mount.h>
 	])
 
-# There are several variants of readdir_r around; we only
-# accept the POSIX-compliant version.
-AC_LINK_IFELSE(
- [AC_LANG_PROGRAM([[#include <dirent.h>]],
-                  [[DIR *dir; struct dirent e, *r;
-		    return(readdir_r(dir, &e, &r));]])],
- [AC_DEFINE(HAVE_READDIR_R,1,[Define to 1 if you have a POSIX compatible readdir_r])]
-)
 # dirfd can be either a function or a macro.
 AC_LINK_IFELSE(
  [AC_LANG_PROGRAM([[#include <dirent.h>
@@ -1295,24 +1294,26 @@ main(int argc, char **argv)
 case "$host_os" in
   *mingw* | *cygwin* | *msys*)
 	;;
+  *darwin*)
+	CRYPTO_CHECK(MD5, LIBSYSTEM, md5)
+	CRYPTO_CHECK(SHA1, LIBSYSTEM, sha1)
+	CRYPTO_CHECK(SHA256, LIBSYSTEM, sha256)
+	CRYPTO_CHECK(SHA384, LIBSYSTEM, sha384)
+	CRYPTO_CHECK(SHA512, LIBSYSTEM, sha512)
+	;;
   *)
 	CRYPTO_CHECK(MD5, LIBC, md5)
-	CRYPTO_CHECK(MD5, LIBSYSTEM, md5)
 	CRYPTO_CHECK(RMD160, LIBC, rmd160)
 	CRYPTO_CHECK(SHA1, LIBC, sha1)
-	CRYPTO_CHECK(SHA1, LIBSYSTEM, sha1)
 	CRYPTO_CHECK(SHA256, LIBC, sha256)
 	CRYPTO_CHECK(SHA256, LIBC2, sha256)
 	CRYPTO_CHECK(SHA256, LIBC3, sha256)
-	CRYPTO_CHECK(SHA256, LIBSYSTEM, sha256)
 	CRYPTO_CHECK(SHA384, LIBC, sha384)
 	CRYPTO_CHECK(SHA384, LIBC2, sha384)
 	CRYPTO_CHECK(SHA384, LIBC3, sha384)
-	CRYPTO_CHECK(SHA384, LIBSYSTEM, sha384)
 	CRYPTO_CHECK(SHA512, LIBC, sha512)
 	CRYPTO_CHECK(SHA512, LIBC2, sha512)
 	CRYPTO_CHECK(SHA512, LIBC3, sha512)
-	CRYPTO_CHECK(SHA512, LIBSYSTEM, sha512)
 	;;
 esac
 
@@ -1377,9 +1378,8 @@ AC_SUBST(LIBSREQUIRED)
 
 # Probe libmd AFTER OpenSSL/libcrypto.
 # The two are incompatible and OpenSSL is more complete.
-AC_CHECK_HEADERS([md5.h ripemd.h sha.h sha256.h sha512.h])
 saved_LIBS=$LIBS
-AC_CHECK_LIB(md,MD5Init)
+AC_CHECK_LIB(md, MD5Init)
 CRYPTO_CHECK(MD5, LIBMD, md5)
 CRYPTO_CHECK(RMD160, LIBMD, rmd160)
 CRYPTO_CHECK(SHA1, LIBMD, sha1)

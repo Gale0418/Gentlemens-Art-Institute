@@ -24,7 +24,7 @@
 #include <sddl.h>
 
 #include "cpio.h"
-#include "err.h"
+#include "lafe_err.h"
 
 #define EPOC_TIME	(116444736000000000ULL)
 
@@ -140,7 +140,7 @@ cpio_CreateFile(const char *path, DWORD dwDesiredAccess, DWORD dwShareMode,
 	CREATEFILE2_EXTENDED_PARAMETERS createExParams;
 #endif
 
-#if !defined(WINAPI_FAMILY_PARTITION) || WINAPI_FAMILY_PARTITION (WINAPI_PARTITION_DESKTOP)
+#if WINAPI_FAMILY_PARTITION (WINAPI_PARTITION_DESKTOP)
 	handle = CreateFileA(path, dwDesiredAccess, dwShareMode,
 	    lpSecurityAttributes, dwCreationDisposition, dwFlagsAndAttributes,
 	    hTemplateFile);

@@ -6,37 +6,58 @@
 
 use crate::archive_reader::{
     ArchiveEntry, ArchiveError, MAX_ARCHIVE_BYTES, MAX_ENTRY_BYTES, MAX_ENTRY_COUNT,
-    MAX_TOTAL_UNPACKED_BYTES,
+    MAX_TOTAL_ENTRY_NAME_BYTES, MAX_TOTAL_UNPACKED_BYTES,
 };
+#[cfg(windows)]
+use libarchive2::CallbackReader;
 use libarchive2::{FileType, ReadArchive};
 use std::collections::HashSet;
 use std::fs::File;
 use std::io::{Read, Seek, SeekFrom};
+#[cfg(unix)]
+use std::os::unix::io::AsRawFd;
 use std::path::Path;
 
 const MAX_ENTRY_NAME_BYTES: usize = 4096;
+const INITIAL_OUTPUT_CAPACITY: usize = 64 * 1024;
 // ENDARC is tiny in ordinary RAR5 files.  Keep the independent trailer scan
 // bounded so a malformed archive cannot turn validation into a large search.
 const MAX_RAR5_END_MARKER_BYTES: usize = 4096;
 const RAR4_SIGNATURE: &[u8; 7] = b"Rar!\x1A\x07\x00";
 const RAR5_SIGNATURE: &[u8; 8] = b"Rar!\x1A\x07\x01\x00";
 
+// Field order is intentional: libarchive must be dropped before the file
+// descriptor it borrows through archive_read_open_fd.
+struct OpenedRar {
+    archive: ReadArchive<'static>,
+    file: File,
+}
+
 /// 列出 RAR/CBR entries 的 bounded metadata。
 pub fn list_entries(path: &Path) -> Result<Vec<ArchiveEntry>, ArchiveError> {
-    let mut archive = open_rar(path)?;
+    let opened = File::open(path)?;
+    list_entries_from_file(opened, path)
+}
+
+pub fn list_entries_from_file(
+    file: File,
+    path_hint: &Path,
+) -> Result<Vec<ArchiveEntry>, ArchiveError> {
+    let mut opened = open_rar_file(file, path_hint)?;
     let mut names = HashSet::new();
     let mut result = Vec::new();
+    let mut name_bytes = 0_usize;
     let mut total = 0_u64;
 
     let mut saw_entry = false;
     loop {
-        let entry = match archive.next_entry() {
+        let entry = match opened.archive.next_entry() {
             Ok(Some(entry)) => {
                 saw_entry = true;
                 entry
             }
             Ok(None) => break,
-            Err(error) if saw_entry && is_verified_terminal_rar5(path, &error) => break,
+            Err(error) if saw_entry && is_verified_terminal_rar5(&opened.file, &error) => break,
             Err(error) => return Err(ArchiveError::Corrupt(error.to_string())),
         };
         if result.len() >= MAX_ENTRY_COUNT {
@@ -58,6 +79,7 @@ pub fn list_entries(path: &Path) -> Result<Vec<ArchiveEntry>, ArchiveError> {
             &name
         };
         validate_entry_name(validation_name)?;
+        name_bytes = checked_name_bytes(name_bytes, name.len())?;
         if !names.insert(name.clone()) {
             return Err(ArchiveError::Corrupt(format!("entry 名稱重複：{name}")));
         }
@@ -80,7 +102,8 @@ pub fn list_entries(path: &Path) -> Result<Vec<ArchiveEntry>, ArchiveError> {
             compressed_size: 0,
             is_directory,
         });
-        archive
+        opened
+            .archive
             .skip_data()
             .map_err(|error| ArchiveError::Corrupt(error.to_string()))?;
     }
@@ -89,6 +112,15 @@ pub fn list_entries(path: &Path) -> Result<Vec<ArchiveEntry>, ArchiveError> {
 
 /// 讀取單一 RAR entry，最多配置 `max_bytes` bytes，不寫入檔案系統。
 pub fn read_entry(path: &Path, name: &str, max_bytes: usize) -> Result<Vec<u8>, ArchiveError> {
+    read_entry_from_file(File::open(path)?, path, name, max_bytes)
+}
+
+pub fn read_entry_from_file(
+    file: File,
+    path_hint: &Path,
+    name: &str,
+    max_bytes: usize,
+) -> Result<Vec<u8>, ArchiveError> {
     validate_entry_name(name)?;
     if max_bytes == 0 || max_bytes > MAX_ENTRY_BYTES {
         return Err(ArchiveError::ReadLimitExceeded {
@@ -97,18 +129,19 @@ pub fn read_entry(path: &Path, name: &str, max_bytes: usize) -> Result<Vec<u8>, 
         });
     }
 
-    let mut archive = open_rar(path)?;
+    let mut opened = open_rar_file(file, path_hint)?;
     let mut names = HashSet::new();
+    let mut name_bytes = 0_usize;
     let mut total = 0_u64;
     let mut saw_entry = false;
     loop {
-        let entry = match archive.next_entry() {
+        let entry = match opened.archive.next_entry() {
             Ok(Some(entry)) => {
                 saw_entry = true;
                 entry
             }
             Ok(None) => break,
-            Err(error) if saw_entry && is_verified_terminal_rar5(path, &error) => break,
+            Err(error) if saw_entry && is_verified_terminal_rar5(&opened.file, &error) => break,
             Err(error) => return Err(ArchiveError::Corrupt(error.to_string())),
         };
         let entry_name = entry
@@ -121,6 +154,7 @@ pub fn read_entry(path: &Path, name: &str, max_bytes: usize) -> Result<Vec<u8>, 
             &entry_name
         };
         validate_entry_name(validation_name)?;
+        name_bytes = checked_name_bytes(name_bytes, entry_name.len())?;
         if names.len() >= MAX_ENTRY_COUNT {
             return Err(ArchiveError::TooManyEntries {
                 count: names.len() + 1,
@@ -144,7 +178,8 @@ pub fn read_entry(path: &Path, name: &str, max_bytes: usize) -> Result<Vec<u8>, 
             });
         }
         if entry_name != name {
-            archive
+            opened
+                .archive
                 .skip_data()
                 .map_err(|error| ArchiveError::Corrupt(error.to_string()))?;
             continue;
@@ -160,10 +195,11 @@ pub fn read_entry(path: &Path, name: &str, max_bytes: usize) -> Result<Vec<u8>, 
             });
         }
 
-        let mut output = Vec::with_capacity(size as usize);
+        let mut output = Vec::with_capacity((size as usize).min(INITIAL_OUTPUT_CAPACITY));
         let mut buffer = [0_u8; 64 * 1024];
         loop {
-            let read = archive
+            let read = opened
+                .archive
                 .read_data(&mut buffer)
                 .map_err(|error| ArchiveError::Corrupt(error.to_string()))?;
             if read == 0 {
@@ -182,17 +218,18 @@ pub fn read_entry(path: &Path, name: &str, max_bytes: usize) -> Result<Vec<u8>, 
     Err(ArchiveError::EntryNotFound(name.to_string()))
 }
 
-fn open_rar(path: &Path) -> Result<ReadArchive<'static>, ArchiveError> {
-    let bytes = std::fs::metadata(path)?.len();
+fn open_rar_file(file: File, _path: &Path) -> Result<OpenedRar, ArchiveError> {
+    let bytes = file.metadata()?.len();
     if bytes > MAX_ARCHIVE_BYTES {
         return Err(ArchiveError::ArchiveTooLarge {
             bytes,
             limit: MAX_ARCHIVE_BYTES,
         });
     }
-    let mut file = std::fs::File::open(path)?;
+    let mut file = file;
     let mut signature = [0_u8; 8];
     let read = file.read(&mut signature)?;
+    file.seek(SeekFrom::Start(0))?;
     let is_rar = signature[..read].starts_with(RAR4_SIGNATURE)
         || signature[..read].starts_with(RAR5_SIGNATURE);
     if !is_rar {
@@ -200,18 +237,47 @@ fn open_rar(path: &Path) -> Result<ReadArchive<'static>, ArchiveError> {
             "RAR/CBR 檔頭不是 RAR4/RAR5 signature".into(),
         ));
     }
-    ReadArchive::open(path).map_err(|error| ArchiveError::Corrupt(error.to_string()))
+    #[cfg(unix)]
+    let archive = ReadArchive::open_fd(file.as_raw_fd())
+        .map_err(|error| ArchiveError::Corrupt(error.to_string()))?;
+    #[cfg(windows)]
+    let (archive, file) = {
+        let marker_file = file.try_clone()?;
+        let archive = ReadArchive::open_callback(CallbackReader::new(file))
+            .map_err(|error| ArchiveError::Corrupt(error.to_string()))?;
+        (archive, marker_file)
+    };
+    #[cfg(not(any(unix, windows)))]
+    let archive =
+        ReadArchive::open(_path).map_err(|error| ArchiveError::Corrupt(error.to_string()))?;
+    Ok(OpenedRar { archive, file })
 }
 
 fn non_negative_size(size: i64, name: &str) -> Result<u64, ArchiveError> {
     u64::try_from(size).map_err(|_| ArchiveError::Corrupt(format!("entry {name} 大小無效")))
 }
 
+fn checked_name_bytes(total: usize, additional: usize) -> Result<usize, ArchiveError> {
+    let total = total
+        .checked_add(additional)
+        .ok_or(ArchiveError::ArchiveMetadataTooLarge {
+            bytes: usize::MAX,
+            limit: MAX_TOTAL_ENTRY_NAME_BYTES,
+        })?;
+    if total > MAX_TOTAL_ENTRY_NAME_BYTES {
+        return Err(ArchiveError::ArchiveMetadataTooLarge {
+            bytes: total,
+            limit: MAX_TOTAL_ENTRY_NAME_BYTES,
+        });
+    }
+    Ok(total)
+}
+
 /// libarchive 3.8.x has a RAR5 terminal-block bug (upstream issue #3352):
 /// after returning all data it can report a fatal error with no errno/message
 /// instead of `ARCHIVE_EOF`.  Only accept that exact opaque error when an
 /// independently CRC-checked RAR5 ENDARC block is the final block in the file.
-fn is_verified_terminal_rar5(path: &Path, error: &libarchive2::Error) -> bool {
+fn is_verified_terminal_rar5(file: &File, error: &libarchive2::Error) -> bool {
     if !matches!(
         error,
         libarchive2::Error::Archive {
@@ -222,15 +288,16 @@ fn is_verified_terminal_rar5(path: &Path, error: &libarchive2::Error) -> bool {
     ) {
         return false;
     }
-    has_valid_rar5_end_marker(path).unwrap_or(false)
+    has_valid_rar5_end_marker(file).unwrap_or(false)
 }
 
-fn has_valid_rar5_end_marker(path: &Path) -> std::io::Result<bool> {
-    let file_size = std::fs::metadata(path)?.len();
+fn has_valid_rar5_end_marker(source: &File) -> std::io::Result<bool> {
+    let file_size = source.metadata()?.len();
     if file_size < 8 {
         return Ok(false);
     }
-    let mut file = File::open(path)?;
+    let mut file = source.try_clone()?;
+    file.seek(SeekFrom::Start(0))?;
     let mut signature = [0_u8; 8];
     file.read_exact(&mut signature)?;
     if signature != *RAR5_SIGNATURE {
@@ -269,7 +336,7 @@ fn valid_rar5_end_candidate(bytes: &[u8], start: usize) -> bool {
         Some(value) => value,
         None => return false,
     };
-    if header_size < 3 || header_size > MAX_RAR5_END_MARKER_BYTES {
+    if !(3..=MAX_RAR5_END_MARKER_BYTES).contains(&header_size) {
         return false;
     }
     let body_start = start + 4 + size_len;
@@ -352,6 +419,12 @@ mod tests {
     use super::*;
 
     #[test]
+    fn links_libarchive_with_security_fix_release() {
+        assert!(libarchive2::version_number() >= 3_008_009);
+        assert!(libarchive2::version().starts_with("libarchive 3.8.9"));
+    }
+
+    #[test]
     fn rejects_unsafe_entry_names() {
         for name in [
             "../page.jpg",
@@ -376,5 +449,27 @@ mod tests {
 
         *marker.last_mut().expect("marker has body") ^= 1;
         assert!(!valid_rar5_end_candidate(&marker, 0));
+    }
+
+    #[test]
+    fn rar5_end_marker_is_verified_with_source_positioned_at_eof() {
+        let path = std::env::temp_dir().join(format!(
+            "gai-rar5-eof-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        let mut bytes = RAR5_SIGNATURE.to_vec();
+        bytes.extend_from_slice(&0x5156_771d_u32.to_le_bytes());
+        bytes.extend_from_slice(&[0x03, 0x05, 0x04, 0x00]);
+        std::fs::write(&path, bytes).unwrap();
+        let mut file = File::open(&path).unwrap();
+        file.seek(SeekFrom::End(0)).unwrap();
+        assert!(has_valid_rar5_end_marker(&file).unwrap());
+        assert!(has_valid_rar5_end_marker(&file).unwrap());
+        drop(file);
+        std::fs::remove_file(path).unwrap();
     }
 }

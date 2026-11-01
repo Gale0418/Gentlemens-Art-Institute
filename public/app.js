@@ -57,7 +57,12 @@ const httpAPI = {
   isElectron: false,
   getLibrary: () => requestJson('/api/library'),
   getScanStatus: () => requestJson('/api/scan-status'),
-  openComic: (id) => requestJson(`/api/comic/${encodeURIComponent(id)}`),
+  openComic: (id, sourceId) => {
+    const query = typeof sourceId === 'string' && sourceId.trim()
+      ? `?sourceId=${encodeURIComponent(sourceId.trim())}`
+      : '';
+    return requestJson(`/api/comic/${encodeURIComponent(id)}${query}`);
+  },
   updateReaderCacheWindow: null,
   saveProgress: (data) => requestJson('/api/progress', {
     method: 'POST',
@@ -147,6 +152,14 @@ let lastPriorityLibraryScanKey = '';
 // Native command 排程不保證呼叫者的完成順序；把每筆進度快照排成單一
 // promise chain，避免快速翻頁時較舊頁碼晚於新頁碼落庫。
 let readingProgressSaveQueue = Promise.resolve();
+const READING_PROGRESS_FAILURES_KEY = 'gai:readingProgressFailures';
+const READING_PROGRESS_AUTO_RETRY_DELAYS_MS = [250, 750];
+let readingProgressFailuresLoaded = false;
+let readingProgressFailures = new Map();
+let readingProgressFailuresStorageReliable = true;
+let latestQueuedReadingProgressById = new Map();
+const discardedReadingProgressIntents = new Map();
+let readingProgressRetryPromise = null;
 // Rust 會在 WebView reload 後保留本次 app runtime 已提交的序號；將
 // 最後發出的序號留在 tab session，讓立即 reload 也不會退回較舊值。
 const READING_PROGRESS_SEQUENCE_KEY = 'gai:readingProgressSequence';
@@ -169,9 +182,262 @@ function nextReadingProgressSaveSequence() {
   }
   return readingProgressSaveSequence;
 }
+
+function nextReadingProgressSaveSequenceAfter(previousSequence) {
+  const allocated = nextReadingProgressSaveSequence();
+  if (allocated > previousSequence) return allocated;
+  readingProgressSaveSequence = previousSequence + 1;
+  try {
+    sessionStorage.setItem(READING_PROGRESS_SEQUENCE_KEY, String(readingProgressSaveSequence));
+  } catch (error) {
+    // Native queue remains ordered even if tab storage is unavailable.
+  }
+  return readingProgressSaveSequence;
+}
+
+function normalizeReadingProgressSnapshot(snapshot) {
+  if (!snapshot || typeof snapshot.id !== 'string' || !snapshot.id) return null;
+  const totalPages = Number(snapshot.totalPages);
+  const currentPage = Number(snapshot.currentPage);
+  const sequence = Number(snapshot.sequence);
+  if (!Number.isSafeInteger(totalPages) || totalPages < 0
+    || !Number.isSafeInteger(currentPage) || currentPage < 0
+    || !Number.isSafeInteger(sequence) || sequence < 0) return null;
+  const normalized = {
+    id: snapshot.id,
+    currentPage: Math.min(currentPage, Math.max(0, totalPages - 1)),
+    totalPages,
+    sequence,
+  };
+  if (typeof snapshot.sourceId === 'string' && snapshot.sourceId.trim()) {
+    normalized.sourceId = snapshot.sourceId.trim();
+  }
+  return normalized;
+}
+
+function readingProgressKey(snapshot) {
+  const sourceId = typeof snapshot?.sourceId === 'string' ? snapshot.sourceId.trim() : '';
+  return `${sourceId}\u0000${snapshot?.id || ''}`;
+}
+
+function readingProgressIntentSequence(snapshot) {
+  // A manual retry gets a fresh native sequence, but remains ordered as the
+  // original user intent for queue/journal conflict checks.
+  const intentSequence = Number(snapshot?.intentSequence);
+  if (Number.isSafeInteger(intentSequence) && intentSequence >= 0) return intentSequence;
+  return Number(snapshot?.sequence);
+}
+
+function readReadingProgressFailures() {
+  if (readingProgressFailuresLoaded) return readingProgressFailures;
+  readingProgressFailuresLoaded = true;
+  try {
+    const raw = JSON.parse(localStorage.getItem(READING_PROGRESS_FAILURES_KEY) || '[]');
+    const entries = Array.isArray(raw) ? raw : Object.values(raw || {});
+    entries.forEach(entry => {
+      const normalized = normalizeReadingProgressSnapshot(entry);
+      if (!normalized) return;
+      const key = readingProgressKey(normalized);
+      const previous = readingProgressFailures.get(key);
+      if (!previous || normalized.sequence >= previous.sequence) {
+        readingProgressFailures.set(key, normalized);
+      }
+    });
+  } catch (error) {
+    // Storage is optional; the in-memory journal still keeps this session recoverable.
+  }
+  return readingProgressFailures;
+}
+
+function writeReadingProgressFailures() {
+  const entries = Array.from(readReadingProgressFailures().values())
+    .sort((a, b) => b.sequence - a.sequence);
+  readingProgressFailures = new Map(entries.map(entry => [readingProgressKey(entry), entry]));
+  try {
+    localStorage.setItem(READING_PROGRESS_FAILURES_KEY, JSON.stringify(entries));
+    readingProgressFailuresStorageReliable = true;
+  } catch (error) {
+    readingProgressFailuresStorageReliable = false;
+    // Keep every memory entry and the visible session-only recovery action.
+  }
+}
+
+function renderReadingProgressRecovery() {
+  const failures = Array.from(readReadingProgressFailures().values());
+  if (typeof document === 'undefined') return;
+  let panel = document.getElementById('reading-progress-recovery');
+  if (!panel && failures.length && document.createElement) {
+    panel = document.createElement('div');
+    panel.id = 'reading-progress-recovery';
+    panel.setAttribute('role', 'status');
+    panel.setAttribute('aria-live', 'polite');
+    panel.style.cssText = 'display:flex;flex:0 0 auto;flex-wrap:wrap;align-items:center;gap:10px;padding:10px 14px;border:1px solid rgba(255,180,80,.45);border-radius:10px;';
+    const messageBox = document.createElement('span');
+    messageBox.className = 'reading-progress-recovery-viewport';
+    const message = document.createElement('span');
+    message.className = 'reading-progress-recovery-message';
+    messageBox.append(message);
+    const retry = document.createElement('button');
+    retry.type = 'button';
+    retry.className = 'reader-image-error';
+    retry.addEventListener('click', () => retryFailedReadingProgressSnapshots());
+    const discard = document.createElement('button');
+    discard.type = 'button';
+    discard.className = 'reading-progress-discard';
+    discard.addEventListener('click', () => discardFailedReadingProgressSnapshots());
+    panel.append(messageBox, retry, discard);
+    const anchor = elements.contentArea;
+    if (anchor?.prepend) anchor.prepend(panel);
+    if (typeof ResizeObserver !== 'undefined') {
+      messageBox.classList.add('marquee-ready');
+      const updateMarquee = () => {
+        const overflow = Math.max(0, message.scrollWidth - messageBox.clientWidth);
+        messageBox.style.setProperty('--marquee-distance', `${overflow}px`);
+        messageBox.classList.toggle('is-overflowing', overflow > 1);
+      };
+      const observer = new ResizeObserver(updateMarquee);
+      observer.observe(messageBox);
+      observer.observe(message);
+    }
+  }
+  if (!panel) return;
+  panel.hidden = failures.length === 0;
+  panel.style.display = failures.length ? 'flex' : 'none';
+  const message = panel.querySelector?.('.reading-progress-recovery-message');
+  const retry = panel.querySelector?.('button');
+  const discard = panel.querySelector?.('.reading-progress-discard');
+  if (message) {
+    const pendingText = readerText('有 {count} 本漫畫的閱讀進度尚未保存。', { count: failures.length });
+    const storageText = readingProgressFailuresStorageReliable
+      ? ''
+      : ` ${readerText('此 App session 可重試，尚未可靠備份。')}`;
+    const legacyText = failures.some(snapshot => !snapshot.sourceId)
+      ? ` ${readerText('部分舊進度無法確認來源，無法自動重試。')}`
+      : '';
+    message.textContent = pendingText + storageText + legacyText;
+  }
+  if (retry) {
+    retry.disabled = !failures.some(snapshot => typeof snapshot.sourceId === 'string' && snapshot.sourceId.trim());
+    retry.textContent = readerText('重試保存閱讀進度');
+  }
+  if (discard) discard.textContent = readerText('放棄未保存進度');
+}
+
+function discardFailedReadingProgressSnapshots() {
+  const failures = readReadingProgressFailures();
+  if (!failures.size) return;
+  if (!window.confirm(readerText('要放棄全部 {count} 筆未保存的閱讀進度嗎？\n這些進度將無法重試；已保存的進度和漫畫檔案不會刪除。', { count: failures.size }))) return;
+  try {
+    localStorage.setItem(READING_PROGRESS_FAILURES_KEY, '[]');
+  } catch (error) {
+    window.alert(readerText('無法清除未保存進度，請確認裝置儲存空間後再試。'));
+    return;
+  }
+  for (const snapshot of failures.values()) {
+    const key = readingProgressKey(snapshot);
+    const previous = discardedReadingProgressIntents.get(key) ?? -1;
+    discardedReadingProgressIntents.set(key, Math.max(previous, snapshot.sequence));
+  }
+  failures.clear();
+  readingProgressFailuresStorageReliable = true;
+  renderReadingProgressRecovery();
+}
+
+function rememberFailedReadingProgressSnapshot(snapshot, intentSequence = readingProgressIntentSequence(snapshot)) {
+  const normalized = normalizeReadingProgressSnapshot(snapshot);
+  if (!normalized) return;
+  const key = readingProgressKey(normalized);
+  if ((discardedReadingProgressIntents.get(key) ?? -1) >= intentSequence) return;
+  const failures = readReadingProgressFailures();
+  const previous = failures.get(key);
+  if (!previous || normalized.sequence >= previous.sequence) failures.set(key, normalized);
+  writeReadingProgressFailures();
+  renderReadingProgressRecovery();
+}
+
+function clearReadingProgressFailure(snapshot, intentSequence = readingProgressIntentSequence(snapshot)) {
+  const normalized = normalizeReadingProgressSnapshot(snapshot);
+  if (!normalized) return;
+  const key = readingProgressKey(normalized);
+  const failures = readReadingProgressFailures();
+  const current = failures.get(key);
+  const latestQueued = latestQueuedReadingProgressById.get(key);
+  if (latestQueued && readingProgressIntentSequence(latestQueued) > intentSequence) return;
+  if (current && current.sequence <= normalized.sequence) {
+    failures.delete(key);
+    writeReadingProgressFailures();
+    renderReadingProgressRecovery();
+  }
+}
+
+function waitForReadingProgressRetry(delayMs) {
+  return new Promise(resolve => setTimeout(resolve, delayMs));
+}
+
+async function persistReadingProgressSnapshot(snapshot, intentSequence = readingProgressIntentSequence(snapshot)) {
+  const key = readingProgressKey(snapshot);
+  for (let attempt = 0; attempt <= READING_PROGRESS_AUTO_RETRY_DELAYS_MS.length; attempt += 1) {
+    if ((discardedReadingProgressIntents.get(key) ?? -1) >= intentSequence) return false;
+    try {
+      // Legacy APIs may return undefined or false; rejection remains the failure signal.
+      await eAPI.saveProgress(snapshot);
+      clearReadingProgressFailure(snapshot, intentSequence);
+      const latestQueued = latestQueuedReadingProgressById.get(key);
+      if (latestQueued
+        && readingProgressIntentSequence(latestQueued) === intentSequence
+        && latestQueued.sequence === snapshot.sequence) {
+        latestQueuedReadingProgressById.delete(key);
+      }
+      return true;
+    } catch (error) {
+      if (attempt >= READING_PROGRESS_AUTO_RETRY_DELAYS_MS.length) {
+        const latestQueued = latestQueuedReadingProgressById.get(key);
+        if (!latestQueued || readingProgressIntentSequence(latestQueued) <= intentSequence) {
+          rememberFailedReadingProgressSnapshot(snapshot, intentSequence);
+        }
+        console.error('保存進度失敗：', error);
+        return false;
+      }
+      await waitForReadingProgressRetry(READING_PROGRESS_AUTO_RETRY_DELAYS_MS[attempt]);
+    }
+  }
+  return false;
+}
+
+function retryFailedReadingProgressSnapshots() {
+  if (readingProgressRetryPromise) return readingProgressRetryPromise;
+  const retryOperation = (async () => {
+    const pending = Array.from(readReadingProgressFailures().values())
+      .sort((a, b) => a.sequence - b.sequence)
+      .flatMap(snapshot => {
+        // A source-less legacy journal is intentionally retained for explicit
+        // discard only; applying it to a newly opened comic would be guessing.
+        if (typeof snapshot.sourceId !== 'string' || !snapshot.sourceId.trim()) return [];
+        const latestQueued = latestQueuedReadingProgressById.get(readingProgressKey(snapshot));
+        if (latestQueued && readingProgressIntentSequence(latestQueued) > snapshot.sequence) return [];
+        const sequence = nextReadingProgressSaveSequenceAfter(snapshot.sequence);
+        return [{ ...snapshot, sequence, intentSequence: snapshot.sequence }];
+      });
+    if (!pending.length) {
+      renderReadingProgressRecovery();
+      return readReadingProgressFailures().size === 0;
+    }
+    for (const snapshot of pending) await enqueueReadingProgressSnapshot(snapshot);
+    renderReadingProgressRecovery();
+    return readReadingProgressFailures().size === 0;
+  })();
+  const retryPromise = retryOperation.finally(() => {
+    if (readingProgressRetryPromise === retryPromise) readingProgressRetryPromise = null;
+  });
+  readingProgressRetryPromise = retryPromise;
+  return readingProgressRetryPromise;
+}
 // 外部資料夾清單是全量寫入；所有 UI intent 必須在同一條 queue 內重讀
 // localStorage，避免兩個舊 snapshot 互相覆蓋。
 let externalBookmarkMutationQueue = Promise.resolve();
+let externalBookmarksSnapshot = null;
+let externalBookmarksLegacyReadable = true;
+let externalBookmarksRecoveryRequired = false;
 
 function isLibraryRefreshBlocked() {
   return Boolean(
@@ -353,13 +619,37 @@ function getCoverUrl(comicId) {
   return `/api/cover?id=${encodedId}`;
 }
 
+// 目錄縮圖只要求 native page/folder route 的 512px PhotoKit 版本；
+// 閱讀器仍使用原始 URL，fixture、HTTP 與內建 demo 也維持原樣。
+function catalogThumbnailURL(source) {
+  const raw = String(source ?? '');
+  if (!/^gai:\/\/(?:page|folder)(?:\/|$)/i.test(raw)) return source;
+  const hashIndex = raw.indexOf('#');
+  const beforeHash = hashIndex === -1 ? raw : raw.slice(0, hashIndex);
+  const hash = hashIndex === -1 ? '' : raw.slice(hashIndex);
+  if (/[?&]thumbnail=[^&#]*/i.test(beforeHash)) {
+    return `${beforeHash.replace(/([?&]thumbnail=)[^&#]*/i, (_, prefix) => `${prefix}1`)}${hash}`;
+  }
+  const separator = beforeHash.includes('?') ? '&' : '?';
+  return `${beforeHash}${separator}thumbnail=1${hash}`;
+}
+
 const READER_PRELOAD_RADIUS = 10;
 const MAX_PRELOADED_IMAGES = READER_PRELOAD_RADIUS * 2;
+const MAX_IMPORTED_PHOTO_BYTES = 64 * 1024 * 1024;
 const READER_CACHE_UPDATE_DELAY_MS = 120;
 const WEBTOON_EAGER_IMAGES = 3;
 const WEBTOON_RENDER_BEFORE = 12;
 const WEBTOON_RENDER_AFTER = 28;
+// 目錄只保留捲動視窗附近的縮圖 DOM；頁面本身仍以 spacer 代表完整高度，
+// 因此 5,000 頁不會被切成只能按鈕翻的 160 頁視窗。
 const CATALOG_RENDER_PAGE_SIZE = 160;
+const CATALOG_THUMB_HEIGHT = 180;
+const CATALOG_GRID_GAP = 14;
+const CATALOG_VIRTUAL_OVERSCAN_ROWS = 3;
+const CATALOG_CONTROLS_OFFSET_FALLBACK = 60;
+const CATALOG_WINDOW_SHIFT_RATIO = 0.5;
+const CATALOG_WINDOW_PAGE_COUNT = CATALOG_RENDER_PAGE_SIZE - 2;
 const CATALOG_IMAGE_CONCURRENCY = 8;
 const BUILT_IN_DEMO_SOURCE_ID = 'builtin:landscapes';
 const BUILT_IN_DEMO_ID_PREFIX = 'builtin:landscape-';
@@ -377,6 +667,10 @@ let catalogImageQueue = [];
 const catalogImageTasks = new Set();
 let catalogImageActive = 0;
 let catalogImageGeneration = 0;
+// 批次換窗時先停止 pump，避免取消舊 active task 的同步 callback
+// 把仍掛在 DOM 上、但即將移除的舊 queue 項目重新啟動。
+let catalogImagePumpSuspended = false;
+let catalogVirtualRenderFrame = null;
 
 const BUILT_IN_DEMO_GROUPS = Object.freeze([
   { slug: 'mountains', title: '層疊群山', pageCount: 2 },
@@ -518,6 +812,13 @@ let state = {
   readerCacheWindowTimer: null,
   readerCacheWindowPage: null,
   readerCacheReadyPage: null,
+  readerCacheWindowToken: 0,
+  // 只有實際完成解碼／載入的頁面才能寫入閱讀進度；失敗頁面可明確重試。
+  readerReadyPages: new Set(),
+  readerFailedPages: new Set(),
+  readerLastReadyPageIndex: null,
+  readerReadyComicId: null,
+  readerLoadTrackingActive: false,
   readerIdleTimer: null,
   readerDiscoveryHintSeen: readStoredSetting('gai:readerDiscoveryHintSeen') === 'true',
   readerContextMenuOpen: false,
@@ -535,6 +836,10 @@ let state = {
   webtoonHeightUpdateFrame: null,
   webtoonNavigationOffset: 0,
   catalogWindowStart: 0,
+  catalogWindowEnd: 0,
+  catalogColumns: 0,
+  catalogRowHeight: CATALOG_THUMB_HEIGHT + CATALOG_GRID_GAP,
+  catalogControlOffset: CATALOG_CONTROLS_OFFSET_FALLBACK,
   comicsRevision: 0,
   readerReturnFocus: null,
   readerReturnComicFolder: null,
@@ -668,6 +973,15 @@ const elements = {
   libraryStartPanel: document.getElementById('library-start-panel'),
   libraryStartChoose: document.getElementById('library-start-choose'),
   libraryStartDemo: document.getElementById('library-start-demo'),
+  libraryDiscoveryBtn: document.getElementById('library-discovery-btn'),
+  libraryDiscoveryStatus: document.getElementById('library-discovery-status'),
+  libraryTagDiscoveryBtn: document.getElementById('library-tag-discovery-btn'),
+  libraryTagDiscoveryPanel: document.getElementById('library-tag-discovery-panel'),
+  discoveryTagSelect: document.getElementById('library-discovery-tag'),
+  discoveryTagPick: document.getElementById('library-discovery-tag-pick'),
+  discoveryTagRandom: document.getElementById('library-discovery-tag-random'),
+  discoveryTagSetup: document.getElementById('library-discovery-tag-setup'),
+  discoveryTagStatus: document.getElementById('library-discovery-tag-status'),
   scanRecoveryPanel: document.getElementById('scan-recovery-panel'),
   scanRecoveryMessage: document.getElementById('scan-recovery-message'),
   scanRetryBtn: document.getElementById('scan-retry-btn'),
@@ -733,6 +1047,7 @@ const elements = {
   readerModeIndicator: document.getElementById('reader-mode-indicator'),
   readerViewport: document.getElementById('reader-viewport'),
   pagesContainer: document.getElementById('pages-container'),
+  readerStatusPanel: document.getElementById('reader-status-panel'),
   pageCounter: document.getElementById('page-counter'),
   progressSlider: document.getElementById('progress-slider'),
   prevZone: document.getElementById('prev-zone'),
@@ -779,6 +1094,7 @@ const elements = {
   settingsBtn: document.getElementById('settings-btn'),
   settingsModal: document.getElementById('settings-modal'),
   closeSettingsBtn: document.getElementById('close-settings-btn'),
+  saveSettingsBtn: document.getElementById('save-settings-btn'),
   scanDirInput: document.getElementById('scan-dir-input'),
   scanDirStatus: document.getElementById('scan-dir-status'),
   scanPathRow: document.getElementById('scan-path-row'),
@@ -827,6 +1143,7 @@ document.addEventListener('DOMContentLoaded', () => {
   applyTheme(readStoredSetting(THEME_STORAGE_KEY) || 'midnight', { persist: false });
   applyLibraryCardSize(readStoredSetting(LIBRARY_CARD_SIZE_STORAGE_KEY), { persist: false });
   syncLibraryPanelsForViewport({ initial: true });
+  renderReadingProgressRecovery();
   initApp().catch(error => {
     console.error('漫畫庫初始化失敗：', error);
     hideLoader();
@@ -1016,9 +1333,9 @@ async function initApp() {
   document.getElementById('zoom-value').textContent = '100%';
   sanitizeSmbConfig();
 
-  // 如果是 iOS，顯示相簿匯入按鈕
+  // 僅在具備原生照片儲存能力的 iOS 環境顯示匯入入口
   const isIOS = /iPad|iPhone|iPod/.test(navigator.userAgent) || (navigator.platform === 'MacIntel' && navigator.maxTouchPoints > 1);
-  if (isIOS) {
+  if (isIOS && typeof eAPI.saveImportedPhoto === 'function') {
     // if (elements.settingsBtn) elements.settingsBtn.style.display = 'none';
     const importBtn = document.getElementById('import-photo-btn');
     if (importBtn) importBtn.style.display = 'inline-block';
@@ -1049,9 +1366,12 @@ async function initApp() {
 
   // 載入外部書籤；和新增／刪除共用 queue，避免初始化 restore 覆蓋
   // 使用者在另一個 UI 事件中剛提交的最新清單。
-  if (eAPI.setBookmarks) {
+  if (eAPI.restoreBookmarks) {
     try {
-      await restoreExternalBookmarks();
+      const restoreStatus = await restoreExternalBookmarks();
+      if (restoreStatus === 'BOOKMARKS_CORRUPT') {
+        alert(readerText('已保存的外部資料夾清單損壞；現有來源不會被清除。請重新選取資料夾後修復。'));
+      }
     } catch (error) {
       console.error('恢復外部資料夾失敗：', error);
       alert(readerText('部分外部資料夾權限無法恢復，請在設定中重新加入：\n{error}', { error }));
@@ -1065,17 +1385,37 @@ function classifyBookmarkUpdateError(error) {
   const message = error && error.message ? error.message : String(error);
   return {
     message,
-    stateWasUpdated: /清單已更新|狀態已更新|設定已更新|BOOKMARKS_UPDATED|PARTIAL_SUCCESS/i.test(message)
+    stateWasUpdated: /清單已更新|狀態已更新|設定已更新|BOOKMARKS_UPDATED|PARTIAL_SUCCESS/i.test(message),
+    bookmarksCorrupt: /BOOKMARKS_CORRUPT/i.test(message)
   };
 }
 
+function markExternalBookmarksCorrupt() {
+  externalBookmarksRecoveryRequired = true;
+}
+
 function readExternalBookmarks() {
+  if (externalBookmarksSnapshot !== null) return externalBookmarksSnapshot.map(bookmark => ({ ...bookmark }));
   try {
     const bookmarks = JSON.parse(localStorage.getItem('gai:externalBookmarks') || '[]');
-    return Array.isArray(bookmarks) ? bookmarks : [];
+    externalBookmarksLegacyReadable = true;
+    return Array.isArray(bookmarks) ? bookmarks.filter(bookmark => (
+      bookmark && typeof bookmark === 'object'
+      && typeof bookmark.bookmark === 'string' && typeof bookmark.name === 'string'
+    )) : [];
   } catch (error) {
-    console.warn('外部資料夾清單格式無效，將重新建立：', error);
+    externalBookmarksLegacyReadable = false;
+    console.warn('無法讀取舊外部資料夾清單；尚未保存原生設定時將暫停遷移：', error);
     return [];
+  }
+}
+
+function rememberExternalBookmarks(bookmarks) {
+  externalBookmarksSnapshot = bookmarks.map(bookmark => ({ ...bookmark }));
+  try {
+    localStorage.setItem('gai:externalBookmarks', JSON.stringify(externalBookmarksSnapshot));
+  } catch (error) {
+    console.warn('無法快取外部資料夾清單；原生設定與本次工作階段清單仍保留：', error);
   }
 }
 
@@ -1118,19 +1458,50 @@ function sanitizeSmbConfig() {
   return safeConfig;
 }
 
-function enqueueExternalBookmarkMutation(operation) {
-  const queued = externalBookmarkMutationQueue.then(operation, operation);
+function enqueueExternalBookmarkMutation(operation, { allowRecovery = false } = {}) {
+  const run = async () => {
+    // 使用者可能在啟動讀取設定時就按新增；第一個修改 intent 也必須先
+    // 取得原生來源，不能從尚未初始化的瀏覽器快取建立全量替換清單。
+    if (externalBookmarksSnapshot === null && !externalBookmarksRecoveryRequired && eAPI?.restoreBookmarks) {
+      let restored;
+      try {
+        restored = await eAPI.restoreBookmarks(readExternalBookmarks(), externalBookmarksLegacyReadable);
+      } catch (error) {
+        if (!classifyBookmarkUpdateError(error).bookmarksCorrupt) throw error;
+        markExternalBookmarksCorrupt();
+        restored = 'BOOKMARKS_CORRUPT';
+      }
+      if (restored === 'BOOKMARKS_CORRUPT') markExternalBookmarksCorrupt();
+      else {
+        if (!Array.isArray(restored)) throw new Error('Native bookmark restore returned an invalid list');
+        rememberExternalBookmarks(restored);
+      }
+    }
+    if (externalBookmarksRecoveryRequired && !allowRecovery) {
+      throw new Error(readerText('外部資料夾清單需要先修復；現有來源沒有變更。'));
+    }
+    return operation();
+  };
+  const queued = externalBookmarkMutationQueue.then(run, run);
   // 保留目前操作的 rejection 給呼叫端，但讓後續 UI intent 繼續排程。
   externalBookmarkMutationQueue = queued.catch(() => {});
   return queued;
 }
 
 async function restoreExternalBookmarks() {
-  if (!eAPI?.setBookmarks) return;
-  await enqueueExternalBookmarkMutation(async () => {
-    // 空清單也是有效的全量提交，用來清除 native process 內殘留的來源。
-    await eAPI.setBookmarks(readExternalBookmarks());
-  });
+  if (!eAPI?.restoreBookmarks) return;
+  // 原生在同一把生命週期鎖內讀取持久化清單；只有尚未保存過的舊版
+  // 才採用瀏覽器資料遷移。初始化與之後的修改共用同一條 queue。
+  return enqueueExternalBookmarkMutation(
+    () => (externalBookmarksRecoveryRequired ? 'BOOKMARKS_CORRUPT' : 'restored'),
+    { allowRecovery: true }
+  );
+}
+
+function normalizeExternalBookmarkSelection(result) {
+  if (!result || typeof result.bookmark !== 'string' || !result.bookmark.trim()
+    || typeof result.name !== 'string' || !result.name.trim()) return null;
+  return { bookmark: result.bookmark, name: result.name };
 }
 
 function isIOSLibraryDevice() {
@@ -1146,46 +1517,83 @@ async function addIOSLibrarySource() {
   let desiredBookmarks = null;
   let duplicateBookmark = false;
   let renamedBookmark = false;
+  let recoveryRebuilt = false;
+  let recoveryCancelled = false;
+  let repairAttempted = false;
   try {
     const result = await window.electronAPI.openExternalFolder();
-    if (!result?.bookmark) return;
+    const selectedBookmark = normalizeExternalBookmarkSelection(result);
+    if (!selectedBookmark) {
+      alert(readerText('選取的外部資料夾授權無效，來源清單沒有變更。'));
+      return;
+    }
 
     await enqueueExternalBookmarkMutation(async () => {
+      if (externalBookmarksRecoveryRequired) {
+        if (!confirm(readerText('先備份損壞清單、重建為已選來源，其他來源需重新加入。確定要繼續嗎？'))) {
+          recoveryCancelled = true;
+          return;
+        }
+        if (!window.electronAPI?.repairExternalBookmarks) {
+          throw new Error(readerText('目前版本不支援修復損壞的外部資料夾清單。'));
+        }
+        repairAttempted = true;
+        const repairedBookmarks = [selectedBookmark];
+        desiredBookmarks = repairedBookmarks;
+        await window.electronAPI.repairExternalBookmarks(repairedBookmarks);
+        externalBookmarksRecoveryRequired = false;
+        rememberExternalBookmarks(repairedBookmarks);
+        recoveryRebuilt = true;
+        return;
+      }
       const bookmarks = readExternalBookmarks();
-      const existingIndex = bookmarks.findIndex(bookmark => bookmark.bookmark === result.bookmark);
+      const existingIndex = bookmarks.findIndex(bookmark => bookmark.bookmark === selectedBookmark.bookmark);
       if (existingIndex >= 0) {
-        if (bookmarks[existingIndex].name === result.name) {
+        if (bookmarks[existingIndex].name === selectedBookmark.name) {
           duplicateBookmark = true;
           alert(readerText('這個資料夾已經加入了。'));
           return;
         }
         const renamedBookmarks = bookmarks.map((bookmark, index) => (
-          index === existingIndex ? { ...bookmark, name: result.name } : bookmark
+          index === existingIndex ? { ...bookmark, name: selectedBookmark.name } : bookmark
         ));
         desiredBookmarks = renamedBookmarks;
         renamedBookmark = true;
         await window.electronAPI.setBookmarks(renamedBookmarks);
-        localStorage.setItem('gai:externalBookmarks', JSON.stringify(renamedBookmarks));
+        rememberExternalBookmarks(renamedBookmarks);
         return;
       }
 
-      const nextBookmarks = [...bookmarks, { bookmark: result.bookmark, name: result.name }];
+      const nextBookmarks = [...bookmarks, selectedBookmark];
       desiredBookmarks = nextBookmarks;
       await window.electronAPI.setBookmarks(nextBookmarks);
-      localStorage.setItem('gai:externalBookmarks', JSON.stringify(nextBookmarks));
-    });
+      rememberExternalBookmarks(nextBookmarks);
+    }, { allowRecovery: true });
+    if (recoveryCancelled) return;
+    if (recoveryRebuilt) {
+      renderExternalBookmarks();
+      if (elements.scanDirStatus) elements.scanDirStatus.textContent = readerText('已修復並加入：{name}，正在重新掃描。', { name: selectedBookmark.name });
+      showLoader(readerText('正在掃描新加入的漫畫來源...'), { progress: null, detail: readerText('掃描完成後會更新書架，期間仍可操作目前畫面') });
+      startScanStatusPolling();
+      scheduleLibraryRefresh(0);
+      return;
+    }
     if (duplicateBookmark) return;
     renderExternalBookmarks();
     if (renamedBookmark) return;
-    if (elements.scanDirStatus) elements.scanDirStatus.textContent = readerText('已加入：{name}，正在重新掃描。', { name: result.name });
+    if (elements.scanDirStatus) elements.scanDirStatus.textContent = readerText('已加入：{name}，正在重新掃描。', { name: selectedBookmark.name });
     showLoader(readerText('正在掃描新加入的漫畫來源...'), { progress: null, detail: readerText('掃描完成後會更新書架，期間仍可操作目前畫面') });
     startScanStatusPolling();
     scheduleLibraryRefresh(0);
   } catch (error) {
     console.error('加入 iOS 外部資料夾失敗：', error);
     const { message, stateWasUpdated } = classifyBookmarkUpdateError(error);
+    if (repairAttempted && !stateWasUpdated) {
+      throw new Error(message);
+    }
     if (stateWasUpdated && desiredBookmarks) {
-      localStorage.setItem('gai:externalBookmarks', JSON.stringify(desiredBookmarks));
+      if (repairAttempted) externalBookmarksRecoveryRequired = false;
+      rememberExternalBookmarks(desiredBookmarks);
       renderExternalBookmarks();
       if (renamedBookmark) return;
       if (elements.scanDirStatus) {
@@ -1219,7 +1627,7 @@ async function chooseLibrarySource() {
   if (elements.scanDirStatus) elements.scanDirStatus.textContent = readerText('正在開啟系統檔案選擇器…');
 
   try {
-    if (isIOSLibraryDevice()) {
+    if (isIOSLibraryDevice() && typeof window.electronAPI?.openExternalFolder === 'function') {
       await addIOSLibrarySource();
     } else if (window.electronAPI?.isElectron && window.electronAPI.openFolderDialog) {
       await chooseNativeLibrarySource();
@@ -1258,6 +1666,18 @@ function bindEvents() {
   elements.libraryPanelScrim?.addEventListener('click', closeLibraryPanelScrim);
 
   elements.libraryStartChoose?.addEventListener('click', chooseLibrarySource);
+  elements.libraryDiscoveryBtn?.addEventListener('click', () => openDiscoveryComic());
+  elements.libraryTagDiscoveryBtn?.addEventListener('click', toggleDiscoveryTags);
+  elements.discoveryTagPick?.addEventListener('click', () => openDiscoveryTag(false));
+  elements.discoveryTagRandom?.addEventListener('click', () => openDiscoveryTag(true));
+  elements.discoveryTagSetup?.addEventListener('click', () => {
+    closeDiscoveryTags();
+    setOrganizeMode(true);
+    switchOrganizerPanel('batch');
+    elements.organizeBar?.scrollIntoView({ block: 'nearest' });
+    elements.organizeTag?.focus();
+    updateOrganizerUi(readerText('先選取漫畫，再輸入標籤；例如 general:冒險，套用後就能依 TAG 探索。'));
+  });
   elements.libraryStartDemo?.addEventListener('click', () => {
     const firstDemo = createBuiltInDemoComics()[0];
     if (!state.comics.some(comic => comic.id === firstDemo.id)) {
@@ -1310,41 +1730,167 @@ function bindEvents() {
   // 相簿匯入
   const importBtn = document.getElementById('import-photo-btn');
   const importInput = document.getElementById('photo-import-input');
+  let importBusy = false;
+  let pendingPhotoImports = [];
+  let retryPhotoImportBtn = null;
   if (importBtn && importInput) {
+    const preparePhotoImportEntries = (selectedFiles, batchId = Date.now()) => {
+      const prepared = Array.from(selectedFiles || []).map((entry, index) => {
+        const file = entry?.file || entry;
+        const filename = entry?.filename || `${batchId}_${index}_${file?.name || 'image.jpg'}`;
+        return { file, filename };
+      });
+      prepared.forEach(({ file, filename }) => {
+        const size = Number(file?.size);
+        const filenameBytes = typeof TextEncoder === 'function'
+          ? new TextEncoder().encode(filename).byteLength
+          : encodeURIComponent(filename).replace(/%[0-9A-F]{2}/gi, 'x').length;
+        if (!Number.isFinite(size) || size <= 0 || size > MAX_IMPORTED_PHOTO_BYTES) {
+          throw new Error(readerText('匯入圖片必須介於 1 byte 與 64 MiB。'));
+        }
+        if (filenameBytes > 200) throw new Error(readerText('匯入檔名過長。'));
+      });
+      return prepared;
+    };
+
+    const updatePhotoImportRetry = () => {
+      if (!pendingPhotoImports.length) {
+        retryPhotoImportBtn?.remove();
+        retryPhotoImportBtn = null;
+        return;
+      }
+      if (!retryPhotoImportBtn) {
+        retryPhotoImportBtn = document.createElement('button');
+        retryPhotoImportBtn.type = 'button';
+        retryPhotoImportBtn.className = 'modal-action-btn photo-import-retry-btn';
+        retryPhotoImportBtn.addEventListener('click', () => {
+          if (importBusy || !pendingPhotoImports.length) return;
+          return processPhotoImport(pendingPhotoImports, { retry: true });
+        });
+        importBtn.parentElement?.appendChild(retryPhotoImportBtn);
+      }
+      retryPhotoImportBtn.textContent = readerText('重試未匯入的 {count} 張', { count: pendingPhotoImports.length });
+      retryPhotoImportBtn.setAttribute('aria-label', retryPhotoImportBtn.textContent);
+      retryPhotoImportBtn.hidden = false;
+    };
+
+    const processPhotoImport = async (selectedFiles, { retry = false } = {}) => {
+      if (importBusy) return;
+      const entries = Array.from(selectedFiles || []);
+      if (!entries.length) return;
+      let prepared;
+      try {
+        // Validate the complete selection and stable native filename before any
+        // ArrayBuffer allocation or partial write.
+        prepared = preparePhotoImportEntries(entries);
+      } catch (error) {
+        alert(readerText('匯入失敗：{error}', { error: error?.message || error }));
+        console.error(error);
+        return;
+      }
+
+      importBusy = true;
+      importBtn.disabled = true;
+      retryPhotoImportBtn?.setAttribute('disabled', 'true');
+      importBtn.setAttribute('aria-busy', 'true');
+      let committed = 0;
+      let failed = 0;
+      let scanError = null;
+      let refreshError = null;
+      const notCommitted = [];
+      showLoader(readerText(retry ? '正在重試匯入 {count} 張圖片…' : '正在從相簿匯入 {count} 張圖片...', { count: prepared.length }), { progress: 0, detail: readerText('請勿關閉 App') });
+
+      const finishImport = async () => {
+        pendingPhotoImports = notCommitted;
+        // 每筆檔案都會嘗試到結束；「未處理」只計算因流程中止而未嘗試的項目，
+        // native 失敗另列為 failed，並由 pendingPhotoImports 提供手動重試。
+        const pending = Math.max(0, prepared.length - committed - failed);
+        showLoader(readerText('圖片匯入完成！正在整理書架...'), { progress: null, detail: readerText('馬上就好囉...') });
+        if (typeof eAPI.scanLibrary === 'function') {
+          try {
+            await eAPI.scanLibrary();
+          } catch (error) {
+            scanError = error;
+            console.error('匯入後掃描失敗：', error);
+          }
+        }
+        try {
+          await fetchLibrary();
+        } catch (error) {
+          refreshError = error;
+          console.error('匯入後刷新書架失敗：', error);
+        }
+        if (scanError || refreshError) {
+          setScanRecoveryVisible(true, readerText('漫畫來源暫時無法完成掃描，現有書架仍可使用。'));
+        }
+        updatePhotoImportRetry();
+        const summary = readerText('匯入結果：成功 {success} 張，失敗 {failed} 張，未處理 {pending} 張。', {
+          success: committed,
+          failed,
+          pending,
+        });
+        if (failed || scanError || refreshError) {
+          alert(`${summary}\n${readerText('已成功寫入的圖片會保留；請按「重試未匯入的圖片」再次處理失敗項。')}`);
+        } else {
+          showReaderToast(summary);
+        }
+      };
+
+      try {
+        for (let index = 0; index < prepared.length; index += 1) {
+          const { file, filename } = prepared[index];
+          try {
+            const arrayBuffer = await file.arrayBuffer();
+            const data = new Uint8Array(arrayBuffer);
+            if (data.byteLength === 0 || data.byteLength > MAX_IMPORTED_PHOTO_BYTES) {
+              throw new Error(readerText('匯入圖片必須介於 1 byte 與 64 MiB。'));
+            }
+            await eAPI.saveImportedPhoto(filename, data);
+            committed += 1;
+          } catch (error) {
+            failed += 1;
+            notCommitted.push({ file, filename, error });
+            console.error('匯入單張圖片失敗：', error);
+          }
+          showLoader(readerText(retry ? '正在重試匯入 {count} 張圖片…' : '正在從相簿匯入 {count} 張圖片...', { count: prepared.length }), { progress: ((index + 1) / prepared.length) * 100, detail: readerText('正在匯入: {name}', { name: file.name }) });
+        }
+        await finishImport();
+      } catch (error) {
+        pendingPhotoImports = [];
+        updatePhotoImportRetry();
+        alert(readerText('匯入失敗：{error}', { error: error?.message || error }));
+        console.error(error);
+      } finally {
+        hideLoader();
+        importInput.value = '';
+        importBusy = false;
+        importBtn.disabled = false;
+        retryPhotoImportBtn?.removeAttribute('disabled');
+        importBtn.removeAttribute('aria-busy');
+        updatePhotoImportRetry();
+      }
+    };
+
     importBtn.addEventListener('click', () => {
+      if (importBusy) return;
       importInput.click();
     });
 
-    importInput.addEventListener('change', async (e) => {
-      const files = e.target.files;
+    importInput.addEventListener('change', (e) => {
+      if (importBusy) return;
+      const files = Array.from(e.target.files || []);
       if (!files || files.length === 0) return;
-
-      showLoader(readerText('正在從相簿匯入 {count} 張圖片...', { count: files.length }), { progress: 0, detail: readerText('請勿關閉 App') });
-
       try {
-        for (let i = 0; i < files.length; i++) {
-          const file = files[i];
-          const arrayBuffer = await file.arrayBuffer();
-          // 生成一個帶有時間戳的檔名，避免重複
-          const filename = `${Date.now()}_${i}_${file.name || 'image.jpg'}`;
-          await eAPI.saveImportedPhoto(filename, Array.from(new Uint8Array(arrayBuffer)));
-
-          showLoader(readerText('正在從相簿匯入 {count} 張圖片...', { count: files.length }), { progress: ((i + 1) / files.length) * 100, detail: readerText('正在匯入: {name}', { name: file.name }) });
-        }
-
-        // 匯入完成後重新掃描
-        showLoader(readerText('圖片匯入完成！正在整理書架...'), { progress: null, detail: readerText('馬上就好囉...') });
-        if (eAPI.scanLibrary) {
-          try { await eAPI.scanLibrary(); } catch(err) { console.error(err); }
-        }
-        await fetchLibrary();
-      } catch (err) {
-        alert(readerText('匯入失敗：{error}', { error: err }));
-        console.error(err);
+        const prepared = preparePhotoImportEntries(files);
+        // The size/name preflight above happens before processPhotoImport starts
+        // any ArrayBuffer allocation.
+        return processPhotoImport(prepared);
+      } catch (error) {
+        alert(readerText('匯入失敗：{error}', { error: error?.message || error }));
+        console.error(error);
+        importInput.value = '';
+        return Promise.resolve();
       }
-
-      hideLoader();
-      importInput.value = ''; // 清空選擇
     });
   }
 
@@ -1418,6 +1964,9 @@ function bindEvents() {
   elements.readerOverlay.addEventListener('mousemove', (e) => {
     // 觸控相容滑鼠事件與按住拖曳不能繞過下方的 tap/swipe 判定。
     if (e.buttons || readerTouchActive || e.sourceCapabilities?.firesTouchEvents) return;
+    // WebKit 也可能先送出沒有 sourceCapabilities 的相容 mousemove。
+    // 縮圖上方不能浮出工具列，否則後續 click 會改落到工具列。
+    if (isCatalogThumbnailInteraction(e)) return;
     const y = e.clientY;
     const h = window.innerHeight;
     if (y < h * 0.12 || y > h * 0.88) {
@@ -1561,14 +2110,14 @@ function bindEvents() {
     clearTimeout(state.readerIdleTimer);
   });
   elements.readerTopBar.addEventListener('mouseleave', () => {
-    triggerControlsActive();
+    if (!elements.readerOverlay.classList.contains('reader-idle')) triggerControlsActive();
   });
 
   elements.readerBottomBar.addEventListener('mouseenter', () => {
     clearTimeout(state.readerIdleTimer);
   });
   elements.readerBottomBar.addEventListener('mouseleave', () => {
-    triggerControlsActive();
+    if (!elements.readerOverlay.classList.contains('reader-idle')) triggerControlsActive();
   });
 
   // 滑鼠滾輪翻頁
@@ -1577,6 +2126,7 @@ function bindEvents() {
   // 設定按鈕與視窗事件
   elements.settingsBtn.addEventListener('click', openSettingsModal);
   elements.closeSettingsBtn.addEventListener('click', closeSettingsModal);
+  elements.saveSettingsBtn?.addEventListener('click', closeSettingsModal);
   elements.themePicker?.addEventListener('click', event => {
     const option = event.target.closest('[data-theme-option]');
     if (option) applyTheme(option.dataset.themeOption);
@@ -1610,7 +2160,7 @@ function bindEvents() {
     setAiPagePanelVisible(false);
     elements.btnAiExplain?.focus({ preventScroll: true });
   });
-  window.addEventListener('resize', scheduleReaderImageTransformRefresh);
+  window.addEventListener('resize', handleReaderResize);
   document.addEventListener('fullscreenchange', scheduleReaderImageTransformRefresh);
   updateAiProviderDisclosure();
 
@@ -1636,11 +2186,8 @@ function bindEvents() {
 
   // Electron 特有邏輯 (純 Electron 模式 — 無 HTTP server)
   if (window.electronAPI && window.electronAPI.isElectron) {
-    const isIOSDevice = isIOSLibraryDevice();
     if (elements.fallbackFolderBrowser) elements.fallbackFolderBrowser.style.display = 'none';
-    if (isIOSDevice) {
-      if (elements.scanPathRow) elements.scanPathRow.hidden = true;
-      if (elements.librarySourceLabel) elements.librarySourceLabel.removeAttribute('for');
+    if (configureSettingsSourceControls()) {
       if (elements.scanDirStatus) {
         elements.scanDirStatus.textContent = readerText('可選擇「檔案」中的本機、iCloud 或已連線 NAS 資料夾。');
       }
@@ -1808,6 +2355,7 @@ function refreshReaderImageTransforms() {
 function scheduleReaderImageTransformRefresh() {
   cancelAnimationFrame(readerTransformFrame);
   readerTransformFrame = requestAnimationFrame(refreshReaderImageTransforms);
+  if (state.readingMode === 'catalog') scheduleCatalogVirtualRender();
 }
 
 function replaceReaderImages(images) {
@@ -1815,6 +2363,68 @@ function replaceReaderImages(images) {
   images.filter(Boolean).forEach(img => elements.pagesContainer.appendChild(img));
   scheduleReaderImageTransformRefresh();
   scheduleAutoPageExplanation();
+}
+
+function readerImageIsReady(img) {
+  return Boolean(img && img.complete && Number(img.naturalWidth) > 0);
+}
+
+async function decodeReaderImage(img) {
+  await img.decode();
+  if (!readerImageIsReady(img)) throw new Error('image decode did not produce a usable image');
+  return img;
+}
+
+function clearReaderImageError() {
+  elements.readerStatusPanel?.querySelectorAll?.('.reader-image-error').forEach(item => item.remove());
+}
+
+function showReaderImageError(pageIndexes) {
+  clearReaderImageError();
+  const host = elements.readerStatusPanel || elements.readerOverlay;
+  if (!host) return;
+  const indexes = [...new Set(pageIndexes)].filter(Number.isInteger);
+  const button = document.createElement('button');
+  button.type = 'button';
+  button.className = 'reader-image-error';
+  button.textContent = readerText('第 {pages} 頁載入失敗，請重試。', {
+    pages: indexes.map(index => index + 1).join('、'),
+  });
+  button.setAttribute('aria-live', 'assertive');
+  button.addEventListener('click', () => {
+    button.disabled = true;
+    button.textContent = readerText('正在重試…');
+    retryReaderPages(indexes);
+  });
+  host.appendChild(button);
+}
+
+function markReaderPageReady(index, img, renderGeneration = state.renderGeneration) {
+  if (renderGeneration !== state.renderGeneration || !state.currentComic || !readerImageIsReady(img)) return false;
+  state.readerReadyComicId = state.currentComic.id;
+  state.readerReadyPages.add(index);
+  state.readerFailedPages.delete(index);
+  if (state.currentPageIndex === index) {
+    state.readerLastReadyPageIndex = index;
+    saveReadingProgress();
+  }
+  return true;
+}
+
+function markReaderPageFailed(index, renderGeneration = state.renderGeneration) {
+  if (renderGeneration !== state.renderGeneration || !state.currentComic) return false;
+  state.readerFailedPages.add(index);
+  state.readerReadyPages.delete(index);
+  return true;
+}
+
+function retryReaderPages(pageIndexes) {
+  const indexes = [...new Set(pageIndexes)].filter(Number.isInteger);
+  indexes.forEach(index => state.readerFailedPages.delete(index));
+  clearReaderImageError();
+  // 重新繪製會重建目前模式的圖片；條漫 prefix 高度仍由既有 metrics
+  // 保留，retry 不會插入影響前綴幾何的錯誤節點。
+  renderPages();
 }
 
 function readerViewportCanScroll(axis) {
@@ -2305,6 +2915,48 @@ function resetCoverLoadQueue() {
   coverLoadActive = 0;
 }
 
+function removeScheduledCover(img) {
+  coverObserver?.unobserve(img);
+  cancelQueuedCoverLoad(img);
+  coverVisibleImages.delete(img);
+  for (const task of coverLoadTasks) {
+    if (task.img !== img) continue;
+    task.cancelled = true;
+    img.removeEventListener('load', task.onLoad);
+    img.removeEventListener('error', task.onError);
+    img.src = '';
+    if (task.src && !img.dataset.src) img.dataset.src = task.src;
+    delete img.dataset.coverQueued;
+    img.dataset.coverState = 'idle';
+    coverLoadTasks.delete(task);
+    coverLoadActive = Math.max(0, coverLoadActive - 1);
+  }
+  scheduleCoverLoadDrain(0);
+}
+
+function ensureCoverObserver() {
+  if (coverObserver) return coverObserver;
+  coverObserver = new IntersectionObserver((entries, observer) => {
+    entries.forEach(entry => {
+      const img = entry.target;
+      if (entry.isIntersecting) {
+        coverVisibleImages.add(img);
+        if (img.dataset.coverPriority !== 'secondary' && hasFailedCover(img.dataset.coverId)) {
+          coverVisibleImages.delete(img);
+          observer.unobserve(img);
+          markCoverUnavailable(img);
+          return;
+        }
+        if (img.dataset.src) enqueueCoverLoad(img);
+      } else {
+        coverVisibleImages.delete(img);
+        cancelQueuedCoverLoad(img);
+      }
+    });
+  }, { rootMargin: '80px' });
+  return coverObserver;
+}
+
 function noteCatalogScroll() {
   coverScrollActive = true;
   if (coverLoadTimer !== null) {
@@ -2356,13 +3008,14 @@ function drainCoverLoadQueue() {
   coverLoadTimer = null;
   if (coverScrollActive) return;
   while (coverLoadActive < COVER_LOAD_CONCURRENCY && coverLoadQueue.length > 0) {
-    const visibleIndex = coverLoadQueue.findIndex(img => coverVisibleImages.has(img));
+    let visibleIndex = coverLoadQueue.findIndex(img => coverVisibleImages.has(img) && img.dataset.coverPriority !== 'secondary');
+    if (visibleIndex < 0) visibleIndex = coverLoadQueue.findIndex(img => coverVisibleImages.has(img));
     if (visibleIndex < 0) return;
     const [img] = coverLoadQueue.splice(visibleIndex, 1);
     coverVisibleImages.delete(img);
     coverObserver?.unobserve(img);
     if (!img?.isConnected || !img.dataset.src) continue;
-    if (hasFailedCover(img.dataset.coverId)) {
+    if (img.dataset.coverPriority !== 'secondary' && hasFailedCover(img.dataset.coverId)) {
       markCoverUnavailable(img);
       continue;
     }
@@ -2389,7 +3042,8 @@ function drainCoverLoadQueue() {
       img.removeEventListener('load', task.onLoad);
       img.removeEventListener('error', task.onError);
       if (task.generation !== coverLoadGeneration) return;
-      if (failed) markCoverUnavailable(img);
+      if (failed && img.dataset.coverPriority === 'secondary') img.style.display = 'none';
+      else if (failed) markCoverUnavailable(img);
       else img.dataset.coverState = 'loaded';
       coverLoadActive = Math.max(0, coverLoadActive - 1);
       scheduleCoverLoadDrain(0);
@@ -2415,7 +3069,7 @@ function scheduleCoverLoadDrain(delay = COVER_LOAD_START_DELAY) {
 
 function enqueueCoverLoad(img) {
   if (!img?.dataset.src || img.dataset.coverState === 'queued' || img.dataset.coverState === 'loading') return;
-  if (hasFailedCover(img.dataset.coverId)) {
+  if (img.dataset.coverPriority !== 'secondary' && hasFailedCover(img.dataset.coverId)) {
     markCoverUnavailable(img);
     return;
   }
@@ -2777,6 +3431,16 @@ function normalizeDirectorySourceId(sourceId) {
   return sourceId == null ? '' : String(sourceId).trim();
 }
 
+function isPhotoKitSourceId(sourceId) {
+  const normalized = normalizeDirectorySourceId(sourceId);
+  return normalized === 'photos' || normalized.startsWith('photos:');
+}
+
+function isVirtualDirectorySourceId(sourceId) {
+  const normalized = normalizeDirectorySourceId(sourceId);
+  return isPhotoKitSourceId(normalized) || normalized === BUILT_IN_DEMO_SOURCE_ID;
+}
+
 function normalizeDirectoryPath(path) {
   if (typeof path !== 'string') return '';
   return path.replace(/^\/+|\/+$/g, '');
@@ -2878,7 +3542,7 @@ function getFolderTreeNodeKey(sourceId, path) {
 
 function getFolderTreeSourceLabel(sourceId) {
   if (!sourceId) return '';
-  if (sourceId === 'smb') return readerText('SMB');
+  if (sourceId === 'smb' || sourceId.startsWith('smb:v1:')) return readerText('SMB');
   if (sourceId.startsWith('external:') || sourceId === BUILT_IN_DEMO_SOURCE_ID) return readerText('Files');
   if (sourceId.startsWith('local:') || sourceId === 'local') return readerText('本機');
   return sourceId;
@@ -3224,13 +3888,10 @@ function updateStats() {
   let completed = 0;
 
   formalComics.forEach(c => {
-    const prog = c.progress;
-    if (prog && prog.currentPage > 0) {
-      if (prog.percent >= 98 || prog.currentPage >= prog.totalPages - 1) {
-        completed++;
-      } else {
-        reading++;
-      }
+    const progress = getProgressInfo(c);
+    if (progress.hasProgress) {
+      if (progress.isFinished) completed++;
+      else reading++;
     }
   });
 
@@ -3244,17 +3905,24 @@ function getProgressInfo(comic) {
   const progress = comic?.progress || {};
   const currentPage = Number(progress.currentPage || 0);
   const totalPages = Number(progress.totalPages || comic?.pageCount || 0);
+  // currentPage is zero-based. A one-page comic therefore remains at 0 even
+  // after it has been opened; updatedAt is the existing persisted last-read
+  // marker written by save_progress and lets us classify that case without a
+  // new cross-layer completion field.
   const suppliedPercent = Number(progress.percent);
+  const hasLastRead = typeof progress.updatedAt === 'string' && progress.updatedAt.trim() !== '';
+  const singlePageFinished = totalPages === 1 && (hasLastRead || suppliedPercent >= 100);
   const rawPercent = Number.isFinite(suppliedPercent)
     ? suppliedPercent
     : totalPages > 0 ? (currentPage / totalPages) * 100 : 0;
-  const percent = Math.round(Math.min(100, Math.max(0, rawPercent)));
+  const percent = singlePageFinished ? 100 : Math.round(Math.min(100, Math.max(0, rawPercent)));
+  const hasProgress = currentPage > 0 || singlePageFinished;
   return {
     currentPage,
     totalPages,
     percent,
-    hasProgress: currentPage > 0,
-    isFinished: currentPage > 0 && (percent >= 98 || currentPage >= totalPages - 1)
+    hasProgress,
+    isFinished: hasProgress && (singlePageFinished || percent >= 98 || currentPage >= totalPages - 1)
   };
 }
 
@@ -3271,13 +3939,27 @@ function renderContinueStrip() {
     })
     .slice(0, 5);
 
+  const titleCounts = new Map();
+  candidates.forEach(comic => titleCounts.set(comic.title, (titleCounts.get(comic.title) || 0) + 1));
+  const contexts = new Map(candidates.map(comic => {
+    const path = typeof comic.relativePath === 'string' ? comic.relativePath : '';
+    const sourceId = getFolderTreeSourceId(comic);
+    const sourceLabel = /^(?:local(?::|$)|external:|smb(?::|$))/.test(sourceId)
+      ? getFolderTreeSourceLabel(sourceId) : '';
+    const context = titleCounts.get(comic.title) > 1
+      ? [sourceLabel, path].filter(Boolean).join(' · ') : '';
+    return [comic, context];
+  }));
+
   const renderSignature = candidates.map(comic => {
     const progress = getProgressInfo(comic);
     const favorite = isFavoriteId(comic.id);
     const displayPercent = progress.percent;
     return [
       comic.id,
+      comic.sourceId || '',
       comic.title,
+      contexts.get(comic),
       progress.currentPage,
       progress.totalPages,
       progress.percent,
@@ -3291,6 +3973,7 @@ function renderContinueStrip() {
   if (renderSignature === lastContinueRenderSignature) return;
   lastContinueRenderSignature = renderSignature;
 
+  elements.continueStrip.querySelectorAll('.lazy-cover').forEach(removeScheduledCover);
   if (candidates.length === 0) {
     if (elements.continuePanel) elements.continuePanel.hidden = true;
     elements.continueStrip.replaceChildren();
@@ -3304,10 +3987,11 @@ function renderContinueStrip() {
     const favorite = isFavoriteId(comic.id);
     const displayPercent = progress.percent;
     return `
-      <button class="continue-card" data-comic-id="${comic.id}">
-        <img src="${escapeHtml(getCoverUrl(comic.id))}" loading="lazy" decoding="async" fetchpriority="low" alt="${escapeHtml(comic.title)}" onerror="this.style.display='none';">
+      <button class="continue-card" data-comic-id="${escapeHtml(comic.id)}" title="${escapeHtml([comic.title, contexts.get(comic)].filter(Boolean).join(' · '))}">
+        <img class="lazy-cover" data-cover-priority="secondary" data-cover-id="${escapeHtml(comic.id)}" data-src="${escapeHtml(getCoverUrl(comic.id))}" loading="lazy" decoding="async" fetchpriority="low" alt="">
         <span class="continue-body">
           <strong>${escapeHtml(comic.title)}</strong>
+          ${contexts.get(comic) ? `<small class="continue-context">${escapeHtml(contexts.get(comic))}</small>` : ''}
           <small>${progress.hasProgress ? readerText('第 {page} 頁', { page: progress.currentPage + 1 }) : readerText('已收藏')}</small>
           <span class="continue-progress"><span style="width: ${displayPercent}%"></span></span>
         </span>
@@ -3316,9 +4000,11 @@ function renderContinueStrip() {
     `;
   }).join('');
 
-  elements.continueStrip.querySelectorAll('.continue-card').forEach(card => {
-    card.addEventListener('click', () => openReader(card.dataset.comicId, { returnToComicFolder: true }));
+  elements.continueStrip.querySelectorAll('.continue-card').forEach((card, index) => {
+    card.addEventListener('click', () => openReader(candidates[index], { returnToComicFolder: true }));
   });
+  const observer = ensureCoverObserver();
+  elements.continueStrip.querySelectorAll('.lazy-cover').forEach(img => observer.observe(img));
 }
 
 function inspectorRenderSignature(comic) {
@@ -3383,7 +4069,7 @@ function activateGridComic(comic) {
     if (comic.isDirectory) {
       navigateLibraryToPath(comic.relativePath, comic.sourceId || '');
     } else {
-      openReader(comic.id);
+      openReader(comic);
     }
     return;
   }
@@ -3492,13 +4178,13 @@ function renderComicInspector(comic, options = {}) {
   if (openBtn) {
     openBtn.onclick = () => {
       if (builtInDemo) {
-        openReader(comic.id);
+        openReader(comic);
       } else if (sourceOffline) {
         openSettingsForRecovery();
       } else if (isDirectory) {
         navigateLibraryToPath(comic.relativePath, comic.sourceId || '');
       } else {
-        openReader(comic.id);
+        openReader(comic);
       }
     };
   }
@@ -3717,16 +4403,10 @@ function compareShelfItems(left, right) {
   return comicTitleCollator.compare(String(left.title || ''), String(right.title || ''));
 }
 
-// 計算目前目錄樹路徑下的項目 (由姬米妮為主人傾力打造的 YACReader 級目錄折疊算法 ✨)
-function getDirectoryItems() {
-  const curPath = state.currentPath;
+function getLibraryFilteredComics() {
   const curSourceId = normalizeDirectorySourceId(state.currentSourceId);
-  const itemsMap = new Map(); // 子目錄折疊
-  const filesList = []; // 直屬此目錄的漫畫
   const hasFormalComic = state.comics.some(comic => comic && !isBuiltInDemoComic(comic));
-
-  // 1. 先進行基礎的系列與狀態過濾
-  const baseFiltered = state.comics.filter(comic => {
+  return state.comics.filter(comic => {
     if (hasFormalComic && isBuiltInDemoComic(comic)) return false;
     if (curSourceId && getComicSourceKey(comic) !== curSourceId) return false;
     if (isBuiltInDemoComic(comic) && state.activeFilter === 'favorite') return false;
@@ -3736,9 +4416,9 @@ function getDirectoryItems() {
     }
 
     // 狀態過濾 (全部/閱讀中/未讀/已讀完)
-    const prog = comic.progress;
-    const isStarted = prog && prog.currentPage > 0;
-    const isFinished = isStarted && (prog.percent >= 98 || prog.currentPage >= prog.totalPages - 1);
+    const progress = getProgressInfo(comic);
+    const isStarted = progress.hasProgress;
+    const isFinished = progress.isFinished;
 
     if (state.activeFilter === 'reading') {
       return isStarted && !isFinished;
@@ -3752,26 +4432,185 @@ function getDirectoryItems() {
 
     return true;
   });
+}
+
+function comicMatchesLibrarySearch(comic, query) {
+  const matches = [comic.title, comic.relativePath, comic.series]
+    .some(value => String(value || '').toLowerCase().includes(query));
+  if (isBuiltInDemoComic(comic)) return matches;
+  const metadata = state.catalogSearchItems.get(comic.id);
+  const matchMetadata = metadata ? JSON.stringify(metadata).toLowerCase().includes(query) : false;
+  return (!state.catalogSearchIds || state.catalogSearchIds.has(comic.id)) && (matches || matchMetadata);
+}
+
+function getDiscoveryCandidates() {
+  const query = elements.searchInput.value.toLowerCase().trim();
+  const path = normalizeDirectoryPath(state.currentPath);
+  return getLibraryFilteredComics().filter(comic => {
+    if (!comic.id || comic.isDirectory || isComicOffline(comic)) return false;
+    if (query) return !state.catalogSearchItems.get(comic.id)?.offline && comicMatchesLibrarySearch(comic, query);
+    const relativePath = normalizeDirectoryPath(comic.relativePath);
+    return !path || relativePath === path || relativePath.startsWith(path + '/');
+  });
+}
+
+function pickDiscoveryComic(candidates, previousId, random = Math.random) {
+  if (!candidates.length) return null;
+  const different = candidates.filter(comic => comic.id !== previousId);
+  const choices = different.length ? different : candidates;
+  return choices[Math.floor(random() * choices.length)];
+}
+
+let discoveryOpening = false;
+let lastDiscoveryComicId = null;
+let discoveryTagGroups = [];
+let discoveryTagScope = '';
+let discoveryTagRequest = 0;
+let discoveryTagsLoading = false;
+let lastDiscoveryTagKey = '';
+
+function discoveryScopeKey(candidates = getDiscoveryCandidates()) {
+  return JSON.stringify(candidates.map(comic => comic.id).sort());
+}
+
+function closeDiscoveryTags() {
+  discoveryTagRequest++;
+  discoveryTagsLoading = false;
+  if (elements.libraryTagDiscoveryPanel) elements.libraryTagDiscoveryPanel.hidden = true;
+  elements.libraryTagDiscoveryBtn?.setAttribute('aria-expanded', 'false');
+}
+
+function syncDiscoveryTagButtons() {
+  const disabled = discoveryOpening || discoveryTagsLoading || !discoveryTagGroups.length;
+  for (const element of [elements.discoveryTagSelect, elements.discoveryTagPick, elements.discoveryTagRandom]) {
+    if (element) element.disabled = disabled;
+  }
+}
+
+function normalizeDiscoveryTagGroups(groups, candidates) {
+  const allowed = new Set(candidates.map(comic => comic.id));
+  const merged = new Map();
+  for (const group of groups) {
+    if (!group || typeof group.namespace !== 'string' || typeof group.value !== 'string') continue;
+    const key = JSON.stringify([group.namespace, group.value]);
+    if (!merged.has(key)) merged.set(key, { namespace: group.namespace, value: group.value, comicIds: new Set() });
+    for (const id of group.comicIds || []) if (allowed.has(id)) merged.get(key).comicIds.add(id);
+  }
+  return [...merged.values()].filter(group => group.comicIds.size)
+    .map(group => ({ ...group, comicIds: [...group.comicIds] }))
+    .sort((a, b) => comicTitleCollator.compare(`${a.namespace}:${a.value}`, `${b.namespace}:${b.value}`));
+}
+
+async function toggleDiscoveryTags() {
+  if (!elements.libraryTagDiscoveryPanel || discoveryOpening) return;
+  if (!elements.libraryTagDiscoveryPanel.hidden) { closeDiscoveryTags(); return; }
+  elements.libraryTagDiscoveryPanel.hidden = false;
+  elements.libraryTagDiscoveryBtn?.setAttribute('aria-expanded', 'true');
+  const request = ++discoveryTagRequest;
+  const candidates = getDiscoveryCandidates().filter(comic => !isBuiltInDemoComic(comic));
+  discoveryTagScope = discoveryScopeKey();
+  discoveryTagGroups = [];
+  discoveryTagsLoading = true;
+  syncDiscoveryTagButtons();
+  elements.discoveryTagStatus.textContent = readerText('正在找目前範圍的標籤…');
+  try {
+    if (!eAPI?.getDiscoveryTags) throw new Error('Discovery tags require the current native backend');
+    const groups = [];
+    // Bound each IPC payload; the native worker reads indexed tags without
+    // touching comic files or hydrating a full metadata object per book.
+    for (let offset = 0; offset < candidates.length; offset += 1000) {
+      if (request !== discoveryTagRequest) return;
+      groups.push(...await eAPI.getDiscoveryTags(candidates.slice(offset, offset + 1000).map(comic => comic.id)));
+    }
+    if (request !== discoveryTagRequest || discoveryTagScope !== discoveryScopeKey()) return;
+    discoveryTagGroups = normalizeDiscoveryTagGroups(groups, candidates);
+    elements.discoveryTagSelect.innerHTML = discoveryTagGroups.map((group, index) => (
+      `<option value="${index}">${escapeHtml(group.namespace)}:${escapeHtml(group.value)} · ${group.comicIds.length}</option>`
+    )).join('');
+    elements.discoveryTagStatus.textContent = readerText(discoveryTagGroups.length
+      ? '選一個 TAG 抽一本，或讓運氣替你選類型。'
+      : '目前範圍還沒有可用標籤。開啟標籤工具，先幫漫畫加一個吧！');
+  } catch (error) {
+    if (request !== discoveryTagRequest) return;
+    console.warn('探索標籤暫不可用：', error);
+    elements.discoveryTagStatus.textContent = readerText('標籤暫時讀不到，請稍後重試；仍可使用隨手翻一本。');
+  } finally {
+    if (request === discoveryTagRequest) {
+      discoveryTagsLoading = false;
+      syncDiscoveryTagButtons();
+    }
+  }
+}
+
+function pickDiscoveryTag(groups, previousKey, random = Math.random) {
+  const other = groups.filter(group => JSON.stringify([group.namespace, group.value]) !== previousKey);
+  const pool = other.length ? other : groups;
+  return pool.length ? pool[Math.floor(random() * pool.length)] : null;
+}
+
+async function openDiscoveryTag(randomTag, random = Math.random) {
+  if (discoveryOpening || discoveryTagsLoading || elements.libraryTagDiscoveryPanel?.hidden) return;
+  if (discoveryTagScope !== discoveryScopeKey()) { closeDiscoveryTags(); return; }
+  const group = randomTag ? pickDiscoveryTag(discoveryTagGroups, lastDiscoveryTagKey, random)
+    : discoveryTagGroups[Number(elements.discoveryTagSelect.value)];
+  if (!group) return;
+  const ids = new Set(group.comicIds);
+  const candidates = getDiscoveryCandidates().filter(comic => ids.has(comic.id));
+  elements.discoveryTagStatus.textContent = readerText('本次抽到：{tag}', { tag: `${group.namespace}:${group.value}` });
+  if (await openDiscoveryComic(random, candidates)) lastDiscoveryTagKey = JSON.stringify([group.namespace, group.value]);
+}
+
+function syncDiscoveryButton() {
+  if (!elements.libraryDiscoveryBtn) return;
+  elements.libraryDiscoveryBtn.disabled = discoveryOpening || !state.filteredComics.some(comic => (
+    !isComicOffline(comic) && (!comic.isDirectory || comic.comicsCount > 0)
+  ));
+  syncDiscoveryTagButtons();
+}
+
+function setDiscoveryStatus(message = '') {
+  if (!elements.libraryDiscoveryStatus) return;
+  elements.libraryDiscoveryStatus.textContent = message;
+  elements.libraryDiscoveryStatus.hidden = !message;
+}
+
+async function openDiscoveryComic(random = Math.random, candidates = getDiscoveryCandidates()) {
+  if (discoveryOpening || state.currentComic || state.pendingComicId) return false;
+  setDiscoveryStatus();
+  const chosen = pickDiscoveryComic(candidates, lastDiscoveryComicId, random);
+  if (!chosen) {
+    setDiscoveryStatus(readerText('目前範圍沒有可讀漫畫，試著換個資料夾或清除篩選。'));
+    return false;
+  }
+  discoveryOpening = true;
+  syncDiscoveryButton();
+  try {
+    await openReader(chosen);
+    if (state.currentComic?.id === chosen.id) lastDiscoveryComicId = chosen.id;
+    else setDiscoveryStatus(readerText('這本暫時打不開，請換一本或檢查來源。'));
+    return state.currentComic?.id === chosen.id;
+  } catch (error) {
+    console.warn('隨機試讀無法開啟：', error);
+    setDiscoveryStatus(readerText('這本暫時打不開，請換一本或檢查來源。'));
+    return false;
+  } finally {
+    discoveryOpening = false;
+    syncDiscoveryButton();
+  }
+}
+
+// 一般導航仍只顯示目前目錄這一層；隨機試讀可選取其下已載入的作品。
+function getDirectoryItems() {
+  const curPath = state.currentPath;
+  const curSourceId = normalizeDirectorySourceId(state.currentSourceId);
+  const itemsMap = new Map();
+  const filesList = [];
+  const baseFiltered = getLibraryFilteredComics();
 
   // 2. 如果使用者正在使用關鍵字搜尋，則退化為「扁平全庫搜尋」，體驗最佳！
   const query = elements.searchInput.value.toLowerCase().trim();
   if (query) {
-    return baseFiltered.filter(comic => {
-      // SQLite 搜尋結果只代表正式資料庫內容；內建示範沒有 catalog row，
-      // 但仍應以本地標題／系列／slug 判斷，不能因 catalogSearchIds 存在就消失。
-      const matchTitle = String(comic.title || '').toLowerCase().includes(query);
-      const matchPath = String(comic.relativePath || '').toLowerCase().includes(query);
-      const matchSeries = String(comic.series || '').toLowerCase().includes(query);
-      const metadata = state.catalogSearchItems.get(comic.id);
-      const matchMetadata = metadata
-        ? JSON.stringify(metadata).toLowerCase().includes(query)
-        : false;
-      if (isBuiltInDemoComic(comic)) return matchTitle || matchPath || matchSeries;
-      if (state.catalogSearchIds) {
-        return state.catalogSearchIds.has(comic.id) && (matchTitle || matchPath || matchSeries || matchMetadata);
-      }
-      return matchTitle || matchPath || matchSeries || matchMetadata;
-    }).map(c => {
+    return baseFiltered.filter(comic => comicMatchesLibrarySearch(comic, query)).map(c => {
       const metadata = state.catalogSearchItems.get(c.id);
       return { ...c, title: metadata?.title || c.title, series: metadata?.series || c.series, metadataTags: metadata?.tags || [], offline: metadata?.offline || false, isDirectory: false };
     }).sort(compareShelfItems);
@@ -3901,6 +4740,10 @@ function filterAndRenderGrid(options = {}) {
   syncLibraryUpButton();
   // 1. 取得目前路徑下的項目
   state.filteredComics = getDirectoryItems();
+  if (elements.libraryTagDiscoveryPanel && !elements.libraryTagDiscoveryPanel.hidden
+    && discoveryTagScope !== discoveryScopeKey()) closeDiscoveryTags();
+  setDiscoveryStatus();
+  syncDiscoveryButton();
 
   // 2. 渲染麵包屑路徑導航列 (由青梅竹馬姬米妮為主人貼心打造 ✨)
   if (state.currentPath === "") {
@@ -3970,6 +4813,7 @@ function getShelfCardRenderKey(comic) {
       isComicOffline(comic) ? 'offline' : 'online'
     ].join(':');
   }
+  const progress = getProgressInfo(comic);
   return [
     comic.id,
     comic.title,
@@ -3979,8 +4823,11 @@ function getShelfCardRenderKey(comic) {
     comic.type,
     comic.ext,
     comic.pageCount,
-    comic.progress?.currentPage || 0,
-    comic.progress?.totalPages || 0,
+    progress.currentPage,
+    progress.totalPages,
+    progress.percent,
+    progress.hasProgress ? 'started' : 'unread',
+    progress.isFinished ? 'finished' : '',
     isComicOffline(comic) ? 'offline' : 'online',
     isFavoriteId(comic.id) ? 'favorite' : ''
   ].join(':');
@@ -4164,6 +5011,8 @@ function renderGrid({ skipUnchanged = false, background = false } = {}) {
     coverObserver?.disconnect();
     coverObserver = null;
     resetCoverLoadQueue();
+    const observer = ensureCoverObserver();
+    elements.continueStrip?.querySelectorAll('.lazy-cover').forEach(img => observer.observe(img));
     elements.comicGrid.innerHTML = '';
     elements.emptyState.style.display = 'flex';
     if (elements.catalogLoadMore) elements.catalogLoadMore.hidden = true;
@@ -4310,9 +5159,10 @@ function renderGrid({ skipUnchanged = false, background = false } = {}) {
       // 📖 【標準漫畫卡片】
       // ==========================================
       // 進度條樣式計算
-      const hasProgress = comic.progress && comic.progress.currentPage > 0;
-      const percent = getProgressInfo(comic).percent;
-      const isFinished = hasProgress && (percent >= 98 || comic.progress.currentPage >= comic.progress.totalPages - 1);
+      const progress = getProgressInfo(comic);
+      const hasProgress = progress.hasProgress;
+      const percent = progress.percent;
+      const isFinished = progress.isFinished;
 
       // 進度徽章內容
       let badgeHtml = '';
@@ -4361,7 +5211,7 @@ function renderGrid({ skipUnchanged = false, background = false } = {}) {
               : isReadableImageFolder(comic) && comic.pageCount > 0
               ? readerText('共 {total} 張圖片', { total: comic.pageCount })
               : readerText('共 {total} 頁', { total: comic.pageCount > 0 ? comic.pageCount : '---' })}</span>
-            <span>${hasProgress ? readerText('第 {page} 頁', { page: comic.progress.currentPage + 1 }) : readerText('未讀')}</span>
+            <span>${hasProgress ? readerText('第 {page} 頁', { page: progress.currentPage + 1 }) : readerText('未讀')}</span>
           </div>
         </div>
       `;
@@ -4417,25 +5267,7 @@ function renderGrid({ skipUnchanged = false, background = false } = {}) {
 
   // IntersectionObserver 懶載入封面；請求另外限流，讓空框先完成繪製，
   // 避免大量 ZIP 封面同時解壓時拖慢書架滑動。
-  coverObserver = new IntersectionObserver((entries, observer) => {
-    entries.forEach(entry => {
-      const img = entry.target;
-      if (entry.isIntersecting) {
-        coverVisibleImages.add(img);
-        if (hasFailedCover(img.dataset.coverId)) {
-          coverVisibleImages.delete(img);
-          observer.unobserve(img);
-          markCoverUnavailable(img);
-          return;
-        }
-        if (img.dataset.src) enqueueCoverLoad(img);
-      } else {
-        coverVisibleImages.delete(img);
-        cancelQueuedCoverLoad(img);
-      }
-    });
-  }, { rootMargin: '80px' }); // 保留少量預載，避免一次觸發整排封面
-
+  ensureCoverObserver(); // 保留少量預載，避免一次觸發整排封面
   document.querySelectorAll('.lazy-cover').forEach(img => {
     coverObserver.observe(img);
   });
@@ -4451,8 +5283,10 @@ function renderGrid({ skipUnchanged = false, background = false } = {}) {
 // ==========================================================================
 
 // 開啟閱讀器
-async function openReader(comicId, { returnToComicFolder = false } = {}) {
-  const shelfComic = state.comics.find(comic => comic.id === comicId);
+async function openReader(comicOrId, { returnToComicFolder = false } = {}) {
+  const requestedComic = comicOrId && typeof comicOrId === 'object' ? comicOrId : null;
+  const comicId = requestedComic?.id || comicOrId;
+  const shelfComic = requestedComic || state.comics.find(comic => comic.id === comicId);
   const previousReadingMode = state.readingMode;
   if (isComicOffline(shelfComic)) {
     showLibrarySourceRecovery(readerText('這本漫畫仍保留在書架，但原本的磁碟位置目前無法存取。請重新掛載 NAS，或選擇新的漫畫目錄。'));
@@ -4480,19 +5314,48 @@ async function openReader(comicId, { returnToComicFolder = false } = {}) {
   state.pendingComicId = comicId;
   showLoader(readerText('正在載入漫畫頁面…'), { progress: null, detail: readerText('正在準備頁面清單...') });
   try {
-    const data = isBuiltInDemoComic(shelfComic)
+    let data = isBuiltInDemoComic(shelfComic)
       ? builtInDemoReaderData(shelfComic)
-      : await eAPI.openComic(comicId);
+      : await eAPI.openComic(comicId, shelfComic?.sourceId || shelfComic?.source_id);
     if (operation !== state.readerOperation) return;
+
+    // The native open result is authoritative.  The shelf source is only a
+    // same-item fallback for older bridges that have not started returning
+    // sourceId yet; never derive a source from the runtime id.
+    const sourceId = typeof data?.sourceId === 'string' && data.sourceId.trim()
+      ? data.sourceId.trim()
+      : (typeof shelfComic?.sourceId === 'string' && shelfComic.sourceId.trim()
+        ? shelfComic.sourceId.trim()
+        : (typeof shelfComic?.source_id === 'string' ? shelfComic.source_id.trim() : ''));
+    if (sourceId) data = { ...data, sourceId };
 
     if (!data.pages || data.pages.length === 0) {
       throw new Error(readerText('這本漫畫沒有可讀取的圖片頁面'));
     }
 
+    const failedProgress = sourceId
+      ? readReadingProgressFailures().get(readingProgressKey({ id: data.id, sourceId }))
+      : null;
+    if (failedProgress && failedProgress.id === data.id && failedProgress.sourceId === sourceId) {
+      // A journaled local save is newer intent, but remains visibly pending until native accepts it.
+      data = {
+        ...data,
+        progress: {
+          ...(data.progress || {}),
+          currentPage: Math.min(failedProgress.currentPage, Math.max(0, data.pages.length - 1)),
+          totalPages: data.pages.length,
+        },
+      };
+    }
     state.currentComic = data;
     state.pendingComicId = null;
     state.selectedComicId = comicId;
     state.currentComicPages = data.pages;
+    state.readerReadyPages = new Set();
+    state.readerFailedPages = new Set();
+    state.readerLastReadyPageIndex = null;
+    state.readerReadyComicId = data.id;
+    state.readerLoadTrackingActive = true;
     state.currentComicIsDir = data.isDir || false;
     state.currentComicFilenames = data.filenames || [];
     state.aiExplainCache.clear();
@@ -4564,12 +5427,77 @@ async function openReader(comicId, { returnToComicFolder = false } = {}) {
   }
 }
 
+function createReadingProgressSnapshot(comic = state.currentComic, pageIndex = state.currentPageIndex, totalPages = state.currentComicPages.length) {
+  if (!comic || isBuiltInDemoComic(comic)) return null;
+  const sourceId = typeof comic.sourceId === 'string' && comic.sourceId.trim()
+    ? comic.sourceId.trim()
+    : (typeof comic.source_id === 'string' ? comic.source_id.trim() : '');
+  const requestedPage = Number.isSafeInteger(pageIndex) ? pageIndex : Math.trunc(Number(pageIndex) || 0);
+  const tracksReadyPages = state.readerLoadTrackingActive === true;
+  let readyPage = requestedPage;
+  if (tracksReadyPages) {
+    if (state.readerReadyComicId !== comic.id) return null;
+    readyPage = state.readerReadyPages.has(requestedPage)
+      ? requestedPage
+      : state.readerLastReadyPageIndex;
+    if (!Number.isSafeInteger(readyPage) || readyPage < 0 || readyPage >= totalPages
+      || !state.readerReadyPages.has(readyPage)) return null;
+  }
+  if (!Number.isSafeInteger(readyPage) || readyPage < 0 || readyPage >= totalPages) return null;
+  return {
+    id: comic.id,
+    ...(sourceId ? { sourceId } : {}),
+    currentPage: readyPage,
+    totalPages,
+    sequence: nextReadingProgressSaveSequence(),
+  };
+}
+
+function enqueueReadingProgressSnapshot(snapshot) {
+  if (!snapshot) return readingProgressSaveQueue;
+  const normalized = normalizeReadingProgressSnapshot(snapshot);
+  if (!normalized) return readingProgressSaveQueue;
+  const intentSequence = readingProgressIntentSequence(snapshot);
+  const key = readingProgressKey(normalized);
+  const latestQueued = latestQueuedReadingProgressById.get(key);
+  if (latestQueued
+    && (readingProgressIntentSequence(latestQueued) > intentSequence
+      || (readingProgressIntentSequence(latestQueued) === intentSequence
+        && latestQueued.sequence >= normalized.sequence))) return readingProgressSaveQueue;
+  latestQueuedReadingProgressById.set(key, { ...normalized, intentSequence });
+  readingProgressSaveQueue = readingProgressSaveQueue
+    .catch(() => {})
+    .then(() => {
+      const latestAtExecution = latestQueuedReadingProgressById.get(key);
+      if (intentSequence < normalized.sequence && latestAtExecution
+        && (readingProgressIntentSequence(latestAtExecution) > intentSequence
+          || (readingProgressIntentSequence(latestAtExecution) === intentSequence
+            && latestAtExecution.sequence > normalized.sequence))) return true;
+      return persistReadingProgressSnapshot(normalized, intentSequence);
+    });
+  return readingProgressSaveQueue;
+}
+
 // 關閉閱讀器
 async function closeReader({ switchingComic = false } = {}) {
+  const closingComic = state.currentComic;
+  // scroll RAF 可能尚未執行；先同步套用最後一次條漫位置，再建立不可變快照。
+  if (closingComic && state.readingMode === 'webtoon' && state.webtoonScrollFrame) {
+    if (typeof cancelAnimationFrame === 'function') cancelAnimationFrame(state.webtoonScrollFrame);
+    state.webtoonScrollFrame = null;
+    updateWebtoonScrollState();
+  }
+  clearTimeout(state.progressSaveTimer);
+  state.progressSaveTimer = null;
+  const closingProgress = createReadingProgressSnapshot(closingComic);
+  const progressQueueToFlush = enqueueReadingProgressSnapshot(closingProgress);
+
   ++state.readerOperation;
   state.renderGeneration += 1;
+  cancelCatalogResize();
+  cancelCatalogVirtualRender();
+  resetCatalogThumbnailLoader();
   cancelWebtoonAnchor();
-  const closingComic = state.currentComic;
   const closingId = closingComic ? closingComic.id : state.pendingComicId;
   const returnComicFolder = state.readerReturnComicFolder;
   const returnLibraryContext = state.readerReturnLibraryContext;
@@ -4579,8 +5507,11 @@ async function closeReader({ switchingComic = false } = {}) {
   state.currentComic = null;
   state.currentComicPages = [];
   state.pendingComicId = null;
-  clearTimeout(state.progressSaveTimer);
-  state.progressSaveTimer = null;
+  state.readerReadyPages.clear();
+  state.readerFailedPages.clear();
+  state.readerLastReadyPageIndex = null;
+  state.readerReadyComicId = null;
+  state.readerLoadTrackingActive = false;
   state.webtoonMeasuredPageHeights.clear();
   state.webtoonMetricsComicId = null;
   setAutoPageExplanation(false);
@@ -4611,12 +5542,12 @@ async function closeReader({ switchingComic = false } = {}) {
   if (closingId && !isBuiltInDemoComic(closingComic) && window.electronAPI && window.electronAPI.closeComic) {
     state.readerClosePromise = state.readerClosePromise
       .catch(() => {})
-      .then(() => window.electronAPI.closeComic(closingId));
-    try {
-      await state.readerClosePromise;
-    } catch (err) {
-      console.error('關閉漫畫清理失敗:', err);
-    }
+      .then(() => progressQueueToFlush)
+      .then(() => window.electronAPI.closeComic(closingId))
+      .catch(err => { console.error('關閉漫畫清理失敗:', err); });
+    await state.readerClosePromise;
+  } else {
+    await progressQueueToFlush;
   }
 
   if (elements.btnAiExplain) elements.btnAiExplain.hidden = false;
@@ -4663,6 +5594,7 @@ async function closeReader({ switchingComic = false } = {}) {
 function releasePreloadedImages() {
   clearTimeout(state.readerCacheWindowTimer);
   state.readerCacheWindowTimer = null;
+  state.readerCacheWindowToken += 1;
   state.readerCacheWindowPage = null;
   state.readerCacheReadyPage = null;
   for (const img of state.preloadedImages.values()) {
@@ -4979,8 +5911,21 @@ function createWebtoonPageImage(src, index, currentIndex, renderGeneration) {
     }
     updateWebtoonPageHeight(index, img, { measured });
   };
-  img.addEventListener('load', () => updateMetrics(true));
-  img.addEventListener('error', () => updateMetrics(false));
+  img.addEventListener('load', () => {
+    if (!img.isConnected) return;
+    updateMetrics(true);
+    if (readerImageIsReady(img)) {
+      markReaderPageReady(index, img, renderGeneration);
+      if (!state.readerFailedPages.size) clearReaderImageError();
+    }
+  });
+  img.addEventListener('error', () => {
+    if (!img.isConnected) return;
+    updateMetrics(false);
+    if (markReaderPageFailed(index, renderGeneration)) {
+      showReaderImageError([...state.readerFailedPages]);
+    }
+  });
   applyImageEffects(img);
   if (eager) img.src = src;
   return img;
@@ -5099,6 +6044,15 @@ function advanceDoubleBySinglePage() {
 function renderPages() {
   if (!state.currentComic) return;
 
+  if (state.readingMode !== 'catalog') {
+    cancelCatalogResize();
+    cancelCatalogVirtualRender();
+    if (catalogImageObserver || catalogImageQueue.length || catalogImageTasks.size || catalogImageActive) {
+      resetCatalogThumbnailLoader();
+    }
+  }
+  clearReaderImageError();
+  state.readerFailedPages.clear();
   cancelWebtoonAnchor();
   if (state.webtoonScrollFrame) {
     cancelAnimationFrame(state.webtoonScrollFrame);
@@ -5133,14 +6087,14 @@ function renderPages() {
     showPageLoadingSpinner(true);
 
     // 🚀 極致雙緩衝：在背景將圖片完整載入並由 GPU 完成解碼，這段期間舊圖片原封不動留在畫面上！
-    tempImg.decode().then(() => {
+    Promise.resolve().then(() => decodeReaderImage(tempImg)).then(() => {
       // 確保在非同步解碼期間，使用者沒有突然切換模式或快速翻到別的頁面
       if (state.renderGeneration !== renderGeneration) return;
       if (state.readingMode !== 'single') return;
       if (state.currentComicPages[state.currentPageIndex] !== targetSrc) return;
-
       // 只有在「百分之百準備好顯示」的這一微秒，才清空 DOM 並瞬間塞入新圖片，絕對零閃爍！
       replaceReaderImages([tempImg]);
+      markReaderPageReady(state.currentPageIndex, tempImg, renderGeneration);
 
       // 隱藏解碼中動畫
       showPageLoadingSpinner(false);
@@ -5149,7 +6103,9 @@ function renderPages() {
       if (state.renderGeneration !== renderGeneration) return;
       if (state.readingMode !== 'single') return;
       if (state.currentComicPages[state.currentPageIndex] !== targetSrc) return;
-      replaceReaderImages([tempImg]);
+      markReaderPageFailed(state.currentPageIndex, renderGeneration);
+      replaceReaderImages([]);
+      showReaderImageError([state.currentPageIndex]);
       showPageLoadingSpinner(false);
     });
 
@@ -5177,18 +6133,20 @@ function renderPages() {
 
       showPageLoadingSpinner(true);
 
-      tempImg.decode().then(() => {
+      Promise.resolve().then(() => decodeReaderImage(tempImg)).then(() => {
         if (state.renderGeneration !== renderGeneration) return;
         if (state.readingMode !== 'double' && state.readingMode !== 'double-rtl') return;
         if (state.currentPageIndex !== 0) return;
-
         replaceReaderImages([tempImg]);
+        markReaderPageReady(0, tempImg, renderGeneration);
         showPageLoadingSpinner(false);
       }).catch(() => {
         if (state.renderGeneration !== renderGeneration) return;
         if (state.readingMode !== 'double' && state.readingMode !== 'double-rtl') return;
         if (state.currentPageIndex !== 0) return;
-        replaceReaderImages([tempImg]);
+        markReaderPageFailed(0, renderGeneration);
+        replaceReaderImages([]);
+        showReaderImageError([0]);
         showPageLoadingSpinner(false);
       });
 
@@ -5209,23 +6167,27 @@ function renderPages() {
 
       showPageLoadingSpinner(true);
 
-      // 用 Promise.all 背景同時等待並解碼雙頁，保證兩張圖同步在背景完全就緒！
-      const decodePromises = [img1.decode()];
-      if (img2) decodePromises.push(img2.decode());
+      // 分別等待兩頁；一頁損壞時仍保留另一張成功圖片。
+      const decodeEntries = [{ index: page1Index, img: img1 }];
+      if (img2) decodeEntries.push({ index: page2Index, img: img2 });
 
-      Promise.all(decodePromises).then(() => {
+      Promise.allSettled(decodeEntries.map(entry => Promise.resolve().then(() => decodeReaderImage(entry.img))))
+        .then(results => {
         if (state.renderGeneration !== renderGeneration) return;
         if (state.readingMode !== 'double' && state.readingMode !== 'double-rtl') return;
         if (state.currentPageIndex !== page1Index) return;
 
-        replaceReaderImages(isRtl && img2 ? [img2, img1] : [img1, img2]);
-        showPageLoadingSpinner(false);
-      }).catch(() => {
-        if (state.renderGeneration !== renderGeneration) return;
-        if (state.readingMode !== 'double' && state.readingMode !== 'double-rtl') return;
-        if (state.currentPageIndex !== page1Index) return;
-
-        replaceReaderImages(isRtl && img2 ? [img2, img1] : [img1, img2]);
+        const readyEntries = decodeEntries.filter((entry, index) => results[index].status === 'fulfilled'
+          && readerImageIsReady(entry.img));
+        const failedEntries = decodeEntries.filter((entry, index) => !readyEntries.includes(entry)
+          || results[index].status !== 'fulfilled');
+        readyEntries.forEach(entry => markReaderPageReady(entry.index, entry.img, renderGeneration));
+        failedEntries.forEach(entry => markReaderPageFailed(entry.index, renderGeneration));
+        const orderedImages = isRtl
+          ? [...readyEntries].reverse().map(entry => entry.img)
+          : readyEntries.map(entry => entry.img);
+        replaceReaderImages(orderedImages);
+        if (failedEntries.length) showReaderImageError(failedEntries.map(entry => entry.index));
         showPageLoadingSpinner(false);
       });
 
@@ -5273,7 +6235,7 @@ function renderPages() {
     elements.readerModeIndicator.textContent = readerText('目錄模式');
     elements.prevZone.style.width = '0';
     elements.nextZone.style.width = '0';
-    elements.readerViewport.onscroll = null;
+    elements.readerViewport.onscroll = handleCatalogScroll;
 
     renderCatalogGrid();
 
@@ -5285,8 +6247,7 @@ function renderPages() {
   syncDoubleModeControls();
   scheduleReaderCacheWindowUpdate();
 
-  // 儲存進度到伺服器
-  saveReadingProgress();
+  // 進度只由已解碼頁面的完成 callback 或條漫防抖動流程儲存。
 }
 
 // 翻到下一頁
@@ -5371,10 +6332,246 @@ function resetCatalogThumbnailLoader() {
   catalogImageActive = 0;
 }
 
+function cancelCatalogThumbnailLoad(img) {
+  if (!img) return;
+  catalogImageObserver?.unobserve?.(img);
+  catalogImageQueue = catalogImageQueue.filter(task => {
+    if (task?.img !== img) return true;
+    delete img.dataset.catalogLoadQueued;
+    return false;
+  });
+  [...catalogImageTasks]
+    .filter(task => task?.img === img)
+    .forEach(task => task.cancel?.());
+}
+
+function cancelCatalogVirtualRender() {
+  if (catalogVirtualRenderFrame === null) return;
+  if (typeof cancelAnimationFrame === 'function') cancelAnimationFrame(catalogVirtualRenderFrame);
+  clearTimeout(catalogVirtualRenderFrame);
+  catalogVirtualRenderFrame = null;
+  catalogVirtualRenderOwner = null;
+}
+
+function catalogGridMetrics() {
+  const viewportWidth = Number(elements.readerViewport?.clientWidth)
+    || Number(window.innerWidth)
+    || 800;
+  const usableWidth = Math.max(130, viewportWidth - 40);
+  const columns = Math.max(1, Math.floor(
+    (usableWidth + CATALOG_GRID_GAP) / (130 + CATALOG_GRID_GAP),
+  ));
+  const viewportHeight = Number(elements.readerViewport?.clientHeight)
+    || Number(window.innerHeight)
+    || 800;
+  return {
+    columns,
+    rowHeight: CATALOG_THUMB_HEIGHT + CATALOG_GRID_GAP,
+    visibleRows: Math.max(1, Math.ceil(viewportHeight / (CATALOG_THUMB_HEIGHT + CATALOG_GRID_GAP))),
+  };
+}
+
+function catalogGridOffset() {
+  const controls = elements.pagesContainer?.querySelector?.('.reader-catalog-window-controls');
+  const offset = Number(controls?.offsetHeight);
+  return Number.isFinite(offset) && offset > 0
+    ? offset + CATALOG_GRID_GAP
+    : (Number(state.catalogControlOffset) || CATALOG_CONTROLS_OFFSET_FALLBACK);
+}
+
+function catalogScrollTopForPage(index, metrics = catalogGridMetrics()) {
+  const viewportHeight = Number(elements.readerViewport?.clientHeight)
+    || Number(window.innerHeight)
+    || 800;
+  const rowTop = Math.floor(Math.max(0, Number(index) || 0) / metrics.columns) * metrics.rowHeight;
+  return Math.max(0, catalogGridOffset() + rowTop - Math.max(0, viewportHeight - metrics.rowHeight) / 2);
+}
+
+function getCatalogVirtualBounds(totalPages, {
+  preserveWindow = false,
+  fromScroll = false,
+  scrollTop = null,
+} = {}) {
+  const metrics = catalogGridMetrics();
+  const totalRows = Math.ceil(totalPages / metrics.columns);
+  const renderCapacity = Math.max(metrics.columns,
+    Math.floor(CATALOG_RENDER_PAGE_SIZE / metrics.columns) * metrics.columns);
+  const maxStart = Math.max(0, totalPages - renderCapacity);
+  let windowStart;
+  let windowEnd;
+
+  if (fromScroll) {
+    const contentTop = Math.max(0, (Number(scrollTop) || 0) - catalogGridOffset());
+    const firstVisibleRow = Math.min(totalRows, Math.floor(contentTop / metrics.rowHeight));
+    const firstVisibleIndex = Math.min(totalPages, firstVisibleRow * metrics.columns);
+    const visibleEnd = Math.min(
+      totalPages,
+      (firstVisibleRow + metrics.visibleRows + CATALOG_VIRTUAL_OVERSCAN_ROWS) * metrics.columns,
+    );
+    const edge = Math.max(metrics.columns, CATALOG_VIRTUAL_OVERSCAN_ROWS * metrics.columns);
+    const currentStart = Number.isSafeInteger(state.catalogWindowStart)
+      ? state.catalogWindowStart : 0;
+    const currentEnd = Number.isSafeInteger(state.catalogWindowEnd)
+      ? state.catalogWindowEnd : 0;
+    const hasWindow = currentEnd > currentStart && state.catalogColumns === metrics.columns;
+    const shift = Math.max(metrics.columns,
+      Math.floor((CATALOG_WINDOW_PAGE_COUNT * CATALOG_WINDOW_SHIFT_RATIO) / metrics.columns)
+        * metrics.columns);
+    let requestedStart = currentStart;
+    if (!hasWindow || firstVisibleIndex < currentStart - edge || visibleEnd > currentEnd + edge) {
+      // A large fling should land on the correct batch immediately; ordinary
+      // scrolling below uses the smaller half-window shift to preserve overlap.
+      requestedStart = firstVisibleIndex - Math.floor(CATALOG_WINDOW_PAGE_COUNT / 2);
+    } else if (visibleEnd >= currentEnd - edge) {
+      requestedStart = currentStart + shift;
+    } else if (firstVisibleIndex <= currentStart + edge) {
+      requestedStart = currentStart - shift;
+    }
+    windowStart = Math.max(0, Math.min(maxStart, requestedStart));
+    windowEnd = Math.min(totalPages, windowStart + CATALOG_WINDOW_PAGE_COUNT);
+  } else {
+    const requestedStart = Number.isSafeInteger(state.catalogWindowStart) ? state.catalogWindowStart : 0;
+    const currentPage = Math.max(0, Math.min(totalPages - 1, state.currentPageIndex));
+    const requestedRenderStart = Math.max(0,
+      Math.floor(requestedStart / metrics.columns) * metrics.columns);
+    const requestedRenderEnd = Math.min(totalPages, requestedRenderStart + renderCapacity);
+    const currentOutsideRequestedRender = currentPage < requestedRenderStart
+      || currentPage >= requestedRenderEnd;
+    const requested = preserveWindow
+      ? requestedStart
+      : (currentOutsideRequestedRender
+        ? currentPage - Math.floor(CATALOG_RENDER_PAGE_SIZE / 2)
+        : requestedStart);
+    windowStart = Math.max(0, Math.min(maxStart, requested));
+    windowEnd = Math.min(totalPages, windowStart + CATALOG_WINDOW_PAGE_COUNT);
+  }
+
+  // Spacer 高度以完整 row 計算；DOM 只掛載最多 160 個、列對齊的頁面。
+  let renderStart = Math.max(0, Math.floor(windowStart / metrics.columns) * metrics.columns);
+  let renderEnd = Math.min(totalPages, renderStart + renderCapacity);
+  // 尾批從完整容量的頁面起點開始，必要時讓 CSS grid 從該列的中間欄位起排，
+  // 這樣既保留整本幾何，也能在 <=160 個縮圖內包含最後一頁。
+  if (totalPages > renderCapacity && windowStart >= maxStart) {
+    renderStart = maxStart;
+    renderEnd = totalPages;
+  }
+  windowEnd = Math.min(totalPages, Math.max(windowStart + 1, renderEnd));
+  return {
+    ...metrics,
+    renderCapacity,
+    maxStart,
+    totalRows,
+    windowStart,
+    windowEnd,
+    renderStart,
+    renderEnd,
+  };
+}
+
+function scheduleCatalogVirtualRender() {
+  if (state.readingMode !== 'catalog' || catalogVirtualRenderFrame !== null || catalogResizeFrame !== null) return;
+  catalogVirtualRenderOwner = catalogRenderOwner();
+  const callback = () => {
+    catalogVirtualRenderFrame = null;
+    const owner = catalogVirtualRenderOwner;
+    catalogVirtualRenderOwner = null;
+    if (isCatalogRenderOwnerCurrent(owner)) renderCatalogGrid({ fromScroll: true });
+  };
+  catalogVirtualRenderFrame = typeof requestAnimationFrame === 'function'
+    ? requestAnimationFrame(callback)
+    : window.setTimeout(callback, 0);
+}
+
+function handleCatalogScroll() {
+  scheduleCatalogVirtualRender();
+}
+
+let catalogResizeFrame = null;
+let catalogResizeGeometry = null;
+let catalogVirtualRenderOwner = null;
+
+function catalogRenderOwner() {
+  return {
+    readerOperation: state.readerOperation,
+    comicId: state.currentComic?.id || null,
+    renderGeneration: state.renderGeneration,
+    mode: state.readingMode,
+  };
+}
+
+function isCatalogRenderOwnerCurrent(owner) {
+  return Boolean(owner
+    && owner.readerOperation === state.readerOperation
+    && owner.comicId === (state.currentComic?.id || null)
+    && owner.renderGeneration === state.renderGeneration
+    && owner.mode === state.readingMode
+    && owner.mode === 'catalog');
+}
+
+function cancelCatalogResize() {
+  if (catalogResizeFrame !== null) {
+    if (typeof cancelAnimationFrame === 'function') cancelAnimationFrame(catalogResizeFrame);
+    clearTimeout(catalogResizeFrame);
+  }
+  catalogResizeFrame = null;
+  catalogResizeGeometry = null;
+}
+
+function scheduleCatalogResize() {
+  if (catalogResizeFrame !== null) return;
+  cancelCatalogVirtualRender();
+  const oldColumns = state.catalogColumns || catalogGridMetrics().columns;
+  const oldRowHeight = state.catalogRowHeight || (CATALOG_THUMB_HEIGHT + CATALOG_GRID_GAP);
+  const oldControlOffset = Number(state.catalogControlOffset) || catalogGridOffset();
+  catalogResizeGeometry = {
+    oldColumns,
+    oldRowHeight,
+    oldControlOffset,
+    oldScrollTop: Number(elements.readerViewport?.scrollTop) || 0,
+    owner: catalogRenderOwner(),
+  };
+  const resize = () => {
+    catalogResizeFrame = null;
+    const geometry = catalogResizeGeometry;
+    catalogResizeGeometry = null;
+    if (!geometry || !isCatalogRenderOwnerCurrent(geometry.owner)) return;
+    const nextMetrics = catalogGridMetrics();
+    if (geometry.oldColumns === nextMetrics.columns
+      && geometry.oldRowHeight === nextMetrics.rowHeight) return;
+
+    // 以最新 viewport top 推回舊列的 logical page；不要拿 currentPageIndex
+    // 當 anchor，因為它代表閱讀模式的跳頁位置，不代表目錄目前視窗。
+    const contentTop = Math.max(0, geometry.oldScrollTop - geometry.oldControlOffset);
+    const oldRow = Math.floor(contentTop / geometry.oldRowHeight);
+    const anchorIndex = oldRow * geometry.oldColumns;
+    const rowOffset = contentTop - oldRow * geometry.oldRowHeight;
+    const newControlOffset = catalogGridOffset();
+    const newRow = Math.floor(anchorIndex / nextMetrics.columns) * nextMetrics.rowHeight;
+    const nextScrollTop = Math.max(0, newControlOffset + newRow + rowOffset);
+    renderCatalogGrid({ fromScroll: true, scrollTopOverride: nextScrollTop });
+    elements.readerViewport.scrollTop = nextScrollTop;
+  };
+  catalogResizeFrame = typeof requestAnimationFrame === 'function'
+    ? requestAnimationFrame(resize)
+    : window.setTimeout(resize, 0);
+}
+
+function handleReaderResize() {
+  if (state.readingMode === 'catalog') {
+    scheduleCatalogResize();
+    return;
+  }
+  scheduleReaderImageTransformRefresh();
+}
+
 function pumpCatalogThumbnailLoads() {
+  if (catalogImagePumpSuspended) return;
   while (catalogImageActive < CATALOG_IMAGE_CONCURRENCY && catalogImageQueue.length) {
     const task = catalogImageQueue.shift();
-    if (!task?.img?.isConnected || task.generation !== catalogImageGeneration || !task.img.dataset.src) continue;
+    if (!task?.img?.isConnected || task.generation !== catalogImageGeneration || !task.img.dataset.src) {
+      if (task?.img) delete task.img.dataset.catalogLoadQueued;
+      continue;
+    }
     const img = task.img;
     const source = img.dataset.src;
     delete img.dataset.src;
@@ -5388,6 +6585,7 @@ function pumpCatalogThumbnailLoads() {
       finished = true;
       img.removeEventListener?.('load', finish);
       img.removeEventListener?.('error', finish);
+      delete img.dataset.catalogLoadQueued;
       catalogImageTasks.delete(activeTask);
       if (taskGeneration !== catalogImageGeneration) return;
       catalogImageActive = Math.max(0, catalogImageActive - 1);
@@ -5399,7 +6597,12 @@ function pumpCatalogThumbnailLoads() {
       img.removeEventListener?.('load', finish);
       img.removeEventListener?.('error', finish);
       img.removeAttribute?.('src');
+      delete img.dataset.catalogLoadQueued;
       catalogImageTasks.delete(activeTask);
+      if (taskGeneration === catalogImageGeneration) {
+        catalogImageActive = Math.max(0, catalogImageActive - 1);
+        pumpCatalogThumbnailLoads();
+      }
     };
     img.addEventListener('load', finish, { once: true });
     img.addEventListener('error', finish, { once: true });
@@ -5408,24 +6611,26 @@ function pumpCatalogThumbnailLoads() {
 }
 
 function enqueueCatalogThumbnailLoad(img, generation = catalogImageGeneration) {
-  if (!img?.dataset?.src || img.dataset.catalogLoadQueued) return;
+  if (!img?.isConnected || !img?.dataset?.src || img.dataset.catalogLoadQueued) return;
   img.dataset.catalogLoadQueued = 'true';
   catalogImageQueue.push({ img, generation });
   pumpCatalogThumbnailLoads();
 }
 
-function startCatalogThumbnailLoads(grid) {
-  resetCatalogThumbnailLoader();
+function startCatalogThumbnailLoads(grid, { reset = true } = {}) {
+  if (reset) resetCatalogThumbnailLoader();
   const images = [...(grid.querySelectorAll?.('img[data-src]') || [])];
   const generation = catalogImageGeneration;
   if (typeof IntersectionObserver === 'function') {
-    catalogImageObserver = new IntersectionObserver(entries => {
-      entries.forEach(entry => {
-        if (!entry.isIntersecting) return;
-        catalogImageObserver?.unobserve?.(entry.target);
-        enqueueCatalogThumbnailLoad(entry.target, generation);
-      });
-    }, { root: elements.readerViewport, rootMargin: '360px' });
+    if (!catalogImageObserver) {
+      catalogImageObserver = new IntersectionObserver(entries => {
+        entries.forEach(entry => {
+          if (!entry.isIntersecting) return;
+          catalogImageObserver?.unobserve?.(entry.target);
+          enqueueCatalogThumbnailLoad(entry.target, catalogImageGeneration);
+        });
+      }, { root: elements.readerViewport, rootMargin: '360px' });
+    }
     images.forEach(img => catalogImageObserver.observe(img));
   } else {
     // 舊 WKWebView 沒有 IntersectionObserver 時仍限制同時解碼數，避免 160 張一起壓垮主執行緒。
@@ -5433,24 +6638,195 @@ function startCatalogThumbnailLoads(grid) {
   }
 }
 
-function renderCatalogGrid({ preserveWindow = false } = {}) {
+function updateCatalogWindowControls(controls, bounds, totalPages) {
+  if (!controls) return;
+  const [previous, status, next] = [...(controls.children || [])];
+  const capacity = bounds.renderCapacity || CATALOG_RENDER_PAGE_SIZE;
+  if (previous) {
+    previous.dataset.catalogWindowStart = String(bounds.windowStart);
+    previous.dataset.catalogRenderStart = String(bounds.renderStart);
+    previous.dataset.catalogRenderEnd = String(bounds.renderEnd);
+    previous.dataset.catalogCapacity = String(capacity);
+    previous.disabled = bounds.renderStart === 0;
+    previous.textContent = readerText('顯示前 {count} 頁', { count: capacity });
+  }
+  if (status) {
+    status.textContent = readerText('顯示第 {start}–{end} / {total} 頁', {
+      start: bounds.renderStart + 1,
+      end: bounds.renderEnd,
+      total: totalPages,
+    });
+  }
+  if (next) {
+    next.dataset.catalogWindowStart = String(bounds.windowStart);
+    next.dataset.catalogWindowEnd = String(bounds.windowEnd);
+    next.dataset.catalogMaxStart = String(bounds.maxStart);
+    next.dataset.catalogRenderStart = String(bounds.renderStart);
+    next.dataset.catalogRenderEnd = String(bounds.renderEnd);
+    next.dataset.catalogCapacity = String(capacity);
+    next.disabled = bounds.renderEnd >= totalPages;
+    next.textContent = readerText('顯示後 {count} 頁', { count: capacity });
+  }
+}
+
+function createCatalogThumbnail(source, index) {
+  const thumb = document.createElement('div');
+  thumb.className = 'catalog-thumb';
+  thumb.dataset.index = String(index);
+  configureInteractiveItem(thumb, readerText('跳到第 {page} 頁', { page: index + 1 }), () => {
+    state.currentPageIndex = index;
+    const backMode = state.prevReadingMode || 'single';
+    setReadingMode(backMode);
+  });
+  const img = document.createElement('img');
+  // 目錄本身已由 IntersectionObserver／queue 控制何時 assign src；再掛原生
+  // loading=lazy 會在 WKWebView 形成第二層延遲，快速跳到尾窗時可能遲遲不解碼。
+  img.loading = 'eager';
+  img.decoding = 'async';
+  img.draggable = false;
+  img.alt = readerText('第 {page} 頁', { page: index + 1 });
+  const label = document.createElement('div');
+  label.className = 'catalog-thumb-label';
+  label.textContent = `${index + 1}`;
+  // 點擊縮圖 → 跳頁並切回閱讀模式
+  thumb.onclick = () => {
+    state.currentPageIndex = index;
+    const backMode = state.prevReadingMode || 'single';
+    setReadingMode(backMode);
+  };
+  thumb.appendChild(img);
+  thumb.appendChild(label);
+  updateCatalogThumbnailNode(thumb, source, index);
+  return thumb;
+}
+
+function updateCatalogThumbnailNode(thumb, source, index) {
+  if (!thumb) return;
+  const thumbnailSource = catalogThumbnailURL(source);
+  thumb.dataset.index = String(index);
+  thumb.classList?.toggle?.('current', index === state.currentPageIndex);
+  const img = [...(thumb.children || [])].find(child => child?.tagName === 'IMG');
+  if (!img) return;
+  img.alt = readerText('第 {page} 頁', { page: index + 1 });
+  if (img.dataset.catalogSource === thumbnailSource) return;
+  cancelCatalogThumbnailLoad(img);
+  img.dataset.catalogSource = thumbnailSource;
+  img.dataset.src = thumbnailSource;
+  img.removeAttribute?.('src');
+}
+
+function patchCatalogThumbnailWindow(grid, renderStart, renderEnd) {
+  const retained = new Map();
+  const leaving = [];
+  [...(grid.children || [])].forEach(thumb => {
+    if (!catalogHasClass(thumb, 'catalog-thumb')) return;
+    const index = Number(thumb.dataset?.index);
+    if (!Number.isInteger(index) || index < renderStart || index >= renderEnd) {
+      const img = [...(thumb.children || [])].find(child => child?.tagName === 'IMG');
+      leaving.push({ thumb, img });
+      return;
+    }
+    retained.set(index, thumb);
+  });
+
+  // 先把整批舊節點 detach，再取消 task。cancel() 會同步嘗試補 queue，
+  // 因此逐項移除會讓尚未 detach 的舊 queue 先搶走新窗的解碼槽位。
+  leaving.forEach(({ thumb }) => grid.removeChild?.(thumb));
+  const wasPumpSuspended = catalogImagePumpSuspended;
+  catalogImagePumpSuspended = true;
+  try {
+    leaving.forEach(({ img }) => cancelCatalogThumbnailLoad(img));
+  } finally {
+    catalogImagePumpSuspended = wasPumpSuspended;
+  }
+  // 舊 active 全部離窗時，保留區的 queued task 可能沒有新的 IO entry；
+  // 解除批次抑制後主動補泵，避免 active=0、queue>0 永久停住。
+  pumpCatalogThumbnailLoads();
+
+  for (let index = renderStart; index < renderEnd; index += 1) {
+    let thumb = retained.get(index);
+    if (!thumb) {
+      thumb = createCatalogThumbnail(state.currentComicPages[index], index);
+      const anchor = [...(grid.children || [])]
+        .find(child => catalogHasClass(child, 'catalog-thumb')
+          && Number(child.dataset?.index) > index);
+      if (anchor) grid.insertBefore?.(thumb, anchor);
+      else grid.appendChild(thumb);
+    } else {
+      updateCatalogThumbnailNode(thumb, state.currentComicPages[index], index);
+    }
+  }
+}
+
+function updateCatalogGridLayout(grid, bounds) {
+  if (!grid) return;
+  grid.style.setProperty?.('--catalog-columns', String(bounds.columns));
+  const startColumn = bounds.renderStart % bounds.columns;
+  if (startColumn) {
+    grid.dataset.catalogStartColumn = String(startColumn + 1);
+    grid.style.setProperty?.('--catalog-start-column', String(startColumn + 1));
+  } else {
+    delete grid.dataset.catalogStartColumn;
+    grid.style.removeProperty?.('--catalog-start-column');
+  }
+}
+
+function renderCatalogGrid({ preserveWindow = false, fromScroll = false, scrollTopOverride = null } = {}) {
   const totalPages = state.currentComicPages.length;
   const focusDescriptor = captureCatalogFocus();
+
+  if (!totalPages) {
+    cancelCatalogVirtualRender();
+    resetCatalogThumbnailLoader();
+    elements.pagesContainer.replaceChildren();
+    state.catalogWindowStart = 0;
+    state.catalogWindowEnd = 0;
+    return;
+  }
+
+  const bounds = getCatalogVirtualBounds(totalPages, {
+    preserveWindow,
+    fromScroll,
+    scrollTop: scrollTopOverride ?? elements.readerViewport?.scrollTop,
+  });
+  const existingGrid = elements.pagesContainer.querySelector?.('.reader-catalog-grid');
+  if (fromScroll && existingGrid && state.catalogColumns === bounds.columns) {
+    if (state.catalogWindowStart === bounds.windowStart && state.catalogWindowEnd === bounds.windowEnd) return;
+    const controls = elements.pagesContainer.querySelector?.('.reader-catalog-window-controls');
+    const topSpacer = elements.pagesContainer.querySelector?.('[data-catalog-spacer="top"]');
+    const bottomSpacer = elements.pagesContainer.querySelector?.('[data-catalog-spacer="bottom"]');
+    state.catalogWindowStart = bounds.windowStart;
+    state.catalogWindowEnd = bounds.windowEnd;
+    state.catalogRowHeight = bounds.rowHeight;
+    updateCatalogWindowControls(controls, bounds, totalPages);
+    if (topSpacer) topSpacer.style.height = `${Math.floor(bounds.renderStart / bounds.columns) * bounds.rowHeight}px`;
+    if (bottomSpacer) {
+      bottomSpacer.style.height = `${Math.max(0,
+        bounds.totalRows - Math.ceil(bounds.renderEnd / bounds.columns)) * bounds.rowHeight}px`;
+    }
+    updateCatalogGridLayout(existingGrid, bounds);
+    patchCatalogThumbnailWindow(existingGrid, bounds.renderStart, bounds.renderEnd);
+    startCatalogThumbnailLoads(existingGrid, { reset: false });
+    restoreCatalogFocus(focusDescriptor);
+    return;
+  }
 
   // 每次目錄重繪都先移除上一個 grid，避免切書或刪頁後舊縮圖疊在新內容上。
   elements.pagesContainer.replaceChildren();
 
-  const maxStart = Math.max(0, totalPages - CATALOG_RENDER_PAGE_SIZE);
-  const requestedStart = Number.isSafeInteger(state.catalogWindowStart) ? state.catalogWindowStart : 0;
-  const currentPage = Math.max(0, Math.min(totalPages - 1, state.currentPageIndex));
-  const windowStart = preserveWindow
-    ? Math.max(0, Math.min(maxStart, requestedStart))
-    : Math.max(0, Math.min(maxStart,
-      currentPage < requestedStart || currentPage >= requestedStart + CATALOG_RENDER_PAGE_SIZE
-        ? currentPage - Math.floor(CATALOG_RENDER_PAGE_SIZE / 2)
-        : requestedStart));
-  const windowEnd = Math.min(totalPages, windowStart + CATALOG_RENDER_PAGE_SIZE);
+  const {
+    columns,
+    rowHeight,
+    totalRows,
+    windowStart,
+    windowEnd,
+    renderStart,
+    renderEnd,
+  } = bounds;
   state.catalogWindowStart = windowStart;
+  state.catalogWindowEnd = windowEnd;
+  state.catalogColumns = columns;
+  state.catalogRowHeight = rowHeight;
 
   const controls = document.createElement('div');
   controls.className = 'reader-catalog-window-controls';
@@ -5458,78 +6834,77 @@ function renderCatalogGrid({ preserveWindow = false } = {}) {
   previous.type = 'button';
   previous.className = 'catalog-window-btn';
   previous.dataset.catalogWindowControl = 'previous';
-  previous.textContent = readerText('顯示前 {count} 頁', { count: CATALOG_RENDER_PAGE_SIZE });
-  previous.disabled = windowStart === 0;
+  previous.textContent = readerText('顯示前 {count} 頁', { count: bounds.renderCapacity });
+  previous.disabled = renderStart === 0;
   previous.addEventListener('click', () => {
-    state.catalogWindowStart = Math.max(0, windowStart - CATALOG_RENDER_PAGE_SIZE);
-    renderCatalogGrid({ preserveWindow: true });
+    const currentBounds = getCatalogVirtualBounds(state.currentComicPages.length, { preserveWindow: true });
+    const alignedEnd = Math.ceil(currentBounds.renderStart / currentBounds.columns) * currentBounds.columns;
+    const target = Math.max(0, Math.min(currentBounds.maxStart,
+      alignedEnd - currentBounds.renderCapacity));
+    state.catalogWindowStart = target;
+    elements.readerViewport.scrollTop = catalogScrollTopForPage(target);
+    renderCatalogGrid({ preserveWindow: true, scrollTopOverride: elements.readerViewport.scrollTop });
   });
   const status = document.createElement('span');
   status.textContent = readerText('顯示第 {start}–{end} / {total} 頁', {
-    start: windowStart + 1,
-    end: windowEnd,
+    start: renderStart + 1,
+    end: renderEnd,
     total: totalPages,
   });
   const next = document.createElement('button');
   next.type = 'button';
   next.className = 'catalog-window-btn';
   next.dataset.catalogWindowControl = 'next';
-  next.textContent = readerText('顯示後 {count} 頁', { count: CATALOG_RENDER_PAGE_SIZE });
-  next.disabled = windowEnd >= totalPages;
+  next.textContent = readerText('顯示後 {count} 頁', { count: bounds.renderCapacity });
+  next.disabled = renderEnd >= totalPages;
   next.addEventListener('click', () => {
-    state.catalogWindowStart = Math.min(maxStart, windowStart + CATALOG_RENDER_PAGE_SIZE);
-    renderCatalogGrid({ preserveWindow: true });
+    const currentBounds = getCatalogVirtualBounds(state.currentComicPages.length, { preserveWindow: true });
+    const target = Math.min(currentBounds.maxStart, currentBounds.renderEnd);
+    state.catalogWindowStart = target;
+    elements.readerViewport.scrollTop = catalogScrollTopForPage(target);
+    renderCatalogGrid({ preserveWindow: true, scrollTopOverride: elements.readerViewport.scrollTop });
   });
   controls.appendChild(previous);
   controls.appendChild(status);
   controls.appendChild(next);
+  updateCatalogWindowControls(controls, bounds, totalPages);
   elements.pagesContainer.appendChild(controls);
+  state.catalogControlOffset = catalogGridOffset();
 
   const grid = document.createElement('div');
   grid.className = 'reader-catalog-grid';
+  updateCatalogGridLayout(grid, bounds);
 
-  state.currentComicPages.slice(windowStart, windowEnd).forEach((src, offset) => {
-    const idx = windowStart + offset;
-    const thumb = document.createElement('div');
-    thumb.className = 'catalog-thumb';
-    if (idx === state.currentPageIndex) thumb.classList.add('current');
-    thumb.dataset.index = idx;
-    configureInteractiveItem(thumb, readerText('跳到第 {page} 頁', { page: idx + 1 }), () => {
-      state.currentPageIndex = idx;
-      const backMode = state.prevReadingMode || 'single';
-      setReadingMode(backMode);
-    });
+  const topSpacer = document.createElement('div');
+  topSpacer.className = 'catalog-virtual-spacer';
+  topSpacer.dataset.catalogSpacer = 'top';
+  topSpacer.style.height = `${Math.floor(renderStart / columns) * rowHeight}px`;
+  topSpacer.setAttribute('aria-hidden', 'true');
 
-    const img = document.createElement('img');
-    img.loading = 'lazy';
-    img.decoding = 'async';
-    img.dataset.src = src;
-    img.alt = readerText('第 {page} 頁', { page: idx + 1 });
-
-    const label = document.createElement('div');
-    label.className = 'catalog-thumb-label';
-    label.textContent = `${idx + 1}`;
-
-    // 點擊縮圖 → 跳頁並切回閱讀模式
-    thumb.onclick = () => {
-      state.currentPageIndex = idx;
-      const backMode = state.prevReadingMode || 'single';
-      setReadingMode(backMode);
-    };
-
-    thumb.appendChild(img);
-    thumb.appendChild(label);
+  state.currentComicPages.slice(renderStart, renderEnd).forEach((src, offset) => {
+    const idx = renderStart + offset;
+    const thumb = createCatalogThumbnail(src, idx);
     grid.appendChild(thumb);
   });
 
+  const bottomSpacer = document.createElement('div');
+  bottomSpacer.className = 'catalog-virtual-spacer';
+  bottomSpacer.dataset.catalogSpacer = 'bottom';
+  bottomSpacer.style.height = `${Math.max(0, totalRows - Math.ceil(renderEnd / columns)) * rowHeight}px`;
+  bottomSpacer.setAttribute('aria-hidden', 'true');
+
+  elements.pagesContainer.appendChild(topSpacer);
   elements.pagesContainer.appendChild(grid);
+  elements.pagesContainer.appendChild(bottomSpacer);
   startCatalogThumbnailLoads(grid);
   restoreCatalogFocus(focusDescriptor);
 
-  // 滾動到當前頁
+  // 只有首次進入目錄時定位目前頁；捲動重繪不可反覆改寫使用者位置。
   const currentThumb = grid.querySelector('.catalog-thumb.current');
-  if (currentThumb) {
-    setTimeout(() => currentThumb.scrollIntoView({ behavior: 'smooth', block: 'center' }), 100);
+  if (currentThumb && !preserveWindow && !fromScroll) {
+    // 數千頁的 spacer 不適合平滑跨越；延遲動畫也可能在 resize 重繪後
+    // 回寫舊位置。初次進入直接定位，之後的捲動／resize 由虛擬視窗接手。
+    elements.readerViewport.scrollTop = catalogScrollTopForPage(state.currentPageIndex);
   }
 }
 
@@ -5547,7 +6922,6 @@ function requestVisibleDirectoryScan(relativePath, {
   force = true,
   announce = true,
 } = {}) {
-  const scanVisibleDirectory = eAPI?.scanVisibleDirectory;
   const location = normalizeDirectoryLocation(relativePath, sourceId);
   const locationKey = getDirectoryLocationKey(location.sourceId, location.relativePath);
   const status = elements.visibleScanStatus;
@@ -5556,6 +6930,14 @@ function requestVisibleDirectoryScan(relativePath, {
     status.hidden = !message;
     status.textContent = message;
   };
+  // PhotoKit albums are virtual sources, not filesystem directories. Their
+  // refresh is driven by get_library/photo-library-changed; sending this
+  // location to the filesystem scanner produces a false source-mismatch UI.
+  if (isVirtualDirectorySourceId(location.sourceId)) {
+    showStatus('');
+    return Promise.resolve(false);
+  }
+  const scanVisibleDirectory = eAPI?.scanVisibleDirectory;
   if (typeof scanVisibleDirectory !== 'function') {
     showStatus('');
     return Promise.resolve(false);
@@ -5750,7 +7132,7 @@ function scheduleAdjacentComicOpen(comic, direction, delayMs = 800, expectedMode
     if (operation !== state.readerOperation || !state.currentComic || state.currentComic.id !== currentId) return;
     if (expectedMode && (state.readingMode !== expectedMode
       || findAdjacentComicInFolder(direction)?.id !== comic.id)) return;
-    openReader(comic.id);
+    openReader(comic);
   }, delayMs);
   return true;
 }
@@ -5834,7 +7216,7 @@ function jumpToPage(pageIndex) {
     // 更新進度
     elements.pageCounter.textContent = readerText('第 {page} / {total} 頁', { page: pageIndex + 1, total: totalPages });
     elements.progressSlider.value = pageIndex + 1;
-    saveReadingProgress();
+    if (state.readerReadyPages.has(pageIndex)) saveReadingProgress();
   } else {
     // 雙頁模式依目前配對相位對齊；錯開後可合法落在偶數索引。
     if (isDoubleReadingMode()) {
@@ -5875,9 +7257,21 @@ function goNextByReadingDirection() {
   }
 }
 
+function isCatalogThumbnailInteraction(event) {
+  if (event.target?.closest?.('.catalog-thumb')) return true;
+  // WK 相容事件可能以 viewport 為 target；用實際點位確認縮圖，
+  // 保留目錄空白處原有的工具列操作。
+  if (state.readingMode !== 'catalog'
+    || !Number.isFinite(event.clientX) || !Number.isFinite(event.clientY)) return false;
+  return Boolean(document.elementFromPoint?.(event.clientX, event.clientY)?.closest?.('.catalog-thumb'));
+}
+
 function handleReaderPointerClick(e) {
   if (elements.readerOverlay.style.display === 'none' || e.button !== 0) return;
-  if (e.target.closest?.('button, input, select, textarea, a, #ai-page-panel')) return;
+  if (isCatalogThumbnailInteraction(e)) return;
+  // 目錄縮圖是 role=button 的 div；其 pointerup 之後仍要交給原生 click，
+  // 不能被閱讀器的中間 tap 或左右翻頁 chrome 先吃掉。
+  if (e.target.closest?.('button, input, select, textarea, a, #ai-page-panel, .catalog-thumb')) return;
 
   // 如果是觸控裝置且是滑動(Swipe)，已經由 touchend 處理，pointerup 可以避免重複觸發
   // pointerup 也會被觸發，所以我們根據滑動距離來排除
@@ -6024,18 +7418,27 @@ function scheduleReaderCacheWindowUpdate() {
   const comicId = state.currentComic.id;
   const pageIndex = state.currentPageIndex;
   if (state.readerCacheWindowPage === pageIndex) return;
+  const readerOperation = state.readerOperation;
+  const renderGeneration = state.renderGeneration;
+  const requestToken = ++state.readerCacheWindowToken;
   state.readerCacheWindowPage = pageIndex;
   state.readerCacheReadyPage = null;
   state.readerCacheWindowTimer = setTimeout(async () => {
     state.readerCacheWindowTimer = null;
-    if (!state.currentComic || state.currentComic.id !== comicId) return;
+    const isCurrentRequest = () => state.readerOperation === readerOperation
+      && state.renderGeneration === renderGeneration
+      && state.readerCacheWindowToken === requestToken
+      && state.currentComic?.id === comicId
+      && state.currentPageIndex === pageIndex
+      && state.readerCacheWindowPage === pageIndex;
+    if (!isCurrentRequest()) return;
     try {
       const generation = await eAPI.updateReaderCacheWindow(comicId, pageIndex);
-      if (state.currentComic?.id === comicId && Number.isSafeInteger(generation)) {
+      if (isCurrentRequest() && Number.isSafeInteger(generation)) {
         state.currentComic.preloadGeneration = generation;
       }
     } catch (error) {
-      if (state.currentComic?.id === comicId && state.readerCacheWindowPage === pageIndex) {
+      if (isCurrentRequest()) {
         state.readerCacheWindowPage = null;
       }
       console.warn('[RAM cache window]', error);
@@ -6218,9 +7621,11 @@ function updateWebtoonScrollState() {
     // 即時懶加載附近的圖片
     loadWebtoonImagesAround(activeIndex);
 
-    // 儲存進度 (防抖動)
+    // 僅在目前頁已實際載入時儲存；未載入頁由 load callback 補存。
     clearTimeout(state.progressSaveTimer);
-    state.progressSaveTimer = setTimeout(saveReadingProgress, 500);
+    state.progressSaveTimer = state.readerReadyPages.has(activeIndex)
+      ? setTimeout(saveReadingProgress, 500)
+      : null;
   }
 }
 
@@ -6242,21 +7647,7 @@ function loadWebtoonImagesAround(index) {
 
 // 儲存進度至主程序
 async function saveReadingProgress() {
-  if (!state.currentComic || isBuiltInDemoComic(state.currentComic)) return;
-  const snapshot = {
-    id: state.currentComic.id,
-    currentPage: state.currentPageIndex,
-    totalPages: state.currentComicPages.length,
-    sequence: nextReadingProgressSaveSequence(),
-  };
-  readingProgressSaveQueue = readingProgressSaveQueue
-    .catch(() => {})
-    .then(() => eAPI.saveProgress(snapshot))
-    .catch(error => {
-      // 單筆 native failure 不得中斷後續快照；下一筆會接續同一條 queue。
-      console.error('保存進度失敗：', error);
-    });
-  await readingProgressSaveQueue;
+  await enqueueReadingProgressSnapshot(createReadingProgressSnapshot());
 }
 
 // ==========================================================================
@@ -6946,6 +8337,9 @@ function handleWheelScroll(e) {
   if (state.readingMode === 'webtoon') cancelWebtoonAnchor();
   // 如果是條漫模式或目錄模式，允許原生滾動，不作攔截
   if (state.readingMode === 'webtoon' || state.readingMode === 'catalog') return;
+  // 放大單頁時 viewport 需要保留原生 wheel 平移；只有頁面沒有溢位時
+  // 才把滾輪視為翻頁手勢。
+  if (state.readingMode === 'single' && readerViewportCanScroll()) return;
 
   e.preventDefault();
 
@@ -6983,6 +8377,7 @@ function isLibraryModalElementFocusable(element) {
   if (!element || element.hidden || element.disabled || element.getAttribute?.('aria-hidden') === 'true') return false;
   let current = element;
   while (current) {
+    if (current.nodeType && current.nodeType !== 1) break;
     if (current.hidden || current.disabled || current.getAttribute?.('aria-hidden') === 'true') return false;
     if (typeof getComputedStyle === 'function') {
       const style = getComputedStyle(current);
@@ -7087,6 +8482,14 @@ function guardLibraryModalFocus(event) {
 // ==========================================================================
 
 // 打開設定視窗
+function configureSettingsSourceControls() {
+  const isIOS = isIOSLibraryDevice() && typeof window.electronAPI?.openExternalFolder === 'function';
+  if (elements.scanPathRow) elements.scanPathRow.hidden = isIOS;
+  if (elements.saveSettingsBtn) elements.saveSettingsBtn.hidden = !isIOS;
+  if (isIOS) elements.librarySourceLabel?.removeAttribute('for');
+  return isIOS;
+}
+
 async function openSettingsModal() {
   state.dialogReturnFocus = document.activeElement;
   openLibraryModal(elements.settingsModal);
@@ -7095,6 +8498,10 @@ async function openSettingsModal() {
   renderExternalBookmarks();
   void refreshAiSessionStatus();
   void window.GaiCommerce?.refresh?.();
+
+  // iOS 用 bookmark 加入來源；外觀即時保存，完成按鈕只關閉設定。
+  // 不讀取或套用桌面路徑，也不等待正在背景掃描的外部書庫。
+  if (configureSettingsSourceControls()) return;
 
   try {
     const config = await eAPI.getConfig();
@@ -7199,6 +8606,11 @@ function renderExternalBookmarks() {
   const container = document.getElementById('external-bookmarks-list');
   if (!container) return;
 
+  if (externalBookmarksRecoveryRequired) {
+    container.innerHTML = `<div style="font-size: 0.9em; color: var(--text-muted);"><i class="fa-solid fa-triangle-exclamation"></i> ${readerText('外部資料夾清單需要修復；現有來源不會被清除。請重新選取資料夾。')}</div>`;
+    return;
+  }
+
   const bookmarks = readExternalBookmarks();
   if (bookmarks.length === 0) {
     container.innerHTML = `<div style="font-size: 0.9em; color: var(--text-muted);"><i class="fa-solid fa-info-circle"></i> ${readerText('目前沒有已加入的外部資料夾')}</div>`;
@@ -7224,6 +8636,8 @@ function renderExternalBookmarks() {
     delBtn.innerHTML = '<i class="fa-solid fa-trash"></i>';
     delBtn.title = readerText('移除外部資料夾：{name}', { name: b.name });
     delBtn.setAttribute('aria-label', readerText('移除外部資料夾：{name}', { name: b.name }));
+    delBtn.className = 'external-bookmark-remove';
+    delBtn.type = 'button';
     delBtn.style.background = 'var(--accent-red)';
     delBtn.style.color = 'white';
     delBtn.style.border = 'none';
@@ -7243,7 +8657,7 @@ function renderExternalBookmarks() {
             if (window.electronAPI && window.electronAPI.setBookmarks) {
               await window.electronAPI.setBookmarks(nextBookmarks);
             }
-            localStorage.setItem('gai:externalBookmarks', JSON.stringify(nextBookmarks));
+            rememberExternalBookmarks(nextBookmarks);
           });
         } catch (error) {
           const { message, stateWasUpdated } = classifyBookmarkUpdateError(error);
@@ -7253,7 +8667,7 @@ function renderExternalBookmarks() {
             return;
           }
           // 原生清單已提交；仍保存新清單，避免下次啟動重新加入已移除的來源。
-          if (desiredBookmarks) localStorage.setItem('gai:externalBookmarks', JSON.stringify(desiredBookmarks));
+          if (desiredBookmarks) rememberExternalBookmarks(desiredBookmarks);
           if (elements.scanDirStatus) elements.scanDirStatus.textContent = readerText('來源已移除；舊存取權限將在 App 結束後釋放。');
         }
         renderExternalBookmarks();
@@ -8022,9 +9436,9 @@ async function metadataSampleDataUrl(source) {
   }
 }
 
-async function sampleComicForAiMetadata(comicId, onProgress = () => {}) {
+async function sampleComicForAiMetadata(comicId, sourceId, onProgress = () => {}) {
   if (!eAPI?.openComic) throw new Error(readerText('目前環境無法讀取漫畫頁面'));
-  const comic = await eAPI.openComic(comicId);
+  const comic = await eAPI.openComic(comicId, sourceId);
   const pages = comic?.pages || [];
   const indexes = metadataSamplePageIndices(pages.length);
   if (!indexes.length) throw new Error(readerText('這本漫畫沒有可供分析的封面或第一頁'));
@@ -8105,7 +9519,7 @@ async function suggestInspectorMetadata(comic, button, resultContainer) {
   const mutationGeneration = state.aiSessionMutationGeneration;
   button.disabled = true;
   try {
-    const { dataUrls, indexes } = await sampleComicForAiMetadata(comic.id, (pages, ready) => {
+    const { dataUrls, indexes } = await sampleComicForAiMetadata(comic.id, comic.sourceId, (pages, ready) => {
       if (!button.isConnected
         || sessionGeneration !== state.aiSessionSwitchGeneration
         || mutationGeneration !== state.aiSessionMutationGeneration) throw new Error('AI session changed');
@@ -8296,7 +9710,18 @@ if (typeof window !== 'undefined' && window.__GIA_TEST_HOOKS__) {
     createBuiltInDemoComics,
     builtInDemoReaderData,
     getCoverUrl,
+    catalogThumbnailURL,
     getDirectoryItems,
+    getLibraryFilteredComics,
+    getDiscoveryCandidates,
+    normalizeDiscoveryTagGroups,
+    pickDiscoveryTag,
+    toggleDiscoveryTags,
+    closeDiscoveryTags,
+    openDiscoveryTag,
+    pickDiscoveryComic,
+    openDiscoveryComic,
+    syncDiscoveryButton,
     getDirectoryLocationKey,
     getVisibleDirectoryMapKey,
     getVisibleDirectoryEntries,
@@ -8313,6 +9738,7 @@ if (typeof window !== 'undefined' && window.__GIA_TEST_HOOKS__) {
     isBuiltInDemoComic,
     isLooseImage,
     resetCoverLoadQueue,
+    removeScheduledCover,
     enqueueCoverLoad,
     drainCoverLoadQueue,
     noteCatalogScroll,
@@ -8336,6 +9762,13 @@ if (typeof window !== 'undefined' && window.__GIA_TEST_HOOKS__) {
     renderGrid,
     getShelfCardRenderKey,
     renderPages,
+    createReadingProgressSnapshot,
+    enqueueReadingProgressSnapshot,
+    retryReaderPages,
+    markReaderPageReady,
+    markReaderPageFailed,
+    readerImageIsReady,
+    decodeReaderImage,
     saveReadingProgress,
     toggleDoubleDirection,
     advanceDoubleBySinglePage,
@@ -8355,13 +9788,22 @@ if (typeof window !== 'undefined' && window.__GIA_TEST_HOOKS__) {
     anchorWebtoonPage,
     cancelWebtoonAnchor,
     renderCatalogGrid,
+    getCatalogVirtualBounds,
+    handleReaderResize,
+    handleCatalogScroll,
     updateReaderUiControls,
     captureCatalogFocus,
     restoreCatalogFocus,
     captureLibraryFocus,
     restoreLibraryRefreshFocus,
     getCatalogThumbnailLoadState() {
-      return { generation: catalogImageGeneration, active: catalogImageActive, queued: catalogImageQueue.length };
+      return {
+        generation: catalogImageGeneration,
+        active: catalogImageActive,
+        queued: catalogImageQueue.length,
+        tasks: catalogImageTasks.size,
+        observerConnected: Boolean(catalogImageObserver),
+      };
     },
     handleKeyDown,
     trapReaderFocus,

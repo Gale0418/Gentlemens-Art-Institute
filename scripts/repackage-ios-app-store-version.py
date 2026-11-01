@@ -25,12 +25,15 @@ def main() -> None:
     parser.add_argument("--input", type=Path, required=True, help="Original signed IPA")
     parser.add_argument("--output", type=Path, required=True, help="New signed IPA")
     parser.add_argument("--version", required=True, help="App Store version, e.g. 1.0")
+    parser.add_argument("--build-number", required=True, help="Unique App Store build number")
     parser.add_argument("--identity", required=True, help="Distribution codesign identity")
     parser.add_argument("--work-dir", type=Path, help="Temporary directory on an APFS/HFS+ volume")
     args = parser.parse_args()
 
     if not re.fullmatch(r"[1-9]\d*\.\d+(?:\.\d+)?", args.version):
         parser.error("--version must contain two or three numeric components")
+    if not re.fullmatch(r"[1-9]\d*", args.build_number):
+        parser.error("--build-number must be a positive integer")
     source = args.input.resolve(strict=True)
     destination = args.output.resolve()
     if source == destination:
@@ -62,6 +65,10 @@ def main() -> None:
         info_path = app / "Info.plist"
         info = plistlib.loads(info_path.read_bytes())
         info["CFBundleShortVersionString"] = args.version
+        info["CFBundleVersion"] = args.build_number
+        # App Store Connect's encryption questionnaire determined that this
+        # app's standard encryption is exempt from documentation requirements.
+        info["ITSAppUsesNonExemptEncryption"] = False
         info_path.write_bytes(plistlib.dumps(info))
         run("codesign", "--force", "--sign", args.identity, "--entitlements", str(entitlements), str(app))
         run("codesign", "--verify", "--deep", "--strict", str(app))
@@ -78,6 +85,10 @@ def main() -> None:
             packaged = plistlib.loads(archive.read(plist_names[0]))
         if packaged["CFBundleShortVersionString"] != args.version:
             raise RuntimeError("Output IPA version differs from requested version")
+        if packaged["CFBundleVersion"] != args.build_number:
+            raise RuntimeError("Output IPA build number differs from requested build number")
+        if packaged.get("ITSAppUsesNonExemptEncryption") is not False:
+            raise RuntimeError("Output IPA does not declare exempt encryption")
         checksum = hashlib.sha256()
         with destination.open("rb") as packaged_file:
             for chunk in iter(lambda: packaged_file.read(1024 * 1024), b""):

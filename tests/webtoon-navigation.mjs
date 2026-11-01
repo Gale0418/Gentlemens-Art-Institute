@@ -432,9 +432,16 @@ async function flushMicrotasks() {
   const failed = runtime.hooks.saveReadingProgress();
   runtime.hooks.state.currentPageIndex = 1;
   const recovered = runtime.hooks.saveReadingProgress();
+  // The real bounded retry waits on the injected clock. Flush the rejected
+  // native call first, advance its 250 ms retry, then let the queue continue
+  // to the newer snapshot; otherwise this fixture leaves a live retry timer.
+  await flushMicrotasks();
+  runtime.clock.tick(250);
+  await flushMicrotasks();
   await Promise.all([failed, recovered]);
-  assert.deepEqual(calls, [0, 1], 'queue continues after one native progress failure');
-  assert.ok(sequences[1] > sequences[0], 'failed progress still consumes one session sequence');
+  assert.deepEqual(calls, [0, 0, 1], 'queue retries the failed snapshot before the newer page');
+  assert.equal(sequences[1], sequences[0], 'retry preserves the failed snapshot sequence');
+  assert.ok(sequences[2] > sequences[1], 'newer progress keeps a monotonic session sequence');
 }
 console.log('PASS: serialized reading progress preserves rapid and backward navigation order');
 

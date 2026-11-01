@@ -9,7 +9,7 @@ use sevenz_rust2::{ArchiveReader as SevenZArchiveReader, BlockDecoder, Password}
 use std::collections::HashSet;
 use std::fmt;
 use std::fs::File;
-use std::io::{self, Read};
+use std::io::{self, Read, Seek, SeekFrom};
 use std::path::{Path, PathBuf};
 
 /// 單一 entry 可被讀取的最大解壓後大小。
@@ -21,6 +21,8 @@ pub const MAX_ENTRY_COUNT: usize = 100_000;
 /// 讀取封存檔 header 時允許的輸入檔案大小上限。
 pub const MAX_ARCHIVE_BYTES: u64 = 8 * 1024 * 1024 * 1024;
 const MAX_ENTRY_NAME_BYTES: usize = 4096;
+/// Aggregate UTF-8 bytes retained for all entry names in one archive.
+pub const MAX_TOTAL_ENTRY_NAME_BYTES: usize = 16 * 1024 * 1024;
 
 const SEVEN_Z_SIGNATURE: &[u8; 6] = b"7z\xBC\xAF\x27\x1C";
 const RAR4_SIGNATURE: &[u8; 7] = b"Rar!\x1A\x07\x00";
@@ -64,6 +66,10 @@ pub enum ArchiveError {
         total: u64,
         limit: u64,
     },
+    ArchiveMetadataTooLarge {
+        bytes: usize,
+        limit: usize,
+    },
     EntryTooLarge {
         name: String,
         bytes: u64,
@@ -93,6 +99,12 @@ impl fmt::Display for ArchiveError {
             }
             Self::ArchiveBomb { total, limit } => {
                 write!(f, "封存檔宣告解壓大小 {total} bytes 超過上限 {limit} bytes")
+            }
+            Self::ArchiveMetadataTooLarge { bytes, limit } => {
+                write!(
+                    f,
+                    "封存檔 entry metadata {bytes} bytes 超過上限 {limit} bytes"
+                )
             }
             Self::EntryTooLarge { name, bytes, limit } => {
                 write!(
@@ -165,6 +177,16 @@ pub fn list_entries(path: impl AsRef<Path>) -> Result<Vec<ArchiveEntry>, Archive
     ArchiveReader::open(path)?.list_entries()
 }
 
+/// 列出已由 capability root 開啟的 archive。`file` 的 descriptor 會一路
+/// 傳給底層 reader，避免先做路徑檢查後又以可競態的字串路徑重開檔。
+pub fn list_entries_from_file(
+    mut file: File,
+    path_hint: &Path,
+) -> Result<Vec<ArchiveEntry>, ArchiveError> {
+    let kind = identify_kind_from_file(&mut file, path_hint)?;
+    list_entries_for_file(file, kind, path_hint)
+}
+
 /// 讀取單一 entry 至 bounded memory buffer，不會將內容寫到檔案系統。
 pub fn read_entry(
     path: impl AsRef<Path>,
@@ -172,6 +194,58 @@ pub fn read_entry(
     max_bytes: usize,
 ) -> Result<Vec<u8>, ArchiveError> {
     ArchiveReader::open(path)?.read_entry(name, max_bytes)
+}
+
+/// 從已開啟且受授權的 descriptor 讀取單一 entry。
+pub fn read_entry_from_file(
+    mut file: File,
+    path_hint: &Path,
+    name: &str,
+    max_bytes: usize,
+) -> Result<Vec<u8>, ArchiveError> {
+    let kind = identify_kind_from_file(&mut file, path_hint)?;
+    read_entry_for_file(file, kind, path_hint, name, max_bytes)
+}
+
+fn identify_kind_from_file(file: &mut File, path: &Path) -> Result<ArchiveKind, ArchiveError> {
+    let mut signature = [0_u8; 8];
+    let read = file.read(&mut signature)?;
+    file.seek(SeekFrom::Start(0))?;
+    identify_kind(&signature[..read], path)
+}
+
+fn list_entries_for_file(
+    file: File,
+    kind: ArchiveKind,
+    path: &Path,
+) -> Result<Vec<ArchiveEntry>, ArchiveError> {
+    match kind {
+        ArchiveKind::Rar => crate::rar_reader::list_entries_from_file(file, path),
+        ArchiveKind::SevenZip => {
+            let reader = open_sevenz_from_file(file)?;
+            validate_sevenz_entries(&reader.archive().files)
+        }
+    }
+}
+
+fn read_entry_for_file(
+    file: File,
+    kind: ArchiveKind,
+    path: &Path,
+    name: &str,
+    max_bytes: usize,
+) -> Result<Vec<u8>, ArchiveError> {
+    validate_entry_name(name)?;
+    if max_bytes == 0 || max_bytes > MAX_ENTRY_BYTES {
+        return Err(ArchiveError::ReadLimitExceeded {
+            name: name.to_string(),
+            limit: MAX_ENTRY_BYTES,
+        });
+    }
+    match kind {
+        ArchiveKind::Rar => crate::rar_reader::read_entry_from_file(file, path, name, max_bytes),
+        ArchiveKind::SevenZip => read_sevenz_entry_from_file(file, path, name, max_bytes),
+    }
 }
 
 fn identify_kind(signature: &[u8], path: &Path) -> Result<ArchiveKind, ArchiveError> {
@@ -236,8 +310,14 @@ fn read_entry_for_kind(
 }
 
 fn open_sevenz(path: &Path) -> Result<SevenZArchiveReader<File>, ArchiveError> {
-    SevenZArchiveReader::open(path, Password::empty())
-        .map_err(|error| ArchiveError::Corrupt(error.to_string()))
+    open_sevenz_from_file(File::open(path)?)
+}
+
+fn open_sevenz_from_file(file: File) -> Result<SevenZArchiveReader<File>, ArchiveError> {
+    let mut reader = SevenZArchiveReader::new(file, Password::empty())
+        .map_err(|error| ArchiveError::Corrupt(error.to_string()))?;
+    reader.set_thread_count(1);
+    Ok(reader)
 }
 
 fn validate_sevenz_entries(
@@ -251,6 +331,7 @@ fn validate_sevenz_entries(
     }
 
     let mut names = HashSet::with_capacity(entries.len());
+    let mut name_bytes = 0_usize;
     let mut total = 0_u64;
     let mut result = Vec::with_capacity(entries.len());
     for entry in entries {
@@ -260,7 +341,8 @@ fn validate_sevenz_entries(
             &entry.name
         };
         validate_entry_name(validation_name)?;
-        if !names.insert(entry.name.clone()) {
+        name_bytes = checked_name_bytes(name_bytes, entry.name.len())?;
+        if !names.insert(entry.name.as_str()) {
             return Err(ArchiveError::Corrupt(format!(
                 "entry 名稱重複：{}",
                 entry.name
@@ -289,7 +371,17 @@ fn validate_sevenz_entries(
 }
 
 fn read_sevenz_entry(path: &Path, name: &str, max_bytes: usize) -> Result<Vec<u8>, ArchiveError> {
-    let mut reader = open_sevenz(path)?;
+    read_sevenz_entry_from_file(File::open(path)?, path, name, max_bytes)
+}
+
+fn read_sevenz_entry_from_file(
+    file: File,
+    _path: &Path,
+    name: &str,
+    max_bytes: usize,
+) -> Result<Vec<u8>, ArchiveError> {
+    let block_source = file.try_clone()?;
+    let mut reader = open_sevenz_from_file(file)?;
     let entries = validate_sevenz_entries(&reader.archive().files)?;
     let target = entries
         .iter()
@@ -315,12 +407,12 @@ fn read_sevenz_entry(path: &Path, name: &str, max_bytes: usize) -> Result<Vec<u8
         return enforce_output_limit(name, output, max_bytes);
     }
 
-    read_solid_sevenz_entry(&mut reader, path, name, max_bytes)
+    read_solid_sevenz_entry(&mut reader, block_source, name, max_bytes)
 }
 
 fn read_solid_sevenz_entry(
     reader: &mut SevenZArchiveReader<File>,
-    path: &Path,
+    mut source: File,
     name: &str,
     max_bytes: usize,
 ) -> Result<Vec<u8>, ArchiveError> {
@@ -352,11 +444,7 @@ fn read_solid_sevenz_entry(
     // target in this block still need to be drained, but earlier blocks do not.
     let archive = reader.archive();
     let password = Password::empty();
-    let mut source = File::open(path)?;
-    let thread_count = std::thread::available_parallelism()
-        .map(|count| count.get().min(u32::MAX as usize) as u32)
-        .unwrap_or(1);
-    let decoder = BlockDecoder::new(thread_count, block_index, archive, &password, &mut source);
+    let decoder = BlockDecoder::new(1, block_index, archive, &password, &mut source);
     let target_name = name.to_string();
     let mut output = Vec::new();
     let completed_block = decoder
@@ -364,10 +452,10 @@ fn read_solid_sevenz_entry(
             if entry.name == target_name {
                 source.take(max_bytes as u64 + 1).read_to_end(&mut output)?;
                 if output.len() > max_bytes {
-                    return Err(io::Error::new(
-                        io::ErrorKind::Other,
-                        format!("entry {} exceeds bounded read", target_name),
-                    )
+                    return Err(io::Error::other(format!(
+                        "entry {} exceeds bounded read",
+                        target_name
+                    ))
                     .into());
                 }
                 return Ok(false);
@@ -428,6 +516,22 @@ fn validate_entry_name(name: &str) -> Result<(), ArchiveError> {
         }
     }
     Ok(())
+}
+
+fn checked_name_bytes(total: usize, additional: usize) -> Result<usize, ArchiveError> {
+    let total = total
+        .checked_add(additional)
+        .ok_or(ArchiveError::ArchiveMetadataTooLarge {
+            bytes: usize::MAX,
+            limit: MAX_TOTAL_ENTRY_NAME_BYTES,
+        })?;
+    if total > MAX_TOTAL_ENTRY_NAME_BYTES {
+        return Err(ArchiveError::ArchiveMetadataTooLarge {
+            bytes: total,
+            limit: MAX_TOTAL_ENTRY_NAME_BYTES,
+        });
+    }
+    Ok(total)
 }
 
 #[cfg(test)]

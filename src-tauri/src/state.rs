@@ -265,6 +265,36 @@ pub struct SmbConfig {
     pub password: Option<String>,
 }
 
+/// Legacy SMB rows were written with this single source ID before the
+/// endpoint became part of the identity.  They must remain read-only until a
+/// future, explicit migration can prove their origin.
+pub const LEGACY_SMB_SOURCE_ID: &str = "smb";
+
+pub fn is_smb_source_id(source_id: &str) -> bool {
+    source_id == LEGACY_SMB_SOURCE_ID || source_id.starts_with("smb:v1:")
+}
+
+/// Builds a stable, opaque identity for one SMB endpoint.  Credentials are
+/// deliberately excluded; a password change must not create a second shelf,
+/// while the effective username is included because ACLs can expose a
+/// different view of the same host/share.
+pub fn smb_source_id(config: &SmbConfig) -> String {
+    let host = config.host.trim().to_ascii_lowercase();
+    let share = config.share.trim().to_string();
+    let username = config
+        .username
+        .as_deref()
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .unwrap_or("guest");
+    let identity = format!("smb-source-v1\0{host}\0{share}\0{username}");
+    format!("smb:v1:{}", blake3::hash(identity.as_bytes()).to_hex())
+}
+
+pub fn smb_source_matches_config(source_id: &str, config: &SmbConfig) -> bool {
+    source_id == smb_source_id(config)
+}
+
 impl std::fmt::Debug for SmbConfig {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("SmbConfig")
@@ -340,6 +370,7 @@ pub struct AppState {
     pub opened_comic_files: std::sync::RwLock<HashMap<String, Vec<String>>>,
     pub smb_config: std::sync::RwLock<Option<SmbConfig>>,
     pub external_bookmarks: std::sync::RwLock<Vec<ExternalBookmark>>,
+    pub external_bookmarks_readable: std::sync::atomic::AtomicBool,
     pub progress_file_lock: tokio::sync::Mutex<()>,
     /// Serializes AI session transitions across Keychain awaits.
     pub ai_session_lifecycle: tokio::sync::Mutex<()>,
@@ -409,6 +440,7 @@ impl AppState {
             opened_comic_files: std::sync::RwLock::new(HashMap::new()),
             smb_config: std::sync::RwLock::new(None),
             external_bookmarks: std::sync::RwLock::new(Vec::new()),
+            external_bookmarks_readable: std::sync::atomic::AtomicBool::new(true),
             progress_file_lock: tokio::sync::Mutex::new(()),
             ai_session_lifecycle: tokio::sync::Mutex::new(()),
             ai_send_lifecycle: tokio::sync::Mutex::new(()),
@@ -442,6 +474,20 @@ impl AppState {
 
     pub fn current_cache_budget_bytes(&self) -> usize {
         self.cache_budget_bytes.load(Ordering::Acquire)
+    }
+
+    /// Invalidate every reader/preload that was resolved against the previous
+    /// local root or external bookmark set.  The lifecycle lock makes the
+    /// generation check and pool clear atomic with a preload commit, so an old
+    /// task cannot repopulate a cache after a source transition.
+    pub fn invalidate_reader_cache(&self) {
+        let _lifecycle = self.comic_lifecycle.lock().unwrap();
+        self.reader_generation.fetch_add(1, Ordering::SeqCst);
+        self.preload_generation.fetch_add(1, Ordering::SeqCst);
+        self.ram_cache_pool.lock().unwrap().clear();
+        self.opened_comic_files.write().unwrap().clear();
+        *self.active_comic_id.lock().unwrap() = None;
+        *self.pending_open_id.lock().unwrap() = None;
     }
 
     pub fn refresh_cache_budget(&self) -> usize {
@@ -545,6 +591,26 @@ mod tests {
         OnlineServicesConfig, GIB, MAX_COMPRESSED_PAGE_CACHE_BYTES,
     };
     use std::collections::HashMap;
+    use std::sync::atomic::Ordering;
+
+    #[test]
+    fn smb_identity_is_endpoint_scoped_and_excludes_password() {
+        let mut config = super::SmbConfig {
+            host: "NAS-A".into(),
+            share: "Comics".into(),
+            username: Some("reader".into()),
+            password: Some("first".into()),
+        };
+        let first = super::smb_source_id(&config);
+        config.password = Some("changed".into());
+        assert_eq!(first, super::smb_source_id(&config));
+        config.host = "NAS-B".into();
+        assert_ne!(first, super::smb_source_id(&config));
+        assert!(!super::smb_source_matches_config(
+            super::LEGACY_SMB_SOURCE_ID,
+            &config
+        ));
+    }
 
     #[test]
     fn online_services_are_off_by_default_and_require_disclosure() {
@@ -628,5 +694,33 @@ mod tests {
         let mut remaining = pool["book"].keys().copied().collect::<Vec<_>>();
         remaining.sort_unstable();
         assert_eq!(remaining, vec![0, 2]);
+    }
+
+    #[test]
+    fn source_invalidation_cancels_readers_and_clears_all_identity_state() {
+        let state = AppState::new();
+        state.reader_generation.store(7, Ordering::SeqCst);
+        state.preload_generation.store(11, Ordering::SeqCst);
+        state
+            .ram_cache_pool
+            .lock()
+            .unwrap()
+            .insert("same-id".into(), HashMap::from([(0, vec![1, 2, 3])]));
+        state
+            .opened_comic_files
+            .write()
+            .unwrap()
+            .insert("same-id".into(), vec!["page.jpg".into()]);
+        *state.active_comic_id.lock().unwrap() = Some("same-id".into());
+        *state.pending_open_id.lock().unwrap() = Some("same-id".into());
+
+        state.invalidate_reader_cache();
+
+        assert_eq!(state.reader_generation.load(Ordering::SeqCst), 8);
+        assert_eq!(state.preload_generation.load(Ordering::SeqCst), 12);
+        assert!(state.ram_cache_pool.lock().unwrap().is_empty());
+        assert!(state.opened_comic_files.read().unwrap().is_empty());
+        assert!(state.active_comic_id.lock().unwrap().is_none());
+        assert!(state.pending_open_id.lock().unwrap().is_none());
     }
 }

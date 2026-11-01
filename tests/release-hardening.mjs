@@ -26,7 +26,7 @@ assert.match(state, /is_active[\s\S]{0,500}left\.0\s*\.cmp\(&right\.0\)/, 'inact
 assert.match(smbScanner, /SMB_CONNECT_TIMEOUT[\s\S]*Duration::from_secs\(10\)/);
 assert.match(smbScanner, /SMB_IO_TIMEOUT[\s\S]*Duration::from_secs\(30\)/);
 assert.match(smbScanner, /MAX_SMB_SCAN_DEPTH/);
-assert.match(smbScanner, /format!\("\.\/\{relative_path\}"\)/);
+assert.match(smbScanner, /gai-smb-v1\\0\{source_id\}\\0\.\/\{relative_path\}/);
 assert.match(smbScanner, /!name\.contains\('\\\\'\)/);
 
 assert.match(fileOps, /error\.kind\(\) == smb2::ErrorKind::NotFound/);
@@ -46,7 +46,7 @@ assert.doesNotMatch(
 
 assert.match(protocol, /let index: usize = match parts\[2\]\.parse\(\)/);
 assert.doesNotMatch(protocol, /parts\[2\]\.parse\(\)\.unwrap_or\(0\)/);
-assert.match(protocol, /comic_info\.source_id == "smb"/);
+assert.match(protocol, /is_smb_source_id\(&comic_info\.source_id\)/);
 assert.match(protocol, /crate::utils::safe_archive_entry_name/);
 assert.match(protocol, /fn route_shape_is_valid/);
 assert.match(protocol, /MUTABLE_IMAGE_CACHE_CONTROL: &str = "no-store"/);
@@ -58,7 +58,7 @@ assert.match(utils, /file_name\.starts_with\('\.'\)/, 'hidden filesystem images 
 
 assert.match(scanner, /has_smb_source/);
 assert.match(scanner, /offline_smb_snapshot/);
-assert.match(scanner, /let id = smb_runtime_id\(&relative_path\)/, 'offline SMB migration must rebuild current source-scoped IDs');
+assert.match(scanner, /WHERE l\.source_id = \?1 AND l\.runtime_id IS NOT NULL/, 'offline SMB snapshots must be scoped to the requested endpoint');
 assert.doesNotMatch(scanner, /runtime_id\.unwrap_or_else/, 'offline SMB must not trust legacy unscoped runtime IDs');
 assert.match(scanner, /!active.contains\(source\)/, 'external cleanup must retain sources still being scanned');
 assert.match(scanner, /file_type\.is_symlink\(\)/);
@@ -92,32 +92,41 @@ assert.throws(() => sandbox.normalizeProgressPayload({ id: '', currentPage: 0, t
 assert.throws(() => sandbox.normalizeProgressPayload({ id: 'comic', currentPage: Number.NaN, totalPages: 1 }));
 
 sandbox.rememberAuthoritativeLibraryProgress([
-  { id: 'smb-book', progress: { currentPage: 86, totalPages: 120, percent: 72.5, updatedAt: '2026-09-04T00:00:00Z' } },
+  { id: 'smb-book', sourceId: 'smb', progress: { currentPage: 86, totalPages: 120, percent: 72.5, updatedAt: '2026-09-04T00:00:00Z' } },
 ]);
 const authoritativeReader = sandbox.normalizeReaderData(sandbox.readerDataWithAuthoritativeProgress('smb-book', {
   id: 'smb-book',
+  sourceId: 'smb',
   pages: Array.from({ length: 120 }, (_, index) => `p${index}`),
   progress: { currentPage: 0, totalPages: 0, percent: 0 },
 }));
 assert.equal(authoritativeReader.progress.currentPage, 86, 'reader must honor SQLite-overlay progress returned by getLibrary');
 assert.equal(authoritativeReader.progress.totalPages, 120);
-sandbox.rememberSavedProgress({ id: 'smb-book', currentPage: 119, totalPages: 120 });
+const newerNative = sandbox.readerDataWithAuthoritativeProgress('smb-book', {
+  sourceId: 'smb', progress: { currentPage: 100, updatedAt: '2099-01-01T00:00:00Z' },
+});
+assert.equal(newerNative.progress.currentPage, 100, 'a newer native progress must not be replaced by an older shelf snapshot');
+sandbox.rememberAuthoritativeLibraryProgress([]);
+assert.equal(sandbox.readerDataWithAuthoritativeProgress('smb-book', {
+  sourceId: 'smb', progress: { currentPage: 0 },
+}).progress.currentPage, 86, 'a partial scan must not erase previously observed progress');
+sandbox.rememberSavedProgress({ id: 'smb-book', sourceId: 'smb', currentPage: 119, totalPages: 120 });
 const staleRefresh = sandbox.rememberAuthoritativeLibraryProgress([
-  { id: 'smb-book', progress: { currentPage: 2, totalPages: 120, percent: 2.5, updatedAt: '2000-01-01T00:00:00Z' } },
+  { id: 'smb-book', sourceId: 'smb', progress: { currentPage: 2, totalPages: 120, percent: 2.5, updatedAt: '2000-01-01T00:00:00Z' } },
 ]);
 assert.equal(staleRefresh[0].progress.currentPage, 119, 'an older background refresh must not rewind a successful save');
 assert.equal(staleRefresh[0].progress.percent, 100);
 const scannerBatch = sandbox.overlayAuthoritativeLibraryProgress([
-  { id: 'smb-book', progress: { currentPage: 0, totalPages: 120, percent: 0 } },
+  { id: 'smb-book', sourceId: 'smb', progress: { currentPage: 0, totalPages: 120, percent: 0 } },
 ]);
 assert.equal(scannerBatch[0].progress.currentPage, 119, 'scanner batches must not rewind SQLite progress');
 assert.equal(sandbox.overlayAuthoritativeLibraryProgress([{ id: 'other-book' }])[0].id, 'other-book');
 assert.equal(sandbox.overlayAuthoritativeLibraryProgress([
-  { id: 'smb-book', progress: { currentPage: 0, totalPages: 120, percent: 0 } },
+  { id: 'smb-book', sourceId: 'smb', progress: { currentPage: 0, totalPages: 120, percent: 0 } },
 ])[0].progress.currentPage, 119, 'a partial scanner batch must not clear other remembered progress');
 
 sandbox.rememberAuthoritativeLibraryProgress([
-  { id: 'resume-book', progress: { currentPage: 7, totalPages: 10, percent: 80, updatedAt: '2026-09-04T01:00:00Z' } },
+  { id: 'resume-book', sourceId: 'smb', progress: { currentPage: 7, totalPages: 10, percent: 80, updatedAt: '2026-09-04T01:00:00Z' } },
 ]);
 const invokeCalls = [];
 const fakeInvoke = async (command, args) => {
@@ -125,6 +134,7 @@ const fakeInvoke = async (command, args) => {
   if (command === 'open_comic') {
     return {
       id: 'resume-book',
+      sourceId: 'smb',
       pages: Array.from({ length: 10 }, (_, index) => `page-${index}`),
       progress: { currentPage: 0, totalPages: 0, percent: 0 },
       preloadGeneration: 1,
@@ -150,6 +160,7 @@ await sandbox.openComicWithAuthoritativeProgress(async (command, args) => {
   noRealignCalls.push({ command, args });
   return {
     id: 'already-aligned',
+    sourceId: 'smb',
     pages: ['a', 'b'],
     progress: { currentPage: 0, totalPages: 2, percent: 0 },
   };

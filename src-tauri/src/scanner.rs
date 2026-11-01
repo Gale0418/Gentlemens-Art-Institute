@@ -71,13 +71,14 @@ pub(crate) fn merge_discovered_comics(library: &mut Vec<ComicItem>, discovered: 
     let mut positions = library
         .iter()
         .enumerate()
-        .map(|(index, comic)| (comic.id.clone(), index))
+        .map(|(index, comic)| ((comic.source_id.clone(), comic.id.clone()), index))
         .collect::<std::collections::HashMap<_, _>>();
     for comic in discovered {
-        if let Some(index) = positions.get(&comic.id).copied() {
+        let identity = (comic.source_id.clone(), comic.id.clone());
+        if let Some(index) = positions.get(&identity).copied() {
             library[index] = comic.clone();
         } else {
-            positions.insert(comic.id.clone(), library.len());
+            positions.insert(identity, library.len());
             library.push(comic.clone());
         }
     }
@@ -87,7 +88,7 @@ fn apply_scan_outcome(library: &mut Vec<ComicItem>, outcome: &ScanOutcome) {
     // SMB has a separate authoritative scanner. Remove its previous runtime
     // snapshot here so that scanner can replace it or load an offline SQLite
     // snapshot without duplicate identities.
-    library.retain(|comic| comic.source_id != "smb");
+    library.retain(|comic| !crate::state::is_smb_source_id(&comic.source_id));
 
     if let Some(local_source_id) = outcome.local_source_id.as_deref() {
         if outcome.local_complete {
@@ -398,29 +399,28 @@ pub(crate) fn external_source_id(bookmark: &str) -> String {
     )
 }
 
-fn smb_runtime_id(relative_path: &str) -> String {
-    general_purpose::URL_SAFE_NO_PAD.encode(format!("./{relative_path}").as_bytes())
-}
-
-fn offline_smb_snapshot(store: &crate::catalog::CatalogStore) -> Result<Vec<ComicItem>, String> {
+fn offline_smb_snapshot(
+    store: &crate::catalog::CatalogStore,
+    source_id: &str,
+) -> Result<Vec<ComicItem>, String> {
     let connection = Connection::open(store.path())
         .map_err(|error| format!("無法開啟離線 NAS 目錄：{error}"))?;
     let mut statement = connection
         .prepare(
             "SELECT c.title, c.series, l.relative_path, l.last_seen_at,
                     COALESCE(p.current_page, 0), COALESCE(p.total_pages, 0),
-                    COALESCE(p.percent, 0), p.updated_at
+                    COALESCE(p.percent, 0), p.updated_at, l.runtime_id
              FROM comic_locations l
              JOIN comics c ON c.id = l.comic_id
              LEFT JOIN reading_progress p ON p.comic_id = c.id
-             WHERE l.source_id = 'smb'
+             WHERE l.source_id = ?1 AND l.runtime_id IS NOT NULL
              ORDER BY lower(c.title), l.relative_path",
         )
         .map_err(|error| error.to_string())?;
     let rows = statement
-        .query_map([], |row| {
+        .query_map([source_id], |row| {
             let relative_path: String = row.get(2)?;
-            let id = smb_runtime_id(&relative_path);
+            let id = row.get(8)?;
             let current_page = usize::try_from(row.get::<_, i64>(4)?).unwrap_or(0);
             let total_pages = usize::try_from(row.get::<_, i64>(5)?).unwrap_or(0);
             let ext = Path::new(&relative_path)
@@ -445,7 +445,7 @@ fn offline_smb_snapshot(store: &crate::catalog::CatalogStore) -> Result<Vec<Comi
                     percent: row.get(6)?,
                     updated_at: row.get(7)?,
                 },
-                source_id: "smb".to_string(),
+                source_id: source_id.to_string(),
                 source_path: None,
                 external_bookmark: None,
             })
@@ -498,6 +498,56 @@ fn mark_external_sources_offline(
     .map_err(|error| error.to_string())?;
     tx.commit().map_err(|error| error.to_string())?;
     Ok(changed)
+}
+
+fn mark_other_smb_sources_offline(
+    store: &crate::catalog::CatalogStore,
+    active: Option<&str>,
+) -> Result<(), String> {
+    let mut connection = Connection::open(store.path()).map_err(|error| error.to_string())?;
+    connection
+        .busy_timeout(Duration::from_secs(5))
+        .map_err(|error| error.to_string())?;
+    let tx = connection
+        .transaction()
+        .map_err(|error| error.to_string())?;
+    tx.execute(
+        "UPDATE comic_locations SET online=0 WHERE (source_id='smb' OR source_id LIKE 'smb:v1:%') AND (?1 IS NULL OR source_id != ?1)",
+        [active],
+    ).map_err(|error| error.to_string())?;
+    tx.execute(
+        "UPDATE comics SET offline=CASE WHEN EXISTS (SELECT 1 FROM comic_locations l WHERE l.comic_id=comics.id AND l.online=1) THEN 0 ELSE 1 END",
+        [],
+    ).map_err(|error| error.to_string())?;
+    tx.commit().map_err(|error| error.to_string())
+}
+
+async fn reconcile_smb_offline_sources(
+    state: &Arc<AppState>,
+    generation: u64,
+    active: Option<String>,
+) {
+    let Some(store) = state
+        .catalog
+        .read()
+        .ok()
+        .and_then(|catalog| catalog.clone())
+    else {
+        return;
+    };
+    let _guard = state.catalog_sync.lock().await;
+    if state.scan_generation.load(Ordering::Acquire) != generation {
+        return;
+    }
+    if let Err(error) = tokio::task::spawn_blocking(move || {
+        mark_other_smb_sources_offline(&store, active.as_deref())
+    })
+    .await
+    .map_err(|error| error.to_string())
+    .and_then(|result| result)
+    {
+        eprintln!("⚠️ 更新 NAS 離線狀態失敗：{error}");
+    }
 }
 
 async fn mark_external_catalog_sources_offline(
@@ -1038,7 +1088,7 @@ fn prepare_saved_item(
             item.r#type = "archive".into();
         }
         item.source_path = Some(path.to_string_lossy().into_owned());
-    } else if item.source_id == "smb" {
+    } else if crate::state::is_smb_source_id(&item.source_id) {
         // A configured SMB source is not necessarily reachable. Only scan_smb
         // may promote a saved entry back to a live comic.
         item.r#type = "offline".into();
@@ -1240,7 +1290,13 @@ pub async fn scan_visible_directory(
             if !source_id.starts_with("external:") {
                 return Err("漫畫來源與目前目錄不符".into());
             }
-        } else if source_id == "smb" {
+        } else if crate::state::is_smb_source_id(source_id) {
+            if !smb_config
+                .as_ref()
+                .is_some_and(|config| crate::state::smb_source_matches_config(source_id, config))
+            {
+                return Err("NAS 來源尚未連線".into());
+            }
             run_local = false;
         } else if source_id.starts_with("local:") {
             run_smb = false;
@@ -1333,7 +1389,9 @@ pub async fn scan_visible_directory(
     } else {
         let configured_root = state.scan_dir.read().unwrap().clone();
         if let Some(source_id) = source_id.as_deref() {
-            if source_id != "smb" && local_source_id(Path::new(&configured_root)) != source_id {
+            if !crate::state::is_smb_source_id(source_id)
+                && local_source_id(Path::new(&configured_root)) != source_id
+            {
                 return Err("漫畫來源與目前目錄不符".into());
             }
         }
@@ -1598,7 +1656,11 @@ pub async fn start_background_scan(state: Arc<AppState>, app_handle: tauri::AppH
     let scanned_comics_task = tokio::task::spawn_blocking(move || {
         let mut results = Vec::new();
         let local_incomplete = AtomicBool::new(false);
-        let external_incomplete = AtomicBool::new(false);
+        let external_incomplete = AtomicBool::new(
+            !state_clone_for_spawn
+                .external_bookmarks_readable
+                .load(Ordering::Acquire),
+        );
 
         let state_clone = state_clone_for_spawn.clone();
         let mut published = 0usize;
@@ -1718,7 +1780,6 @@ pub async fn start_background_scan(state: Arc<AppState>, app_handle: tauri::AppH
             let external_complete = outcome.external_complete;
             let local_source_id = outcome.local_source_id.clone();
             let external_source_ids = outcome.external_source_ids.clone();
-            let discovered = outcome.comics.clone();
             state
                 .saved_scan_closed_generation
                 .store(my_gen, Ordering::Release);
@@ -1736,7 +1797,7 @@ pub async fn start_background_scan(state: Arc<AppState>, app_handle: tauri::AppH
                         &app_handle,
                         my_gen,
                         source_id.clone(),
-                        source_items(&discovered, &source_id),
+                        source_items(&outcome.comics, &source_id),
                     )
                     .await;
                 }
@@ -1753,7 +1814,7 @@ pub async fn start_background_scan(state: Arc<AppState>, app_handle: tauri::AppH
                         &app_handle,
                         my_gen,
                         source_id.clone(),
-                        source_items(&discovered, source_id),
+                        source_items(&outcome.comics, source_id),
                     )
                     .await;
                     if state.scan_generation.load(Ordering::Acquire) != my_gen {
@@ -1773,6 +1834,8 @@ pub async fn start_background_scan(state: Arc<AppState>, app_handle: tauri::AppH
 
             let smb_cfg = state.smb_config.read().unwrap().clone();
             if let Some(cfg) = smb_cfg {
+                let smb_source_id = crate::state::smb_source_id(&cfg);
+                reconcile_smb_offline_sources(&state, my_gen, Some(smb_source_id.clone())).await;
                 let state_clone = state.clone();
                 let handle = app_handle.clone();
                 tokio::spawn(async move {
@@ -1807,8 +1870,9 @@ pub async fn start_background_scan(state: Arc<AppState>, app_handle: tauri::AppH
                         if let Some(catalog) = catalog {
                             let _catalog_sync = state_clone.catalog_sync.lock().await;
                             let catalog_for_mark = catalog.clone();
+                            let source_for_mark = smb_source_id.clone();
                             match tokio::task::spawn_blocking(move || {
-                                catalog_for_mark.mark_source_offline("smb")
+                                catalog_for_mark.mark_source_offline(&source_for_mark)
                             })
                             .await
                             {
@@ -1827,7 +1891,8 @@ pub async fn start_background_scan(state: Arc<AppState>, app_handle: tauri::AppH
                             }
                             let snapshot_result = tokio::task::spawn_blocking({
                                 let catalog = catalog.clone();
-                                move || offline_smb_snapshot(&catalog)
+                                let source = smb_source_id.clone();
+                                move || offline_smb_snapshot(&catalog, &source)
                             })
                             .await;
                             match snapshot_result {
@@ -1838,7 +1903,7 @@ pub async fn start_background_scan(state: Arc<AppState>, app_handle: tauri::AppH
                                         return;
                                     }
                                     let mut comics = state_clone.comics.lock().await;
-                                    comics.retain(|comic| comic.source_id != "smb");
+                                    comics.retain(|comic| comic.source_id != smb_source_id);
                                     comics.extend(snapshot);
                                 }
                                 Ok(Err(snapshot_error)) => {
@@ -1861,7 +1926,7 @@ pub async fn start_background_scan(state: Arc<AppState>, app_handle: tauri::AppH
                             .lock()
                             .await
                             .iter()
-                            .filter(|comic| comic.source_id == "smb")
+                            .filter(|comic| comic.source_id == smb_source_id)
                             .cloned()
                             .collect::<Vec<_>>();
                         let count = state_clone.comics.lock().await.len();
@@ -1870,7 +1935,7 @@ pub async fn start_background_scan(state: Arc<AppState>, app_handle: tauri::AppH
                             &state_clone,
                             &handle,
                             my_gen,
-                            "smb".to_string(),
+                            smb_source_id,
                             smb_items,
                         )
                         .await;
@@ -1879,7 +1944,7 @@ pub async fn start_background_scan(state: Arc<AppState>, app_handle: tauri::AppH
                     }
                 });
             } else {
-                mark_catalog_source_offline(&state, "smb".to_string()).await;
+                reconcile_smb_offline_sources(&state, my_gen, None).await;
                 finish_scan_if_current(&state, &app_handle, my_gen, Some(local_count)).await;
             }
         }
@@ -2025,6 +2090,46 @@ mod tests {
     }
 
     #[test]
+    fn discovered_runtime_ids_are_isolated_by_source() {
+        let mut library = Vec::new();
+        merge_discovered_comics(
+            &mut library,
+            &[
+                comic("same-runtime", "來源 A", "external:a"),
+                comic("same-runtime", "來源 B", "external:b"),
+            ],
+        );
+        assert_eq!(library.len(), 2);
+        assert_eq!(
+            library
+                .iter()
+                .map(|item| (item.source_id.as_str(), item.title.as_str()))
+                .collect::<BTreeSet<_>>(),
+            BTreeSet::from([("external:a", "來源 A"), ("external:b", "來源 B")])
+        );
+
+        merge_discovered_comics(
+            &mut library,
+            &[comic("same-runtime", "來源 B 更新", "external:b")],
+        );
+        assert_eq!(library.len(), 2);
+        assert_eq!(
+            library
+                .iter()
+                .find(|item| item.source_id == "external:b")
+                .map(|item| item.title.as_str()),
+            Some("來源 B 更新")
+        );
+        assert_eq!(
+            library
+                .iter()
+                .find(|item| item.source_id == "external:a")
+                .map(|item| item.title.as_str()),
+            Some("來源 A")
+        );
+    }
+
+    #[test]
     fn incomplete_local_scan_does_not_block_complete_external_replacement() {
         let mut library = vec![
             comic("local-old", "本機舊書", "local:test"),
@@ -2083,15 +2188,6 @@ mod tests {
         let comics = vec![comic("one", "一", "local:test")];
         assert_eq!(source_items(&comics, "local:test").len(), 1);
         assert!(source_items(&comics, "smb").is_empty());
-    }
-
-    #[test]
-    fn smb_runtime_id_is_source_scoped() {
-        let relative = "series/book.cbz";
-        assert_ne!(
-            smb_runtime_id(relative),
-            general_purpose::URL_SAFE_NO_PAD.encode(relative.as_bytes())
-        );
     }
 
     #[test]

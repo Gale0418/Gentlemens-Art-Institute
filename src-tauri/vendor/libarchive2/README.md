@@ -1,6 +1,6 @@
 # libarchive2
 
-Safe Rust bindings for [libarchive](https://github.com/libarchive/libarchive) v3.8.1, providing cross-platform archive reading and writing capabilities.
+Safe Rust bindings for [libarchive](https://github.com/libarchive/libarchive) v3.8.9, providing cross-platform archive reading and writing capabilities.
 
 [![CI](https://github.com/AllenDang/libarchive-rs/workflows/CI/badge.svg)](https://github.com/AllenDang/libarchive-rs/actions/workflows/ci.yml)
 [![Rust](https://img.shields.io/badge/rust-2024%20edition-orange.svg)](https://www.rust-lang.org)
@@ -13,7 +13,7 @@ Safe Rust bindings for [libarchive](https://github.com/libarchive/libarchive) v3
 - **Memory Safe**: Comprehensive lifetime tracking prevents use-after-free bugs
 - **Type Safe**: Idiomatic Rust API with strong typing and error handling
 - **Zero Cost Abstractions**: RAII resource management with no runtime overhead
-- **Full Feature Support**: All libarchive v3.8.1 capabilities exposed safely
+- **Full Feature Support**: All libarchive v3.8.9 capabilities exposed safely
 - **Multiple Formats**: TAR, ZIP, 7z, AR, CPIO, ISO9660, XAR, MTREE, WARC, and more
 - **Multiple Compressions**: gzip, bzip2, xz, zstd, lz4, compress, and more
 - **Cross-Platform**: macOS, Windows, Linux, iOS, and Android
@@ -186,7 +186,7 @@ cargo build --target i686-linux-android  # x86
 
 ### Why WASM is Not Supported
 
-libarchive v3.8.1 is not compatible with WebAssembly because:
+libarchive v3.8.9 is not compatible with WebAssembly because:
 
 - The library requires POSIX types (`pid_t`, `uid_t`, `gid_t`, `mode_t`) that don't exist in WASM
 - Depends on system calls and OS-level file system operations not available in WebAssembly
@@ -580,3 +580,6 @@ brew install mingw-w64
 # For Linux cross-compilation
 brew install x86_64-unknown-linux-gnu
 ```
+
+Local G.A.I build links the official libarchive 3.8.9 vendored source through
+libarchive2-sys; the Rust bindings retain their existing API.

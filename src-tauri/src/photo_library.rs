@@ -66,7 +66,55 @@ pub fn is_photo_album_id(id: &str) -> bool {
     album_id_from_photo_id(id).is_some()
 }
 
+fn progress_for_snapshot(snapshot: &PhotoAlbumSnapshot, progress: Option<&Progress>) -> Progress {
+    let total_pages = if snapshot.available {
+        snapshot.asset_ids.len()
+    } else {
+        0
+    };
+    let Some(progress) = progress else {
+        return Progress {
+            current_page: 0,
+            total_pages,
+            percent: 0.0,
+            updated_at: None,
+        };
+    };
+
+    if total_pages == 0 {
+        return Progress {
+            current_page: 0,
+            total_pages: 0,
+            percent: 0.0,
+            updated_at: progress.updated_at.clone(),
+        };
+    }
+
+    let current_page = progress.current_page.min(total_pages - 1);
+    // An updated timestamp or non-zero progress proves the album was opened.
+    // Keep an unopened one-page album at 0%, even though its only valid index
+    // is also its last page.
+    let has_read_progress =
+        progress.updated_at.is_some() || progress.current_page > 0 || progress.percent > 0.0;
+    let percent = if has_read_progress && (current_page > 0 || total_pages == 1) {
+        ((current_page + 1) as f64 / total_pages as f64 * 100.0).clamp(0.0, 100.0)
+    } else {
+        0.0
+    };
+    Progress {
+        current_page,
+        total_pages,
+        percent,
+        updated_at: progress.updated_at.clone(),
+    }
+}
+
 fn item_for_snapshot(snapshot: &PhotoAlbumSnapshot, progress: Option<&Progress>) -> ComicItem {
+    let page_count = if snapshot.available {
+        snapshot.asset_ids.len()
+    } else {
+        0
+    };
     ComicItem {
         id: photo_album_id(&snapshot.id),
         r#type: "photo-album".into(),
@@ -77,17 +125,8 @@ fn item_for_snapshot(snapshot: &PhotoAlbumSnapshot, progress: Option<&Progress>)
         title: snapshot.title.clone(),
         series: "照片圖庫".into(),
         updated_at: String::new(),
-        page_count: if snapshot.available {
-            snapshot.asset_ids.len()
-        } else {
-            0
-        },
-        progress: progress.cloned().unwrap_or(Progress {
-            current_page: 0,
-            total_pages: 0,
-            percent: 0.0,
-            updated_at: None,
-        }),
+        page_count,
+        progress: progress_for_snapshot(snapshot, progress),
         source_id: "photos:".into(),
         source_path: None,
         external_bookmark: None,
@@ -220,9 +259,12 @@ pub async fn refresh(app_handle: &AppHandle, state: &Arc<AppState>) -> Result<()
         return Ok(());
     }
 
-    let _ = app_handle;
-    let _ = state;
-    Ok(())
+    #[cfg(not(target_os = "ios"))]
+    {
+        let _ = app_handle;
+        let _ = state;
+        Ok(())
+    }
 }
 
 pub async fn mark_unavailable(state: &Arc<AppState>) {
@@ -280,16 +322,19 @@ pub async fn status(
         });
     }
 
-    let _ = (app_handle, request_authorization);
-    Ok(PhotoLibraryStatusView {
-        supported: false,
-        authorization: "unsupported".into(),
-        albums: Vec::new(),
-        linked_album_ids: Vec::new(),
-        allow_network: state
-            .photo_network_allowed
-            .load(std::sync::atomic::Ordering::Acquire),
-    })
+    #[cfg(not(target_os = "ios"))]
+    {
+        let _ = (app_handle, request_authorization);
+        Ok(PhotoLibraryStatusView {
+            supported: false,
+            authorization: "unsupported".into(),
+            albums: Vec::new(),
+            linked_album_ids: Vec::new(),
+            allow_network: state
+                .photo_network_allowed
+                .load(std::sync::atomic::Ordering::Acquire),
+        })
+    }
 }
 
 pub async fn set_linked_albums(
@@ -326,8 +371,11 @@ pub async fn set_linked_albums(
         return Ok(PhotoMutationResult { success: true });
     }
 
-    let _ = (app_handle, state, album_ids);
-    Err("照片圖庫僅支援 iOS".into())
+    #[cfg(not(target_os = "ios"))]
+    {
+        let _ = (app_handle, state, album_ids);
+        Err("照片圖庫僅支援 iOS".into())
+    }
 }
 
 pub fn set_network_allowed(state: &AppState, allowed: bool) -> PhotoNetworkPolicy {
@@ -373,16 +421,19 @@ pub fn request_image(
             return Ok((response.path, response.mime_type));
         }
 
-        let _ = (handle, album_id, asset_id, thumbnail, allow_network);
-        Err("照片圖庫僅支援 iOS".into())
+        #[cfg(not(target_os = "ios"))]
+        {
+            let _ = (handle, album_id, asset_id, thumbnail, allow_network);
+            Err("照片圖庫僅支援 iOS".into())
+        }
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::{
-        album_id_from_photo_id, is_photo_album_id, load_progress, page_asset, persist_progress,
-        photo_album_id, PhotoAlbumSnapshot,
+        album_id_from_photo_id, is_photo_album_id, item_for_snapshot, load_progress, page_asset,
+        persist_progress, photo_album_id, PhotoAlbumSnapshot,
     };
     use crate::state::AppState;
 
@@ -421,6 +472,49 @@ mod tests {
         persist_progress(&directory, &progress).unwrap();
         assert_eq!(load_progress(&directory).unwrap()[&id].current_page, 2);
         std::fs::remove_dir_all(directory).unwrap();
+    }
+
+    #[test]
+    fn snapshot_progress_tracks_current_asset_count_and_clamps_index() {
+        let snapshot = PhotoAlbumSnapshot {
+            id: "album".into(),
+            title: "相簿".into(),
+            available: true,
+            asset_ids: vec!["a".into(), "b".into(), "c".into()],
+        };
+        let progress = crate::state::Progress {
+            current_page: 9,
+            total_pages: 10,
+            percent: 100.0,
+            updated_at: Some("2026-09-09T00:00:00Z".into()),
+        };
+        let item = item_for_snapshot(&snapshot, Some(&progress));
+        assert_eq!(item.page_count, 3);
+        assert_eq!(item.progress.current_page, 2);
+        assert_eq!(item.progress.total_pages, 3);
+        assert_eq!(item.progress.percent, 100.0);
+        assert_eq!(item.progress.updated_at, progress.updated_at);
+    }
+
+    #[test]
+    fn unread_single_page_does_not_become_finished_during_snapshot_reconcile() {
+        let snapshot = PhotoAlbumSnapshot {
+            id: "album".into(),
+            title: "相簿".into(),
+            available: true,
+            asset_ids: vec!["only".into()],
+        };
+        let progress = crate::state::Progress {
+            current_page: 0,
+            total_pages: 1,
+            percent: 0.0,
+            updated_at: None,
+        };
+        let item = item_for_snapshot(&snapshot, Some(&progress));
+        assert_eq!(item.progress.current_page, 0);
+        assert_eq!(item.progress.total_pages, 1);
+        assert_eq!(item.progress.percent, 0.0);
+        assert!(item.progress.updated_at.is_none());
     }
 
     #[test]

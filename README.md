@@ -1,18 +1,14 @@
 # 紳士藝術研究所 Gentlemen's Art Institute
 
-**漫畫多到找一本像考古？把書庫交給 G.A.I，今天就別再跟檔案總管猜拳了。**
+**自己的漫畫，找得到、接著看。**
 
-**這是你自己的圖片與漫畫檔閱讀器。**從本機、外接硬碟或已掛載的 NAS 選擇資料夾即可開始；App 不內附漫畫，也不提供漫畫下載或內容訂閱。請使用自己有權閱讀的檔案。
+硬碟裡的收藏堆成山，找一本還得像在考古？G.A.I 把自己的漫畫檔與圖集放上書架，讓搜尋、收藏與閱讀進度都在同一個地方。圖片資料夾、ZIP／CBZ、RAR／CBR、7z／CB7 不用先手動解壓；單頁、雙頁、右至左與條漫，依作品切換。資料夾書庫優先顯示目前可見的封面，閱讀器也提供手動放棄尚未保存閱讀進度的操作。
 
-圖片資料夾、ZIP／CBZ、RAR／CBR、7z／CB7 直接讀，條漫一路往下滑；想照原本節奏翻，也有單頁與雙頁模式。不必先把圖片接成一張巨圖，原始檔案也不用改。進度、收藏、搜尋與基本標籤放在同一個書架，下次打開就接著看。
+基本閱讀免費，不要求建立 App 帳號。可從本機、外接硬碟或已透過系統掛載的 NAS 選擇資料夾。首發 v1 Pro 採一次買斷，提供直接 SMB／NAS、批次整理、重複候選與選用 AI 工具；AI 需自備金鑰，API 費用另計。
 
-資料夾點進去，先顯示眼前這一層；整個書庫的掃描在背景繼續跑。NAS 暫時離線，已整理的書庫紀錄也不會跟著消失。這才是收藏越堆越高時，真正需要的待遇吧 (｀・ω・´)σ
+已取得測試版時，先試讀內建原創風景，再加入自己的收藏。內建圖集供操作體驗；App 不提供漫畫下載或內容庫。NAS 離線時會保留已整理紀錄，原始頁面仍需來源可讀；進度保存在當前裝置，未提供跨裝置自動同步。
 
-**基本閱讀免費。** 本機檔案、已透過系統掛載的 NAS 資料夾、三種閱讀模式、進度、收藏、搜尋、基本標籤與資料匯出都能用。想把書庫整理得更兇？**v1 Pro 一次買斷，沒有訂閱**，加入直接 SMB／NAS 連線、批次標籤、進階整理、重複作品候選與 AI 解說／整理工具。
-
-AI 是選用功能：自備 OpenAI 或 Google API Key，確認供應商與傳送內容、同意後才會傳送選取的頁面與提示文字。書本外的「AI 掃描」會取樣開頭三頁及約 40%、50%、60% 位置，建議仍由你決定是否套用。Pro 不附 API 額度，供應商費用另計。
-
-G.A.I 適用於 macOS、iPhone 與 iPad；不提供漫畫下載、來源爬取或內容訂閱。檔案由你提供，請確認自己有權使用。
+**發布狀態（2026-11-01）：iOS 1.0.1 (59) 與 Mac 1.0.2 (59) 均為 `READY_FOR_DISTRIBUTION`；本機 iPad 已安裝並啟動 1.0.1 (62)。** 第59版商店圖組與 Gemini 繁中／英文／日文介紹的變更紀錄見 [第59版發行紀錄](docs/release/build59-store-refresh-2026-10-17.md)。完整實機 TAG、VoiceOver 及 StoreKit 交易矩陣仍未完成；上述 iPad 安裝啟動不代表這些驗收已通過。
 
 [隱私政策](#隱私政策) · [支援與使用說明](SUPPORT.md)
 
@@ -31,7 +27,8 @@ G.A.I 適用於 macOS、iPhone 與 iPad；不提供漫畫下載、來源爬取�
 - SQLite catalog 是 metadata / location / progress 的主要本機 authority；來源離線不等於資料刪除。
 - 本機、iOS security-scoped folder 與單一 SMB/NAS 是獨立來源；其中一個來源離線不應清除其他來源或 catalog 紀錄。
 - 內建全年齡原創 demo 可在乾淨安裝、沒有 NAS／帳號／第三方下載的情況下直接驗證核心 reader。
-- iOS 1.0 待審版本已有 Apple 處理完成的 build 39；本機 build 41 已完成修正並通過 iPad 實機目錄切換驗證，仍待上傳。隱私政策與支援頁面已公開，iOS 商店已放實際 App 截圖；macOS 截圖、App Privacy 與加密聲明仍待完成，**尚未送審或上架**。
+- 2026-11-01：iOS 1.0.1 (59) 與 Mac 1.0.2 (59) 已 `READY_FOR_DISTRIBUTION`；本機 iPad 為 1.0.1 (62)，已安裝並啟動。iOS 1.0.2 (63) 正在準備中；完整實機 TAG、VoiceOver 與 StoreKit 交易矩陣仍未完成。
+- 歷史紀錄（2026-10-03）：Mac `1.0` 已 `READY_FOR_DISTRIBUTION`；iOS `1.0` 與 Mac `1.0.1` 的第57版已撤回，第58版兩平台已正式送審。本機 Mac／iPad 當時為第56版；TAG 探索的 Mac 證據見 [探索體驗報告](docs/audits/2026-10-03-discovery-experience.md)。
 - `src-tauri/vendor/wry/` 是**刻意保留的 iOS WebKit startup patch**，目前仍由 Cargo `[patch.crates-io]` 使用；不要因為它看起來像 vendor 目錄就清掉。
 
 ## 隱私政策
@@ -83,9 +80,12 @@ G.A.I 是讀取使用者自行提供內容的漫畫閱讀工具，不提供漫�
 ### Source lifecycle
 
 - 進入目錄時只即時掃描該層的漫畫檔與子資料夾；全域掃描、收藏與最近閱讀各自維持背景優先通道。子資料夾可先導航，點入後再掃下一層。
+- 資料夾書庫優先顯示目前可見的封面；閱讀器可手動放棄尚未保存的閱讀進度，不會把暫時位置誤當成已保存狀態。
 - Local source ID 使用**使用者已配置的 root 字串**衍生，刻意保持來源拔除後仍可重現；不要在每次掃描時動態 canonicalize，否則同一 removable/NAS-backed source 可能在 online/offline 狀態得到不同 ID。若未來要改成 canonical identity，必須先把 resolved identity 持久化再做 migration。
 - iOS external folder 使用 security-scoped bookmark；symlink 不可逃出使用者選擇的 root。
-- 專案目前只支援**一組 SMB/NAS 設定**。要換 NAS 就更新設定並重新掃描，不維護多 NAS namespace。
+- 專案一次只連線一組 SMB/NAS；不同主機、分享目錄與帳號使用各自的來源識別。舊版未記錄端點的 SMB 資料會保留，無法確認歸屬時不自動套用至新連線。
+- 外部來源授權清單損壞時先保留原有目錄資料；使用者重新選取資料夾並確認後才備份損壞清單、重建授權。其他來源需重新加入。
+- 同時連線的來源若出現相同漫畫識別碼，閱讀器會拒絕開啟，避免顯示或保存到錯誤作品。
 - SMB 掃描與檔案操作均有 timeout；成功掃描才把 current NAS state 標 online，失敗則保留 SQLite location 並回填 offline shelf。
 - offline 是 location 狀態，不代表 comic metadata 被刪除。
 
@@ -138,11 +138,11 @@ npm run tauri dev
 # 正式 macOS app / DMG
 npm run build
 
-# iOS/iPadOS
-npm run tauri ios build
+# iOS/iPadOS：先建立本機副本，再依 BUILD_GUIDE.md 建置及簽署
+bash scripts/release/stage-ios-build.sh
 ```
 
-iOS/iPadOS 有額外的本機檔案系統、Xcode、簽名與實機驗證要求，請依 [`BUILD_GUIDE.md`](BUILD_GUIDE.md) 操作；不要從歷史 blocker 文件複製舊路徑或假設舊磁碟狀態仍成立。
+iOS/iPadOS 有額外的本機檔案系統、Xcode、簽名與實機驗證要求，請依 [`BUILD_GUIDE.md`](BUILD_GUIDE.md) 使用 staging 副本遷移並重建 Apple 專案後再建置；不要直接使用舊的 `app` Xcode 專案，也不要從歷史 blocker 文件複製舊路徑。App 發行版號以 Tauri 設定為準，`package.json` 與 Cargo package 版號是內部套件版本。
 
 ## Data & privacy boundaries
 

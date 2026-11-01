@@ -1,7 +1,7 @@
 {
   "$schema": "../node_modules/@tauri-apps/cli/config.schema.json",
   "productName": "紳士藝術研究所 Gentlemen's Art Institute",
-  "version": "1.0.0",
+  "version": "1.0.2",
   "identifier": "com.windsheep.gai",
   "build": {
     "frontendDist": "../public"
@@ -18,7 +18,7 @@
       }
     ],
     "security": {
-      "csp": "default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; font-src 'self'; connect-src 'self' gai:; img-src 'self' gai: data: blob:; object-src 'none'; base-uri 'self';"
+      "csp": "default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; font-src 'self'; connect-src 'self' ipc: http://ipc.localhost gai:; img-src 'self' gai: data: blob:; object-src 'none'; base-uri 'self';"
     }
   },
   "bundle": {
@@ -35,12 +35,12 @@
       "debugApplicationIdSuffix": ".debug"
     },
     "macOS": {
-      "bundleVersion": "42",
+      "bundleVersion": "59",
       "signingIdentity": "-"
     },
     "iOS": {
       "minimumSystemVersion": "15.0",
-      "bundleVersion": "42"
+      "bundleVersion": "63"
     }
   }
 }

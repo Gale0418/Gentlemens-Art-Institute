@@ -17,9 +17,11 @@
 	<key>CFBundlePackageType</key>
 	<string>APPL</string>
 	<key>CFBundleShortVersionString</key>
-	<string>1.0.0</string>
+	<string>1.0.2</string>
 	<key>CFBundleVersion</key>
-	<string>1.0.0</string>
+	<string>63</string>
+	<key>ITSAppUsesNonExemptEncryption</key>
+	<false/>
 	<key>LSRequiresIPhoneOS</key>
 	<true/>
 	<key>LSSupportsOpeningDocumentsInPlace</key>
@@ -48,6 +50,8 @@
 		<string>UIInterfaceOrientationLandscapeLeft</string>
 		<string>UIInterfaceOrientationLandscapeRight</string>
 	</array>
+	<key>NSCameraUsageDescription</key>
+	<string>Take a photo to import it into your local comic library. Photos are stored on this device.</string>
 	<key>NSPhotoLibraryUsageDescription</key>
 	<string>Link your selected albums to browse photos and keep album contents up to date. Your photos will not be modified or deleted.</string>
 </dict>

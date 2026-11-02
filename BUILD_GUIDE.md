@@ -75,6 +75,17 @@ src-tauri/target/release/bundle/
 - Tauri universal 輸出可能缺少附屬 `catalog-import`。將兩個 target 的同名 binary 用 `lipo -create` 合併至 universal 的 release 目錄，再執行 `tauri bundle --target universal-apple-darwin --bundles app --config src-tauri/tauri.appstore.macos.conf.json --ci`。主程式與附屬工具均須回讀兩個架構。
 - NAS 複製的 `icon.icns` 可能保留0700。bundle 的圖示檔應為0644，所有一般檔案須可讀、目錄須可搜尋；修正後重新檢查應用簽章。用正式 Mac App Store installer 憑證執行 `productbuild --component <app> /Applications --sign <identity> <pkg>`，展開 PKG 檢查 payload 權限並執行 `pkgutil --check-signature`。Apple 90255 表示安裝包內有非 root 使用者無法讀取的檔案。
 
+Tauri 的 `bundle.macOS.entitlements` 只會套用到外層 App；`Contents/MacOS` 內的命令列 helper（目前是 `catalog-import`）必須先用
+`src-tauri/Entitlements-macOS-helper.plist` 簽署。helper entitlement 只包含
+`com.apple.security.app-sandbox=true` 與 `com.apple.security.inherit=true`，不加入
+`get-task-allow`。完成 arm64／x86_64 `lipo` 合併後，固定使用
+`scripts/release/sign-macos-app-store.sh`：它會先簽每個 helper、再簽主程式與 outer App，
+回讀每個 executable 的實際 entitlements／雙架構／版本，最後建立並驗證 Installer PKG。
+`--app` 是唯讀來源；務必另指定 `--output-app`，讓腳本在 task-scoped staging copy
+完成所有驗證後才提交 App 與 PKG，失敗時不會污染來源或覆蓋既有產物。
+提交期間若收到中斷或第二個輸出提交失敗，腳本會回滾本次已提交的 App／PKG，避免留下半套產物；架構驗證也會拒絕除 arm64／x86_64 以外的 slice。
+不要只對既有 PKG 重新簽名，否則下一次建置仍會產生未 sandbox 的 helper。
+
 完整此次發行證據見 [第57版發行收尾](docs/release/build57-appstore-closeout-2026-10-03.md)。
 
 ## 4. iOS / iPadOS

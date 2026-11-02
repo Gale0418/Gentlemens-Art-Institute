@@ -66,7 +66,7 @@ if [[ "$1" == find-identity ]]; then
 fi
 exit 1`);
   writeExecutable(path.join(bin, 'file'), '#!/bin/bash\necho "$1: Mach-O universal binary"');
-  writeExecutable(path.join(bin, 'lipo'), '#!/bin/bash\nif [[ "$1" == -verify_arch ]]; then exit 0; fi\nif [[ "$1" == -archs ]]; then echo "${GAI_MOCK_ARCHS:-arm64 x86_64}"; exit 0; fi\necho "Architectures in the fat file: $2 are: x86_64 arm64"');
+  writeExecutable(path.join(bin, 'lipo'), '#!/bin/bash\nif [[ "$2" == -verify_arch && "$3" == arm64 && "$4" == x86_64 && "$#" == 4 ]]; then exit 0; fi\nif [[ "$1" == -archs && "$#" == 2 ]]; then echo "${GAI_MOCK_ARCHS:-arm64 x86_64}"; exit 0; fi\necho "unsupported lipo argument order" >&2; exit 1');
   writeExecutable(path.join(bin, 'codesign'), `#!/bin/bash
 target="\${@: -1}"
 if [[ "$1" == --force ]]; then

@@ -325,7 +325,7 @@ for executable in "${executables[@]}"; do
   file_output=$(file "$executable")
   printf '%s\n' "$file_output" | grep -F 'Mach-O' >/dev/null || \
     fail "not a Mach-O executable: $executable"
-  lipo -verify_arch arm64 x86_64 "$executable" >/dev/null 2>&1 || \
+  lipo "$executable" -verify_arch arm64 x86_64 >/dev/null 2>&1 || \
     fail "arm64+x86_64 universal architecture missing: $executable"
   require_exact_universal_architectures "$executable"
   require_entitlement "$executable" 'com.apple.security.app-sandbox'

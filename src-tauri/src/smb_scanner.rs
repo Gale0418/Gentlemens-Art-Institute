@@ -1,5 +1,5 @@
 use crate::scanner::{merge_discovered_comics, LibraryBatch};
-use crate::state::{self, AppState, ComicItem, Progress, SmbConfig};
+use crate::state::{self, AppState, ComicItem, Progress, ReaderPriority, SmbConfig};
 use base64::{engine::general_purpose, Engine as _};
 use std::path::Path;
 use std::sync::Arc;
@@ -11,6 +11,49 @@ const MAX_SMB_SCAN_DEPTH: usize = 32;
 const UNKNOWN_SMB_TIME: &str = "1970-01-01T00:00:00+00:00";
 const SMB_PROGRESS_BATCH: usize = 64;
 const SMB_PROGRESS_INTERVAL: Duration = Duration::from_millis(400);
+const SMB_READER_WAIT: Duration = Duration::from_millis(50);
+
+fn visible_batch_needs_retry(
+    published: usize,
+    discovered: usize,
+    generation: u64,
+    visible_generation: u64,
+    current_generation: u64,
+    current_visible_generation: u64,
+) -> bool {
+    published < discovered
+        && generation == current_generation
+        && visible_generation == current_visible_generation
+}
+
+async fn wait_for_reader_priority(
+    state: &AppState,
+    generation: u64,
+    visible_generation: Option<u64>,
+) -> bool {
+    loop {
+        if generation
+            != state
+                .scan_generation
+                .load(std::sync::atomic::Ordering::Acquire)
+            || visible_generation.is_some_and(|visible| {
+                visible
+                    != state
+                        .visible_scan_generation
+                        .load(std::sync::atomic::Ordering::Acquire)
+            })
+        {
+            return false;
+        }
+        let priority = state.reader_priority();
+        let should_wait = matches!(priority, ReaderPriority::Opening)
+            || (visible_generation.is_none() && matches!(priority, ReaderPriority::Active));
+        if !should_wait {
+            return true;
+        }
+        tokio::time::sleep(SMB_READER_WAIT).await;
+    }
+}
 
 #[cfg(test)]
 fn legacy_smb_runtime_id(relative_path: &str) -> String {
@@ -61,6 +104,9 @@ pub async fn scan_smb(
     scan_generation: u64,
     app_handle: tauri::AppHandle,
 ) -> Result<(), String> {
+    if !wait_for_reader_priority(&state, scan_generation, None).await {
+        return Ok(());
+    }
     crate::commerce::require_pro(&app_handle).await?;
     let source_id = state::smb_source_id(&config);
     let addr = format!("{}:445", config.host);
@@ -137,6 +183,9 @@ pub async fn scan_smb(
     )
     .await?;
 
+    if !wait_for_reader_priority(&state, scan_generation, None).await {
+        return Ok(());
+    }
     let _scan_lifecycle = state.scan_lifecycle.lock().await;
     let mut comics = state.comics.lock().await;
     if scan_generation
@@ -175,6 +224,10 @@ pub(crate) async fn scan_visible_smb(
         || (!relative_path.is_empty() && !relative_path.split('/').all(safe_smb_entry_name))
     {
         return Err("SMB 漫畫目錄路徑無效".to_string());
+    }
+
+    if !wait_for_reader_priority(&state, generation, Some(visible_generation)).await {
+        return Ok(());
     }
 
     crate::commerce::require_pro(&app_handle).await?;
@@ -250,22 +303,55 @@ pub(crate) async fn scan_visible_smb(
     )
     .await?;
 
-    publish_smb_visible_progress(
-        &state,
-        &app_handle,
-        generation,
-        visible_generation,
-        &results,
-        results.len(),
-        &mut published,
-        &mut published_at,
-        true,
-    )
-    .await;
-    let _scan_lifecycle = state.scan_lifecycle.lock().await;
-    if generation == state.scan_generation.load(Ordering::Acquire)
-        && visible_generation == state.visible_scan_generation.load(Ordering::Acquire)
-    {
+    // The force publish can race a new Opening intent after its initial
+    // reader-priority wait. Retry the un-published tail rather than emitting
+    // only directories and silently losing the visible comics batch.
+    loop {
+        if !wait_for_reader_priority(&state, generation, Some(visible_generation)).await {
+            return Ok(());
+        }
+        publish_smb_visible_progress(
+            &state,
+            &app_handle,
+            generation,
+            visible_generation,
+            &results,
+            results.len(),
+            &mut published,
+            &mut published_at,
+            true,
+        )
+        .await;
+        if !visible_batch_needs_retry(
+            published,
+            results.len(),
+            generation,
+            visible_generation,
+            state.scan_generation.load(Ordering::Acquire),
+            state.visible_scan_generation.load(Ordering::Acquire),
+        ) {
+            if published >= results.len() {
+                break;
+            }
+            return Ok(());
+        }
+        tokio::time::sleep(SMB_READER_WAIT).await;
+    }
+    loop {
+        if !wait_for_reader_priority(&state, generation, Some(visible_generation)).await {
+            return Ok(());
+        }
+        let _scan_lifecycle = state.scan_lifecycle.lock().await;
+        if generation != state.scan_generation.load(Ordering::Acquire)
+            || visible_generation != state.visible_scan_generation.load(Ordering::Acquire)
+        {
+            return Ok(());
+        }
+        // Opening may have raced the pre-lock gate. Drop scan_lifecycle and
+        // wait again; never sleep while holding either lifecycle lock.
+        if matches!(state.reader_priority(), ReaderPriority::Opening) {
+            continue;
+        }
         use tauri::Emitter;
         let _ = app_handle.emit(
             "library-changed",
@@ -274,11 +360,12 @@ pub(crate) async fn scan_visible_smb(
                 items: Vec::new(),
                 found: 0,
                 visible: true,
-                visible_path: Some(relative_path),
+                visible_path: Some(relative_path.clone()),
                 visible_source_id: Some(source_id.clone()),
-                directories: Some(directories),
+                directories: Some(directories.clone()),
             },
         );
+        break;
     }
     Ok(())
 }
@@ -301,6 +388,9 @@ async fn scan_smb_dir(
     published_at: &mut Instant,
     visible_generation: Option<u64>,
 ) -> Result<(), String> {
+    if !wait_for_reader_priority(state, scan_generation, visible_generation).await {
+        return Ok(());
+    }
     if scan_generation
         != state
             .scan_generation
@@ -326,6 +416,9 @@ async fn scan_smb_dir(
         .map_err(|error| format!("SMB 目錄讀取失敗：{error}"))?;
 
     for entry in entries {
+        if !wait_for_reader_priority(state, scan_generation, visible_generation).await {
+            return Ok(());
+        }
         if scan_generation
             != state
                 .scan_generation
@@ -465,6 +558,9 @@ async fn publish_smb_progress(
     if !should_publish_smb_progress(discovered, *published, published_at.elapsed()) {
         return;
     }
+    if matches!(state.reader_priority(), ReaderPriority::Opening) {
+        return;
+    }
     let status = {
         let _scan_lifecycle = state.scan_lifecycle.lock().await;
         if state
@@ -472,6 +568,9 @@ async fn publish_smb_progress(
             .load(std::sync::atomic::Ordering::Acquire)
             != generation
         {
+            return;
+        }
+        if matches!(state.reader_priority(), ReaderPriority::Opening) {
             return;
         }
         let newly_discovered = results[*published..].to_vec();
@@ -523,6 +622,9 @@ async fn publish_smb_visible_progress(
     if !force && !should_publish_smb_progress(discovered, *published, published_at.elapsed()) {
         return;
     }
+    if matches!(state.reader_priority(), ReaderPriority::Opening) {
+        return;
+    }
     let batch = {
         let _scan_lifecycle = state.scan_lifecycle.lock().await;
         if state
@@ -534,6 +636,9 @@ async fn publish_smb_visible_progress(
                 .load(std::sync::atomic::Ordering::Acquire)
                 != visible_generation
         {
+            return;
+        }
+        if matches!(state.reader_priority(), ReaderPriority::Opening) {
             return;
         }
         let newly_discovered = results[*published..].to_vec();
@@ -617,6 +722,39 @@ mod tests {
             Duration::ZERO
         ));
         assert!(should_publish_smb_progress(2, 1, SMB_PROGRESS_INTERVAL));
+    }
+
+    #[test]
+    fn visible_batch_retry_preserves_unpublished_tail_until_cancelled() {
+        assert!(visible_batch_needs_retry(0, 3, 7, 11, 7, 11));
+        assert!(!visible_batch_needs_retry(3, 3, 7, 11, 7, 11));
+        assert!(!visible_batch_needs_retry(0, 3, 7, 11, 8, 11));
+        assert!(!visible_batch_needs_retry(0, 3, 7, 11, 7, 12));
+    }
+
+    #[tokio::test]
+    async fn smb_reader_gate_waits_without_lock_and_cancels_by_generation() {
+        let state = Arc::new(AppState::new());
+        state
+            .scan_generation
+            .store(1, std::sync::atomic::Ordering::Release);
+        *state.active_comic_id.lock().unwrap() = Some("reading".into());
+        let waiting = state.clone();
+        let waiter = tokio::spawn(async move { wait_for_reader_priority(&waiting, 1, None).await });
+        tokio::time::sleep(Duration::from_millis(10)).await;
+        assert!(state.comic_lifecycle.try_lock().is_ok());
+        *state.active_comic_id.lock().unwrap() = None;
+        assert!(waiter.await.unwrap());
+
+        *state.active_comic_id.lock().unwrap() = Some("reading".into());
+        let cancelling = state.clone();
+        let cancelled =
+            tokio::spawn(async move { wait_for_reader_priority(&cancelling, 1, None).await });
+        tokio::time::sleep(Duration::from_millis(10)).await;
+        state
+            .scan_generation
+            .store(2, std::sync::atomic::Ordering::Release);
+        assert!(!cancelled.await.unwrap());
     }
 
     #[test]

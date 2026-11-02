@@ -26,6 +26,12 @@ const MAX_RAR5_END_MARKER_BYTES: usize = 4096;
 const RAR4_SIGNATURE: &[u8; 7] = b"Rar!\x1A\x07\x00";
 const RAR5_SIGNATURE: &[u8; 8] = b"Rar!\x1A\x07\x01\x00";
 
+#[derive(Debug)]
+pub struct FirstImage {
+    pub name: String,
+    pub bytes: Vec<u8>,
+}
+
 // Field order is intentional: libarchive must be dropped before the file
 // descriptor it borrows through archive_read_open_fd.
 struct OpenedRar {
@@ -108,6 +114,99 @@ pub fn list_entries_from_file(
             .map_err(|error| ArchiveError::Corrupt(error.to_string()))?;
     }
     Ok(result)
+}
+
+/// 讀取 archive 實體順序中的第一個安全圖片，作為縮圖代表圖。
+///
+/// 這不是正式 reader 的 page 0：RAR/solid RAR 沒有可依賴的廉價隨機索引，
+/// 在不讀完整 archive 的前提下無法證明自然排序後的最小名稱。封面因此只讀
+/// 第一個可安全辨識且大小有界的圖片；若其前面出現非空非圖片 payload，直接放棄，
+/// 避免為了找後續圖片而觸發大型 solid stream 或 Files provider materialization。
+pub fn read_first_image_from_file(
+    file: File,
+    path_hint: &Path,
+    max_bytes: usize,
+) -> Result<FirstImage, ArchiveError> {
+    if max_bytes == 0 || max_bytes > MAX_ENTRY_BYTES {
+        return Err(ArchiveError::ReadLimitExceeded {
+            name: "第一張圖片".into(),
+            limit: MAX_ENTRY_BYTES,
+        });
+    }
+
+    let mut opened = open_rar_file(file, path_hint)?;
+    let mut names = HashSet::new();
+    let mut name_bytes = 0_usize;
+    let mut total = 0_u64;
+    let mut saw_entry = false;
+
+    loop {
+        let entry = match opened.archive.next_entry() {
+            Ok(Some(entry)) => {
+                saw_entry = true;
+                entry
+            }
+            Ok(None) => break,
+            Err(error) if saw_entry && is_verified_terminal_rar5(&opened.file, &error) => break,
+            Err(error) => return Err(ArchiveError::Corrupt(error.to_string())),
+        };
+        if names.len() >= MAX_ENTRY_COUNT {
+            return Err(ArchiveError::TooManyEntries {
+                count: names.len() + 1,
+                limit: MAX_ENTRY_COUNT,
+            });
+        }
+
+        let entry_name = entry
+            .pathname()
+            .ok_or_else(|| ArchiveError::Corrupt("RAR entry 缺少 pathname".into()))?;
+        let is_directory = matches!(entry.file_type(), FileType::Directory);
+        let validation_name = if is_directory {
+            entry_name.trim_end_matches('/')
+        } else {
+            &entry_name
+        };
+        validate_entry_name(validation_name)?;
+        name_bytes = checked_name_bytes(name_bytes, entry_name.len())?;
+        if !names.insert(entry_name.clone()) {
+            return Err(ArchiveError::Corrupt(format!(
+                "entry 名稱重複：{entry_name}"
+            )));
+        }
+
+        let size = non_negative_size(entry.size(), &entry_name)?;
+        total = total.checked_add(size).ok_or(ArchiveError::ArchiveBomb {
+            total: u64::MAX,
+            limit: MAX_TOTAL_UNPACKED_BYTES,
+        })?;
+        if total > MAX_TOTAL_UNPACKED_BYTES {
+            return Err(ArchiveError::ArchiveBomb {
+                total,
+                limit: MAX_TOTAL_UNPACKED_BYTES,
+            });
+        }
+
+        match cover_entry_action(is_directory, size, &entry_name, max_bytes)? {
+            CoverEntryAction::Read => {
+                let bytes = read_entry_data(&mut opened.archive, &entry_name, size, max_bytes)?;
+                return Ok(FirstImage {
+                    name: entry_name,
+                    bytes,
+                });
+            }
+            // Empty metadata entries and directories do not carry a
+            // compressed payload. They are safe to advance past before the
+            // representative image, but no non-empty non-image is ever
+            // skipped for a cover.
+            CoverEntryAction::Skip => {
+                opened
+                    .archive
+                    .skip_data()
+                    .map_err(|error| ArchiveError::Corrupt(error.to_string()))?;
+            }
+        }
+    }
+    Err(ArchiveError::NoSupportedImages)
 }
 
 /// 讀取單一 RAR entry，最多配置 `max_bytes` bytes，不寫入檔案系統。
@@ -195,27 +294,43 @@ pub fn read_entry_from_file(
             });
         }
 
-        let mut output = Vec::with_capacity((size as usize).min(INITIAL_OUTPUT_CAPACITY));
-        let mut buffer = [0_u8; 64 * 1024];
-        loop {
-            let read = opened
-                .archive
-                .read_data(&mut buffer)
-                .map_err(|error| ArchiveError::Corrupt(error.to_string()))?;
-            if read == 0 {
-                break;
-            }
-            if output.len().saturating_add(read) > max_bytes {
-                return Err(ArchiveError::ReadLimitExceeded {
-                    name: name.to_string(),
-                    limit: max_bytes,
-                });
-            }
-            output.extend_from_slice(&buffer[..read]);
-        }
-        return Ok(output);
+        return read_entry_data(&mut opened.archive, name, size, max_bytes);
     }
     Err(ArchiveError::EntryNotFound(name.to_string()))
+}
+
+fn read_entry_data(
+    archive: &mut ReadArchive<'static>,
+    name: &str,
+    size: u64,
+    max_bytes: usize,
+) -> Result<Vec<u8>, ArchiveError> {
+    if size > max_bytes as u64 {
+        return Err(ArchiveError::EntryTooLarge {
+            name: name.to_string(),
+            bytes: size,
+            limit: max_bytes,
+        });
+    }
+
+    let mut output = Vec::with_capacity((size as usize).min(INITIAL_OUTPUT_CAPACITY));
+    let mut buffer = [0_u8; 64 * 1024];
+    loop {
+        let read = archive
+            .read_data(&mut buffer)
+            .map_err(|error| ArchiveError::Corrupt(error.to_string()))?;
+        if read == 0 {
+            break;
+        }
+        if output.len().saturating_add(read) > max_bytes {
+            return Err(ArchiveError::ReadLimitExceeded {
+                name: name.to_string(),
+                limit: max_bytes,
+            });
+        }
+        output.extend_from_slice(&buffer[..read]);
+    }
+    Ok(output)
 }
 
 fn open_rar_file(file: File, _path: &Path) -> Result<OpenedRar, ArchiveError> {
@@ -271,6 +386,57 @@ fn checked_name_bytes(total: usize, additional: usize) -> Result<usize, ArchiveE
         });
     }
     Ok(total)
+}
+
+fn is_visible_supported_image(name: &str) -> bool {
+    if name
+        .split('/')
+        .any(|part| part.starts_with('.') || part.eq_ignore_ascii_case("__MACOSX"))
+    {
+        return false;
+    }
+    let Some(extension) = Path::new(name).extension().and_then(|value| value.to_str()) else {
+        return false;
+    };
+    crate::scanner::IMAGE_EXTENSIONS
+        .iter()
+        .any(|supported| supported[1..].eq_ignore_ascii_case(extension))
+}
+
+#[derive(Debug, PartialEq, Eq)]
+enum CoverEntryAction {
+    Skip,
+    Read,
+}
+
+fn cover_entry_action(
+    is_directory: bool,
+    size: u64,
+    name: &str,
+    max_bytes: usize,
+) -> Result<CoverEntryAction, ArchiveError> {
+    if is_directory {
+        if size > 0 {
+            return Err(ArchiveError::Corrupt(format!(
+                "目錄 entry 含有非空資料：{name}"
+            )));
+        }
+        return Ok(CoverEntryAction::Skip);
+    }
+    if size == 0 {
+        return Ok(CoverEntryAction::Skip);
+    }
+    if !is_visible_supported_image(name) {
+        return Err(ArchiveError::NoSupportedImages);
+    }
+    if size > max_bytes as u64 {
+        return Err(ArchiveError::EntryTooLarge {
+            name: name.to_string(),
+            bytes: size,
+            limit: max_bytes,
+        });
+    }
+    Ok(CoverEntryAction::Read)
 }
 
 /// libarchive 3.8.x has a RAR5 terminal-block bug (upstream issue #3352):
@@ -471,5 +637,114 @@ mod tests {
         assert!(has_valid_rar5_end_marker(&file).unwrap());
         drop(file);
         std::fs::remove_file(path).unwrap();
+    }
+
+    #[test]
+    fn cover_candidates_keep_visibility_and_extension_rules() {
+        assert!(is_visible_supported_image("chapter/2.jpg"));
+        assert!(is_visible_supported_image("chapter/2.PNG"));
+        assert!(!is_visible_supported_image("chapter/.cover.jpg"));
+        assert!(!is_visible_supported_image("__MACOSX/cover.jpg"));
+        assert!(!is_visible_supported_image("chapter/2.bmp"));
+    }
+
+    #[test]
+    fn cover_uses_archive_order_as_thumbnail_only() {
+        let archive_order = ["10.jpg", "2.jpg"];
+        assert_eq!(
+            archive_order.iter().find(
+                |name| cover_entry_action(false, 1, name, 8).unwrap() == CoverEntryAction::Read
+            ),
+            Some(&"10.jpg")
+        );
+        let mut formal_page_order = archive_order;
+        formal_page_order.sort_by(|a, b| natord::compare(a, b).then_with(|| a.cmp(b)));
+        assert_eq!(formal_page_order, ["2.jpg", "10.jpg"]);
+    }
+
+    #[test]
+    fn cover_rejects_nonempty_prefix_without_scanning_later_entries() {
+        assert!(matches!(
+            cover_entry_action(false, 1, "notes.txt", 8),
+            Err(ArchiveError::NoSupportedImages)
+        ));
+        assert!(matches!(
+            cover_entry_action(false, 1, "1.jpg", 8),
+            Ok(CoverEntryAction::Read)
+        ));
+    }
+
+    #[test]
+    fn cover_rejects_oversized_first_image_without_trying_later_images() {
+        assert!(matches!(
+            cover_entry_action(false, 9, "1.jpg", 8),
+            Err(ArchiveError::EntryTooLarge {
+                name,
+                bytes: 9,
+                limit: 8
+            }) if name == "1.jpg"
+        ));
+        assert!(matches!(
+            cover_entry_action(false, 1, "2.jpg", 8),
+            Ok(CoverEntryAction::Read)
+        ));
+        assert!(matches!(
+            cover_entry_action(true, 1, "pages/", 8),
+            Err(ArchiveError::Corrupt(_))
+        ));
+    }
+
+    #[test]
+    fn first_image_rejects_invalid_read_budget_before_opening() {
+        let error = read_first_image_from_file(
+            File::open(std::env::current_exe().unwrap()).unwrap(),
+            Path::new("archive.rar"),
+            0,
+        )
+        .unwrap_err();
+        assert!(matches!(error, ArchiveError::ReadLimitExceeded { .. }));
+    }
+
+    #[test]
+    fn real_rar_fixture_is_walked_without_finding_unsupported_images() {
+        let encoded = include_str!("../vendor/libarchive2-sys/libarchive/libarchive/test/test_read_format_rar5_multiple_files.rar.uu");
+        let path = std::env::temp_dir().join(format!(
+            "gai-rar-cover-fixture-{}-{}.rar",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        std::fs::write(&path, decode_uu_fixture(encoded)).unwrap();
+        let result =
+            read_first_image_from_file(File::open(&path).unwrap(), &path, 64 * 1024 * 1024);
+        let _ = std::fs::remove_file(path);
+        assert!(matches!(result, Err(ArchiveError::NoSupportedImages)));
+    }
+
+    fn decode_uu_fixture(encoded: &str) -> Vec<u8> {
+        let mut output = Vec::new();
+        for line in encoded.lines() {
+            if line.starts_with("begin ") || line == "end" || line.is_empty() {
+                continue;
+            }
+            let bytes = line.as_bytes();
+            let expected = (bytes[0].wrapping_sub(b' ') & 0x3f) as usize;
+            let mut decoded = Vec::with_capacity(expected);
+            for chunk in bytes[1..].chunks(4) {
+                let mut values = [0_u8; 4];
+                for (index, value) in chunk.iter().enumerate() {
+                    values[index] = value.wrapping_sub(b' ') & 0x3f;
+                }
+                decoded.extend_from_slice(&[
+                    (values[0] << 2) | (values[1] >> 4),
+                    (values[1] << 4) | (values[2] >> 2),
+                    (values[2] << 6) | values[3],
+                ]);
+            }
+            output.extend_from_slice(&decoded[..expected.min(decoded.len())]);
+        }
+        output
     }
 }

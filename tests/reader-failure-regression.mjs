@@ -115,6 +115,7 @@ function extractSection(source, startMarker, endMarker) {
     restoreReaderFocus() {},
     resumeCatalogAppendRenderIfReady() {},
     scheduleLibraryRefresh() {},
+    scheduleCoverLoadDrain() {},
     clearTimeout,
     cancelAnimationFrame() {},
     document: { fullscreenElement: null, body: { style: {} } },
@@ -218,6 +219,7 @@ function extractSection(source, startMarker, endMarker) {
     alert: message => alerts.push(message),
     console: { error() {} },
     clearTimeout,
+    scheduleCoverLoadDrain() {},
   };
   vm.runInNewContext(`${extractFunction(appSource, 'getComicSourceId')}\n${extractFunction(appSource, 'setSelectedComic')}\n${extractFunction(appSource, 'clearReaderPageNotice')}\n${openReader}\nglobalThis.openReader = openReader;`, context);
   await context.openReader('broken');

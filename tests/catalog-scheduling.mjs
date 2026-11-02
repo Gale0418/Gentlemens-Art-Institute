@@ -482,6 +482,52 @@ assert.equal(hooks.catalogThumbnailURL('/fixture/page-3.png'), '/fixture/page-3.
   assert.equal(first.src, '');
 }
 
+// 開書意圖一旦成立，queued shelf covers 必須讓路給 reader；待返回書架
+// 後才恢復，避免 external archive 的 cover route 在 cold open 期間繼續堆積。
+{
+  const opening = createHarness();
+  const cover = makeCover('reader-priority-cover');
+  opening.hooks.state.pendingComicId = 'cold-open-book';
+  opening.hooks.setCoverVisibility(cover, true);
+  opening.hooks.enqueueCoverLoad(cover);
+  opening.hooks.drainCoverLoadQueue();
+  assert.equal(cover.src, '', 'pending reader keeps new shelf cover work queued');
+  assert.equal(opening.hooks.getCoverQueueState().active, 0);
+  opening.hooks.state.pendingComicId = null;
+  opening.hooks.drainCoverLoadQueue();
+  assert.equal(cover.src, '/cover/reader-priority-cover', 'cover queue resumes after reader intent clears');
+  opening.hooks.resetCoverLoadQueue();
+}
+
+// Reader open failure clears pendingComicId without closeReader; the failure
+// path itself must restart the real cover pump rather than leaving it paused.
+{
+  const failedOpen = createHarness();
+  const comic = {
+    id: 'failed-reader-cover',
+    title: 'Failed reader cover',
+    relativePath: 'external/H/book.cbz',
+    sourceId: 'external:files',
+    type: 'external-archive',
+    pageCount: 12,
+  };
+  const cover = makeCover(comic.id);
+  failedOpen.context.window.electronAPI.openComic = async () => {
+    throw new Error('temporary provider failure');
+  };
+  failedOpen.hooks.setCoverVisibility(cover, true);
+  failedOpen.hooks.enqueueCoverLoad(cover);
+  const open = failedOpen.hooks.openReader(comic);
+  await Promise.resolve();
+  failedOpen.clock.tick(80);
+  assert.equal(cover.src, '', 'failed reader intent keeps shelf cover paused while open is pending');
+  await open;
+  assert.equal(failedOpen.hooks.state.pendingComicId, null);
+  failedOpen.clock.tick(0);
+  assert.equal(cover.src, `/cover/${comic.id}`, 'open failure finally resumes the real cover pump');
+  failedOpen.hooks.resetCoverLoadQueue();
+}
+
 // 離開視窗的 queued 項目會被移除；停滑後只啟動仍可見項目，且上限維持 2。
 {
   const offscreen = makeCover('offscreen');

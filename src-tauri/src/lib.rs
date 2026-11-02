@@ -302,6 +302,24 @@ fn normalize_requested_source_id(source_id: Option<String>, scan_dir: &str) -> O
     })
 }
 
+fn parse_requested_source_id(source_id: Option<&str>) -> Result<Option<String>, String> {
+    let requested = source_id
+        .map(str::trim)
+        .filter(|source| !source.is_empty())
+        .map(str::to_owned);
+    if source_id.is_some() && requested.is_none() {
+        return Err("漫畫來源識別碼格式不正確".into());
+    }
+    Ok(requested)
+}
+
+fn require_reader_pages(page_paths: &[String]) -> Result<(), String> {
+    if page_paths.is_empty() {
+        return Err("漫畫沒有可讀取的圖片頁面".into());
+    }
+    Ok(())
+}
+
 fn reader_route_url(route: &str, id: &str, page_index: usize, source_id: &str) -> String {
     format!(
         "gai://{route}/{id}/{page_index}?sourceId={}",
@@ -496,6 +514,89 @@ fn reader_generation_is_current(state: &AppState, generation: u64) -> bool {
         .reader_generation
         .load(std::sync::atomic::Ordering::Acquire)
         == generation
+}
+
+/// Clears a pending open if `open_comic` exits before publishing a reader.
+///
+/// The frontend can reject/cancel an open before it gets a chance to call
+/// `close_comic`. Keeping this guard scoped to the generation and source is
+/// important: an older open must never clear a newer same-ID/source request.
+struct PendingOpenGuard {
+    state: Arc<AppState>,
+    id: String,
+    source_id: Option<String>,
+    generation: u64,
+}
+
+impl PendingOpenGuard {
+    fn new(state: Arc<AppState>, id: String, source_id: Option<String>, generation: u64) -> Self {
+        Self {
+            state,
+            id,
+            source_id,
+            generation,
+        }
+    }
+}
+
+impl Drop for PendingOpenGuard {
+    fn drop(&mut self) {
+        let Ok(_lifecycle) = self.state.comic_lifecycle.lock() else {
+            return;
+        };
+        // The generation must be checked while the lifecycle is held. An
+        // unlocked pre-check could race a newer same-ID open that updates the
+        // generation and pending slot immediately afterwards.
+        if self
+            .state
+            .reader_generation
+            .load(std::sync::atomic::Ordering::Acquire)
+            != self.generation
+        {
+            return;
+        }
+        let Ok(mut pending_id) = self.state.pending_open_id.lock() else {
+            return;
+        };
+        let Ok(mut pending_source_id) = self.state.pending_open_source_id.lock() else {
+            return;
+        };
+        let source_matches = match self.source_id.as_deref() {
+            Some(source_id) => pending_source_id.as_deref() == Some(source_id),
+            None => pending_source_id.is_none(),
+        };
+        if pending_id.as_deref() == Some(self.id.as_str()) && source_matches {
+            *pending_id = None;
+            *pending_source_id = None;
+        }
+    }
+}
+
+fn begin_pending_open(state: &AppState, id: &str, source_id: Option<String>) -> u64 {
+    let _lifecycle = state.comic_lifecycle.lock().unwrap();
+    let generation = state
+        .reader_generation
+        .fetch_add(1, std::sync::atomic::Ordering::SeqCst)
+        + 1;
+    *state.pending_open_id.lock().unwrap() = Some(id.to_owned());
+    *state.pending_open_source_id.lock().unwrap() = source_id;
+    generation
+}
+
+fn bind_pending_open_source(
+    state: &AppState,
+    id: &str,
+    generation: u64,
+    source_id: String,
+) -> Result<(), String> {
+    let _lifecycle = state.comic_lifecycle.lock().unwrap();
+    if !reader_generation_is_current(state, generation)
+        || state.pending_open_id.lock().unwrap().as_deref() != Some(id)
+    {
+        return Err("開啟漫畫已取消".into());
+    }
+    *state.pending_open_source_id.lock().unwrap() = Some(source_id);
+    Ok(())
 }
 
 fn open_smb_temp_root(temp_base: &Path, source_id: &str) -> Result<cap_std::fs::Dir, String> {
@@ -1239,16 +1340,15 @@ async fn open_comic(
             .find(|album| album.id == album_id && album.available)
             .map(|album| album.asset_ids.clone())
             .ok_or_else(|| "照片相簿目前不可用".to_string())?;
-        let reader_generation = {
-            let _lifecycle = state.comic_lifecycle.lock().unwrap();
-            let generation = state
-                .reader_generation
-                .fetch_add(1, std::sync::atomic::Ordering::SeqCst)
-                + 1;
-            *state.pending_open_id.lock().unwrap() = Some(id.clone());
-            *state.pending_open_source_id.lock().unwrap() = Some(item.source_id.clone());
-            generation
-        };
+        require_reader_pages(&assets)?;
+        let reader_generation =
+            begin_pending_open(state.inner(), &id, Some(item.source_id.clone()));
+        let _pending_open_guard = PendingOpenGuard::new(
+            state.inner().clone(),
+            id.clone(),
+            Some(item.source_id.clone()),
+            reader_generation,
+        );
         let preload_generation = {
             let _lifecycle = state.comic_lifecycle.lock().unwrap();
             if !reader_generation_is_current(state.inner(), reader_generation) {
@@ -1285,14 +1385,7 @@ async fn open_comic(
             "preloadGeneration": preload_generation
         }));
     }
-    let requested_source_id = source_id
-        .as_deref()
-        .map(str::trim)
-        .filter(|source| !source.is_empty())
-        .map(str::to_owned);
-    if source_id.is_some() && requested_source_id.is_none() {
-        return Err("漫畫來源識別碼格式不正確".into());
-    }
+    let requested_source_id = parse_requested_source_id(source_id.as_deref())?;
     // Keep the legacy spelling long enough to permit a narrowly scoped
     // catalog fallback.  Once a configured root is captured, `local` is
     // normalized to its root-bound identity; arbitrary source IDs must never
@@ -1303,6 +1396,16 @@ async fn open_comic(
     // switch could silently attach an old catalog row to the new root.
     let legacy_scan_dir = state.scan_dir.read().unwrap().clone();
     let requested_source_id = normalize_requested_source_id(requested_source_id, &legacy_scan_dir);
+    // Publish the open intent before the first comics/catalog lookup. A scan
+    // publication may hold `comics` for an O(N) merge; reader priority must
+    // already be visible before this command can wait on that mutex.
+    let reader_generation = begin_pending_open(state.inner(), &id, requested_source_id.clone());
+    let mut pending_open_guard = PendingOpenGuard::new(
+        state.inner().clone(),
+        id.clone(),
+        requested_source_id.clone(),
+        reader_generation,
+    );
     let state_item = {
         let comics = state.comics.lock().await;
         // ID-only opens remain fail-closed when multiple live locations exist;
@@ -1392,16 +1495,13 @@ async fn open_comic(
         register_comic_capability(&mut comics, &comic_info);
     }
     let relative_path_str = comic_info.relative_path.clone();
-    let reader_generation = {
-        let _lifecycle = state.comic_lifecycle.lock().unwrap();
-        let generation = state
-            .reader_generation
-            .fetch_add(1, std::sync::atomic::Ordering::SeqCst)
-            + 1;
-        *state.pending_open_id.lock().unwrap() = Some(id.clone());
-        *state.pending_open_source_id.lock().unwrap() = Some(comic_info.source_id.clone());
-        generation
-    };
+    bind_pending_open_source(
+        state.inner(),
+        &id,
+        reader_generation,
+        comic_info.source_id.clone(),
+    )?;
+    pending_open_guard.source_id = Some(comic_info.source_id.clone());
 
     let full_path: PathBuf;
     let is_dir: bool;
@@ -1760,6 +1860,11 @@ async fn open_comic(
         }
         entry_names
     };
+
+    // Reject an empty folder/archive before committing active reader state.
+    // The frontend also validates pages, but native must not leave an active
+    // reader behind when that validation raises after open_comic returns.
+    require_reader_pages(&opened_files)?;
 
     let title = comic_info.title.clone();
     let r#type = comic_info.r#type.clone();
@@ -5775,5 +5880,108 @@ mod tests {
         let encoded = "A".repeat(MAX_AI_BASE64_BYTES + 4);
         let data_url = format!("data:image/png;base64,{encoded}");
         assert!(validate_page_data_url(&data_url).is_err());
+    }
+
+    #[test]
+    fn failed_pending_open_is_cleared_only_for_its_generation_and_source() {
+        let state = Arc::new(AppState::new());
+        let generation = state
+            .reader_generation
+            .fetch_add(1, std::sync::atomic::Ordering::SeqCst)
+            + 1;
+        *state.pending_open_id.lock().unwrap() = Some("book".into());
+        *state.pending_open_source_id.lock().unwrap() = Some("external:bookmark".into());
+        {
+            let _guard = PendingOpenGuard::new(
+                state.clone(),
+                "book".into(),
+                Some("external:bookmark".into()),
+                generation,
+            );
+        }
+        assert!(state.pending_open_id.lock().unwrap().is_none());
+        assert!(state.pending_open_source_id.lock().unwrap().is_none());
+
+        *state.pending_open_id.lock().unwrap() = Some("book".into());
+        *state.pending_open_source_id.lock().unwrap() = Some("external:bookmark".into());
+        let stale = PendingOpenGuard::new(
+            state.clone(),
+            "book".into(),
+            Some("external:bookmark".into()),
+            generation,
+        );
+        state
+            .reader_generation
+            .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        *state.pending_open_source_id.lock().unwrap() = Some("external:new-bookmark".into());
+        drop(stale);
+        assert_eq!(
+            state.pending_open_id.lock().unwrap().as_deref(),
+            Some("book")
+        );
+        assert_eq!(
+            state.pending_open_source_id.lock().unwrap().as_deref(),
+            Some("external:new-bookmark")
+        );
+    }
+
+    #[test]
+    fn early_open_intent_switches_same_id_without_clearing_new_reader() {
+        let state = Arc::new(AppState::new());
+        let first_generation = begin_pending_open(&state, "same-id", None);
+        let first = PendingOpenGuard::new(state.clone(), "same-id".into(), None, first_generation);
+        assert_eq!(
+            state.pending_open_id.lock().unwrap().as_deref(),
+            Some("same-id")
+        );
+        assert!(state.pending_open_source_id.lock().unwrap().is_none());
+
+        let second_generation =
+            begin_pending_open(&state, "same-id", Some("external:new-source".into()));
+        let second = PendingOpenGuard::new(
+            state.clone(),
+            "same-id".into(),
+            Some("external:new-source".into()),
+            second_generation,
+        );
+        drop(first);
+        assert_eq!(
+            state.pending_open_source_id.lock().unwrap().as_deref(),
+            Some("external:new-source")
+        );
+        drop(second);
+        assert!(state.pending_open_id.lock().unwrap().is_none());
+        assert!(state.pending_open_source_id.lock().unwrap().is_none());
+    }
+
+    #[test]
+    fn cancelled_early_intent_is_cleared_by_reader_invalidation() {
+        let state = Arc::new(AppState::new());
+        let generation =
+            begin_pending_open(&state, "photo-or-book", Some("external:source".into()));
+        let guard = PendingOpenGuard::new(
+            state.clone(),
+            "photo-or-book".into(),
+            Some("external:source".into()),
+            generation,
+        );
+        state.invalidate_reader_cache();
+        drop(guard);
+        assert!(state.pending_open_id.lock().unwrap().is_none());
+        assert!(state.pending_open_source_id.lock().unwrap().is_none());
+    }
+
+    #[test]
+    fn invalid_source_is_rejected_before_early_open_intent() {
+        let state = Arc::new(AppState::new());
+        assert!(parse_requested_source_id(Some("  ")).is_err());
+        assert!(state.pending_open_id.lock().unwrap().is_none());
+        assert!(state.pending_open_source_id.lock().unwrap().is_none());
+    }
+
+    #[test]
+    fn empty_reader_pages_are_rejected_before_active_commit() {
+        assert!(require_reader_pages(&[]).is_err());
+        assert!(require_reader_pages(&["page://one".into()]).is_ok());
     }
 }

@@ -1347,6 +1347,70 @@ pub fn handle_comic_request(
             );
         }
 
+        // RAR cover requests intentionally use archive order as a bounded
+        // representative thumbnail. This must not be treated as formal page
+        // zero: the reader below still uses its natural-sorted archive index.
+        let is_rar_archive = full_path
+            .extension()
+            .and_then(|value| value.to_str())
+            .is_some_and(|extension| {
+                matches!(extension.to_ascii_lowercase().as_str(), "rar" | "cbr")
+            });
+        if host == "cover" && is_rar_archive {
+            let Some((page_file, _, _)) = archive_access.as_ref() else {
+                return Response::builder()
+                    .status(StatusCode::NOT_FOUND)
+                    .body(b"archive descriptor unavailable".to_vec())
+                    .map_err(Into::into);
+            };
+            let page_file = match page_file.try_clone() {
+                Ok(file) => file,
+                Err(error) => {
+                    return Response::builder()
+                        .status(StatusCode::UNPROCESSABLE_ENTITY)
+                        .header("Access-Control-Allow-Origin", "*")
+                        .body(format!("archive descriptor unavailable: {error}").into_bytes())
+                        .map_err(Into::into);
+                }
+            };
+            let image = match crate::rar_reader::read_first_image_from_file(
+                page_file,
+                &full_path,
+                MAX_IMAGE_BYTES as usize,
+            ) {
+                Ok(image) => image,
+                Err(error) => {
+                    let status = match &error {
+                        crate::archive_reader::ArchiveError::EntryTooLarge { .. }
+                        | crate::archive_reader::ArchiveError::ReadLimitExceeded { .. } => {
+                            StatusCode::PAYLOAD_TOO_LARGE
+                        }
+                        _ => StatusCode::UNPROCESSABLE_ENTITY,
+                    };
+                    return Response::builder()
+                        .status(status)
+                        .header("Access-Control-Allow-Origin", "*")
+                        .body(error.to_string().into_bytes())
+                        .map_err(Into::into);
+                }
+            };
+            let extension = Path::new(&image.name)
+                .extension()
+                .and_then(|value| value.to_str())
+                .unwrap_or("");
+            let mime = detect_mime(&image.bytes, &format!(".{extension}"));
+            if let Some(key) = cover_cache_key {
+                state.cache_cover(key, image.bytes.clone(), mime);
+            }
+            return Response::builder()
+                .header("Content-Type", mime)
+                .header("Cache-Control", ARCHIVE_IMAGE_CACHE_CONTROL)
+                .header("X-Content-Type-Options", "nosniff")
+                .header("Access-Control-Allow-Origin", "*")
+                .body(image.bytes)
+                .map_err(Into::into);
+        }
+
         if comic_info.r#type.contains("image") {
             let is_file = match (&authorized_root, &authorized_relative) {
                 (Some(root), Some(relative)) => root.is_file(relative),

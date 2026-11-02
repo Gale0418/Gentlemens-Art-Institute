@@ -59,7 +59,7 @@ ROOT_DIR=$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd -P)
 APP_ENTITLEMENTS="$ROOT_DIR/src-tauri/Entitlements-macOS.plist"
 HELPER_ENTITLEMENTS="$ROOT_DIR/src-tauri/Entitlements-macOS-helper.plist"
 
-for command_name in codesign lipo productbuild pkgutil security plutil rg file; do
+for command_name in codesign lipo productbuild pkgutil security plutil grep file; do
   command -v "$command_name" >/dev/null || fail "missing command: $command_name"
 done
 [[ -d "$APP_PATH/Contents/MacOS" ]] || fail "invalid source app bundle: $APP_PATH"
@@ -223,9 +223,9 @@ identity_team=$(printf '%s\n' "$APPLICATION_IDENTITY" | sed -n 's/.*(\([A-Za-z0-
   fail "application identity/profile team mismatch: $identity_team vs $profile_team"
 [[ "$INSTALLER_IDENTITY" == *"($profile_team)"* ]] || \
   fail 'installer identity/profile team mismatch'
-security find-identity -v -p codesigning | rg -F "\"$APPLICATION_IDENTITY\"" >/dev/null || \
+security find-identity -v -p codesigning | grep -F "\"$APPLICATION_IDENTITY\"" >/dev/null || \
   fail "application signing identity is not available: $APPLICATION_IDENTITY"
-security find-identity -v | rg -F "\"$INSTALLER_IDENTITY\"" >/dev/null || \
+security find-identity -v | grep -F "\"$INSTALLER_IDENTITY\"" >/dev/null || \
   fail "installer signing identity is not available: $INSTALLER_IDENTITY"
 
 cp "$PROFILE_PATH" "$staged_app/Contents/embedded.provisionprofile"
@@ -269,7 +269,7 @@ signature_dump() {
 
 require_signature_identity() {
   local executable=$1
-  signature_dump "$executable" | rg -F "Authority=$APPLICATION_IDENTITY" >/dev/null || \
+  signature_dump "$executable" | grep -F "Authority=$APPLICATION_IDENTITY" >/dev/null || \
     fail "signature identity mismatch: $executable"
 }
 
@@ -278,7 +278,7 @@ require_entitlement() {
   local entitlement=$2
   local dump
   dump=$(entitlements_dump "$executable") || fail "cannot read entitlements: $executable"
-  printf '%s\n' "$dump" | rg -F "\"$entitlement\" => true" >/dev/null || \
+  printf '%s\n' "$dump" | grep -F "\"$entitlement\" => true" >/dev/null || \
     fail "missing entitlement $entitlement in $executable"
 }
 
@@ -287,7 +287,7 @@ require_no_entitlement() {
   local entitlement=$2
   local dump
   dump=$(entitlements_dump "$executable") || fail "cannot read entitlements: $executable"
-  if printf '%s\n' "$dump" | rg -F "\"$entitlement\" => true" >/dev/null; then
+  if printf '%s\n' "$dump" | grep -F "\"$entitlement\" => true" >/dev/null; then
     fail "forbidden entitlement $entitlement in $executable"
   fi
 }
@@ -301,7 +301,7 @@ require_exact_helper_entitlements() {
   keys=$(printf '%s\n' "$dump" | sed -n 's/^[[:space:]]*"\([^"]*\)" => .*/\1/p' | sort)
   [[ "$keys" == $'com.apple.security.app-sandbox\ncom.apple.security.inherit' ]] || \
     fail "helper entitlements are not exactly sandbox+inherit: $executable"
-  true_count=$(printf '%s\n' "$dump" | rg -c '=> true$' || true)
+  true_count=$(printf '%s\n' "$dump" | grep -c '=> true$' || true)
   [[ "$true_count" == '2' ]] || fail "helper true entitlement count is not 2: $executable"
 }
 
@@ -323,7 +323,7 @@ for executable in "${executables[@]}"; do
   codesign --verify --strict --verbose=2 "$executable"
   require_signature_identity "$executable"
   file_output=$(file "$executable")
-  printf '%s\n' "$file_output" | rg -F 'Mach-O' >/dev/null || \
+  printf '%s\n' "$file_output" | grep -F 'Mach-O' >/dev/null || \
     fail "not a Mach-O executable: $executable"
   lipo -verify_arch arm64 x86_64 "$executable" >/dev/null 2>&1 || \
     fail "arm64+x86_64 universal architecture missing: $executable"
@@ -339,12 +339,12 @@ done
 
 codesign --verify --deep --strict --verbose=2 "$staged_app"
 require_signature_identity "$staged_app"
-signature_dump "$staged_app" | rg -F "Identifier=$bundle_identifier" >/dev/null || \
+signature_dump "$staged_app" | grep -F "Identifier=$bundle_identifier" >/dev/null || \
   fail "signed bundle identifier mismatch: $staged_app"
 productbuild --component "$staged_app" /Applications \
   --sign "$INSTALLER_IDENTITY" "$staged_pkg"
 pkgutil --check-signature "$staged_pkg"
-pkgutil --payload-files "$staged_pkg" | rg -F "$main_executable" >/dev/null || \
+pkgutil --payload-files "$staged_pkg" | grep -F "$main_executable" >/dev/null || \
   fail 'PKG payload is missing the main executable'
 
 app_commit_started=1

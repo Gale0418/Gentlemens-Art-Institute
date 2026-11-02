@@ -204,6 +204,8 @@ assert.match(macStoreSigner, /The staging directory still contains/);
 assert.match(macStoreSigner, /lipo -verify_arch arm64 x86_64/);
 assert.match(macStoreSigner, /require_exact_universal_architectures/);
 assert.match(macStoreSigner, /lipo -archs/);
+assert.match(macStoreSigner, /command_name in codesign lipo productbuild pkgutil security plutil grep file/);
+assert.doesNotMatch(macStoreSigner, /\brg\b/);
 assert.match(macStoreSigner, /source_app_real/);
 assert.match(macStoreSigner, /codesign --verify --deep --strict/);
 console.log('PASS: release hardening invariants are locked');

@@ -81,6 +81,7 @@ pub enum ArchiveError {
     },
     EntryNotFound(String),
     EntryIsDirectory(String),
+    NoSupportedImages,
 }
 
 impl fmt::Display for ArchiveError {
@@ -117,6 +118,7 @@ impl fmt::Display for ArchiveError {
             }
             Self::EntryNotFound(name) => write!(f, "找不到封存檔 entry：{name}"),
             Self::EntryIsDirectory(name) => write!(f, "entry 是目錄，不能讀取內容：{name}"),
+            Self::NoSupportedImages => write!(f, "封存檔裡沒有支援的圖片檔案"),
         }
     }
 }

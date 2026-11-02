@@ -1,4 +1,4 @@
-use crate::state::{AppState, ComicItem, Progress};
+use crate::state::{AppState, ComicItem, Progress, ReaderPriority};
 use base64::{engine::general_purpose, Engine as _};
 use rusqlite::Connection;
 use std::collections::BTreeSet;
@@ -11,6 +11,9 @@ use std::time::{Duration, Instant};
 pub const IMAGE_EXTENSIONS: [&str; 6] = [".jpg", ".jpeg", ".png", ".gif", ".webp", ".avif"];
 const PARTIAL_LIBRARY_BATCH: usize = 64;
 const PARTIAL_LIBRARY_INTERVAL: Duration = Duration::from_millis(400);
+// The wait is cooperative and deliberately coarse: it avoids a 100+ Hz
+// polling loop while keeping close/cancellation latency bounded to one slice.
+const READER_SCAN_WAIT: Duration = Duration::from_millis(50);
 const MAX_LOCAL_SCAN_DEPTH: usize = 100;
 pub(crate) const MAX_PROGRESS_FILE_BYTES: usize = 16 * 1024 * 1024;
 
@@ -130,13 +133,33 @@ fn publish_partial_library(
     if !should_publish_partial(results.len(), *published, published_at.elapsed()) {
         return;
     }
+    // Do not begin a full-library merge after an open has become pending. The
+    // check is intentionally repeated after acquiring the publication lock;
+    // neither check can preempt a merge that already started.
+    if should_yield_to_reader(state.reader_priority(), None) {
+        return;
+    }
     let status = {
-        let _scan_lifecycle = state.scan_lifecycle.blocking_lock();
+        // Partial batches are an optimization, not the authoritative result.
+        // Avoid starting this O(N) merge while the publication lock is busy;
+        // `try_lock` cannot preempt a merge already in progress. A failed
+        // try_lock never drops data because `published` advances only after a
+        // successful merge, and the final scan outcome remains authoritative.
+        let Ok(_scan_lifecycle) = state.scan_lifecycle.try_lock() else {
+            return;
+        };
         if state.scan_generation.load(Ordering::Acquire) != generation {
             return;
         }
+        if should_yield_to_reader(state.reader_priority(), None) {
+            return;
+        }
         let newly_discovered = &results[*published..];
-        merge_discovered_comics(&mut state.comics.blocking_lock(), newly_discovered);
+        let Ok(mut comics) = state.comics.try_lock() else {
+            return;
+        };
+        merge_discovered_comics(&mut comics, newly_discovered);
+        drop(comics);
         let mut progress = state.scan_progress.blocking_lock();
         progress.found = results.len();
         progress.phase = "discovering".into();
@@ -165,6 +188,34 @@ fn publish_partial_library(
     let _ = app_handle.emit("library-changed", batch);
 }
 
+fn should_yield_to_reader(priority: ReaderPriority, visible_generation: Option<u64>) -> bool {
+    match (priority, visible_generation) {
+        (ReaderPriority::Opening, _) => true,
+        // The visible lane is the second priority: it may keep discovering
+        // the directory the user is looking at while an existing reader is
+        // active, but the full-library lane must yield to that reader.
+        (ReaderPriority::Active, None) => true,
+        _ => false,
+    }
+}
+
+fn yield_to_reader_if_needed(state: &AppState, my_gen: u64, visible_generation: Option<u64>) {
+    // This is cooperative only. A provider call already in progress cannot
+    // be preempted by this check or by `try_lock`.
+    while should_yield_to_reader(state.reader_priority(), visible_generation) {
+        // A superseding scan generation cancels the wait; this keeps an old
+        // worker bounded even if a reader remains open for a long time.
+        if state.scan_generation.load(Ordering::Acquire) != my_gen
+            || visible_generation.is_some_and(|visible| {
+                state.visible_scan_generation.load(Ordering::Acquire) != visible
+            })
+        {
+            return;
+        }
+        std::thread::sleep(READER_SCAN_WAIT);
+    }
+}
+
 fn publish_visible_library(
     results: &[ComicItem],
     state: &Arc<AppState>,
@@ -173,17 +224,26 @@ fn publish_visible_library(
     visible_generation: u64,
     published: &mut usize,
     published_at: &mut Instant,
-) {
+) -> bool {
+    // A visible result is useful, but an Opening reader is higher priority.
+    // Keep `published` unchanged so the final retry below can publish the
+    // complete visible batch after the reader releases the intent.
+    if should_yield_to_reader(state.reader_priority(), Some(visible_generation)) {
+        return false;
+    }
     let batch = {
         let _scan_lifecycle = state.scan_lifecycle.blocking_lock();
         if state.scan_generation.load(Ordering::Acquire) != generation
             || state.visible_scan_generation.load(Ordering::Acquire) != visible_generation
         {
-            return;
+            return false;
+        }
+        if should_yield_to_reader(state.reader_priority(), Some(visible_generation)) {
+            return false;
         }
         let items = results[*published..].to_vec();
         if items.is_empty() {
-            return;
+            return false;
         }
         merge_discovered_comics(&mut state.comics.blocking_lock(), &items);
         *published = results.len();
@@ -200,6 +260,7 @@ fn publish_visible_library(
     };
     use tauri::Emitter;
     let _ = app_handle.emit("library-changed", batch);
+    true
 }
 
 pub(crate) fn publish_visible_directories(
@@ -207,15 +268,21 @@ pub(crate) fn publish_visible_directories(
     app_handle: &tauri::AppHandle,
     generation: u64,
     visible_generation: u64,
-    visible_path: String,
-    visible_source_id: Option<String>,
-    directories: Vec<String>,
-) {
+    visible_path: &str,
+    visible_source_id: Option<&str>,
+    directories: &[String],
+) -> bool {
+    if should_yield_to_reader(state.reader_priority(), Some(visible_generation)) {
+        return false;
+    }
     let _scan_lifecycle = state.scan_lifecycle.blocking_lock();
     if state.scan_generation.load(Ordering::Acquire) != generation
         || state.visible_scan_generation.load(Ordering::Acquire) != visible_generation
     {
-        return;
+        return false;
+    }
+    if should_yield_to_reader(state.reader_priority(), Some(visible_generation)) {
+        return false;
     }
     use tauri::Emitter;
     let _ = app_handle.emit(
@@ -225,11 +292,35 @@ pub(crate) fn publish_visible_directories(
             items: Vec::new(),
             found: 0,
             visible: true,
-            visible_path: Some(visible_path),
-            visible_source_id,
-            directories: Some(directories),
+            visible_path: Some(visible_path.to_owned()),
+            visible_source_id: visible_source_id.map(str::to_owned),
+            directories: Some(directories.to_owned()),
         },
     );
+    true
+}
+
+fn combine_visible_scan_results(
+    local_result: Result<(), String>,
+    smb_result: Result<(), String>,
+    source_scoped: bool,
+) -> Result<(), String> {
+    // An unscoped directory request intentionally probes both configured
+    // sources. One source can be absent/offline while the other contains the
+    // selected directory, so one successful lane is enough. A scoped request
+    // is expected to address one authoritative source; if both lanes ever
+    // reach this helper, preserve every error instead of hiding one.
+    if !source_scoped && (local_result.is_ok() || smb_result.is_ok()) {
+        return Ok(());
+    }
+    match (local_result, smb_result) {
+        (Ok(()), Ok(())) => Ok(()),
+        (Err(local_error), Ok(())) => Err(local_error),
+        (Ok(()), Err(smb_error)) => Err(smb_error),
+        (Err(local_error), Err(smb_error)) => Err(format!(
+            "本機可見目錄掃描失敗：{local_error}；SMB 可見目錄掃描失敗：{smb_error}"
+        )),
+    }
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -297,6 +388,47 @@ async fn finish_scan_if_current(
         }
         .into();
         progress.completed_at = Some(chrono::Utc::now().to_rfc3339());
+        progress.clone()
+    };
+    if state.scan_generation.load(Ordering::Acquire) != generation {
+        return false;
+    }
+    use tauri::Emitter;
+    let _ = app_handle.emit("scan-progress", status);
+    let _ = app_handle.emit("library-changed", ());
+    true
+}
+
+fn apply_scan_worker_failure(
+    progress: &mut crate::state::ScanProgress,
+    generation: u64,
+    error: String,
+) -> bool {
+    if progress.generation != generation || !progress.is_scanning {
+        return false;
+    }
+    progress.is_scanning = false;
+    progress.phase = "error".into();
+    progress.error = Some(error);
+    progress.completed_at = Some(chrono::Utc::now().to_rfc3339());
+    true
+}
+
+async fn mark_scan_worker_failure_if_current(
+    state: &Arc<AppState>,
+    app_handle: &tauri::AppHandle,
+    generation: u64,
+    error: String,
+) -> bool {
+    let status = {
+        let _scan_lifecycle = state.scan_lifecycle.lock().await;
+        if state.scan_generation.load(Ordering::Acquire) != generation {
+            return false;
+        }
+        let mut progress = state.scan_progress.lock().await;
+        if !apply_scan_worker_failure(&mut progress, generation, error) {
+            return false;
+        }
         progress.clone()
     };
     if state.scan_generation.load(Ordering::Acquire) != generation {
@@ -720,6 +852,7 @@ fn scan_recursive(
     incomplete: &AtomicBool,
     visible_generation: Option<u64>,
 ) {
+    yield_to_reader_if_needed(state, my_gen, visible_generation);
     if state.scan_generation.load(Ordering::Relaxed) != my_gen
         || visible_generation
             .is_some_and(|visible| state.visible_scan_generation.load(Ordering::Relaxed) != visible)
@@ -746,6 +879,7 @@ fn scan_recursive(
     let mut image_count = 0usize;
     let mut subdirs = Vec::new();
     for entry in entries {
+        yield_to_reader_if_needed(state, my_gen, visible_generation);
         if state.scan_generation.load(Ordering::Acquire) != my_gen
             || visible_generation.is_some_and(|visible| {
                 state.visible_scan_generation.load(Ordering::Acquire) != visible
@@ -1033,6 +1167,29 @@ fn saved_scan_is_current(state: &AppState, generation: u64, saved_generation: u6
         && state.saved_scan_generation.load(Ordering::Acquire) == saved_generation
 }
 
+async fn wait_for_saved_scan_lane(
+    state: &AppState,
+    generation: u64,
+    saved_generation: u64,
+) -> bool {
+    loop {
+        if !saved_scan_is_current(state, generation, saved_generation) {
+            return false;
+        }
+        if !matches!(state.reader_priority(), ReaderPriority::Opening) {
+            return true;
+        }
+        tokio::time::sleep(READER_SCAN_WAIT).await;
+    }
+}
+
+enum RecentSavedPreparation {
+    Deferred,
+    Stale,
+    NoItem,
+    Item(ComicItem),
+}
+
 fn visible_source_lanes(
     is_external: bool,
     local_configured: bool,
@@ -1155,28 +1312,34 @@ fn prepare_saved_item(
 }
 
 fn publish_saved_items(
-    items: Vec<ComicItem>,
+    items: &[ComicItem],
     state: &Arc<AppState>,
     app_handle: &tauri::AppHandle,
     generation: u64,
     saved_generation: u64,
-) {
+) -> bool {
     if items.is_empty() {
-        return;
+        return true;
+    }
+    if matches!(state.reader_priority(), ReaderPriority::Opening) {
+        return false;
     }
     let batch = {
         let _scan_lifecycle = state.scan_lifecycle.blocking_lock();
         if !saved_scan_is_current(state, generation, saved_generation)
             || !state.scan_progress.blocking_lock().is_scanning
         {
-            return;
+            return true;
+        }
+        if matches!(state.reader_priority(), ReaderPriority::Opening) {
+            return false;
         }
         let mut comics = state.comics.blocking_lock();
-        merge_discovered_comics(&mut comics, &items);
+        merge_discovered_comics(&mut comics, items);
         let found = comics.len();
         LibraryBatch {
             generation,
-            items,
+            items: items.to_owned(),
             found,
             visible: false,
             visible_path: None,
@@ -1186,6 +1349,46 @@ fn publish_saved_items(
     };
     use tauri::Emitter;
     let _ = app_handle.emit("library-changed", batch);
+    true
+}
+
+async fn publish_saved_items_until_ready(
+    items: Vec<ComicItem>,
+    state: &Arc<AppState>,
+    app_handle: &tauri::AppHandle,
+    generation: u64,
+    saved_generation: u64,
+) {
+    loop {
+        if !wait_for_saved_scan_lane(state, generation, saved_generation).await {
+            return;
+        }
+        let state_for_publish = state.clone();
+        let handle_for_publish = app_handle.clone();
+        let items_for_publish = items.clone();
+        let published = match tokio::task::spawn_blocking(move || {
+            publish_saved_items(
+                &items_for_publish,
+                &state_for_publish,
+                &handle_for_publish,
+                generation,
+                saved_generation,
+            )
+        })
+        .await
+        {
+            Ok(published) => published,
+            Err(error) => {
+                eprintln!(
+                    "⚠️ 優先漫畫 publication 背景工作失敗：{error}；優先載入失敗，完整掃描仍繼續（不保證結果）"
+                );
+                return;
+            }
+        };
+        if published {
+            return;
+        }
+    }
 }
 
 pub async fn scan_priority_library(
@@ -1223,47 +1426,119 @@ pub async fn scan_priority_library(
     let favorite_state = state.clone();
     let favorite_handle = app_handle.clone();
     let favorite_store = store.clone();
-    tokio::task::spawn_blocking(move || {
-        let items = match favorite_store.get_runtime_items_by_ids(&favorite_ids) {
-            Ok(items) => items,
-            Err(error) => {
-                eprintln!("⚠️ 收藏優先掃描失敗：{error}");
+    tokio::spawn(async move {
+        let items = loop {
+            if !wait_for_saved_scan_lane(&favorite_state, generation, saved_generation).await {
                 return;
             }
-        };
-        for chunk in items.chunks(32) {
-            if !saved_scan_is_current(&favorite_state, generation, saved_generation) {
-                break;
+            let ids = favorite_ids.clone();
+            let state_for_prepare = favorite_state.clone();
+            let handle_for_prepare = favorite_handle.clone();
+            let store_for_prepare = favorite_store.clone();
+            let prepared = match tokio::task::spawn_blocking(move || {
+                if !saved_scan_is_current(&state_for_prepare, generation, saved_generation)
+                    || matches!(state_for_prepare.reader_priority(), ReaderPriority::Opening)
+                {
+                    return None;
+                }
+                let items = match store_for_prepare.get_runtime_items_by_ids(&ids) {
+                    Ok(items) => items,
+                    Err(error) => {
+                        eprintln!("⚠️ 收藏優先掃描失敗：{error}");
+                        return Some(Vec::new());
+                    }
+                };
+                Some(
+                    items
+                        .into_iter()
+                        .filter_map(|item| {
+                            prepare_saved_item(item, &state_for_prepare, &handle_for_prepare)
+                        })
+                        .collect::<Vec<_>>(),
+                )
+            })
+            .await
+            {
+                Ok(prepared) => prepared,
+                Err(error) => {
+                    eprintln!(
+                        "⚠️ 收藏優先掃描背景工作失敗：{error}；優先載入失敗，完整掃描仍繼續（不保證結果）"
+                    );
+                    return;
+                }
+            };
+            if let Some(items) = prepared {
+                break items;
             }
-            let ready = chunk
-                .iter()
-                .cloned()
-                .filter_map(|item| prepare_saved_item(item, &favorite_state, &favorite_handle))
-                .collect();
-            publish_saved_items(
-                ready,
-                &favorite_state,
-                &favorite_handle,
-                generation,
-                saved_generation,
-            );
-        }
+        };
+        publish_saved_items_until_ready(
+            items,
+            &favorite_state,
+            &favorite_handle,
+            generation,
+            saved_generation,
+        )
+        .await;
     });
 
-    tokio::task::spawn_blocking(move || match store.get_recent_reading_runtime_item() {
-        Ok(Some(item)) => {
-            if let Some(item) = prepare_saved_item(item, &state, &app_handle) {
-                publish_saved_items(
-                    vec![item],
-                    &state,
-                    &app_handle,
-                    generation,
-                    saved_generation,
-                );
+    tokio::spawn(async move {
+        let item = loop {
+            if !wait_for_saved_scan_lane(&state, generation, saved_generation).await {
+                return;
             }
+            let state_for_prepare = state.clone();
+            let handle_for_prepare = app_handle.clone();
+            let store_for_prepare = store.clone();
+            let prepared = match tokio::task::spawn_blocking(move || {
+                if !saved_scan_is_current(&state_for_prepare, generation, saved_generation) {
+                    return RecentSavedPreparation::Stale;
+                }
+                if matches!(state_for_prepare.reader_priority(), ReaderPriority::Opening) {
+                    return RecentSavedPreparation::Deferred;
+                }
+                match store_for_prepare.get_recent_reading_runtime_item() {
+                    Ok(Some(item)) => {
+                        prepare_saved_item(item, &state_for_prepare, &handle_for_prepare)
+                            .map(RecentSavedPreparation::Item)
+                            .unwrap_or(RecentSavedPreparation::NoItem)
+                    }
+                    Ok(None) => RecentSavedPreparation::NoItem,
+                    Err(error) => {
+                        eprintln!("⚠️ 最近閱讀優先掃描失敗：{error}");
+                        RecentSavedPreparation::NoItem
+                    }
+                }
+            })
+            .await
+            {
+                Ok(prepared) => prepared,
+                Err(error) => {
+                    eprintln!(
+                        "⚠️ 最近閱讀優先掃描背景工作失敗：{error}；優先載入失敗，完整掃描仍繼續（不保證結果）"
+                    );
+                    return;
+                }
+            };
+            match prepared {
+                RecentSavedPreparation::Item(item) => break Some(item),
+                RecentSavedPreparation::Deferred => continue,
+                RecentSavedPreparation::Stale => return,
+                // An empty result or a preparation failure is terminal; it
+                // must not be mistaken for an Opening defer after the reader
+                // closes between the worker and this async task.
+                RecentSavedPreparation::NoItem => break None,
+            }
+        };
+        if let Some(item) = item {
+            publish_saved_items_until_ready(
+                vec![item],
+                &state,
+                &app_handle,
+                generation,
+                saved_generation,
+            )
+            .await;
         }
-        Ok(None) => {}
-        Err(error) => eprintln!("⚠️ 最近閱讀優先掃描失敗：{error}"),
     });
     Ok(())
 }
@@ -1304,31 +1579,17 @@ pub async fn scan_visible_directory(
             return Err("漫畫來源與目前目錄不符".into());
         }
     }
-    let smb_task = if run_smb {
-        if let Some(config) = smb_config {
-            let smb_state = state.clone();
-            let smb_handle = app_handle.clone();
-            let smb_path = relative_path.clone();
-            Some(tokio::spawn(async move {
-                crate::smb_scanner::scan_visible_smb(
-                    config,
-                    smb_state,
-                    generation,
-                    visible_generation,
-                    smb_handle,
-                    smb_path,
-                )
-                .await
-            }))
-        } else {
-            None
-        }
-    } else {
-        None
-    };
     if !run_local {
-        if let Some(task) = smb_task {
-            return task.await.map_err(|error| error.to_string())?;
+        if let Some(config) = smb_config {
+            return crate::smb_scanner::scan_visible_smb(
+                config,
+                state,
+                generation,
+                visible_generation,
+                app_handle,
+                relative_path,
+            )
+            .await;
         }
         return Ok(());
     }
@@ -1395,16 +1656,40 @@ pub async fn scan_visible_directory(
                 return Err("漫畫來源與目前目錄不符".into());
             }
         }
-        (configured_root, relative_path, None, None)
+        (configured_root, relative_path.clone(), None, None)
     };
     let subpath =
         safe_visible_relative_path(&subpath).ok_or_else(|| "漫畫目錄路徑無效".to_string())?;
     if root.is_empty() {
-        if let Some(task) = smb_task {
-            return task.await.map_err(|error| error.to_string())?;
-        }
         return Ok(());
     }
+
+    // Do not spawn the SMB lane until all local/security-scoped preflight has
+    // succeeded. Otherwise an early local error (for example a revoked iOS
+    // bookmark) would drop this JoinHandle and leave an unmanaged network
+    // scan running. Valid dual-source requests still overlap SMB I/O with the
+    // local blocking scan below.
+    let smb_task = if run_smb {
+        smb_config.map(|config| {
+            let smb_state = state.clone();
+            let smb_handle = app_handle.clone();
+            let smb_path = relative_path.clone();
+            tokio::spawn(async move {
+                crate::smb_scanner::scan_visible_smb(
+                    config,
+                    smb_state,
+                    generation,
+                    visible_generation,
+                    smb_handle,
+                    smb_path,
+                )
+                .await
+            })
+        })
+    } else {
+        None
+    };
+    let source_scoped = source_id.is_some();
     let root_path = std::path::PathBuf::from(root);
     // Reading progress is stored under the configured library, including for
     // comics discovered through an external bookmark.
@@ -1489,39 +1774,146 @@ pub async fn scan_visible_directory(
             &incomplete,
             Some(visible_generation),
         );
-        publish_visible_library(
-            &results,
-            &state,
-            &app_handle,
-            generation,
-            visible_generation,
-            &mut published,
-            &mut published_at,
-        );
-        publish_visible_directories(
-            &state,
-            &app_handle,
-            generation,
-            visible_generation,
-            visible_path,
-            source_id,
-            directories,
-        );
+        if published < results.len() {
+            loop {
+                if publish_visible_library(
+                    &results,
+                    &state,
+                    &app_handle,
+                    generation,
+                    visible_generation,
+                    &mut published,
+                    &mut published_at,
+                ) {
+                    break;
+                }
+                if state.scan_generation.load(Ordering::Acquire) != generation
+                    || state.visible_scan_generation.load(Ordering::Acquire) != visible_generation
+                {
+                    return Ok(());
+                }
+                // `publish_visible_library` may have observed Opening just
+                // before the reader closed. Retry once more instead of
+                // treating that transient rejection as success; otherwise
+                // `published < results.len()` would leave visible comics
+                // undiscovered.
+                std::thread::sleep(READER_SCAN_WAIT);
+            }
+        }
+        loop {
+            if publish_visible_directories(
+                &state,
+                &app_handle,
+                generation,
+                visible_generation,
+                &visible_path,
+                source_id.as_deref(),
+                &directories,
+            ) {
+                break;
+            }
+            if state.scan_generation.load(Ordering::Acquire) != generation
+                || state.visible_scan_generation.load(Ordering::Acquire) != visible_generation
+            {
+                return Ok(());
+            }
+            // The only non-generation rejection is an Opening reader. Sleep
+            // outside scan_lifecycle, then retry so directory metadata is not
+            // lost when the reader intent races the final publication.
+            std::thread::sleep(READER_SCAN_WAIT);
+        }
         Ok(())
     })
     .await
-    .map_err(|error| error.to_string())?;
+    .map_err(|error| error.to_string())
+    .and_then(|result| result);
     if let Some(task) = smb_task {
         let smb_result = task.await.map_err(|error| error.to_string())?;
-        if local_result.is_ok() {
-            return Ok(());
-        }
-        return smb_result;
+        return combine_visible_scan_results(local_result, smb_result, source_scoped);
     }
     local_result
 }
 
+/// Coalesces concurrent scan requests behind one supervisor. A running
+/// provider call remains non-preemptible, but a new request never creates a
+/// second blocking worker that could starve the reader; it is replayed against
+/// the latest state after the current worker reaches a return point.
 pub async fn start_background_scan(state: Arc<AppState>, app_handle: tauri::AppHandle) {
+    if !claim_scan_supervisor(&state).await {
+        return;
+    }
+
+    loop {
+        {
+            // Clear only while holding the hand-off gate. A requester that
+            // arrives after this point either changes the latest state before
+            // this iteration starts, or sets the flag for the next iteration;
+            // it cannot be overwritten by an unlocked store.
+            let _gate = state.scan_supervisor_gate.lock().await;
+            state
+                .scan_supervisor_requested
+                .store(false, std::sync::atomic::Ordering::Release);
+        }
+        let worker_generation = state
+            .scan_generation
+            .load(std::sync::atomic::Ordering::Acquire)
+            .saturating_add(1);
+        let worker = tokio::spawn(start_background_scan_once(
+            state.clone(),
+            app_handle.clone(),
+        ));
+        if let Err(error) = worker.await {
+            eprintln!("❌ 全庫掃描背景工作中止：{error}");
+            let _ = mark_scan_worker_failure_if_current(
+                &state,
+                &app_handle,
+                worker_generation,
+                format!("全庫掃描背景工作中止：{error}"),
+            )
+            .await;
+        }
+
+        // Hold the same gate used by requesters while deciding whether to
+        // stop. This closes the race where a new request arrives between the
+        // final flag read and clearing `running`.
+        if finish_scan_supervisor(&state).await {
+            continue;
+        }
+        return;
+    }
+}
+
+async fn claim_scan_supervisor(state: &AppState) -> bool {
+    let _gate = state.scan_supervisor_gate.lock().await;
+    if state
+        .scan_supervisor_running
+        .swap(true, std::sync::atomic::Ordering::AcqRel)
+    {
+        state
+            .scan_supervisor_requested
+            .store(true, std::sync::atomic::Ordering::Release);
+        false
+    } else {
+        true
+    }
+}
+
+async fn finish_scan_supervisor(state: &AppState) -> bool {
+    let _gate = state.scan_supervisor_gate.lock().await;
+    if state
+        .scan_supervisor_requested
+        .load(std::sync::atomic::Ordering::Acquire)
+    {
+        true
+    } else {
+        state
+            .scan_supervisor_running
+            .store(false, std::sync::atomic::Ordering::Release);
+        false
+    }
+}
+
+async fn start_background_scan_once(state: Arc<AppState>, app_handle: tauri::AppHandle) {
     let requested_dir = state.scan_dir.read().unwrap().clone();
     let probe_dir = requested_dir.clone();
     let source_exists = tokio::task::spawn_blocking(move || {
@@ -1838,7 +2230,7 @@ pub async fn start_background_scan(state: Arc<AppState>, app_handle: tauri::AppH
                 reconcile_smb_offline_sources(&state, my_gen, Some(smb_source_id.clone())).await;
                 let state_clone = state.clone();
                 let handle = app_handle.clone();
-                tokio::spawn(async move {
+                let _ = async move {
                     println!("🌐 開始掃描 SMB NAS...");
                     {
                         let mut progress = state_clone.scan_progress.lock().await;
@@ -1942,7 +2334,8 @@ pub async fn start_background_scan(state: Arc<AppState>, app_handle: tauri::AppH
                         println!("✅ SMB 掃描完成，總共 {count} 本漫畫");
                         finish_scan_if_current(&state_clone, &handle, my_gen, Some(count)).await;
                     }
-                });
+                }
+                .await;
             } else {
                 reconcile_smb_offline_sources(&state, my_gen, None).await;
                 finish_scan_if_current(&state, &app_handle, my_gen, Some(local_count)).await;
@@ -2078,6 +2471,194 @@ mod tests {
             Duration::ZERO
         ));
         assert!(should_publish_partial(2, 1, PARTIAL_LIBRARY_INTERVAL));
+    }
+
+    #[test]
+    fn reader_priority_yields_only_the_background_lane() {
+        assert!(should_yield_to_reader(ReaderPriority::Opening, None));
+        assert!(should_yield_to_reader(ReaderPriority::Opening, Some(1)));
+        assert!(should_yield_to_reader(ReaderPriority::Active, None));
+        assert!(!should_yield_to_reader(ReaderPriority::Active, Some(1)));
+        assert!(!should_yield_to_reader(ReaderPriority::Idle, None));
+        assert!(!should_yield_to_reader(ReaderPriority::Idle, Some(1)));
+    }
+
+    #[tokio::test]
+    async fn saved_scan_lane_waits_async_and_cancels_by_generation() {
+        let state = Arc::new(AppState::new());
+        state.scan_generation.store(1, Ordering::Release);
+        state.saved_scan_generation.store(1, Ordering::Release);
+        *state.pending_open_id.lock().unwrap() = Some("opening".into());
+
+        let waiting_state = state.clone();
+        let waiter =
+            tokio::spawn(async move { wait_for_saved_scan_lane(&waiting_state, 1, 1).await });
+        tokio::time::sleep(Duration::from_millis(10)).await;
+        assert!(state.comic_lifecycle.try_lock().is_ok());
+        *state.pending_open_id.lock().unwrap() = None;
+        assert!(waiter.await.unwrap());
+
+        *state.pending_open_id.lock().unwrap() = Some("opening".into());
+        let cancelling_state = state.clone();
+        let cancelled =
+            tokio::spawn(async move { wait_for_saved_scan_lane(&cancelling_state, 1, 1).await });
+        tokio::time::sleep(Duration::from_millis(10)).await;
+        state.saved_scan_generation.store(2, Ordering::Release);
+        assert!(!cancelled.await.unwrap());
+    }
+
+    #[test]
+    fn recent_saved_preparation_distinguishes_deferred_from_no_item() {
+        assert!(matches!(
+            RecentSavedPreparation::Deferred,
+            RecentSavedPreparation::Deferred
+        ));
+        assert!(matches!(
+            RecentSavedPreparation::NoItem,
+            RecentSavedPreparation::NoItem
+        ));
+        assert!(matches!(
+            RecentSavedPreparation::Stale,
+            RecentSavedPreparation::Stale
+        ));
+    }
+
+    #[test]
+    fn unscoped_visible_scan_accepts_one_successful_source() {
+        assert_eq!(
+            combine_visible_scan_results(Err("local failed".into()), Ok(()), false),
+            Ok(())
+        );
+        assert_eq!(
+            combine_visible_scan_results(Ok(()), Err("smb failed".into()), false),
+            Ok(())
+        );
+        assert_eq!(
+            combine_visible_scan_results(
+                Err("local failed".into()),
+                Err("smb failed".into()),
+                false,
+            ),
+            Err("本機可見目錄掃描失敗：local failed；SMB 可見目錄掃描失敗：smb failed".into())
+        );
+        assert_eq!(combine_visible_scan_results(Ok(()), Ok(()), false), Ok(()));
+    }
+
+    #[test]
+    fn scoped_visible_scan_does_not_hide_a_lane_error() {
+        assert_eq!(
+            combine_visible_scan_results(Err("local failed".into()), Ok(()), true),
+            Err("local failed".into())
+        );
+        assert_eq!(
+            combine_visible_scan_results(Ok(()), Err("smb failed".into()), true),
+            Err("smb failed".into())
+        );
+        assert_eq!(
+            combine_visible_scan_results(
+                Err("local failed".into()),
+                Err("smb failed".into()),
+                true,
+            ),
+            Err("本機可見目錄掃描失敗：local failed；SMB 可見目錄掃描失敗：smb failed".into())
+        );
+    }
+
+    #[test]
+    fn reader_wait_releases_lifecycle_and_recovers_on_close_or_cancel() {
+        let state = Arc::new(AppState::new());
+        state.scan_generation.store(1, Ordering::Release);
+        *state.active_comic_id.lock().unwrap() = Some("reading".into());
+        let (started_tx, started_rx) = std::sync::mpsc::channel();
+        let (finished_tx, finished_rx) = std::sync::mpsc::channel();
+        let waiting_state = state.clone();
+        let waiter = std::thread::spawn(move || {
+            started_tx.send(()).unwrap();
+            yield_to_reader_if_needed(&waiting_state, 1, None);
+            finished_tx.send(()).unwrap();
+        });
+        started_rx
+            .recv_timeout(Duration::from_secs(1))
+            .expect("reader wait did not start");
+        assert!(finished_rx.recv_timeout(Duration::from_millis(20)).is_err());
+        // The sleep happens after reader_priority releases this lock.
+        assert!(state.comic_lifecycle.try_lock().is_ok());
+        *state.active_comic_id.lock().unwrap() = None;
+        finished_rx
+            .recv_timeout(Duration::from_secs(1))
+            .expect("reader close did not release scan wait");
+        waiter.join().unwrap();
+
+        *state.active_comic_id.lock().unwrap() = Some("reading".into());
+        let (cancelled_tx, cancelled_rx) = std::sync::mpsc::channel();
+        let cancelled_state = state.clone();
+        let cancelled = std::thread::spawn(move || {
+            yield_to_reader_if_needed(&cancelled_state, 1, None);
+            cancelled_tx.send(()).unwrap();
+        });
+        std::thread::sleep(Duration::from_millis(10));
+        state.scan_generation.store(2, Ordering::Release);
+        cancelled_rx
+            .recv_timeout(Duration::from_secs(1))
+            .expect("superseding generation did not cancel reader wait");
+        cancelled.join().unwrap();
+    }
+
+    #[tokio::test]
+    async fn scan_supervisor_coalesces_requests_without_dropping_latest() {
+        let state = AppState::new();
+        assert!(claim_scan_supervisor(&state).await);
+        assert!(!claim_scan_supervisor(&state).await);
+        assert!(state.scan_supervisor_requested.load(Ordering::Acquire));
+        assert!(finish_scan_supervisor(&state).await);
+        assert!(state.scan_supervisor_running.load(Ordering::Acquire));
+
+        state
+            .scan_supervisor_requested
+            .store(false, Ordering::Release);
+        assert!(!finish_scan_supervisor(&state).await);
+        assert!(!state.scan_supervisor_running.load(Ordering::Acquire));
+    }
+
+    #[tokio::test]
+    async fn scan_supervisor_releases_running_after_worker_join_error() {
+        let state = AppState::new();
+        assert!(claim_scan_supervisor(&state).await);
+        let worker = tokio::spawn(async { panic!("test worker panic") });
+        assert!(worker.await.is_err());
+        assert!(!finish_scan_supervisor(&state).await);
+        assert!(!state.scan_supervisor_running.load(Ordering::Acquire));
+    }
+
+    #[test]
+    fn scan_worker_failure_marks_only_its_generation() {
+        let state = AppState::new();
+        let mut progress = state.scan_progress.blocking_lock();
+        progress.generation = 7;
+        progress.is_scanning = true;
+        progress.phase = "discovering".into();
+        assert!(apply_scan_worker_failure(
+            &mut progress,
+            7,
+            "worker panic".into()
+        ));
+        assert!(!progress.is_scanning);
+        assert_eq!(progress.phase, "error");
+        assert_eq!(progress.error.as_deref(), Some("worker panic"));
+        assert!(progress.completed_at.is_some());
+
+        progress.generation = 8;
+        progress.is_scanning = true;
+        progress.phase = "discovering".into();
+        progress.error = None;
+        assert!(!apply_scan_worker_failure(
+            &mut progress,
+            7,
+            "stale worker".into()
+        ));
+        assert!(progress.is_scanning);
+        assert_eq!(progress.generation, 8);
+        assert!(progress.error.is_none());
     }
 
     #[test]

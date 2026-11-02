@@ -3576,7 +3576,11 @@ function markCoverUnavailable(img) {
 
 function drainCoverLoadQueue() {
   coverLoadTimer = null;
-  if (coverScrollActive) return;
+  // Once a reader open has been requested, do not start more shelf-cover
+  // requests. Existing native requests are allowed to finish, but new cover
+  // work must yield to the first reader page (especially for external
+  // archives whose cover route may still enumerate the archive).
+  if (coverScrollActive || state.currentComic || state.pendingComicId) return;
   while (coverLoadActive < COVER_LOAD_CONCURRENCY && coverLoadQueue.length > 0) {
     let visibleIndex = coverLoadQueue.findIndex(img => coverVisibleImages.has(img) && img.dataset.coverPriority !== 'secondary');
     if (visibleIndex < 0) visibleIndex = coverLoadQueue.findIndex(img => coverVisibleImages.has(img));
@@ -6431,7 +6435,13 @@ async function openReader(comicOrId, { returnToComicFolder = false } = {}) {
   } finally {
     clearTimeout(state._smbLoaderTimer);
     state._smbLoaderTimer = null;
-    if (operation === state.readerOperation) hideLoader();
+    if (operation === state.readerOperation) {
+      hideLoader();
+      // openComic failures clear pendingComicId in the catch path without
+      // going through closeReader. Resume covers here once that failed
+      // operation has fully released the reader intent.
+      if (!state.currentComic && !state.pendingComicId) scheduleCoverLoadDrain(0);
+    }
   }
 }
 
@@ -6564,6 +6574,11 @@ async function closeReader({ switchingComic = false } = {}) {
   } else {
     await progressQueueToFlush;
   }
+
+  // A normal reader close returns control to the shelf. Resume any queued
+  // covers only after native reader cleanup has completed; switching opens
+  // keep the queue paused until the next reader operation settles.
+  if (!switchingComic) scheduleCoverLoadDrain(0);
 
   if (elements.btnAiExplain) elements.btnAiExplain.hidden = false;
   if (elements.btnAiAutoExplain) elements.btnAiAutoExplain.hidden = false;

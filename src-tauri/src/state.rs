@@ -561,6 +561,12 @@ pub struct AppState {
     pub saved_scan_generation: std::sync::atomic::AtomicU64,
     pub saved_scan_closed_generation: std::sync::atomic::AtomicU64,
     pub scan_lifecycle: Mutex<()>,
+    /// Ensures only one full-library scan supervisor owns the blocking scan
+    /// worker. New requests set `scan_supervisor_requested` and are coalesced
+    /// after the current synchronous provider call returns.
+    pub scan_supervisor_gate: Mutex<()>,
+    pub scan_supervisor_running: AtomicBool,
+    pub scan_supervisor_requested: AtomicBool,
     pub preload_generation: std::sync::atomic::AtomicU64,
     pub memory_pressure: AtomicU8,
     pub cache_budget_bytes: AtomicUsize,
@@ -616,6 +622,18 @@ pub struct AppState {
     pub photo_network_allowed: AtomicBool,
 }
 
+/// 儲存掃描器應讓路的讀者生命週期狀態。
+///
+/// `Opening` 必須優先於所有掃描；已經在閱讀時，完整掃描讓路，但目前
+/// 可見目錄掃描仍可提供第二順位的目錄內容。這個狀態只讀取既有 reader
+/// 欄位，不新增另一套可能失同步的旗標。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ReaderPriority {
+    Idle,
+    Opening,
+    Active,
+}
+
 impl AppState {
     pub fn new() -> Self {
         Self {
@@ -639,6 +657,9 @@ impl AppState {
             saved_scan_generation: std::sync::atomic::AtomicU64::new(0),
             saved_scan_closed_generation: std::sync::atomic::AtomicU64::new(0),
             scan_lifecycle: Mutex::new(()),
+            scan_supervisor_gate: Mutex::new(()),
+            scan_supervisor_running: AtomicBool::new(false),
+            scan_supervisor_requested: AtomicBool::new(false),
             preload_generation: std::sync::atomic::AtomicU64::new(0),
             memory_pressure: AtomicU8::new(MemoryPressure::Normal as u8),
             cache_budget_bytes: AtomicUsize::new(measured_memory_budget(MemoryPressure::Normal)),
@@ -681,6 +702,22 @@ impl AppState {
 
     pub fn memory_pressure_level(&self) -> MemoryPressure {
         MemoryPressure::from_raw(self.memory_pressure.load(Ordering::Acquire))
+    }
+
+    /// 以既有 reader lifecycle 原子地觀察掃描優先權。
+    ///
+    /// 呼叫端不可將這個觀察誤解為搶占：它只是在下一個同步 I/O 邊界
+    /// 之前讓掃描工作暫停；已經進入 `read_dir`、provider metadata 或
+    /// archive index 的同步呼叫仍會跑到返回。
+    pub(crate) fn reader_priority(&self) -> ReaderPriority {
+        let _lifecycle = self.comic_lifecycle.lock().unwrap();
+        if self.pending_open_id.lock().unwrap().is_some() {
+            ReaderPriority::Opening
+        } else if self.active_comic_id.lock().unwrap().is_some() {
+            ReaderPriority::Active
+        } else {
+            ReaderPriority::Idle
+        }
     }
 
     pub fn current_cache_budget_bytes(&self) -> usize {
@@ -975,7 +1012,7 @@ mod tests {
     use super::{
         calculate_memory_budget, device_cache_budget, AppState, ComicItem, CoverCache,
         CoverCacheKey, MemoryBudgetInputs, MemoryPressure, OnlineServicesConfig, Progress,
-        SourceRevision, COVER_CACHE_MAX_BYTES, COVER_CACHE_MAX_ENTRY_BYTES, GIB,
+        ReaderPriority, SourceRevision, COVER_CACHE_MAX_BYTES, COVER_CACHE_MAX_ENTRY_BYTES, GIB,
         MAX_COMPRESSED_PAGE_CACHE_BYTES,
     };
     use std::collections::HashMap;
@@ -1398,5 +1435,15 @@ mod tests {
             CoverCacheKey::for_comic(&comic("smb:a", "book.cbz"), revision.clone()),
             CoverCacheKey::for_comic(&comic("smb:a", "other.cbz"), revision),
         );
+    }
+
+    #[test]
+    fn reader_priority_uses_pending_before_active_without_new_state() {
+        let state = AppState::new();
+        assert_eq!(state.reader_priority(), ReaderPriority::Idle);
+        *state.active_comic_id.lock().unwrap() = Some("active".into());
+        assert_eq!(state.reader_priority(), ReaderPriority::Active);
+        *state.pending_open_id.lock().unwrap() = Some("opening".into());
+        assert_eq!(state.reader_priority(), ReaderPriority::Opening);
     }
 }

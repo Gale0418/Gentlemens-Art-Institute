@@ -135,7 +135,8 @@ exec /bin/mv "$@"`);
   const log = path.join(root, 'sign.log');
   const environment = {
     ...process.env,
-    PATH: `${bin}:${process.env.PATH}`,
+    // Deliberately omit ripgrep: the signer must run with the macOS baseline PATH.
+    PATH: `${bin}:/usr/bin:/bin`,
     GAI_MOCK_ROOT: mockRoot,
     GAI_MOCK_LOG: log,
     GAI_MOCK_ARCHS: 'arm64 x86_64',

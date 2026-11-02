@@ -1,5 +1,8 @@
 import fs from 'node:fs';
 import assert from 'node:assert/strict';
+import { spawnSync } from 'node:child_process';
+import os from 'node:os';
+import path from 'node:path';
 import vm from 'node:vm';
 
 const bridge = fs.readFileSync('public/tauri-api.js', 'utf8');
@@ -10,6 +13,250 @@ const toolchain = fs.readFileSync('rust-toolchain.toml', 'utf8');
 const cargoManifest = fs.readFileSync('src-tauri/Cargo.toml', 'utf8');
 const packageDocument = JSON.parse(fs.readFileSync('package.json', 'utf8'));
 const releaseMetadata = JSON.parse(fs.readFileSync('docs/release/gai-app-store-connect-metadata.json', 'utf8'));
+
+const releaseGate = spawnSync('bash', ['scripts/release/asc-dry-run.sh'], { encoding: 'utf8' });
+const releaseGateOutput = `${releaseGate.stdout}\n${releaseGate.stderr}`;
+assert.equal(releaseGate.status, 3, 'known unresolved active release evidence must remain blocked');
+assert.match(releaseGateOutput, /active evidence blockers: [1-9]/, 'gate must count active evidence blockers');
+assert.match(releaseGateOutput, /LOCAL DRY-RUN: BLOCKED/, 'gate must fail closed without ASC/network access');
+assert.doesNotMatch(releaseGateOutput, /TODO_APP_ID|TODO_VERSION|TODO_BUILD_ID/, 'historical/template TODO text must not drive the gate output');
+assert.equal(releaseMetadata.activeEvidence?.status, 'BLOCKED', 'canonical metadata must keep unresolved evidence blocked');
+assert.equal(releaseMetadata.activeEvidence?.blockers?.length, 8, 'all fixed active evidence blockers must remain represented');
+assert.ok(
+  releaseMetadata.activeEvidence?.blockers?.some(item => item.id === 'developer-program-agreement' && item.status === 'BLOCKED'),
+  'Developer Program agreement action must remain an independent blocker'
+);
+assert.equal(releaseMetadata.nextReleasePreparation?.version, '1.0.3');
+assert.equal(releaseMetadata.nextReleasePreparation?.status, 'BLOCKED', '1.0.3 preparation must not be presented as released');
+assert.equal(releaseMetadata.remoteReleaseState?.platforms?.find(item => item.platform === 'IOS')?.version, '1.0.2');
+assert.equal(releaseMetadata.remoteReleaseState?.platforms?.find(item => item.platform === 'IOS')?.buildNumber, '63');
+assert.equal(releaseMetadata.remoteReleaseState?.iap?.state, 'APPROVED');
+assert.match(releaseMetadata.remoteReleaseState?.appPrivacy || '', /published-readback/);
+assert.match(releaseMetadata.remoteReleaseState?.appPrivacy || '', /1\.0\.3.*unverified/);
+
+const releaseGateFixtureDir = fs.mkdtempSync(path.join(os.tmpdir(), 'gai-release-gate-'));
+try {
+  // Synthetic shape-only records: this test validates parser invariants, not external evidence.
+  const syntheticVerifiedBlockers = releaseMetadata.activeEvidence.blockers.map(blocker => ({
+    ...blocker,
+    status: 'VERIFIED',
+    verifiedAt: '2026-11-02',
+    evidenceRef: `synthetic:release-gate/${blocker.id}`,
+    evidence: 'Synthetic regression fixture records completed evidence shape; no external claim.'
+  }));
+  const releaseGateFixture = {
+    ...releaseMetadata,
+    status: 'ready-local-evidence',
+    historical: { ...releaseMetadata.historical, note: 'TODO historical marker must be ignored' },
+    ascCommandTemplates: { ...releaseMetadata.ascCommandTemplates, note: 'TODO command placeholder must be ignored' },
+    reviewInformation: {
+      ...releaseMetadata.reviewInformation,
+      sevenRequiredCategories: Object.fromEntries(
+        Object.keys(releaseMetadata.reviewInformation.sevenRequiredCategories).map(category => [category, {
+          status: 'VERIFIED',
+          value: 'Synthetic regression fixture records completed review-category shape; no external claim.',
+          evidence: `synthetic:review-category/${category}`
+        }])
+      )
+    },
+    testFlightGate: releaseMetadata.testFlightGate.map(item => ({
+      ...item,
+      status: 'VERIFIED',
+      evidence: 'Synthetic regression fixture records completed gate shape; no external claim.'
+    })),
+    privacyAndCompliance: {
+      ...releaseMetadata.privacyAndCompliance,
+      appPrivacyQuestionnaire: 'Synthetic regression fixture records completed App Privacy shape; no external claim.'
+    },
+    activeEvidence: {
+      status: 'READY',
+      blockers: syntheticVerifiedBlockers
+    }
+  };
+  const releaseGateFixturePath = path.join(releaseGateFixtureDir, 'metadata.json');
+  const runReleaseGateFixture = fixture => {
+    fs.writeFileSync(releaseGateFixturePath, JSON.stringify(fixture));
+    return spawnSync('bash', ['scripts/release/asc-dry-run.sh'], {
+      encoding: 'utf8',
+      env: { ...process.env, METADATA_FILE_OVERRIDE: releaseGateFixturePath }
+    });
+  };
+  const gateOutput = result => `${result.stdout}\n${result.stderr}`;
+  const cleanGate = runReleaseGateFixture(releaseGateFixture);
+  assert.equal(cleanGate.status, 0, 'historical and command-template TODO markers must not block a clean active-evidence gate');
+  assert.match(gateOutput(cleanGate), /LOCAL DRY-RUN: PASS/);
+  const legalLeapGate = runReleaseGateFixture({
+    ...releaseGateFixture,
+    activeEvidence: {
+      ...releaseGateFixture.activeEvidence,
+      blockers: releaseGateFixture.activeEvidence.blockers.map(blocker => ({ ...blocker, verifiedAt: '2024-02-29' }))
+    }
+  });
+  assert.equal(legalLeapGate.status, 0, 'a real past leap-day verifiedAt must be accepted');
+  const timestampGate = runReleaseGateFixture({
+    ...releaseGateFixture,
+    activeEvidence: {
+      ...releaseGateFixture.activeEvidence,
+      blockers: releaseGateFixture.activeEvidence.blockers.map(blocker => ({ ...blocker, verifiedAt: '2024-02-29T12:34:56.123Z' }))
+    }
+  });
+  assert.equal(timestampGate.status, 0, 'a real past UTC timestamp verifiedAt must be accepted');
+
+  const partialGate = runReleaseGateFixture({
+    ...releaseGateFixture,
+    status: 'blocked-local-evidence',
+    activeEvidence: {
+      status: 'BLOCKED',
+      blockers: releaseMetadata.activeEvidence.blockers.map((blocker, index) =>
+        index === 0 ? syntheticVerifiedBlockers[index] : blocker
+      )
+    }
+  });
+  assert.equal(partialGate.status, 3, 'partially verified evidence must remain blocked');
+  assert.match(gateOutput(partialGate), /active evidence blockers: 7/);
+  assert.match(gateOutput(partialGate), /LOCAL DRY-RUN: BLOCKED/);
+
+  const readyWithActiveTodos = runReleaseGateFixture({
+    ...releaseGateFixture,
+    testFlightGate: releaseMetadata.testFlightGate,
+    privacyAndCompliance: releaseMetadata.privacyAndCompliance
+  });
+  assert.equal(readyWithActiveTodos.status, 2, 'ready metadata with active TestFlight/App Privacy TODOs must fail closed');
+  assert.match(gateOutput(readyWithActiveTodos), /ready-local-evidence requires testFlightGate/);
+
+  const assertSchemaFailure = (fixture, message, pattern) => {
+    const result = runReleaseGateFixture(fixture);
+    assert.equal(result.status, 2, message);
+    assert.match(gateOutput(result), /LOCAL DRY-RUN: FAIL/);
+    assert.match(gateOutput(result), pattern, message);
+  };
+  assertSchemaFailure(
+    {
+      ...releaseGateFixture,
+      activeEvidence: {
+        ...releaseGateFixture.activeEvidence,
+        blockers: releaseGateFixture.activeEvidence.blockers.map((blocker, index) =>
+          index === 0 ? { ...blocker, verifiedAt: '2026-02-31' } : blocker
+        )
+      }
+    },
+    'nonexistent calendar date must fail closed',
+    /requires a valid verifiedAt/
+  );
+  assertSchemaFailure(
+    {
+      ...releaseGateFixture,
+      activeEvidence: {
+        ...releaseGateFixture.activeEvidence,
+        blockers: releaseGateFixture.activeEvidence.blockers.map((blocker, index) =>
+          index === 0 ? { ...blocker, verifiedAt: '2999-01-01' } : blocker
+        )
+      }
+    },
+    'future verifiedAt must fail closed',
+    /requires a valid verifiedAt/
+  );
+  assertSchemaFailure(
+    { ...releaseGateFixture, testFlightGate: [] },
+    'empty TestFlight gate must fail closed',
+    /missing ready-local-evidence testFlightGate artifact/
+  );
+  assertSchemaFailure(
+    { ...releaseGateFixture, testFlightGate: releaseGateFixture.testFlightGate.slice(0, -1) },
+    'missing TestFlight gate item must fail closed',
+    /missing ready-local-evidence testFlightGate readiness/
+  );
+  assertSchemaFailure(
+    {
+      ...releaseGateFixture,
+      testFlightGate: [...releaseGateFixture.testFlightGate, { ...releaseGateFixture.testFlightGate[0] }]
+    },
+    'duplicate TestFlight gate item must fail closed',
+    /duplicate ready-local-evidence testFlightGate id artifact/
+  );
+  assertSchemaFailure(
+    {
+      ...releaseGateFixture,
+      reviewInformation: {
+        ...releaseGateFixture.reviewInformation,
+        sevenRequiredCategories: {
+          ...releaseGateFixture.reviewInformation.sevenRequiredCategories,
+          physicalRecording: {
+            ...releaseGateFixture.reviewInformation.sevenRequiredCategories.physicalRecording,
+            status: 'TODO'
+          }
+        }
+      }
+    },
+    'unfinished review category must fail closed',
+    /review category physicalRecording requires status VERIFIED/
+  );
+  assertSchemaFailure(
+    {
+      ...releaseGateFixture,
+      status: 'blocked-local-evidence',
+      activeEvidence: {
+        status: 'BLOCKED',
+        blockers: releaseMetadata.activeEvidence.blockers.map((blocker, index) =>
+          index === 0
+            ? { ...syntheticVerifiedBlockers[index], evidence: 'Release evidence remains unverified' }
+            : blocker
+        )
+      }
+    },
+    'pending text cannot be relabeled VERIFIED',
+    /cannot contain placeholder language/
+  );
+  assertSchemaFailure(
+    { ...releaseGateFixture, status: 'blocked-local-evidence', activeEvidence: { status: 'BLOCKED' } },
+    'missing blocker list must fail closed',
+    /activeEvidence\.blockers must be an array/
+  );
+  assertSchemaFailure(
+    {
+      ...releaseGateFixture,
+      status: 'blocked-local-evidence',
+      activeEvidence: {
+        status: 'BLOCKED',
+        blockers: releaseMetadata.activeEvidence.blockers.map((blocker, index) =>
+          index === 0 ? { ...blocker, status: 'PENDING' } : blocker
+        )
+      }
+    },
+    'unknown blocker status must fail closed',
+    /must have status BLOCKED/
+  );
+  assertSchemaFailure(
+    {
+      ...releaseGateFixture,
+      status: 'blocked-local-evidence',
+      activeEvidence: { status: 'BLOCKED', blockers: [null] }
+    },
+    'non-object blocker must fail closed',
+    /must be an object/
+  );
+  assertSchemaFailure(
+    {
+      ...releaseGateFixture,
+      status: 'blocked-local-evidence',
+      activeEvidence: {
+        status: 'BLOCKED',
+        blockers: releaseMetadata.activeEvidence.blockers.map((blocker, index) =>
+          index === 0 ? { id: blocker.id, status: blocker.status } : blocker
+        )
+      }
+    },
+    'missing blocker evidence must fail closed',
+    /requires evidence/
+  );
+  assertSchemaFailure(
+    { ...releaseGateFixture, status: 'blocked-local-evidence', activeEvidence: { status: 'BLOCKED', blockers: [] } },
+    'blocked release with an empty blocker list must fail closed',
+    /missing active evidence blocker physical-recording/
+  );
+} finally {
+  fs.rmSync(releaseGateFixtureDir, { recursive: true, force: true });
+}
 
 assert.match(toolchain, /channel = "1\.98\.1"/, 'release toolchain must pin Rust 1.98.1');
 assert.match(cargoManifest, /rust-version = "1\.98\.1"/, 'Cargo MSRV must match Rust 1.98.1');

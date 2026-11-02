@@ -1,35 +1,92 @@
 {
   "schemaVersion": 1,
-  "status": "draft-blocked",
-  "lastReviewed": "2026-09-28",
+  "status": "blocked-local-evidence",
+  "lastReviewed": "2026-11-02",
   "sourceOfTruth": "docs/release/gai-app-store-connect-metadata.json",
+  "remoteReleaseState": {
+    "checkedAt": "2026-11-02",
+    "appStoreConnectAppId": "6809937717",
+    "bundleId": "com.windsheep.gai",
+    "platforms": [
+      {
+        "platform": "IOS",
+        "version": "1.0.2",
+        "versionId": "c639b7d5-79bd-423b-b025-027ea1e64c16",
+        "buildNumber": "63",
+        "buildId": "ea84ce01-9a3a-412f-84ca-2ed8e31c14bc",
+        "processingState": "VALID",
+        "distributionState": "READY_FOR_DISTRIBUTION",
+        "reviewState": "COMPLETE",
+        "blockingIssues": []
+      },
+      {
+        "platform": "MAC_OS",
+        "version": "1.0.2",
+        "versionId": "5d50df94-abf3-4eb8-bb12-8e19d7a7d70a",
+        "buildNumber": "59",
+        "buildId": "d84fdf6e-481e-4d62-bd7c-0ac2171b2e16",
+        "processingState": "VALID",
+        "distributionState": "READY_FOR_DISTRIBUTION",
+        "reviewState": "COMPLETE",
+        "blockingIssues": []
+      }
+    ],
+    "iap": {
+      "productId": "com.windsheep.gai.pro.v1",
+      "iapId": "6809937934",
+      "type": "NON_CONSUMABLE",
+      "state": "APPROVED",
+      "baseTerritory": "TWN",
+      "price": "TWD 150"
+    },
+    "screenshots": {
+      "IOS": {
+        "zh-Hant": { "count": 12, "deliveryState": "COMPLETE" },
+        "en-US": { "count": 9, "deliveryState": "COMPLETE" },
+        "ja": { "count": 9, "deliveryState": "COMPLETE" }
+      }
+    },
+    "ageRating": "declaration-present",
+    "appPrivacy": "published-readback-approximately-one-month-before-2026-11-02; one data type Photos or Videos for App Functionality and linked to the user; 1.0.3 and third-party data flows remain unverified",
+    "encryption": {
+      "declarationState": "CREATED",
+      "availableOnFrenchStore": true,
+      "build63UsesNonExemptEncryption": false,
+      "buildAssociation": "not-confirmed"
+    }
+  },
+  "nextReleasePreparation": {
+    "version": "1.0.3",
+    "status": "BLOCKED",
+    "evidence": "Preparation only; no App Store Connect 1.0.3 version or build was read back in this review. Device, App Privacy, encryption linkage, commerce, and release-build evidence remain unresolved."
+  },
   "release": {
     "platform": "IOS",
     "lane": "TestFlight-first; App Store submission requires action-time owner confirmation",
     "appStoreConnectAppId": "6809937717",
     "bundleId": "com.windsheep.gai",
-    "version": "1.0.0",
-    "build": "42; App Store Connect processingState VALID; attached to iOS version 1.0 on 2026-09-28",
+    "version": "1.0.2",
+    "build": "63; App Store Connect processingState VALID; iOS version 1.0.2 is READY_FOR_DISTRIBUTION as read back 2026-11-02",
     "minimumOS": "15.0",
     "rustToolchain": "1.98.1",
     "supportedDevices": [
       "iPhone and iPad in the processed iOS build; physical final-package checks pending"
     ],
-    "signingAndArtifactEvidence": "App Store Connect build b0d10edc-d86d-4ca2-bc54-425f611cc4ec (42) processed VALID and attached to version 1.0; minimum iOS 15.0. A local signed IPA hash was not independently reread this turn.",
+    "signingAndArtifactEvidence": "App Store Connect build ea84ce01-9a3a-412f-84ca-2ed8e31c14bc (63) processed VALID and attached to iOS version 1.0.2; a local signed IPA hash and physical recording remain unverified.",
     "launchLocales": [
       "zh-Hant",
       "en-US",
       "ja"
     ],
-    "appStoreVersionId": "f2110298-4d29-4ba1-8fa4-9310c72ee321",
+    "appStoreVersionId": "c639b7d5-79bd-423b-b025-027ea1e64c16",
     "releaseType": "MANUAL"
   },
   "monetizationDraft": {
-    "status": "draft-blocked",
+    "status": "blocked-local-evidence",
     "model": "Free core reading plus a one-time v1 Pro purchase; no subscription",
-    "storeKitStatus": "StoreKit 2 source integrated; TODO: sandbox purchase/restore/offline/revocation and physical release-build evidence",
+    "storeKitStatus": "StoreKit 2 source integrated; App Store Connect IAP is APPROVED; TODO: sandbox purchase/restore/offline/revocation and physical release-build evidence",
     "productId": "com.windsheep.gai.pro.v1",
-    "price": "Configured and read back 2026-09-09: TWD 150 one-time v1 Pro purchase, base territory TWN; not yet approved for sale",
+    "price": "App Store Connect read back 2026-11-02: TWD 150 one-time v1 Pro purchase, base territory TWN, state APPROVED; physical transaction evidence remains TODO",
     "apiQuota": "No API quota is bundled with the purchase",
     "aiDelivery": "Cloud BYOK only; no on-device model is included in this launch specification",
     "free": [
@@ -88,7 +145,7 @@
         "ja"
       ]
     },
-    "metadataSyncStatus": "uploaded-read-back zh-Hant iOS and macOS 2026-09-28; en-US and ja unchanged"
+    "metadataSyncStatus": "Historical listing localization readback recorded 2026-09-28; current source changes are not claimed as uploaded."
   },
   "reviewInformation": {
     "sevenRequiredCategories": {
@@ -99,8 +156,8 @@
       },
       "deviceAndOperatingSystem": {
         "status": "partially-known",
-        "value": "Processed App Store Connect build 1.0 (42) reports minimum iOS 15.0. Physical review device model, OS, and recording evidence for this final package remain pending.",
-        "evidence": "App Store Connect build b0d10edc-d86d-4ca2-bc54-425f611cc4ec; physical-device checks pending"
+        "value": "Processed App Store Connect build 1.0.2 (63) reports a valid iOS release; physical review device model, OS, and recording evidence for this final package remain pending.",
+        "evidence": "App Store Connect build ea84ce01-9a3a-412f-84ca-2ed8e31c14bc; physical-device checks pending"
       },
       "purposeAndTargetAudience": {
         "status": "drafted",
@@ -141,8 +198,8 @@
       "If demonstrating direct SMB, state that the server is user-selected and show only a disposable review share; confirm the core reader also works with a local or mounted folder.",
       "End in the app and inspect the exported movie for readable text, continuous physical-device evidence, no secrets, no private metadata, and no unlicensed or age-restricted review material."
     ],
-    "submissionStatus": "Existing draft c6e3d075-2fb5-4958-8334-2717254ddeb9 is READY_FOR_REVIEW and contains the Pro IAP only; app version 1.0 is not attached. Do not create a duplicate submission.",
-    "exportCompliance": "Declaration d6b66a68-a11c-4fd9-93cc-0ee6b994a6b0 exists with availableOnFrenchStore=true and state CREATED. On 2026-09-28 its builds relationship was empty, its French declaration document relationship was null, and asc validate blocked build 42 with build.encryption.declaration_missing."
+    "submissionStatus": "Remote iOS 1.0.2 review state is COMPLETE with no blocking issues as read back 2026-11-02; local physical-device and release-evidence gates remain blocked.",
+    "exportCompliance": "Declaration d6b66a68-a11c-4fd9-93cc-0ee6b994a6b0 remains CREATED with availableOnFrenchStore=true in the current readback; association with build 63 and any required document remain unconfirmed."
   },
   "privacyAndCompliance": {
     "privacyPolicyURL": "https://github.com/Gale0418/Gentlemens-Art-Institute/blob/main/README.md#隱私政策",
@@ -151,7 +208,7 @@
     "appPrivacyQuestionnaire": "TODO: complete from the processed release build. Explicitly assess local catalog data, selected page images/prompts sent to optional AI providers, SMB connection data, diagnostics, and whether any data is linked to the user or used for tracking.",
     "ageRating": "App Store Connect questionnaire completed 2026-09-27: FOUR_PLUS for bundled all-ages demo and reader features",
     "copyrightAndContentReview": "App Store Connect declaration DOES_NOT_USE_THIRD_PARTY_CONTENT; bundled reviewer demo is original all-ages landscape artwork. User-provided files remain user responsibility.",
-    "exportCompliance": "Standard third-party cryptography declaration d6b66a68-a11c-4fd9-93cc-0ee6b994a6b0 remains CREATED and is not linked to build 42; App Store Connect availability for France was set to unavailable on 2026-09-28 and read back as FRA=false, so French-store declaration paperwork is not being pursued. General export-compliance declaration/build linkage remains required and unresolved.",
+    "exportCompliance": "Standard third-party cryptography declaration d6b66a68-a11c-4fd9-93cc-0ee6b994a6b0 remains CREATED with current remote readback availableOnFrenchStore=true; build 63 association and required declaration paperwork remain unresolved.",
     "openSourceNotices": "docs/release/THIRD_PARTY_NOTICES.md; original vendor notices are retained under src-tauri/vendor/; verify shipping or public-link placement before submission",
     "supportContactEvidence": "Public support address approved for this project.",
     "frenchStoreAvailability": {
@@ -161,12 +218,27 @@
       "note": "France removed at owner direction to avoid ANSSI declaration paperwork; other territories were unchanged."
     }
   },
+  "activeEvidence": {
+    "status": "BLOCKED",
+    "policy": "Remote distribution readiness does not replace local physical-device, privacy, encryption, commerce, or release-build evidence.",
+    "verificationRule": "A VERIFIED item requires a valid verifiedAt and evidenceRef and cannot use placeholder language; the local parser validates record shape only and does not prove external facts.",
+    "blockers": [
+      { "id": "physical-recording", "status": "BLOCKED", "evidence": "Physical device recording, device model/OS, and capture log are not in the repository." },
+      { "id": "app-privacy", "status": "BLOCKED", "evidence": "Read-only ASC App Privacy page readback (approximately one month before 2026-11-02) shows Published: one data type, Photos or Videos, used for App Functionality and linked to the user; privacy URL points to README #隱私政策. The 1.0.3 release behavior and third-party data flows still require release-build assessment." },
+      { "id": "export-compliance", "status": "BLOCKED", "evidence": "Encryption declaration is CREATED; association with iOS build 63 and required document are unconfirmed." },
+      { "id": "reviewer-content", "status": "BLOCKED", "evidence": "Owner approval of the authorized reviewer sample and rights/content checklist is pending." },
+      { "id": "storekit-release-build", "status": "BLOCKED", "evidence": "Purchase, restore, offline entitlement, revocation/refund, and physical storefront evidence are pending." },
+      { "id": "smb-release-build", "status": "BLOCKED", "evidence": "Disposable-share timeout, disconnect, and credential-clearing evidence is pending." },
+      { "id": "ai-release-build", "status": "BLOCKED", "evidence": "Release-build provider disclosure, consent, Keychain, and candidate-review evidence is pending." },
+      { "id": "developer-program-agreement", "status": "BLOCKED", "evidence": "ASC App list reports a Developer Program agreement update requiring the account holder to review and accept it before updates or submissions; owner action is pending." }
+    ]
+  },
   "testFlightGate": [
     {
       "id": "artifact",
       "check": "Signed IPA is built from the intended commit with Rust 1.98.1 and processed by Apple",
       "status": "processed-valid",
-      "evidence": "App Store Connect version 1.0, build b0d10edc-d86d-4ca2-bc54-425f611cc4ec (42), processingState VALID on 2026-09-28; local signed IPA SHA-256 not independently reread this turn."
+      "evidence": "App Store Connect iOS version 1.0.2, build ea84ce01-9a3a-412f-84ca-2ed8e31c14bc (63), processingState VALID on 2026-11-02; local signed IPA SHA-256 and physical recording remain unverified."
     },
     {
       "id": "physical-device",
@@ -213,25 +285,40 @@
   ],
   "unknowns": [
     "TODO: physical recording filename, device model, OS, and capture evidence",
-    "TODO: public G.A.I privacy policy URL and support URL",
-    "TODO: final App Privacy answers, age rating, export compliance, and rights/content approval",
-    "TODO: final screenshots and app icon/store asset readback",
+    "TODO: App Privacy answers and web-session readback",
+    "TODO: encryption declaration association for build 63 and reviewer rights/content approval",
+    "TODO: final package icon and release-build network/provider confirmation",
     "TODO: StoreKit purchase/restore/offline/revocation evidence and physical storefront currency/price verification",
     "TODO: release-build confirmation of network entitlements, external service behavior, and provider availability"
   ],
   "ascCommandTemplates": {
     "note": "Templates only. This repository script never invokes ASC or makes network requests.",
-    "validate": "asc validate --app TODO_APP_ID --version TODO_VERSION --platform IOS --output table",
-    "stageDryRun": "asc release stage --app TODO_APP_ID --version TODO_VERSION --build-id TODO_BUILD_ID --metadata-dir ./metadata/version/TODO_VERSION --dry-run --output table",
-    "reviewDryRun": "asc review submit --app TODO_APP_ID --version TODO_VERSION --build-id TODO_BUILD_ID --dry-run --output table",
-    "confirmationRule": "Do not add --confirm until the owner has reviewed the local evidence, the remote dry-run output, and all TODOs are resolved."
+    "validate": "asc validate --app 6809937717 --version 1.0.2 --platform IOS --output table",
+    "stageDryRun": "asc release stage --app 6809937717 --version 1.0.2 --build-id ea84ce01-9a3a-412f-84ca-2ed8e31c14bc --dry-run --output table",
+    "reviewDryRun": "asc review submit --app 6809937717 --version 1.0.2 --build-id ea84ce01-9a3a-412f-84ca-2ed8e31c14bc --dry-run --output table",
+    "confirmationRule": "Do not add --confirm until the owner has reviewed the local evidence, the remote dry-run output, and all active evidence blockers are resolved."
   },
   "macOSRelease": {
-    "appStoreVersionId": "6bbb5919-ea45-4234-b4a3-627b6889bcd8",
-    "version": "1.0",
-    "state": "PREPARE_FOR_SUBMISSION",
-    "build": "Upload attempt 0b6521e2-4540-43d1-80a5-6c20c0f39723 rejected by Apple with ITMS-90242 missing LSApplicationCategoryType, ITMS-90869 arm64-only architecture at macOS 10.13 minimum, and ITMS-90255 icon.icns mode 0700. Rebuilding universal arm64+x86_64 after adding public.app-category.entertainment and correcting icon resource readability.",
-    "metadataSyncStatus": "uploaded-read-back zh-Hant 2026-09-28; en-US and ja unchanged",
-    "screenshots": "none found for this version; App Store validation reports screenshots.required.any"
+    "version": "1.0.2",
+    "state": "READY_FOR_DISTRIBUTION",
+    "build": "App Store Connect build d84fdf6e-481e-4d62-bd7c-0ac2171b2e16 (59) processingState VALID; review COMPLETE and no blocking issues in 2026-11-02 readback.",
+    "appStoreVersionId": "5d50df94-abf3-4eb8-bb12-8e19d7a7d70a",
+    "metadataSyncStatus": "Remote 1.0.2 status read back 2026-11-02; current source changes are not claimed as uploaded.",
+    "screenshots": "Current source screenshot inventory was not independently read back for macOS in this turn."
+  },
+  "historical": {
+    "initialMetadataReview": {
+      "reviewedAt": "2026-09-28",
+      "iosVersion": "1.0.0",
+      "iosBuildNumber": "42",
+      "iosBuildId": "b0d10edc-d86d-4ca2-bc54-425f611cc4ec",
+      "iosVersionId": "f2110298-4d29-4ba1-8fa4-9310c72ee321"
+    },
+    "initialMacOSSubmission": {
+      "version": "1.0",
+      "state": "PREPARE_FOR_SUBMISSION",
+      "note": "Failed first-release attempt; retained for traceability only and not current release status."
+    },
+    "note": "Historical values are excluded from active evidence gating."
   }
 }

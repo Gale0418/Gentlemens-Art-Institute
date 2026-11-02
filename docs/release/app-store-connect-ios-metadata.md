@@ -1,8 +1,22 @@
 # G.A.I App Store Connect／TestFlight 發行資料與審查包
 
-狀態：`draft-blocked`。本文件的人讀版本對應 canonical JSON：`docs/release/gai-app-store-connect-metadata.json`。修改欄位時先更新 JSON，再同步本文件；不要把 App Store Connect 私密資料、API key、SMB 密碼或真實裝置識別碼提交到 repo。
+狀態：`BLOCKED（local evidence）`。ASC 遠端回讀顯示 iOS 1.0.2（build 63）與 macOS 1.0.2（build 59）均為 `READY_FOR_DISTRIBUTION`，但本機實機、隱私、加密、交易與 release-build 證據尚未完成。本文件的人讀版本對應 canonical JSON：`docs/release/gai-app-store-connect-metadata.json`。修改欄位時先更新 JSON，再同步本文件；不要把 App Store Connect 私密資料、API key、SMB 密碼或真實裝置識別碼提交到 repo。
 
-本文件保留發行資料與證據清單；既有遠端設定以 canonical JSON 的日期紀錄為準，本次文件同步未呼叫遠端 ASC 或提交版本。`scripts/release/asc-dry-run.sh` 只做本地 JSON／欄位／秘密掃描與命令模板輸出。
+本文件保留發行資料與證據清單；2026-11-02 的遠端狀態回讀已寫入 canonical JSON，未在本次修補中執行 ASC 寫入或提交。`scripts/release/asc-dry-run.sh` 只做本地 JSON／欄位／秘密掃描與命令模板輸出，僅以 `activeEvidence` 阻擋，不會把歷史文字或命令佔位文字當成目前待辦。
+
+只有八項 active evidence 全部具備 `VERIFIED`、`verifiedAt`、`evidenceRef`，八個固定 TestFlight gate 項目完整且唯一、七類 review category 完成，且 App Privacy questionnaire 沒有佔位文字時，才可進入 READY；parser 只驗證紀錄形狀，不能自動證明外部事實，仍需人工核對。
+
+## 目前遠端狀態（唯讀回讀）
+
+- iOS 1.0.2（build 63）：processing `VALID`、`READY_FOR_DISTRIBUTION`，review `COMPLETE`，無遠端 blocking issue。
+- macOS 1.0.2（build 59）：processing `VALID`、`READY_FOR_DISTRIBUTION`，review `COMPLETE`，無遠端 blocking issue。
+- IAP `com.windsheep.gai.pro.v1`：`APPROVED`，台灣基準價格回讀為 TWD 150；購買、恢復、離線權益與撤銷仍需實機證據。
+- iOS 的 zh-Hant／en-US／ja 截圖集合回讀為 `COMPLETE`；macOS 截圖本輪未獨立回讀。
+- Age Rating 有 declaration；ASC App Privacy 頁面唯讀回讀約一個月前已發布，聲明 1 種「照片或影片」資料用於 App 功能且與使用者身分連結，隱私政策指向 README `#隱私政策`；1.0.3 真實行為與第三方資料流仍未對照驗證。build 63 回讀 `usesNonExemptEncryption=false`，但加密 declaration 為 `CREATED` 且與 build 63 的關聯尚未確認。
+
+1.0.0／build 42 與早期 macOS 1.0 首發失敗資料已移至 canonical JSON 的 `historical` 區段，僅供追溯，不代表目前版本狀態。
+
+1.0.3 目前僅是準備中的下一版本，canonical JSON 明確標為 `BLOCKED`；本輪沒有 1.0.3 的 ASC version/build 回讀，不能把它當成已上傳、已審查或已上架。
 
 ## 首發商業模型（已整合，待完整交易驗收）
 
@@ -10,7 +24,7 @@
 
 undo／復原、資料安全保護、已產生的 AI 結果與匯出不以付費封鎖。AI 僅走使用者自備金鑰（BYOK）的雲端路徑，不提供裝置端模型或內含 API 額度。v1 Pro 是首發版本的買斷範圍，不承諾所有未來新增功能永久免費；已購得的 v1 Pro 權益必須在後續支援版本中保留，不因 v2 發布或日後新增訂閱方案而收回。
 
-StoreKit 2 原生程式、後端權益檢查與 Pro 介面已整合；本機／沙盒交易與實機證據尚未完成，不代表已具備送審資格。依 2026-09-09 設定回讀紀錄，Product ID 為 `com.windsheep.gai.pro.v1`，台灣基準價格為 NT$150；尚未核准販售，實際 StoreKit 交易與裝置商店地區／幣別驗證仍為 `TODO`。正式包送審前，必須能驗證購買、恢復、離線權益判定與 revocation／退款後收回；TestFlight 應驗證完整功能與沙盒購買流程，且沙盒權益不得流入正式環境。
+StoreKit 2 原生程式、後端權益檢查與 Pro 介面已整合；本機／沙盒交易與實機證據尚未完成，不代表已具備送審資格。依 2026-11-02 遠端回讀，Product ID 為 `com.windsheep.gai.pro.v1`，台灣基準價格為 TWD 150，商品狀態為 `APPROVED`；實際 StoreKit 交易與裝置商店地區／幣別驗證仍為 `TODO`。正式包送審前，必須能驗證購買、恢復、離線權益判定與 revocation／退款後收回；TestFlight 應驗證完整功能與沙盒購買流程，且沙盒權益不得流入正式環境。
 
 ## 已知發行身分
 
@@ -22,7 +36,7 @@ StoreKit 2 原生程式、後端權益檢查與 Pro 介面已整合；本機／�
 | 最低 OS | iOS 15.0 | `src-tauri/gen/apple/project.yml`；仍須以 processed build 回讀確認 |
 | Rust release toolchain | `1.98.1` | `rust-toolchain.toml`、`src-tauri/Cargo.toml`、本機品質檢查 |
 | App Store Connect App ID | `6809937717` | canonical JSON 既有回讀紀錄 |
-| Marketing version／Build | `1.0.0`／processed build `TODO` | 版本依 canonical JSON；build 以實際上傳並 processed 的 artifact 回讀 |
+| Marketing version／Build | `1.0.2`／processed build `63` | ASC 回讀為 `VALID`；本機 signed artifact hash 與實機錄影仍待補 |
 | 隱私政策 URL | README 隱私政策段落；公開回讀 `TODO` | 使用者指定 README，不另架站；推送後驗證 GitHub main 公開連結 |
 | 支援 URL／聯絡方式 | URL 待發布；公開支援信箱 `coderb0418@gmail.com` | 依使用者指定參考 MediBuddy 上架文件第 57 行；尚未寄信 |
 
@@ -30,7 +44,7 @@ StoreKit 2 原生程式、後端權益檢查與 Pro 介面已整合；本機／�
 
 App Name（zh-Hant-TW）：`紳士藝術研究所`
 
-首發已核准繁體中文、英文（en-US）與日文（ja）；英文名稱為 `Gentlemen's Art Institute`。依 canonical JSON 紀錄，三語文案已於 2026-09-09 上傳並回讀 App Store Connect；隱私／支援 URL 與審查素材仍待補齊。
+首發規劃包含繁體中文、英文（en-US）與日文（ja）；英文名稱為 `Gentlemen's Art Institute`。既有三語文案同步是歷史回讀紀錄，不能視為本輪 source changes 已上傳；隱私／支援 URL 與審查素材仍待補齊。
 
 Subtitle：`圖片轉條漫，往下滑就能看`
 
@@ -86,25 +100,26 @@ Not applicable as a regulated service: the app provides no medical, diagnostic, 
 | 類別 | 目前狀態 | 送審前證據 |
 | --- | --- | --- |
 | 實機錄影 | `TODO` | 實體裝置、實際 build、可播放檔名 |
-| 裝置／OS | 部分已知 | 最低 iOS 15.0；實機型號／OS／processed build `TODO` |
+| 裝置／OS | 部分已知 | processed iOS 1.0.2（63）有效；實機型號／OS／錄影證據仍為 `TODO` |
 | 目的與對象 | 草案完成 | `PRODUCT.md` 與最終 listing |
 | 設定與操作 | 草案完成 | 本機／掛載 NAS 流程，SMB credentials 另行安全提供 |
 | 外部服務 | 草案完成，待 release build 確認 | SMB 使用者端點；可選 OpenAI／Google AI 的資料路徑、provider 揭露與 explicit consent |
-| 商業模型／IAP | StoreKit 已整合；台灣基準價格 TWD 150 與 ASC 商品已設定並回讀；Xcode 本機購買與權益查詢成功，交易列舉失敗、撤銷未驗證，待完整驗收 | 最終包可驗證購買、恢復、離線權益與 revocation；正式販售核准與完整交易驗收仍待完成 |
+| 商業模型／IAP | StoreKit 已整合；ASC 商品回讀為 `APPROVED`、台灣基準價格 TWD 150；交易、撤銷與實機完整驗收仍待完成 | 最終包可驗證購買、恢復、離線權益與 revocation；不得把遠端商品核准當成本機交易證據 |
 | 區域差異 | 草案完成，待確認 | 主要語系、商店區域與 provider availability |
-| 受管制／受保護內容 | 需主人決策 | reviewer sample 權利、年齡分級、App Privacy、export compliance |
+| 受管制／受保護內容 | 需主人決策 | reviewer sample 權利、App Privacy、export compliance；Age Rating 有 declaration 但仍須核對最終分發資料 |
 
 ## TestFlight-first Gate
 
-- [ ] 取得 numeric App Store Connect App ID、marketing version、processed build 與 version/build IDs。
+- [x] 取得 numeric App Store Connect App ID、marketing version、processed build 與 version/build IDs；iOS 1.0.2（63）與 macOS 1.0.2（59）已記錄於 canonical JSON。
 - [ ] 產出 signed IPA／archive，保存 artifact SHA-256 與 Apple processing readback；不把 artifact 或秘密放進 repo。
 - [ ] 在實體裝置安裝同一 processed build，跑完整錄影腳本。
 - [ ] 用安全授權 sample 驗證本機／掛載 NAS 匯入、閱讀、離線保留；若宣傳 direct SMB，再測 disposable share、斷線、timeout 與清除設定。
 - [ ] 若宣傳可選 AI，驗證預設關閉、手動觸發、OpenAI／Google provider-specific disclosure、explicit consent、provider 切換重新同意、預設 session-only 與 iOS Keychain 選用保存／清除、候選人工審核；不要提交真實 key、頁面或回應。
-- [ ] 補齊隱私政策 URL、支援 URL／聯絡方式、App Privacy、Age Rating、export compliance、截圖、icon、授權 notices 與地區 localization。
+- [ ] 核對 App Privacy、Age Rating、export compliance 與 reviewer rights；截圖／icon／授權 notices／地區 localization 仍需對最終包完成證據閉環。
+- [ ] 由帳號持有人檢視並接受 ASC App list 顯示的 Developer Program 協議更新；未接受前不得更新或送審。
 - [ ] 先跑 `npm run verify` 與 `scripts/release/asc-dry-run.sh`；之後由主人在自己的已驗證環境執行 `asc validate ... --dry-run`／對應 review dry-run，逐項核對輸出。
-- [ ] 只有所有 TODO 完成且主人在 action-time 審閱後，才可考慮任何 `--confirm` 或提交操作。
+- [ ] 只有 `activeEvidence` 全部完成且主人在 action-time 審閱後，才可考慮任何 `--confirm` 或提交操作。
 
 ## 目前不可代填的欄位
 
-App ID、version／build／version ID／build ID、實機錄影附件、隱私政策與支援 URL、聯絡方式、App Privacy questionnaire、Age Rating、export compliance、reviewer sample 的權利與分級，均明確保留 `TODO`。這些值不能從本機推測，也不能為了讓審查通過而省略實際存在的 SMB 或可選 AI 行為。
+實機錄影附件、App Privacy questionnaire、export compliance 與 reviewer sample 的權利／分級仍明確保留 `TODO`；App ID、version／build／version ID／build ID 已由 2026-11-02 遠端唯讀回讀填入。這些未解項不能從本機推測，也不能為了讓審查通過而省略實際存在的 SMB 或可選 AI 行為。

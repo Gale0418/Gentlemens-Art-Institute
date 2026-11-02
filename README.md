@@ -27,7 +27,7 @@
 - SQLite catalog 是 metadata / location / progress 的主要本機 authority；來源離線不等於資料刪除。
 - 本機、iOS security-scoped folder 與單一 SMB/NAS 是獨立來源；其中一個來源離線不應清除其他來源或 catalog 紀錄。
 - 內建全年齡原創 demo 可在乾淨安裝、沒有 NAS／帳號／第三方下載的情況下直接驗證核心 reader。
-- 2026-11-02：商店 iOS 1.0.2 (63) 與 Mac 1.0.2 (59) 已 `READY_FOR_DISTRIBUTION`；iOS 1.0.3 (66) 已送審、等待 Apple 審查。Mac build 62 的上傳因輔助程式沙盒簽署遭 Apple 拒絕，修正後的 build 63 已建置完成、準備上傳。iPad 開發版 1.0.3 (66) 已實機驗證橫向按鈕、漫畫翻頁與頁碼自動隱藏；完整 TAG、VoiceOver、StoreKit 交易矩陣仍未完成。
+- 2026-11-02：商店 iOS 1.0.2 (63) 與 Mac 1.0.2 (59) 已 `READY_FOR_DISTRIBUTION`；iOS 1.0.3 (66) 已送審、等待 Apple 審查。Mac build 62 的上傳因輔助程式沙盒簽署遭 Apple 拒絕，修正後的 build 63 已建置完成；因後續開書效能回報，暫緩上傳並準備新版。iPad 開發版 1.0.3 (66) 已實機驗證橫向按鈕、漫畫翻頁與頁碼自動隱藏；完整 TAG、VoiceOver、StoreKit 交易矩陣仍未完成。
 - 歷史紀錄（2026-10-03）：Mac `1.0` 已 `READY_FOR_DISTRIBUTION`；iOS `1.0` 與 Mac `1.0.1` 的第57版已撤回，第58版兩平台已正式送審。本機 Mac／iPad 當時為第56版；TAG 探索的 Mac 證據見 [探索體驗報告](docs/audits/2026-10-03-discovery-experience.md)。
 - `src-tauri/vendor/wry/` 是**刻意保留的 iOS WebKit startup patch**，目前仍由 Cargo `[patch.crates-io]` 使用；不要因為它看起來像 vendor 目錄就清掉。
 

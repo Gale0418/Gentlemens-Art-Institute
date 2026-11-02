@@ -155,6 +155,8 @@ validate_build_paths
 
 這個遷移是必要的，因為 `tauri ios init --ci --skip-targets-install` 產生的是乾淨 `gai` project，但不會帶回 repository 內手工保留的 Apple project 設定；staging script 因此採備份後改名並重生 project 的最小路徑。不要為了繞過檢查修改 Cargo package 或 lib name。
 
+`node tests/ios-privacy-sync.mjs` 的一般 PrivacyInfo／PBX fixture 不依賴 `xcodegen`；macOS 上額外的 iOS metadata、交易回滾、signal 與 staging lifecycle fixture 需要本機可執行的 `xcodegen`。若測試環境沒有 `xcodegen`，測試會明確輸出 `SKIP: stage metadata and lifecycle fixtures require xcodegen`，只跳過這組新增 fixture，其餘 privacy 測試仍照常執行。這個 skip 不放寬正式 staging：`stage-ios-build.sh` 在需要解析或重生 `project.yml` 時仍會以 exit 4 明確失敗，不會把缺少 `xcodegen` 視為通過。
+
 完成 staging 後，可先確認生成的 Apple project 與 scheme：
 
 ```bash

@@ -206,6 +206,29 @@ migrate_staged_apple_project() {
   echo "Migrated staged Apple project app -> gai; backup: $backup_root" >&2
 }
 
+validate_staged_apple_project() {
+  local stage_root="$1"
+  local apple_root="$stage_root/src-tauri/gen/apple"
+  local project_yml="$apple_root/project.yml"
+  local project_name project_file
+  [[ -f "$project_yml" ]] || fail_stage "staged project.yml is missing"
+
+  # Externals contains the Rust archive consumed by the Frameworks phase. It
+  # must never be declared as a source/resource directory: XcodeGen would
+  # otherwise copy libapp.a into the application bundle as a standalone file,
+  # which App Store validation rejects as invalid bundle structure.
+  if grep -Eq '^[[:space:]]*-[[:space:]]+path:[[:space:]]+Externals[[:space:]]*$' "$project_yml"; then
+    fail_stage "staged project.yml must not add Externals to application sources/resources; libapp.a is a linked archive"
+  fi
+
+  project_name="$(sed -n 's/^name:[[:space:]]*//p' "$project_yml" | head -n 1 | tr -d '"[:space:]')"
+  [[ -n "$project_name" ]] || fail_stage "cannot read generated Apple project name"
+  project_file="$apple_root/$project_name.xcodeproj/project.pbxproj"
+  if [[ -f "$project_file" ]] && grep -Eq '/\* libapp\.a in Resources \*/' "$project_file"; then
+    fail_stage "generated Apple project places libapp.a in Resources; refusing to package a standalone library"
+  fi
+}
+
 sync_staged_ios_plist() {
   local plist="$1"
   local key type canonical_type canonical_value canonical_json existing_type
@@ -360,6 +383,7 @@ sync_staged_ios_metadata() {
   local -a targets=()
   [[ -d "$apple_root" ]] || fail_stage "staged Apple directory is missing"
   [[ -f "$project_yml" ]] || fail_stage "staged project.yml is missing"
+  validate_staged_apple_project "$stage_root"
   for target in app_iOS gai_iOS; do
     if [[ -d "$apple_root/$target" ]]; then
       targets+=("$target")

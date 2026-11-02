@@ -440,6 +440,76 @@ if (process.platform === 'darwin') {
     assert.deepEqual(fs.readFileSync(projectYml), transactionBefore.project, 'later target failure must roll back project.yml');
     assert.deepEqual(fs.readFileSync(appInfoPath), transactionBefore.app, 'later target failure must roll back earlier target plist changes');
     assert.deepEqual(fs.readFileSync(gaiInfoPath), transactionBefore.gai, 'later target failure must preserve the conflicting target plist');
+
+    const invalidResourcesRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'gai-ios-invalid-resources-'));
+    try {
+      const invalidAppleDir = path.join(invalidResourcesRoot, 'src-tauri/gen/apple');
+      fs.mkdirSync(path.join(invalidAppleDir, 'gai_iOS'), { recursive: true });
+      fs.copyFileSync(canonicalInfoPath, path.join(invalidAppleDir, 'gai_iOS/Info.plist'));
+      fs.writeFileSync(path.join(invalidAppleDir, 'project.yml'), [
+        'name: gai',
+        'targets:',
+        '  gai_iOS:',
+        '    type: application',
+        '    sources:',
+        '      - path: Externals',
+        '      - path: gai_iOS',
+        '    info:',
+        '      path: gai_iOS/Info.plist',
+        '      properties:',
+        '        CFBundleVersion: "65"',
+        '',
+      ].join('\n'));
+      const invalidResources = childProcess.spawnSync('bash', [stageScript, '--sync-ios-metadata', invalidResourcesRoot], {
+        cwd: root,
+        encoding: 'utf8',
+        env: { ...process.env, CANONICAL_IOS_PLIST_OVERRIDE: canonicalInfoPath },
+      });
+      assert.equal(invalidResources.status, 4, 'Externals source must fail closed before packaging');
+      assert.match(invalidResources.stderr, /must not add Externals.*libapp\.a/);
+    } finally {
+      fs.rmSync(invalidResourcesRoot, { recursive: true, force: true });
+    }
+
+    const linkedArchiveRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'gai-ios-linked-archive-'));
+    try {
+      const linkedAppleDir = path.join(linkedArchiveRoot, 'src-tauri/gen/apple');
+      const externalsDir = path.join(linkedAppleDir, 'Externals/arm64/release');
+      fs.mkdirSync(path.join(linkedAppleDir, 'Sources'), { recursive: true });
+      fs.mkdirSync(externalsDir, { recursive: true });
+      // XcodeGen only needs a path-shaped archive for project generation; the
+      // archive is deliberately present to catch accidental source scanning.
+      fs.writeFileSync(path.join(externalsDir, 'libapp.a'), Buffer.from('!<arch>\n'));
+      const linkedProjectYml = path.join(linkedAppleDir, 'project.yml');
+      fs.writeFileSync(linkedProjectYml, [
+        'name: gai',
+        'options:',
+        '  bundleIdPrefix: com.windsheep',
+        'targets:',
+        '  gai_iOS:',
+        '    type: application',
+        '    platform: iOS',
+        '    sources:',
+        '      - path: Sources',
+        '    settings:',
+        '      base:',
+        '        LIBRARY_SEARCH_PATHS[arch=arm64]: $(PROJECT_DIR)/Externals/arm64/$(CONFIGURATION)',
+        '    dependencies:',
+        '      - framework: libapp.a',
+        '        embed: false',
+        '',
+      ].join('\n'));
+      const generated = childProcess.spawnSync('xcodegen', ['generate', '--spec', linkedProjectYml, '--project', linkedAppleDir, '--quiet'], {
+        cwd: root,
+        encoding: 'utf8',
+      });
+      assert.equal(generated.status, 0, `XcodeGen linked archive fixture failed: ${generated.stderr}`);
+      const linkedPbxproj = fs.readFileSync(path.join(linkedAppleDir, 'gai.xcodeproj/project.pbxproj'), 'utf8');
+      assert.doesNotMatch(linkedPbxproj, /libapp\.a in Resources/, 'linked libapp.a must not be emitted in Resources');
+      assert.match(linkedPbxproj, /libapp\.a in Frameworks/, 'linked libapp.a must remain in Frameworks');
+    } finally {
+      fs.rmSync(linkedArchiveRoot, { recursive: true, force: true });
+    }
   } finally {
     fs.rmSync(stageRoot, { recursive: true, force: true });
   }

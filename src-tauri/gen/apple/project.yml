@@ -30,7 +30,6 @@ targets:
     sources:
       - path: Sources
       - path: Assets.xcassets
-      - path: Externals
       - path: app_iOS
       - path: app_iOS/PrivacyInfo.xcprivacy
         buildPhase: resources

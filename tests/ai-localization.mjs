@@ -20,6 +20,7 @@ function extractFunction(name) {
 }
 
 const functions = [
+  'getComicSourceId',
   'getAiExplainLocale',
   'aiExplainCacheKey',
   'localizeAiExplainError',
@@ -94,6 +95,59 @@ assert.deepEqual(calls.map(call => call.targetLocale), ['zh-Hant', 'en', 'ja']);
 pending.shift()('日本語結果');
 await thirdRequest;
 assert.equal(context.state.aiExplainCache.get('comic-1:0:ja'), '日本語結果');
+
+// The same runtime id from two roots must not share an in-flight explanation
+// or let source A's late response paint source B's reader.
+{
+  const sourcePending = [];
+  const sourceContext = {
+    window: { GAIL10n: { locale: 'zh-Hant', t: source => source } },
+    state: {
+      currentComic: { id: 'same-runtime-id', sourceId: 'local:A' },
+      currentComicPages: ['page-a'],
+      currentPageIndex: 0,
+      aiExplainCache: new Map(),
+      aiExplainInFlight: false,
+      aiExplainActiveRequest: null,
+      aiExplainPendingPage: null,
+      aiExplainPendingRequest: null,
+      aiAutoExplain: false,
+      aiSessionStatus: { configured: true },
+      aiSessionSwitchPending: false,
+      aiSessionMutationPending: false,
+      aiSessionRevocationFailed: false,
+      aiSessionSwitchGeneration: 0,
+      aiSessionMutationGeneration: 0,
+    },
+    elements: { aiPageResult: { textContent: '' }, btnAiExplain: { disabled: false } },
+    eAPI: { explainPage: () => new Promise(resolve => sourcePending.push(resolve)) },
+    isBuiltInDemoComic: () => false,
+    pageDataUrl: async () => 'data:image/png;base64,AA==',
+    setAiPagePanelVisible() {},
+    syncReaderRotationUi() {},
+    setAiSessionActionAvailability() {},
+    readerText: source => source,
+    setAutoPageExplanation() {},
+    showReaderToast() {},
+  };
+  vm.runInNewContext(functions, sourceContext);
+  const requestA = sourceContext.requestPageExplanation(0, false);
+  await new Promise(resolve => setImmediate(resolve));
+  sourceContext.state.currentComic = { id: 'same-runtime-id', sourceId: 'smb:B' };
+  sourceContext.state.currentComicPages = ['page-b'];
+  const requestB = sourceContext.requestPageExplanation(0, false);
+  sourcePending.shift()('source A result');
+  await requestA;
+  await new Promise(resolve => setImmediate(resolve));
+  assert.equal(sourceContext.state.aiExplainCache.get('local:A\u0000same-runtime-id:0:zh-Hant'), 'source A result');
+  assert.equal(sourceContext.elements.aiPageResult.textContent, '艦載 AI 正在閱讀第 {page} 頁…',
+    'source A late response cannot paint source B');
+  sourcePending.shift()('source B result');
+  await requestB;
+  await new Promise(resolve => setImmediate(resolve));
+  await new Promise(resolve => setImmediate(resolve));
+  assert.equal(sourceContext.state.aiExplainCache.get('smb:B\u0000same-runtime-id:0:zh-Hant'), 'source B result');
+}
 
 assert.match(
   app,

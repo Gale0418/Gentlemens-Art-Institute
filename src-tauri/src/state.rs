@@ -4,6 +4,204 @@ use std::sync::atomic::{AtomicBool, AtomicU64, AtomicU8, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex as StdMutex, OnceLock, Weak};
 use tokio::sync::Mutex;
 
+/// Identity of the file observed through an already-authorized descriptor.
+///
+/// The path is intentionally not part of this value: an atomic replacement
+/// keeps the path stable while changing the underlying inode.  Unix also
+/// records the status-change time (`ctime`) as a second signal; other
+/// platforms leave it absent.  These are metadata signals, not a content
+/// hash, so they cannot promise collision-free invalidation.
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub struct SourceRevision {
+    pub len: u64,
+    pub modified: Option<(u64, u32)>,
+    pub ctime: Option<(i64, i64)>,
+    pub file_id: Option<(u64, u64)>,
+}
+
+pub(crate) const COVER_CACHE_MAX_BYTES: usize = 24 * 1024 * 1024;
+pub(crate) const COVER_CACHE_MAX_ENTRY_BYTES: usize = 4 * 1024 * 1024;
+
+/// A cover is scoped to both its source location and the descriptor revision
+/// that was authorized for the current request.  The relative path keeps two
+/// books from sharing a cache entry when a source exposes identical file
+/// metadata for more than one location.
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub(crate) struct CoverCacheKey {
+    source_identity: String,
+    revision: SourceRevision,
+}
+
+impl CoverCacheKey {
+    pub(crate) fn for_comic(comic: &ComicItem, revision: SourceRevision) -> Self {
+        Self {
+            source_identity: format!("{}\0{}", comic.source_id, comic.relative_path),
+            revision,
+        }
+    }
+}
+
+#[derive(Debug)]
+struct CoverCacheEntry {
+    bytes: Vec<u8>,
+    mime: &'static str,
+    last_used: u64,
+}
+
+#[derive(Debug, Default)]
+pub(crate) struct CoverCache {
+    entries: HashMap<CoverCacheKey, CoverCacheEntry>,
+    total_bytes: usize,
+    next_use: u64,
+}
+
+impl CoverCache {
+    fn next_use(&mut self) -> u64 {
+        self.next_use = self.next_use.wrapping_add(1);
+        self.next_use
+    }
+
+    fn get(&mut self, key: &CoverCacheKey) -> Option<(Vec<u8>, &'static str)> {
+        let use_stamp = self.next_use();
+        let entry = self.entries.get_mut(key)?;
+        entry.last_used = use_stamp;
+        Some((entry.bytes.clone(), entry.mime))
+    }
+
+    fn insert(&mut self, key: CoverCacheKey, bytes: Vec<u8>, mime: &'static str) -> bool {
+        let size = bytes.len();
+        if size == 0 || size > COVER_CACHE_MAX_ENTRY_BYTES {
+            return false;
+        }
+
+        // Keep at most one revision for a source location.  A replaced archive
+        // can therefore not retain stale cover bytes until the global budget
+        // happens to evict them.
+        let replaced_bytes = self
+            .entries
+            .iter()
+            .filter(|(existing, _)| existing.source_identity == key.source_identity)
+            .map(|(_, entry)| entry.bytes.len())
+            .sum::<usize>();
+        self.entries
+            .retain(|existing, _| existing.source_identity != key.source_identity);
+        self.total_bytes = self.total_bytes.saturating_sub(replaced_bytes);
+
+        while self.total_bytes.saturating_add(size) > COVER_CACHE_MAX_BYTES {
+            let Some(oldest) = self
+                .entries
+                .iter()
+                .min_by_key(|(_, entry)| entry.last_used)
+                .map(|(key, _)| key.clone())
+            else {
+                break;
+            };
+            if let Some(entry) = self.entries.remove(&oldest) {
+                self.total_bytes = self.total_bytes.saturating_sub(entry.bytes.len());
+            }
+        }
+        if self.total_bytes.saturating_add(size) > COVER_CACHE_MAX_BYTES {
+            return false;
+        }
+
+        let last_used = self.next_use();
+        self.total_bytes = self.total_bytes.saturating_add(size);
+        self.entries.insert(
+            key,
+            CoverCacheEntry {
+                bytes,
+                mime,
+                last_used,
+            },
+        );
+        true
+    }
+
+    fn clear(&mut self) {
+        self.entries.clear();
+        self.total_bytes = 0;
+    }
+
+    #[cfg(test)]
+    fn total_bytes(&self) -> usize {
+        self.total_bytes
+    }
+
+    #[cfg(test)]
+    fn len(&self) -> usize {
+        self.entries.len()
+    }
+}
+
+impl SourceRevision {
+    fn from_parts(
+        len: u64,
+        modified: Option<(u64, u32)>,
+        ctime: Option<(i64, i64)>,
+        file_id: Option<(u64, u64)>,
+    ) -> Self {
+        Self {
+            len,
+            modified,
+            ctime,
+            file_id,
+        }
+    }
+
+    pub fn from_std_metadata(metadata: &std::fs::Metadata) -> Self {
+        let modified = metadata
+            .modified()
+            .ok()
+            .and_then(|time| time.duration_since(std::time::UNIX_EPOCH).ok())
+            .map(|duration| (duration.as_secs(), duration.subsec_nanos()));
+        #[cfg(unix)]
+        let ctime = {
+            use std::os::unix::fs::MetadataExt;
+            Some((metadata.ctime(), metadata.ctime_nsec()))
+        };
+        #[cfg(not(unix))]
+        let ctime = None;
+        #[cfg(unix)]
+        let file_id = {
+            use std::os::unix::fs::MetadataExt;
+            Some((metadata.dev(), metadata.ino()))
+        };
+        #[cfg(not(unix))]
+        let file_id = None;
+        Self::from_parts(metadata.len(), modified, ctime, file_id)
+    }
+
+    pub fn from_cap_metadata(metadata: &cap_std::fs::Metadata) -> Self {
+        let modified = metadata
+            .modified()
+            .ok()
+            .and_then(|time| time.into_std().duration_since(std::time::UNIX_EPOCH).ok())
+            .map(|duration| (duration.as_secs(), duration.subsec_nanos()));
+        #[cfg(unix)]
+        let ctime = {
+            use cap_std::fs::MetadataExt;
+            Some((metadata.ctime(), metadata.ctime_nsec()))
+        };
+        #[cfg(not(unix))]
+        let ctime = None;
+        #[cfg(unix)]
+        let file_id = {
+            use cap_std::fs::MetadataExt;
+            Some((metadata.dev(), metadata.ino()))
+        };
+        #[cfg(not(unix))]
+        let file_id = None;
+        Self::from_parts(metadata.len(), modified, ctime, file_id)
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct OpenedArchivePage {
+    pub total_pages: usize,
+    pub page_name: Option<String>,
+    pub revision: SourceRevision,
+}
+
 pub const GIB: u64 = 1024 * 1024 * 1024;
 pub const MAX_COMPRESSED_PAGE_CACHE_BYTES: usize = GIB as usize;
 const MIB: u64 = 1024 * 1024;
@@ -367,7 +565,10 @@ pub struct AppState {
     pub memory_pressure: AtomicU8,
     pub cache_budget_bytes: AtomicUsize,
     pub ram_cache_pool: std::sync::Mutex<HashMap<String, HashMap<usize, Vec<u8>>>>,
+    pub ram_cache_revisions: std::sync::Mutex<HashMap<String, SourceRevision>>,
+    pub(crate) cover_cache: StdMutex<CoverCache>,
     pub opened_comic_files: std::sync::RwLock<HashMap<String, Vec<String>>>,
+    pub opened_comic_revisions: std::sync::RwLock<HashMap<String, SourceRevision>>,
     pub smb_config: std::sync::RwLock<Option<SmbConfig>>,
     pub external_bookmarks: std::sync::RwLock<Vec<ExternalBookmark>>,
     pub external_bookmarks_readable: std::sync::atomic::AtomicBool,
@@ -385,7 +586,12 @@ pub struct AppState {
     pub progress_sequences: tokio::sync::Mutex<HashMap<String, u64>>,
     pub active_bookmarks: std::sync::Mutex<HashMap<String, String>>,
     pub active_comic_id: std::sync::Mutex<Option<String>>,
+    /// Source identity paired with the single active reader ID. Runtime IDs
+    /// are not globally unique, so every reader/cache publication must bind
+    /// both values under `comic_lifecycle`.
+    pub active_comic_source_id: std::sync::Mutex<Option<String>>,
     pub pending_open_id: std::sync::Mutex<Option<String>>,
+    pub pending_open_source_id: std::sync::Mutex<Option<String>>,
     pub comic_lifecycle: std::sync::Mutex<()>,
     pub file_lifecycle: tokio::sync::Mutex<()>,
     pub reader_generation: std::sync::atomic::AtomicU64,
@@ -437,7 +643,10 @@ impl AppState {
             memory_pressure: AtomicU8::new(MemoryPressure::Normal as u8),
             cache_budget_bytes: AtomicUsize::new(measured_memory_budget(MemoryPressure::Normal)),
             ram_cache_pool: std::sync::Mutex::new(HashMap::new()),
+            ram_cache_revisions: std::sync::Mutex::new(HashMap::new()),
+            cover_cache: StdMutex::new(CoverCache::default()),
             opened_comic_files: std::sync::RwLock::new(HashMap::new()),
+            opened_comic_revisions: std::sync::RwLock::new(HashMap::new()),
             smb_config: std::sync::RwLock::new(None),
             external_bookmarks: std::sync::RwLock::new(Vec::new()),
             external_bookmarks_readable: std::sync::atomic::AtomicBool::new(true),
@@ -449,7 +658,9 @@ impl AppState {
             progress_sequences: tokio::sync::Mutex::new(HashMap::new()),
             active_bookmarks: std::sync::Mutex::new(HashMap::new()),
             active_comic_id: std::sync::Mutex::new(None),
+            active_comic_source_id: std::sync::Mutex::new(None),
             pending_open_id: std::sync::Mutex::new(None),
+            pending_open_source_id: std::sync::Mutex::new(None),
             comic_lifecycle: std::sync::Mutex::new(()),
             file_lifecycle: tokio::sync::Mutex::new(()),
             reader_generation: std::sync::atomic::AtomicU64::new(0),
@@ -476,6 +687,156 @@ impl AppState {
         self.cache_budget_bytes.load(Ordering::Acquire)
     }
 
+    pub(crate) fn cached_cover(&self, key: &CoverCacheKey) -> Option<(Vec<u8>, &'static str)> {
+        self.cover_cache.lock().ok()?.get(key)
+    }
+
+    pub(crate) fn cache_cover(
+        &self,
+        key: CoverCacheKey,
+        bytes: Vec<u8>,
+        mime: &'static str,
+    ) -> bool {
+        self.cover_cache
+            .lock()
+            .map(|mut cache| {
+                // Re-check while holding the cache mutex. A request may have
+                // observed Normal before a concurrent pressure transition and
+                // then waited here behind the clearing operation.
+                if self.memory_pressure_level() != MemoryPressure::Normal {
+                    return false;
+                }
+                cache.insert(key, bytes, mime)
+            })
+            .unwrap_or(false)
+    }
+
+    /// Reads the archive index and its revision as one reader-lifecycle
+    /// snapshot. Writers publish both under the same lifecycle lock.
+    pub fn opened_archive_snapshot(
+        &self,
+        id: &str,
+        source_id: &str,
+    ) -> Option<(Vec<String>, SourceRevision)> {
+        let _lifecycle = self.comic_lifecycle.lock().ok()?;
+        if !self.active_reader_matches_locked(id, source_id) {
+            return None;
+        }
+        let pages = self.opened_comic_files.read().ok()?.get(id)?.clone();
+        let revision = self.opened_comic_revisions.read().ok()?.get(id)?.clone();
+        Some((pages, revision))
+    }
+
+    /// Reads only the requested page name and count while keeping the index
+    /// and revision under one lifecycle snapshot. Protocol page requests must
+    /// not clone an entire archive index for every image.
+    pub fn opened_archive_page(
+        &self,
+        id: &str,
+        source_id: &str,
+        page_index: usize,
+    ) -> Option<OpenedArchivePage> {
+        let _lifecycle = self.comic_lifecycle.lock().ok()?;
+        if !self.active_reader_matches_locked(id, source_id) {
+            return None;
+        }
+        let opened = self.opened_comic_files.read().ok()?;
+        let pages = opened.get(id)?;
+        let revision = self.opened_comic_revisions.read().ok()?.get(id)?.clone();
+        Some(OpenedArchivePage {
+            total_pages: pages.len(),
+            page_name: pages.get(page_index).cloned(),
+            revision,
+        })
+    }
+
+    pub fn opened_comic_file(
+        &self,
+        id: &str,
+        source_id: &str,
+        page_index: usize,
+    ) -> Option<String> {
+        let _lifecycle = self.comic_lifecycle.lock().ok()?;
+        if !self.active_reader_matches_locked(id, source_id) {
+            return None;
+        }
+        self.opened_comic_files
+            .read()
+            .ok()?
+            .get(id)
+            .and_then(|files| files.get(page_index).cloned())
+    }
+
+    pub fn opened_comic_page_count(&self, id: &str, source_id: &str) -> Option<usize> {
+        let _lifecycle = self.comic_lifecycle.lock().ok()?;
+        if !self.active_reader_matches_locked(id, source_id) {
+            return None;
+        }
+        self.opened_comic_files.read().ok()?.get(id).map(Vec::len)
+    }
+
+    /// Returns a RAM page only when it belongs to the exact descriptor
+    /// revision supplied by the current protocol request.
+    pub fn cached_page_for_revision(
+        &self,
+        id: &str,
+        source_id: &str,
+        page_index: usize,
+        revision: &SourceRevision,
+    ) -> Option<Vec<u8>> {
+        let _lifecycle = self.comic_lifecycle.lock().ok()?;
+        if !self.active_reader_matches_locked(id, source_id) {
+            return None;
+        }
+        let pool = self.ram_cache_pool.lock().ok()?;
+        let revisions = self.ram_cache_revisions.lock().ok()?;
+        (revisions.get(id) == Some(revision))
+            .then(|| pool.get(id)?.get(&page_index).cloned())
+            .flatten()
+    }
+
+    pub(crate) fn active_reader_matches_locked(&self, id: &str, source_id: &str) -> bool {
+        self.active_comic_id
+            .lock()
+            .ok()
+            .and_then(|active| active.clone())
+            .as_deref()
+            == Some(id)
+            && self
+                .active_comic_source_id
+                .lock()
+                .ok()
+                .and_then(|source| source.clone())
+                .as_deref()
+                == Some(source_id)
+    }
+
+    pub fn active_reader_source(&self, id: &str) -> Option<String> {
+        let _lifecycle = self.comic_lifecycle.lock().ok()?;
+        self.active_comic_id
+            .lock()
+            .ok()
+            .and_then(|active| {
+                active
+                    .as_deref()
+                    .filter(|active| *active == id)
+                    .map(str::to_owned)
+            })
+            .and_then(|_| self.active_comic_source_id.lock().ok()?.clone())
+    }
+
+    /// Captures the active reader identity and generation at one lifecycle
+    /// point. A request must carry this generation through its I/O; checking
+    /// only `(id, source_id)` would let a same-source reopen publish bytes
+    /// selected by the previous reader session.
+    pub fn active_reader_generation(&self, id: &str, source_id: &str) -> Option<u64> {
+        let _lifecycle = self.comic_lifecycle.lock().ok()?;
+        if !self.active_reader_matches_locked(id, source_id) {
+            return None;
+        }
+        Some(self.reader_generation.load(Ordering::Acquire))
+    }
+
     /// Invalidate every reader/preload that was resolved against the previous
     /// local root or external bookmark set.  The lifecycle lock makes the
     /// generation check and pool clear atomic with a preload commit, so an old
@@ -485,9 +846,14 @@ impl AppState {
         self.reader_generation.fetch_add(1, Ordering::SeqCst);
         self.preload_generation.fetch_add(1, Ordering::SeqCst);
         self.ram_cache_pool.lock().unwrap().clear();
+        self.ram_cache_revisions.lock().unwrap().clear();
+        self.cover_cache.lock().unwrap().clear();
         self.opened_comic_files.write().unwrap().clear();
+        self.opened_comic_revisions.write().unwrap().clear();
         *self.active_comic_id.lock().unwrap() = None;
+        *self.active_comic_source_id.lock().unwrap() = None;
         *self.pending_open_id.lock().unwrap() = None;
+        *self.pending_open_source_id.lock().unwrap() = None;
     }
 
     pub fn refresh_cache_budget(&self) -> usize {
@@ -503,9 +869,14 @@ impl AppState {
             MemoryPressure::Normal => desired,
         };
         self.cache_budget_bytes.store(next, Ordering::Release);
-        if next < current {
+        if pressure != MemoryPressure::Normal || next < current {
             let _lifecycle = self.comic_lifecycle.lock().unwrap();
-            self.trim_cache_to_budget_locked(next);
+            if pressure != MemoryPressure::Normal {
+                self.cover_cache.lock().unwrap().clear();
+            }
+            if next < current {
+                self.trim_cache_to_budget_locked(next);
+            }
         }
         next
     }
@@ -521,12 +892,18 @@ impl AppState {
         };
         self.cache_budget_bytes.store(next, Ordering::Release);
 
-        if pressure == MemoryPressure::Critical
-            && MemoryPressure::from_raw(previous) != MemoryPressure::Critical
-        {
+        if pressure != MemoryPressure::Normal {
             let _lifecycle = self.comic_lifecycle.lock().unwrap();
-            self.ram_cache_pool.lock().unwrap().clear();
-            self.preload_generation.fetch_add(1, Ordering::SeqCst);
+            self.cover_cache.lock().unwrap().clear();
+            if pressure == MemoryPressure::Critical
+                && MemoryPressure::from_raw(previous) != MemoryPressure::Critical
+            {
+                self.ram_cache_pool.lock().unwrap().clear();
+                self.ram_cache_revisions.lock().unwrap().clear();
+                self.preload_generation.fetch_add(1, Ordering::SeqCst);
+            } else if next < current {
+                self.trim_cache_to_budget_locked(next);
+            }
         } else if next < current {
             let _lifecycle = self.comic_lifecycle.lock().unwrap();
             self.trim_cache_to_budget_locked(next);
@@ -575,6 +952,15 @@ impl AppState {
             }
         }
         pool.retain(|_, pages| !pages.is_empty());
+        let live_ids = pool
+            .keys()
+            .cloned()
+            .collect::<std::collections::HashSet<_>>();
+        drop(pool);
+        self.ram_cache_revisions
+            .lock()
+            .unwrap()
+            .retain(|id, _| live_ids.contains(id));
     }
 }
 
@@ -587,8 +973,10 @@ impl Default for AppState {
 #[cfg(test)]
 mod tests {
     use super::{
-        calculate_memory_budget, device_cache_budget, AppState, MemoryBudgetInputs, MemoryPressure,
-        OnlineServicesConfig, GIB, MAX_COMPRESSED_PAGE_CACHE_BYTES,
+        calculate_memory_budget, device_cache_budget, AppState, ComicItem, CoverCache,
+        CoverCacheKey, MemoryBudgetInputs, MemoryPressure, OnlineServicesConfig, Progress,
+        SourceRevision, COVER_CACHE_MAX_BYTES, COVER_CACHE_MAX_ENTRY_BYTES, GIB,
+        MAX_COMPRESSED_PAGE_CACHE_BYTES,
     };
     use std::collections::HashMap;
     use std::sync::atomic::Ordering;
@@ -711,6 +1099,27 @@ mod tests {
             .write()
             .unwrap()
             .insert("same-id".into(), vec!["page.jpg".into()]);
+        let revision = SourceRevision {
+            len: 3,
+            modified: None,
+            ctime: None,
+            file_id: None,
+        };
+        state
+            .opened_comic_revisions
+            .write()
+            .unwrap()
+            .insert("same-id".into(), revision.clone());
+        state
+            .ram_cache_revisions
+            .lock()
+            .unwrap()
+            .insert("same-id".into(), revision);
+        state.cover_cache.lock().unwrap().insert(
+            cover_key("local\0same-id", 1),
+            b"cover".to_vec(),
+            "image/jpeg",
+        );
         *state.active_comic_id.lock().unwrap() = Some("same-id".into());
         *state.pending_open_id.lock().unwrap() = Some("same-id".into());
 
@@ -719,8 +1128,275 @@ mod tests {
         assert_eq!(state.reader_generation.load(Ordering::SeqCst), 8);
         assert_eq!(state.preload_generation.load(Ordering::SeqCst), 12);
         assert!(state.ram_cache_pool.lock().unwrap().is_empty());
+        assert!(state.ram_cache_revisions.lock().unwrap().is_empty());
+        assert_eq!(state.cover_cache.lock().unwrap().len(), 0);
         assert!(state.opened_comic_files.read().unwrap().is_empty());
+        assert!(state.opened_comic_revisions.read().unwrap().is_empty());
         assert!(state.active_comic_id.lock().unwrap().is_none());
         assert!(state.pending_open_id.lock().unwrap().is_none());
+    }
+
+    #[test]
+    fn archive_revision_rejects_same_size_atomic_replacement_and_old_cache() {
+        let root = std::env::temp_dir().join(format!(
+            "gai-archive-revision-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        std::fs::create_dir_all(&root).unwrap();
+        let archive = root.join("book.cbz");
+        let replacement = root.join("book.next.cbz");
+        std::fs::write(&archive, b"same-size-old").unwrap();
+        let old_revision = SourceRevision::from_std_metadata(&std::fs::metadata(&archive).unwrap());
+        std::fs::write(&replacement, b"same-size-new").unwrap();
+        std::fs::rename(&replacement, &archive).unwrap();
+        let new_revision = SourceRevision::from_std_metadata(&std::fs::metadata(&archive).unwrap());
+        assert_ne!(old_revision, new_revision);
+
+        let state = AppState::new();
+        state
+            .opened_comic_files
+            .write()
+            .unwrap()
+            .insert("book".into(), vec!["page.jpg".into()]);
+        state
+            .opened_comic_revisions
+            .write()
+            .unwrap()
+            .insert("book".into(), old_revision.clone());
+        state
+            .ram_cache_pool
+            .lock()
+            .unwrap()
+            .insert("book".into(), HashMap::from([(0, b"old-page".to_vec())]));
+        state
+            .ram_cache_revisions
+            .lock()
+            .unwrap()
+            .insert("book".into(), old_revision);
+        *state.active_comic_id.lock().unwrap() = Some("book".into());
+        *state.active_comic_source_id.lock().unwrap() = Some("local:test".into());
+
+        let (_, indexed_revision) = state.opened_archive_snapshot("book", "local:test").unwrap();
+        assert_ne!(indexed_revision, new_revision);
+        let selected = state.opened_archive_page("book", "local:test", 0).unwrap();
+        assert_eq!(selected.total_pages, 1);
+        assert_eq!(selected.page_name.as_deref(), Some("page.jpg"));
+        state.opened_comic_revisions.write().unwrap().clear();
+        assert!(state.opened_archive_page("book", "local:test", 0).is_none());
+        assert_ne!(
+            state.ram_cache_revisions.lock().unwrap().get("book"),
+            Some(&new_revision)
+        );
+        assert!(state
+            .cached_page_for_revision("book", "local:test", 0, &new_revision)
+            .is_none());
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn reader_index_and_ram_cache_are_source_bound_for_same_runtime_id() {
+        let state = AppState::new();
+        state
+            .opened_comic_files
+            .write()
+            .unwrap()
+            .insert("shared".into(), vec!["page.jpg".into()]);
+        let revision = SourceRevision {
+            len: 1,
+            modified: None,
+            ctime: None,
+            file_id: Some((1, 1)),
+        };
+        state
+            .opened_comic_revisions
+            .write()
+            .unwrap()
+            .insert("shared".into(), revision.clone());
+        state
+            .ram_cache_pool
+            .lock()
+            .unwrap()
+            .insert("shared".into(), HashMap::from([(0, b"page".to_vec())]));
+        state
+            .ram_cache_revisions
+            .lock()
+            .unwrap()
+            .insert("shared".into(), revision.clone());
+        *state.active_comic_id.lock().unwrap() = Some("shared".into());
+        *state.active_comic_source_id.lock().unwrap() = Some("local:new".into());
+
+        assert!(state
+            .opened_archive_page("shared", "local:old", 0)
+            .is_none());
+        assert!(state
+            .cached_page_for_revision("shared", "local:old", 0, &revision)
+            .is_none());
+        assert!(state
+            .opened_archive_page("shared", "local:new", 0)
+            .is_some());
+        assert!(state
+            .cached_page_for_revision("shared", "local:new", 0, &revision)
+            .is_some());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn source_revision_changes_after_same_size_in_place_write() {
+        let root = std::env::temp_dir().join(format!(
+            "gai-source-revision-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        std::fs::create_dir_all(&root).unwrap();
+        let archive = root.join("book.cbz");
+        std::fs::write(&archive, b"same-size-old").unwrap();
+        let old_revision = SourceRevision::from_std_metadata(&std::fs::metadata(&archive).unwrap());
+
+        let mut file = std::fs::OpenOptions::new()
+            .write(true)
+            .open(&archive)
+            .unwrap();
+        use std::io::Write;
+        file.write_all(b"same-size-new").unwrap();
+        file.sync_all().unwrap();
+        let new_revision = SourceRevision::from_std_metadata(&std::fs::metadata(&archive).unwrap());
+
+        assert_eq!(old_revision.len, new_revision.len);
+        assert_ne!(old_revision.modified, new_revision.modified);
+        assert_ne!(old_revision.ctime, new_revision.ctime);
+        assert_ne!(old_revision, new_revision);
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn warning_pressure_releases_and_blocks_cover_cache() {
+        let state = AppState::new();
+        let key = cover_key("local\0warning-book.cbz", 1);
+        assert!(state.cache_cover(key.clone(), b"cover".to_vec(), "image/jpeg"));
+        assert!(state.cached_cover(&key).is_some());
+
+        state.set_memory_pressure(MemoryPressure::Warning);
+
+        assert!(state.cached_cover(&key).is_none());
+        assert!(!state.cache_cover(key.clone(), b"cover".to_vec(), "image/jpeg"));
+        state.set_memory_pressure(MemoryPressure::Normal);
+        assert!(state.cache_cover(key.clone(), b"cover".to_vec(), "image/jpeg"));
+        assert!(state.cached_cover(&key).is_some());
+    }
+
+    #[test]
+    fn cover_cache_rechecks_pressure_after_waiting_for_mutex() {
+        let state = AppState::new();
+        let key = cover_key("local\0racing-book.cbz", 1);
+        let cache_guard = state.cover_cache.lock().unwrap();
+        state
+            .memory_pressure
+            .store(MemoryPressure::Warning as u8, Ordering::Release);
+        drop(cache_guard);
+
+        assert!(!state.cache_cover(key.clone(), b"cover".to_vec(), "image/jpeg"));
+        assert!(state.cached_cover(&key).is_none());
+        state.set_memory_pressure(MemoryPressure::Normal);
+    }
+
+    fn cover_key(source: &str, revision: u64) -> CoverCacheKey {
+        CoverCacheKey {
+            source_identity: source.into(),
+            revision: SourceRevision {
+                len: revision,
+                modified: Some((revision, 0)),
+                ctime: Some((revision as i64, 0)),
+                file_id: Some((revision, revision)),
+            },
+        }
+    }
+
+    #[test]
+    fn cover_cache_is_revision_scoped_and_replaces_old_source_bytes() {
+        let mut cache = CoverCache::default();
+        let old = cover_key("local\0book.cbz", 1);
+        let new = cover_key("local\0book.cbz", 2);
+        assert!(cache.insert(old.clone(), b"old".to_vec(), "image/jpeg"));
+        assert_eq!(
+            cache.get(&old).map(|(bytes, _)| bytes),
+            Some(b"old".to_vec())
+        );
+        assert!(cache.insert(new.clone(), b"new".to_vec(), "image/png"));
+        assert!(cache.get(&old).is_none());
+        assert_eq!(
+            cache.get(&new).map(|(bytes, mime)| (bytes, mime)),
+            Some((b"new".to_vec(), "image/png"))
+        );
+        assert_eq!(cache.total_bytes(), 3);
+        assert_eq!(cache.len(), 1);
+    }
+
+    #[test]
+    fn cover_cache_enforces_item_budget_and_lru_total_budget() {
+        let mut cache = CoverCache::default();
+        assert!(!cache.insert(
+            cover_key("too-large", 1),
+            vec![0; COVER_CACHE_MAX_ENTRY_BYTES + 1],
+            "image/jpeg",
+        ));
+
+        let item = vec![7; COVER_CACHE_MAX_ENTRY_BYTES];
+        for index in 0..(COVER_CACHE_MAX_BYTES / COVER_CACHE_MAX_ENTRY_BYTES) {
+            assert!(cache.insert(
+                cover_key(&format!("source-{index}"), index as u64),
+                item.clone(),
+                "image/jpeg",
+            ));
+        }
+        let kept = cover_key("source-0", 0);
+        assert!(cache.get(&kept).is_some());
+        assert!(cache.insert(cover_key("new-source", 99), item, "image/jpeg"));
+        assert!(cache.get(&kept).is_some());
+        assert!(cache.get(&cover_key("source-1", 1)).is_none());
+        assert!(cache.total_bytes() <= COVER_CACHE_MAX_BYTES);
+    }
+
+    #[test]
+    fn cover_cache_key_includes_source_and_relative_path() {
+        let revision = SourceRevision {
+            len: 10,
+            modified: None,
+            ctime: None,
+            file_id: None,
+        };
+        let comic = |source_id: &str, relative_path: &str| ComicItem {
+            id: relative_path.into(),
+            r#type: "archive".into(),
+            relative_path: relative_path.into(),
+            ext: ".cbz".into(),
+            title: "book".into(),
+            series: "series".into(),
+            updated_at: String::new(),
+            page_count: 0,
+            progress: Progress {
+                current_page: 0,
+                total_pages: 0,
+                percent: 0.0,
+                updated_at: None,
+            },
+            source_id: source_id.into(),
+            source_path: None,
+            external_bookmark: None,
+        };
+        assert_ne!(
+            CoverCacheKey::for_comic(&comic("smb:a", "book.cbz"), revision.clone()),
+            CoverCacheKey::for_comic(&comic("smb:b", "book.cbz"), revision.clone()),
+        );
+        assert_ne!(
+            CoverCacheKey::for_comic(&comic("smb:a", "book.cbz"), revision.clone()),
+            CoverCacheKey::for_comic(&comic("smb:a", "other.cbz"), revision),
+        );
     }
 }

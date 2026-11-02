@@ -19,7 +19,9 @@ function extractFunction(name) {
   throw new Error(`unable to extract ${name}`);
 }
 
+const sourceId = vm.runInNewContext(`(${extractFunction('getComicSourceId')})`);
 const sourceKey = vm.runInNewContext(`(${extractFunction('getComicSourceKey')})`, {
+  getComicSourceId: sourceId,
   isBuiltInDemoComic: comic => comic?.sourceId === 'builtin:landscapes',
   isPhotoAlbum: comic => String(comic?.id || '').startsWith('photos:'),
 });
@@ -83,6 +85,86 @@ assert.match(css, /\.reader-overlay\.mode-single\.single-page-pannable \.nav-zon
 assert.match(css, /\.nav-zone[\s\S]*pointer-events: none/, 'nav zones must not intercept viewport touch gestures');
 assert.match(css, /@media \(max-width: 900px\) \{[\s\S]*\.reader-bottom-bar[\s\S]*grid-template-columns: auto minmax\(0, 1fr\)/, 'iPad portrait reader controls use a compact two-row layout');
 assert.match(css, /\.reader-bottom-bar \.bottom-bar-right[\s\S]*overflow-x: auto/, 'narrow reader controls remain horizontally scrollable');
+// 閒置時整個底欄都要離開畫面；觸控裝置不可再覆寫成右下角常駐頁碼。
+const idleBottomRules = [...css.matchAll(/\.reader-overlay\.reader-idle\s+\.reader-bottom-bar\s*\{([^}]*)\}/g)];
+assert.ok(idleBottomRules.length > 0, 'reader idle state defines a bottom-bar rule');
+assert.match(idleBottomRules[0][1], /transform:\s*translateY\(calc\(100%\s*\+/);
+assert.match(idleBottomRules[0][1], /pointer-events:\s*none/);
+for (const [, declarations] of idleBottomRules) {
+  assert.doesNotMatch(declarations, /transform:\s*translateY\(0(?:px|%)?\)/, 'touch idle must not bring the page counter back onscreen');
+  assert.doesNotMatch(declarations, /pointer-events:\s*auto/, 'hidden reader controls must not intercept taps');
+}
+const hiddenIdleBar = css.match(/\.reader-overlay\.reader-idle:not\(\.reader-page-notice\)\s+\.reader-bottom-bar\s*\{([^}]*)\}/)?.[1];
+assert.match(hiddenIdleBar || '', /visibility:\s*hidden/, 'overflowing wrapped counters must not leak into the idle viewport');
+const pageNoticeRule = css.match(/\.reader-overlay\.reader-idle\.reader-page-notice\s+\.reader-bottom-bar\s*\{([^}]*)\}/)?.[1];
+assert.ok(pageNoticeRule, 'only the transient page notice reveals the idle counter');
+assert.match(pageNoticeRule, /transform:\s*translateY\(0\)/);
+assert.match(pageNoticeRule, /pointer-events:\s*none/, 'the transient page counter must not intercept gestures');
+{
+  const classList = (...initial) => {
+    const values = new Set(initial);
+    return {
+      add: value => values.add(value), remove: value => values.delete(value),
+      contains: value => values.has(value),
+    };
+  };
+  const elements = {
+    readerOverlay: { style: { display: 'flex' }, classList: classList('reader-idle') },
+    readerTopBar: { classList: classList() },
+    readerBottomBar: { classList: classList() },
+  };
+  const state = { readingMode: 'single', readerContextMenuOpen: false, readerIdleTimer: null };
+  let idleCallback;
+  const context = {
+    elements, state, window: { innerWidth: 1000 },
+    setTimeout: callback => { idleCallback = callback; return 1; },
+    clearTimeout() {}, isCatalogThumbnailInteraction: () => false,
+  };
+  vm.runInNewContext(`${extractFunction('clearReaderPageNotice')}\n${extractFunction('triggerControlsActive')}\n${pointer}\nglobalThis.tap = handleReaderPointerClick;`, context);
+  context.tap({ button: 0, clientX: 500, target: { closest: () => null } });
+  assert.equal(elements.readerOverlay.classList.contains('reader-idle'), false, 'centre tap reveals the reader controls');
+  assert.equal(elements.readerBottomBar.classList.contains('active'), true, 'revealed controls include the page counter');
+  idleCallback();
+  assert.equal(elements.readerOverlay.classList.contains('reader-idle'), true, 'reader returns to idle after the timer');
+  assert.equal(elements.readerBottomBar.classList.contains('active'), false, 'idle removes the active bottom bar');
+}
+{
+  const classes = new Set(['reader-idle']);
+  const state = { readingMode: 'single', currentPageIndex: 0, currentComicPages: ['one', 'two', 'three'], readerPageNoticeTimer: null };
+  const elements = { readerOverlay: { style: { display: 'flex' }, classList: {
+    add: name => classes.add(name), remove: name => classes.delete(name), contains: name => classes.has(name),
+  } } };
+  const timers = new Map();
+  let nextTimer = 0;
+  let renders = 0;
+  let boundaries = 0;
+  const context = {
+    state, elements, adjacentComicSwitchToken: 0,
+    setTimeout: (callback, delay) => { assert.equal(delay, 1500); timers.set(++nextTimer, callback); return nextTimer; },
+    clearTimeout: timer => timers.delete(timer), renderPages: () => { renders += 1; },
+    openNextComicInFolder: () => { boundaries += 1; }, openPrevComicInFolder: () => { boundaries += 1; },
+  };
+  vm.runInNewContext(`${extractFunction('showReaderPageNotice')}\n${extractFunction('nextPage')}\n${extractFunction('prevPage')}\nglobalThis.next = nextPage; globalThis.prev = prevPage;`, context);
+  context.next();
+  assert.equal(state.currentPageIndex, 1);
+  assert.equal(classes.has('reader-page-notice'), true, 'a real page turn briefly shows the page counter');
+  const firstTimer = state.readerPageNoticeTimer;
+  context.next();
+  assert.equal(timers.has(firstTimer), false, 'rapid turns cancel the older hide timer');
+  assert.equal(timers.size, 1);
+  timers.get(state.readerPageNoticeTimer)();
+  assert.equal(classes.has('reader-page-notice'), false, 'the page counter disappears after inactivity');
+  context.next();
+  assert.equal(boundaries, 1);
+  assert.equal(classes.has('reader-page-notice'), false, 'reaching a boundary without changing page does not flash a stale number');
+  context.prev();
+  assert.equal(classes.has('reader-page-notice'), true, 'turning backwards also shows the page counter');
+  assert.equal(renders, 3);
+  classes.delete('reader-idle');
+  context.prev();
+  classes.add('reader-idle');
+  assert.equal(classes.has('reader-page-notice'), true, 'a page turn just before toolbar timeout retains its notice');
+}
 assert.match(app, /if \(readerTouchClickHandled \|\| readerTouchMoved \|\| readerTouchMulti \|\| readerTouchCancelled\)/, 'reader pointer clicks must retain swipe guards');
 assert.match(app, /e\.target === elements\.progressSlider \|\| e\.target\?\.id === 'progress-slider'/, 'range arrow keys must not trigger document page navigation');
 assert.match(app, /let readingProgressSaveSequence = initialReadingProgressSaveSequence\(\)/, 'progress sequence must survive WebView reloads');
@@ -350,6 +432,14 @@ function createRuntimeHarness(sharedSessionStorage = null) {
     sessionStorage,
     fetch: async () => ({ ok: true, json: async () => ({}) }),
     Image: FakeImage,
+    // bindEvents can refresh the shelf asynchronously; keep its DOM type
+    // guard inert in the VM without changing FakeElement construction.
+    HTMLButtonElement: class {},
+    IntersectionObserver: class {
+      observe() {}
+      unobserve() {}
+      disconnect() {}
+    },
     Option: class {},
     URL: { createObjectURL: () => 'blob:test', revokeObjectURL() {} },
     getComputedStyle: () => ({ paddingLeft: '0', paddingRight: '0', paddingTop: '0', paddingBottom: '0', objectFit: 'contain' }),
@@ -357,6 +447,8 @@ function createRuntimeHarness(sharedSessionStorage = null) {
     cancelAnimationFrame: window.cancelAnimationFrame,
     setTimeout: window.setTimeout,
     clearTimeout: window.clearTimeout,
+    setInterval: () => 0,
+    clearInterval: () => {},
     console,
     alert() {},
     navigator: { userAgent: '', platform: '' },
@@ -515,13 +607,13 @@ function renderWebtoonPages(hooks, count, currentPageIndex) {
 // 換到頁數相同的另一部條漫時，前一本的實測頁高不得污染新書的 spacer。
 {
   const runtime = createRuntimeHarness();
-  runtime.hooks.state.currentComic = comic('webtoon-a', 'webtoon A');
+  runtime.hooks.state.currentComic = { ...comic('same-runtime-id', 'webtoon A'), sourceId: 'local:A' };
   runtime.hooks.state.currentComicPages = ['/a-0.svg', '/a-1.svg', '/a-2.svg'];
   runtime.hooks.state.readingMode = 'webtoon';
   runtime.hooks.renderPages();
   runtime.hooks.state.webtoonPageHeights[0] = 999;
   runtime.hooks.state.webtoonMeasuredPageHeights.set(0, 999);
-  runtime.hooks.state.currentComic = comic('webtoon-b', 'webtoon B');
+  runtime.hooks.state.currentComic = { ...comic('same-runtime-id', 'webtoon B'), sourceId: 'smb:B' };
   runtime.hooks.state.currentComicPages = ['/b-0.svg', '/b-1.svg', '/b-2.svg'];
   runtime.hooks.renderPages();
   assert.notEqual(runtime.hooks.state.webtoonPageHeights[0], 999, 'same-page-count book gets fresh webtoon estimates');
@@ -772,6 +864,52 @@ function renderWebtoonPages(hooks, count, currentPageIndex) {
   assert.equal(findDialog(document), undefined);
 }
 
+// Navigation must keep the source identity when two roots expose the same id;
+// the matching source's sibling is the only valid adjacent target.
+{
+  const { hooks } = createRuntimeHarness();
+  const current = { ...comic('same-id', 'Current SMB'), sourceId: 'smb:one' };
+  hooks.state.currentComic = current;
+  hooks.state.currentComicPages = ['/page.jpg'];
+  hooks.state.comics = [
+    { ...comic('same-id', 'Same ID local'), sourceId: 'local:one' },
+    current,
+    { ...comic('next-id', 'Next SMB'), sourceId: 'smb:one' },
+  ];
+  hooks.invalidateComicNavigationCache();
+  const next = hooks.findAdjacentComicInFolder('next');
+  assert.equal(next?.id, 'next-id');
+  assert.equal(next?.sourceId, 'smb:one', '同 id 的另一來源不可成為相鄰漫畫');
+}
+
+// RAM cache completion from source A must not advance the same-id reader from
+// source B; only the matching source can publish its generation.
+{
+  const { hooks } = createRuntimeHarness();
+  const legacy = { ...comic('same-id', 'Legacy'), sourceId: '', relativePath: 'folder/a.cbz' };
+  hooks.state.currentComic = legacy;
+  hooks.state.comics = [legacy,
+    { ...comic('same-id', 'SMB'), sourceId: 'smb:B', relativePath: 'folder/b.cbz' },
+    { ...comic('next-b', 'Next SMB'), sourceId: 'smb:B', relativePath: 'folder/c.cbz' }];
+  hooks.invalidateComicNavigationCache();
+  assert.equal(hooks.findAdjacentComicInFolder('next'), null,
+    'a legacy comic with no source must not navigate into a different source with the same id');
+  const matches = vm.runInNewContext(`(${extractFunction('comicMatchesIdentity')})`, { getComicSourceId: sourceId });
+  assert.equal(matches(legacy, legacy.id, ''), true);
+  assert.equal(matches(hooks.state.comics[1], legacy.id, ''), false,
+    'an empty legacy source must not select a source-qualified card');
+}
+
+{
+  const { hooks } = createRuntimeHarness();
+  hooks.state.currentComic = { id: 'same-runtime-id', sourceId: 'local:A', preloadGeneration: 3 };
+  hooks.state.currentPageIndex = 0;
+  hooks.handleRamCacheProgress({ id: 'same-runtime-id', sourceId: 'smb:B', generation: 9, pageIndex: 0 });
+  assert.equal(hooks.state.currentComic.preloadGeneration, 3, '跨來源 RAM event 不得更新目前 reader');
+  hooks.handleRamCacheProgress({ id: 'same-runtime-id', sourceId: 'local:A', generation: 4, pageIndex: 0 });
+  assert.equal(hooks.state.currentComic.preloadGeneration, 4, '同來源 RAM event 可更新目前 reader');
+}
+
 // Switching to a normally titled adjacent comic keeps the user's active webtoon mode.
 {
   const { hooks } = createRuntimeHarness();
@@ -800,6 +938,96 @@ function renderWebtoonPages(hooks, count, currentPageIndex) {
 }
 
 console.log('PASS: webtoon navigation buttons, direct open, mode preservation, boundary absence, and cleanup are covered');
+
+// Returning to a page or switching mode cancels a pending adjacent-book open.
+for (const cancel of ['previous', 'jump', 'mode']) {
+  const { hooks, clock, openCalls } = createRuntimeHarness();
+  hooks.elements.readerOverlay.style.display = 'flex';
+  hooks.state.readingMode = 'single';
+  hooks.state.currentComic = comic('a', 'A');
+  hooks.state.currentComicPages = ['/one.jpg', '/two.jpg'];
+  hooks.state.currentPageIndex = 1;
+  hooks.state.comics = [hooks.state.currentComic, comic('b', 'B')];
+  hooks.invalidateComicNavigationCache();
+  assert.equal(hooks.findAdjacentComicInFolder('next')?.id, 'b');
+  hooks.renderPages();
+  hooks.nextPage();
+  clock.tick(400);
+  if (cancel === 'previous') hooks.prevPage();
+  if (cancel === 'jump') hooks.jumpToPage(1);
+  if (cancel === 'mode') {
+    hooks.elements.zoomValue.parentElement = { style: {} };
+    hooks.setReadingMode('webtoon');
+  }
+  clock.tick(500);
+  await new Promise(resolve => setImmediate(resolve));
+  assert.deepEqual(openCalls, [], `${cancel} cancels pending adjacent-book navigation`);
+}
+
+// A boundary navigation still opens the adjacent comic when its intentional
+// 800 ms delay expires; cancellation checks must not accidentally suppress the
+// normal completion path.
+{
+  const { hooks, clock, openCalls } = createRuntimeHarness();
+  hooks.elements.readerOverlay.style.display = 'flex';
+  hooks.state.readingMode = 'single';
+  hooks.state.currentComic = comic('a', 'A');
+  hooks.state.currentComicPages = ['/one.jpg'];
+  hooks.state.currentPageIndex = 0;
+  hooks.state.comics = [hooks.state.currentComic, comic('b', 'B')];
+  hooks.invalidateComicNavigationCache();
+  assert.equal(hooks.findAdjacentComicInFolder('next')?.id, 'b');
+  hooks.renderPages();
+
+  hooks.nextPage();
+  clock.tick(799);
+  assert.deepEqual(openCalls, [], 'adjacent comic waits for the full boundary delay');
+  clock.tick(1);
+  await new Promise(resolve => setImmediate(resolve));
+  assert.deepEqual(openCalls, ['b'], 'adjacent comic opens when the boundary delay expires');
+}
+
+// Closing the reader increments readerOperation; a delayed boundary switch
+// must not reopen a comic after that close has completed.
+{
+  const { hooks, clock, openCalls } = createRuntimeHarness();
+  hooks.elements.readerOverlay.style.display = 'flex';
+  hooks.state.readingMode = 'single';
+  hooks.state.currentComic = comic('a', 'A');
+  hooks.state.currentComicPages = ['/one.jpg'];
+  hooks.state.currentPageIndex = 0;
+  hooks.state.comics = [hooks.state.currentComic, comic('b', 'B')];
+  hooks.invalidateComicNavigationCache();
+  assert.equal(hooks.findAdjacentComicInFolder('next')?.id, 'b');
+  hooks.renderPages();
+
+  hooks.nextPage();
+  await hooks.closeReader();
+  clock.tick(800);
+  await new Promise(resolve => setImmediate(resolve));
+  assert.deepEqual(openCalls, [], 'closeReader cancels delayed adjacent navigation');
+}
+
+// The same guard must work for a reader operation superseded by another
+// operation, even if the old reader has not been explicitly closed yet.
+{
+  const { hooks, clock, openCalls } = createRuntimeHarness();
+  hooks.elements.readerOverlay.style.display = 'flex';
+  hooks.state.readingMode = 'single';
+  hooks.state.currentComic = comic('a', 'A');
+  hooks.state.currentComicPages = ['/one.jpg'];
+  hooks.state.currentPageIndex = 0;
+  hooks.state.comics = [hooks.state.currentComic, comic('b', 'B')];
+  hooks.invalidateComicNavigationCache();
+  assert.equal(hooks.findAdjacentComicInFolder('next')?.id, 'b');
+  hooks.renderPages();
+
+  hooks.nextPage();
+  hooks.state.readerOperation += 1;
+  clock.tick(800);
+  await new Promise(resolve => setImmediate(resolve));
+  assert.deepEqual(openCalls, [], 'a superseded reader operation cancels delayed adjacent navigation');
+}
 
 // Two-page controls keep the cover exception, support a one-page offset, and
 // retain that offset for the following two-page navigation.
@@ -851,6 +1079,24 @@ console.log('PASS: webtoon navigation buttons, direct open, mode preservation, b
   hooks.state.readingMode = 'single';
   assert.equal(hooks.advanceDoubleBySinglePage(), false, 'single mode ignores double shift');
   assert.equal(hooks.toggleDoubleDirection(), false, 'single mode ignores direction action');
+}
+
+// A double-page spread can end with one page; avoid a duplicated range such as 2-2.
+{
+  const { hooks } = createRuntimeHarness();
+  hooks.elements.readerOverlay.style.display = 'flex';
+  hooks.state.currentComic = comic('double-tail', 'Double tail');
+  hooks.state.currentComicPages = ['/cover.svg', '/last.svg'];
+  for (const mode of ['double', 'double-rtl']) {
+    hooks.state.readingMode = mode;
+    hooks.state.currentPageIndex = 1;
+    hooks.renderPages();
+    assert.equal(hooks.elements.pageCounter.textContent, '第 2 / 2 頁', `${mode} shows a single page at the tail`);
+  }
+  hooks.state.currentComicPages.push('/third.svg');
+  hooks.state.readingMode = 'double';
+  hooks.renderPages();
+  assert.equal(hooks.elements.pageCounter.textContent, '第 2-3 / 3 頁', 'a real spread still shows both pages');
 }
 
 // The unified two-page entry remains available while its two auxiliary

@@ -23,9 +23,45 @@ window.GAIL10n.register({
     "en": "This app session can retry, but the progress is not reliably backed up yet.",
     "ja": "このアプリセッションでは再試行できますが、進捗はまだ確実にバックアップされていません。"
   },
+  "書架仍在掃描，候選可能變動。": {
+    "en": "The shelf is still scanning; possible matches may change.",
+    "ja": "本棚をスキャン中です。候補が変わる可能性があります。"
+  },
   "部分舊進度無法確認來源，無法自動重試。": {
     "en": "Some older progress has an unknown source and cannot be retried automatically.",
     "ja": "一部の古い進捗は保存元を確認できないため、自動的に再試行できません。"
+  },
+  "未保存進度：{name}（{pages}）": {
+    "en": "Unsaved progress: {name} ({pages})",
+    "ja": "未保存の進捗：{name}（{pages}）"
+  },
+  "未保存進度：來源未確認；可能候選：{candidates}（{pages}）": {
+    "en": "Unsaved progress: source unconfirmed; possible matches: {candidates} ({pages})",
+    "ja": "未保存の進捗：保存元未確認、候補：{candidates}（{pages}）"
+  },
+  "未保存進度：來源未確認；可能候選（{count}，仍需確認）：{candidates}（{pages}）": {
+    "en": "Unsaved progress: source unconfirmed; possible matches ({count}, confirmation required): {candidates} ({pages})",
+    "ja": "未保存の進捗：保存元未確認、候補（{count}件、確認が必要）：{candidates}（{pages}）"
+  },
+  "未保存進度：{name}（來源未確認；{pages}）": {
+    "en": "Unsaved progress: {name} (source unconfirmed; {pages})",
+    "ja": "未保存の進捗：{name}（保存元未確認；{pages}）"
+  },
+  "未保存進度：未知作品（來源未確認；{pages}）": {
+    "en": "Unsaved progress: unknown work (source unconfirmed; {pages})",
+    "ja": "未保存の進捗：不明な作品（保存元未確認；{pages}）"
+  },
+  "未保存進度：未知作品（{pages}）": {
+    "en": "Unsaved progress: unknown work ({pages})",
+    "ja": "未保存の進捗：不明な作品（{pages}）"
+  },
+  "未知作品": {
+    "en": "Unknown work",
+    "ja": "不明な作品"
+  },
+  "其他來源": {
+    "en": "Other source",
+    "ja": "その他の保存元"
   },
   "閱讀進度來源格式不正確。": {
     "en": "The reading progress source is invalid.",
@@ -46,6 +82,10 @@ window.GAIL10n.register({
   "第 {pages} 頁載入失敗，請重試。": {
     "en": "Page {pages} failed to load. Retry.",
     "ja": "{pages}ページ目の読み込みに失敗しました。再試行してください。"
+  },
+  "第 {pages} 頁載入失敗，點擊重試；若仍失敗，請關閉後重新開啟本書。": {
+    "en": "Page {pages} failed to load. Tap to retry; if it still fails, close and reopen this book.",
+    "ja": "{pages}ページ目を読み込めませんでした。タップして再試行し、それでも失敗する場合は本を閉じて開き直してください。"
   },
   "正在重試…": {
     "en": "Retrying…",

@@ -398,20 +398,16 @@ body {
 .reading-progress-recovery-viewport {
   flex: 1 1 12rem;
   min-width: 0;
+  max-width: 100%;
+}
+
+.reading-progress-recovery-message {
+  display: block;
+  max-width: 100%;
+  white-space: pre-line;
   overflow-wrap: anywhere;
-}
-
-.reading-progress-recovery-viewport.marquee-ready {
-  overflow: hidden;
-}
-
-.marquee-ready .reading-progress-recovery-message {
-  display: inline-block;
-  white-space: nowrap;
-}
-
-.marquee-ready.is-overflowing .reading-progress-recovery-message {
-  animation: reading-progress-marquee 10s ease-in-out infinite alternate;
+  word-break: break-word;
+  line-height: 1.45;
 }
 
 #reading-progress-recovery button {
@@ -420,18 +416,23 @@ body {
   padding: 6px 12px;
 }
 
-@keyframes reading-progress-marquee {
-  0%, 15% { transform: translateX(0); }
-  85%, 100% { transform: translateX(calc(-1 * var(--marquee-distance))); }
+@media (max-width: 560px) {
+  #reading-progress-recovery {
+    align-items: stretch;
+  }
+
+  .reading-progress-recovery-viewport {
+    flex-basis: 100%;
+  }
+
+  #reading-progress-recovery button {
+    flex: 1 1 10rem;
+  }
 }
 
 @media (prefers-reduced-motion: reduce) {
-  .reading-progress-recovery-viewport.marquee-ready { overflow: visible; }
-  .marquee-ready .reading-progress-recovery-message {
-    white-space: normal;
-  }
-  .marquee-ready.is-overflowing .reading-progress-recovery-message {
-    animation: none;
+  .reading-progress-recovery-message {
+    scroll-behavior: auto;
   }
 }
 
@@ -2441,6 +2442,55 @@ body {
   background: linear-gradient(to top, rgba(9, 12, 21, 1), rgba(9, 12, 21, 0));
 }
 
+.inspector-cover-fallback {
+  position: absolute;
+  inset: 0;
+  z-index: 2;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 10px;
+  padding: 24px;
+  color: var(--text-main);
+  text-align: center;
+  background: linear-gradient(145deg, var(--bg-hover), var(--bg-color));
+}
+
+.inspector-cover-fallback[hidden] { display: none; }
+
+.inspector-cover-fallback-icon {
+  width: 42px;
+  height: 42px;
+  display: grid;
+  place-items: center;
+  border: 1px solid color-mix(in srgb, var(--accent-color) 34%, transparent);
+  border-radius: 50%;
+  color: var(--accent-color);
+}
+
+.inspector-cover-fallback strong {
+  color: var(--text-main);
+  font-size: 13px;
+}
+
+.inspector-cover-fallback button {
+  min-height: 44px;
+  padding: 0 16px;
+  border: 1px solid color-mix(in srgb, var(--accent-color) 40%, transparent);
+  border-radius: 10px;
+  color: var(--on-accent, #fff);
+  background: var(--accent-color);
+  font: inherit;
+  font-weight: 700;
+  cursor: pointer;
+}
+
+.inspector-cover-fallback button:disabled {
+  cursor: wait;
+  opacity: 0.72;
+}
+
 .inspector-body {
   padding: 20px;
   display: flex;
@@ -2633,6 +2683,11 @@ body {
 .reader-overlay.reader-idle .reader-bottom-bar {
   transform: translateY(calc(100% + max(16px, env(safe-area-inset-bottom)) + 8px)) !important;
   pointer-events: none;
+}
+
+/* 子元件可能在窄空間換行並超出控制列；閒置時一併隱藏，避免露出頁碼碎片。 */
+.reader-overlay.reader-idle:not(.reader-page-notice) .reader-bottom-bar {
+  visibility: hidden;
 }
 
 .reader-context-menu {
@@ -6558,23 +6613,24 @@ select:focus-visible,
   .reader-overlay.reader-idle .reader-top-bar {
     transform: translateY(-100%) !important;
   }
+}
 
-  .reader-overlay.reader-idle .reader-bottom-bar {
-    right: max(12px, env(safe-area-inset-right));
-    bottom: max(12px, env(safe-area-inset-bottom));
-    left: auto;
-    width: auto;
-    height: 44px;
-    padding: 0 8px;
-    overflow: hidden;
-    transform: translateY(0) !important;
-    pointer-events: auto;
-  }
+/* 閒置時翻頁只短暫顯示頁碼；不攔截圖片上的觸控或滑鼠操作。 */
+.reader-overlay.reader-idle.reader-page-notice .reader-bottom-bar {
+  right: max(12px, env(safe-area-inset-right));
+  bottom: max(12px, env(safe-area-inset-bottom));
+  left: auto;
+  display: flex;
+  width: auto;
+  height: 44px;
+  padding: 0 8px;
+  transform: translateY(0) !important;
+  pointer-events: none;
+}
 
-  .reader-overlay.reader-idle .reader-bottom-bar .bottom-bar-center,
-  .reader-overlay.reader-idle .reader-bottom-bar .bottom-bar-right {
-    display: none;
-  }
+.reader-overlay.reader-idle.reader-page-notice .bottom-bar-center,
+.reader-overlay.reader-idle.reader-page-notice .bottom-bar-right {
+  display: none;
 }
 
 @media (max-width: 620px) {
@@ -6786,5 +6842,151 @@ html:not([data-i18n-ready]) body {
     top: auto;
     bottom: max(12px, env(safe-area-inset-bottom));
     transform: none;
+  }
+}
+
+/* iPad 橫向工具列：中等寬度改成兩列保留標題與完整觸控文字；
+   1180px 以上才維持單列，避免 action button 以 flex-shrink 產生換行。 */
+@media (min-width: 1024px) and (max-width: 1179px) {
+  .app-header {
+    height: auto;
+    min-height: calc(124px + env(safe-area-inset-top));
+    flex-direction: row;
+    flex-wrap: wrap;
+    align-content: center;
+    row-gap: 10px;
+    padding: calc(12px + env(safe-area-inset-top)) 20px 12px;
+  }
+
+  .logo {
+    flex: 1 1 100%;
+    min-width: 0;
+  }
+
+  .logo-text h1 {
+    white-space: nowrap;
+  }
+
+  .header-actions {
+    flex: 1 1 100%;
+    width: 100%;
+    min-width: 0;
+    gap: 8px;
+  }
+
+  .search-box,
+  .search-box:focus-within {
+    flex: 1 1 220px;
+    width: auto;
+    min-width: 220px;
+  }
+
+  .action-btn {
+    flex: 0 0 auto;
+    width: auto;
+    min-width: 44px;
+    padding-inline: 10px;
+    overflow: visible;
+    font-size: 14px;
+    white-space: nowrap;
+  }
+
+  .main-layout {
+    height: calc(100dvh - 124px - env(safe-area-inset-top));
+  }
+}
+
+@media (min-width: 1180px) and (max-width: 1366px) {
+  .app-header {
+    gap: 14px;
+    padding-inline: 20px;
+  }
+
+  .logo {
+    flex: 0 0 auto;
+  }
+
+  .logo-text h1 {
+    white-space: nowrap;
+  }
+
+  .header-actions {
+    flex: 1 1 auto;
+    min-width: 0;
+    gap: 8px;
+    justify-content: flex-end;
+  }
+
+  .search-box,
+  .search-box:focus-within {
+    flex: 1 1 190px;
+    width: auto;
+    min-width: 190px;
+    max-width: 300px;
+  }
+
+  .action-btn {
+    flex: 0 0 auto;
+    min-width: 44px;
+    padding-inline: 10px;
+    white-space: nowrap;
+  }
+}
+
+/* 書架標題列：雙側欄開啟時讓控制群組換列，保留完整文字與觸控尺寸。 */
+.library-header {
+  flex-wrap: wrap;
+  align-items: center;
+}
+
+.library-header > div:first-child {
+  flex: 0 1 auto;
+  flex-wrap: wrap;
+  min-width: 0;
+  max-width: 100%;
+}
+
+.library-header h2 {
+  flex: 0 1 auto;
+  min-width: 0;
+  max-width: 100%;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.library-header > div:first-child > .library-up-btn,
+.library-header > div:first-child > .library-discovery-btn,
+.library-header > div:first-child > .library-discovery-btn span,
+.filter-options .filter-btn {
+  flex: 0 0 auto;
+  white-space: nowrap;
+}
+
+.filter-options {
+  flex: 0 1 auto;
+  flex-wrap: wrap;
+  align-items: center;
+  min-width: 0;
+  max-width: 100%;
+}
+
+.filter-options .series-filter-field {
+  max-width: 100%;
+}
+
+.filter-options .series-filter-field select {
+  min-width: 0;
+}
+
+/* 保留手機窄版既有的單排篩選列，避免觸控按鈕被拆成多列。 */
+@media (max-width: 620px) {
+  .library-header {
+    align-items: flex-start;
+  }
+
+  .filter-options {
+    flex-wrap: nowrap;
+    overflow-x: auto;
   }
 }

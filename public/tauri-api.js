@@ -395,8 +395,11 @@ async function openComicWithAuthoritativeProgress(invoke, id, sourceId) {
     id,
     ...(typeof sourceId === 'string' && sourceId.trim() ? { sourceId: sourceId.trim() } : {}),
   });
+  const effectiveSourceId = typeof nativeData?.sourceId === 'string' && nativeData.sourceId.trim()
+    ? nativeData.sourceId.trim()
+    : (typeof sourceId === 'string' ? sourceId.trim() : '');
   const nativeNormalized = normalizeReaderData(nativeData);
-  const normalized = normalizeReaderData(readerDataWithAuthoritativeProgress(id, nativeData, sourceId));
+  const normalized = normalizeReaderData(readerDataWithAuthoritativeProgress(id, nativeData, effectiveSourceId));
   const nativePage = nativeNormalized?.progress?.currentPage;
   const resumePage = normalized?.progress?.currentPage;
 
@@ -410,6 +413,7 @@ async function openComicWithAuthoritativeProgress(invoke, id, sourceId) {
       const generation = await invoke('update_reader_cache_window', {
         comicId: id,
         pageIndex: resumePage,
+        ...(effectiveSourceId ? { sourceId: effectiveSourceId } : {}),
       });
       if (Number.isSafeInteger(generation)) normalized.preloadGeneration = generation;
     } catch (error) {
@@ -534,8 +538,15 @@ if (window.__TAURI__) {
     overlayLibraryProgress: overlayAuthoritativeLibraryProgress,
     getScanStatus: () => invoke('get_scan_status'),
     openComic: (id, sourceId) => openComicWithAuthoritativeProgress(invoke, id, sourceId),
-    updateReaderCacheWindow: (comicId, pageIndex) => invoke('update_reader_cache_window', { comicId, pageIndex }),
-    closeComic: (comicId) => invoke('close_comic', { comicId }),
+    updateReaderCacheWindow: (comicId, pageIndex, sourceId) => invoke('update_reader_cache_window', {
+      comicId,
+      pageIndex,
+      ...(typeof sourceId === 'string' && sourceId.trim() ? { sourceId: sourceId.trim() } : {}),
+    }),
+    closeComic: (comicId, sourceId) => invoke('close_comic', {
+      comicId,
+      ...(typeof sourceId === 'string' && sourceId.trim() ? { sourceId: sourceId.trim() } : {}),
+    }),
     saveProgress: async (data) => {
       const normalized = normalizeProgressPayload(data);
       const result = await invoke('save_progress', { data: normalized });
@@ -624,11 +635,22 @@ if (window.__TAURI__) {
       localStorage.setItem('gai:favorites', JSON.stringify(favorites));
       return favorites;
     },
-    showItemInFolder: (comicId) => invoke('show_item_in_folder', { comicId }),
-    getFileCapability: (comicId) => invoke('get_file_capability', { comicId }),
+    showItemInFolder: (comicId, sourceId, relativePath) => invoke('show_item_in_folder', {
+      comicId,
+      ...(sourceId && relativePath ? { sourceId, relativePath } : {}),
+    }),
+    getFileCapability: (comicId, sourceId, relativePath) => invoke('get_file_capability', {
+      comicId,
+      ...(sourceId && relativePath ? { sourceId, relativePath } : {}),
+    }),
     mutateComicFile: (request) => invoke('mutate_comic_file', { request }),
     undoComicFileOperation: (token) => invoke('undo_comic_file_operation', { token }),
-    trashPage: (comicId, pageIndex) => invoke('trash_page', { comicId, pageIndex }),
+    trashPage: (comicId, pageIndex, sourceId, relativePath, expectedPageName) => invoke('trash_page', {
+      comicId,
+      pageIndex,
+      ...(sourceId && relativePath ? { sourceId, relativePath } : {}),
+      ...(typeof expectedPageName === 'string' ? { expectedPageName } : {}),
+    }),
     scanLibrary: () => invoke('scan_library'),
     scanPriorityLibrary: (favoriteIds) => invoke('scan_priority_library', {
       favoriteIds: normalizePriorityLibraryIds(favoriteIds),
@@ -638,8 +660,14 @@ if (window.__TAURI__) {
       ...(sourceId ? { sourceId } : {}),
     }),
     searchCatalog: (query) => invoke('search_catalog', { query }),
-    getDiscoveryTags: (runtimeIds) => invoke('get_discovery_tags', { runtimeIds }),
-    getComicMetadata: (id) => invoke('get_comic_metadata', { id }),
+    getDiscoveryTags: (runtimeIds, targets) => invoke('get_discovery_tags', {
+      runtimeIds,
+      ...(Array.isArray(targets) && targets.length ? { targets } : {}),
+    }),
+    getComicMetadata: (id, sourceId, relativePath) => invoke('get_comic_metadata', {
+      id,
+      ...(sourceId && relativePath ? { sourceId, relativePath } : {}),
+    }),
     applyBatchMetadata: (request) => invoke('apply_batch_metadata', { request }),
     undoBatchMetadata: (token) => invoke('undo_batch_metadata', { token }),
     upsertFolderTagRule: (rule) => invoke('upsert_folder_tag_rule', { rule }),

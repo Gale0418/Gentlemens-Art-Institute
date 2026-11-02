@@ -149,6 +149,8 @@ async fn catalog_call<T: Send + 'static>(
 #[serde(rename_all = "camelCase")]
 pub struct FileMutationRequest {
     pub comic_id: String,
+    pub source_id: Option<String>,
+    pub relative_path: Option<String>,
     pub action: String,
     pub destination_relative_path: Option<String>,
     pub expected_fingerprint: Option<String>,
@@ -332,8 +334,23 @@ pub async fn mutate(
     if !matches!(request.action.as_str(), "rename" | "move" | "trash") {
         return Err("未知的檔案操作".into());
     }
+    let source_id = request
+        .source_id
+        .as_deref()
+        .filter(|value| !value.trim().is_empty())
+        .ok_or("缺少漫畫來源識別，已拒絕檔案操作")?
+        .to_owned();
+    let relative_path = request
+        .relative_path
+        .as_deref()
+        .filter(|value| !value.is_empty())
+        .ok_or("缺少漫畫來源位置，已拒絕檔案操作")?
+        .to_owned();
     let comic_id = request.comic_id.clone();
-    let location = catalog_call(store, move |store| store.get_location(&comic_id)).await?;
+    let location = catalog_call(store, move |store| {
+        store.get_location_for_source(&comic_id, &source_id, &relative_path)
+    })
+    .await?;
     if !location.online {
         return Err("漫畫來源目前離線".into());
     }
@@ -1343,6 +1360,134 @@ mod tests {
         assert!(!result.can_rename);
     }
 
+    #[tokio::test]
+    async fn mutate_rejects_ambiguous_canonical_locations_before_touching_files() {
+        let base = std::env::temp_dir().join(format!(
+            "gai-file-op-ambiguous-location-{}",
+            uuid::Uuid::new_v4()
+        ));
+        let root_a = base.join("root-a");
+        let root_b = base.join("root-b");
+        std::fs::create_dir_all(&root_a).unwrap();
+        std::fs::create_dir_all(&root_b).unwrap();
+        let book_a = root_a.join("book.cbz");
+        let book_b = root_b.join("book.cbz");
+        std::fs::write(&book_a, b"same archive bytes").unwrap();
+        std::fs::write(&book_b, b"same archive bytes").unwrap();
+
+        let runtime_id = general_purpose::URL_SAFE_NO_PAD.encode(b"book.cbz");
+        let progress = Progress {
+            current_page: 0,
+            total_pages: 0,
+            percent: 0.0,
+            updated_at: None,
+        };
+        let item = |root: &Path, path: &Path| ComicItem {
+            id: runtime_id.clone(),
+            r#type: "archive".into(),
+            relative_path: "book.cbz".into(),
+            ext: ".cbz".into(),
+            title: "book".into(),
+            series: "test".into(),
+            updated_at: "2026-11-02T00:00:00Z".into(),
+            page_count: 0,
+            progress: progress.clone(),
+            source_id: crate::scanner::local_source_id(root),
+            source_path: Some(path.to_string_lossy().into_owned()),
+            external_bookmark: None,
+        };
+
+        let store = CatalogStore::new(base.join("catalog.sqlite3")).unwrap();
+        store
+            .sync_library(&[item(&root_a, &book_a), item(&root_b, &book_b)])
+            .unwrap();
+
+        let locations = store.get_runtime_items_for_id(&runtime_id).unwrap();
+        assert_eq!(
+            locations.len(),
+            2,
+            "fixture must contain two source locations"
+        );
+        let expected_fingerprint = crate::catalog::sampled_fingerprint(&book_b).unwrap();
+        let result = mutate(
+            &store,
+            None,
+            FileMutationRequest {
+                comic_id: runtime_id.clone(),
+                source_id: None,
+                relative_path: None,
+                action: "rename".into(),
+                destination_relative_path: Some("renamed.cbz".into()),
+                expected_fingerprint: Some(expected_fingerprint.clone()),
+            },
+        )
+        .await;
+
+        // Source-unqualified file operations must fail closed. Before the
+        // source-qualified lookup fix, one ambiguous location would be
+        // selected and renamed here.
+        assert!(result.is_err(), "ambiguous location must not be mutated");
+        assert!(book_a.exists(), "root A must remain untouched");
+        assert!(book_b.exists(), "root B must remain untouched");
+        assert_eq!(std::fs::read(&book_a).unwrap(), b"same archive bytes");
+        assert_eq!(std::fs::read(&book_b).unwrap(), b"same archive bytes");
+        assert!(!root_a.join("renamed.cbz").exists());
+        assert!(!root_b.join("renamed.cbz").exists());
+
+        let source_a = crate::scanner::local_source_id(&root_a);
+        let selected_result = mutate(
+            &store,
+            None,
+            FileMutationRequest {
+                comic_id: runtime_id.clone(),
+                source_id: Some(source_a.clone()),
+                relative_path: Some("book.cbz".into()),
+                action: "rename".into(),
+                destination_relative_path: Some("selected-a.cbz".into()),
+                expected_fingerprint: Some(expected_fingerprint.clone()),
+            },
+        )
+        .await;
+        assert!(
+            selected_result.is_ok(),
+            "exact source-qualified location should be mutable"
+        );
+        assert!(!book_a.exists(), "selected source A should be renamed");
+        assert!(root_a.join("selected-a.cbz").exists());
+        assert!(book_b.exists(), "source B must remain untouched");
+        assert_eq!(std::fs::read(&book_b).unwrap(), b"same archive bytes");
+
+        store.forget_source_locations(&source_a).unwrap();
+        let stale_result = mutate(
+            &store,
+            None,
+            FileMutationRequest {
+                comic_id: runtime_id,
+                source_id: Some(source_a),
+                relative_path: Some("selected-a.cbz".into()),
+                action: "rename".into(),
+                destination_relative_path: Some("stale-renamed.cbz".into()),
+                expected_fingerprint: Some(expected_fingerprint),
+            },
+        )
+        .await;
+        assert!(
+            stale_result.is_err(),
+            "removed source must not fall back to B"
+        );
+        assert!(
+            root_a.join("selected-a.cbz").exists(),
+            "removed source file must remain untouched"
+        );
+        assert!(
+            book_b.exists(),
+            "same-fingerprint source B must remain untouched"
+        );
+
+        drop(store);
+        let _ = std::fs::remove_dir_all(&base);
+    }
+
     #[test]
     fn local_rename_trash_and_undo_keep_identity_without_empty_quarantine_tombs() {
         let base = std::env::temp_dir().join(format!("gai-file-op-{}", uuid::Uuid::new_v4()));
@@ -1381,6 +1526,8 @@ mod tests {
             location,
             FileMutationRequest {
                 comic_id: runtime_id,
+                source_id: None,
+                relative_path: None,
                 action: "rename".into(),
                 destination_relative_path: Some("renamed".into()),
                 expected_fingerprint,
@@ -1458,6 +1605,8 @@ mod tests {
             location,
             FileMutationRequest {
                 comic_id: stable_id.clone(),
+                source_id: None,
+                relative_path: None,
                 action: "trash".into(),
                 destination_relative_path: None,
                 expected_fingerprint,
@@ -1506,6 +1655,8 @@ mod tests {
             location,
             FileMutationRequest {
                 comic_id: stable_id.clone(),
+                source_id: None,
+                relative_path: None,
                 action: "rename".into(),
                 destination_relative_path: Some("double-fault".into()),
                 expected_fingerprint: registered_fingerprint(

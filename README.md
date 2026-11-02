@@ -8,7 +8,7 @@
 
 已取得測試版時，先試讀內建原創風景，再加入自己的收藏。內建圖集供操作體驗；App 不提供漫畫下載或內容庫。NAS 離線時會保留已整理紀錄，原始頁面仍需來源可讀；進度保存在當前裝置，未提供跨裝置自動同步。
 
-**發布狀態（2026-11-01）：iOS 1.0.1 (59) 與 Mac 1.0.2 (59) 均為 `READY_FOR_DISTRIBUTION`；iOS 1.0.2 (63) 已送審，狀態為 `WAITING_FOR_REVIEW`，審核通過後自動發佈。本機 iPad 已安裝並啟動 1.0.2 (63)。** 第59版商店圖組與 Gemini 繁中／英文／日文介紹的變更紀錄見 [第59版發行紀錄](docs/release/build59-store-refresh-2026-10-17.md)。完整實機 TAG、VoiceOver 及 StoreKit 交易矩陣仍未完成；上述 iPad 安裝啟動不代表這些驗收已通過。
+**發布狀態（2026-11-02）：iOS 1.0.2 (63) 與 Mac 1.0.2 (59) 均為 `READY_FOR_DISTRIBUTION`。** 新的書架與閱讀修正正在進行審查與發行準備，尚不代表已上傳或上架。本機 iPad 已安裝並啟動 1.0.2 (63)。第59版商店圖組與 Gemini 繁中／英文／日文介紹的變更紀錄見 [第59版發行紀錄](docs/release/build59-store-refresh-2026-10-17.md)。完整實機 TAG、VoiceOver 及 StoreKit 交易矩陣仍未完成；上述 iPad 安裝啟動不代表這些驗收已通過。
 
 [隱私政策](#隱私政策) · [支援與使用說明](SUPPORT.md)
 
@@ -27,7 +27,7 @@
 - SQLite catalog 是 metadata / location / progress 的主要本機 authority；來源離線不等於資料刪除。
 - 本機、iOS security-scoped folder 與單一 SMB/NAS 是獨立來源；其中一個來源離線不應清除其他來源或 catalog 紀錄。
 - 內建全年齡原創 demo 可在乾淨安裝、沒有 NAS／帳號／第三方下載的情況下直接驗證核心 reader。
-- 2026-11-01：iOS 1.0.1 (59) 與 Mac 1.0.2 (59) 已 `READY_FOR_DISTRIBUTION`；本機 iPad 已安裝並啟動 iOS 1.0.2 (63)。商店版 1.0.2 (63) build 為 `VALID`，已送審並回讀 `WAITING_FOR_REVIEW`，發佈方式為審核通過後自動發佈；完整實機 TAG、VoiceOver 與 StoreKit 交易矩陣仍未完成。
+- 2026-11-02：商店 iOS 1.0.2 (63) 與 Mac 1.0.2 (59) 已 `READY_FOR_DISTRIBUTION`；新修正尚在交付準備。本機 iPad 已安裝並啟動 iOS 1.0.2 (63)；完整實機 TAG、VoiceOver 與 StoreKit 交易矩陣仍未完成。
 - 歷史紀錄（2026-10-03）：Mac `1.0` 已 `READY_FOR_DISTRIBUTION`；iOS `1.0` 與 Mac `1.0.1` 的第57版已撤回，第58版兩平台已正式送審。本機 Mac／iPad 當時為第56版；TAG 探索的 Mac 證據見 [探索體驗報告](docs/audits/2026-10-03-discovery-experience.md)。
 - `src-tauri/vendor/wry/` 是**刻意保留的 iOS WebKit startup patch**，目前仍由 Cargo `[patch.crates-io]` 使用；不要因為它看起來像 vendor 目錄就清掉。
 
@@ -81,11 +81,14 @@ G.A.I 是讀取使用者自行提供內容的漫畫閱讀工具，不提供漫�
 
 - 進入目錄時只即時掃描該層的漫畫檔與子資料夾；全域掃描、收藏與最近閱讀各自維持背景優先通道。子資料夾可先導航，點入後再掃下一層。
 - 資料夾書庫優先顯示目前可見的封面；閱讀器可手動放棄尚未保存的閱讀進度，不會把暫時位置誤當成已保存狀態。
+- 未保存進度提示會列出可辨識的作品與頁碼；舊紀錄若缺少來源，只顯示可能的候選並標明尚未確認，不會自動套用到其他書庫。
+- 書架依可用寬度重新排列操作與篩選項；左右側欄同時展開時，按鈕文字不再因空間不足而逐字換行。
 - Local source ID 使用**使用者已配置的 root 字串**衍生，刻意保持來源拔除後仍可重現；不要在每次掃描時動態 canonicalize，否則同一 removable/NAS-backed source 可能在 online/offline 狀態得到不同 ID。若未來要改成 canonical identity，必須先把 resolved identity 持久化再做 migration。
 - iOS external folder 使用 security-scoped bookmark；symlink 不可逃出使用者選擇的 root。
 - 專案一次只連線一組 SMB/NAS；不同主機、分享目錄與帳號使用各自的來源識別。舊版未記錄端點的 SMB 資料會保留，無法確認歸屬時不自動套用至新連線。
 - 外部來源授權清單損壞時先保留原有目錄資料；使用者重新選取資料夾並確認後才備份損壞清單、重建授權。其他來源需重新加入。
 - 同時連線的來源若出現相同漫畫識別碼，閱讀器會拒絕開啟，避免顯示或保存到錯誤作品。
+- 改名、移動與整本隔離必須核對選定的來源和相對路徑；來源已移除或身分不明時不會改動其他副本。尚未整合至介面的單頁刪除指令暫停，待安全頁面日誌完成後才重新啟用。
 - SMB 掃描與檔案操作均有 timeout；成功掃描才把 current NAS state 標 online，失敗則保留 SQLite location 並回填 offline shelf。
 - offline 是 location 狀態，不代表 comic metadata 被刪除。
 

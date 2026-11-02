@@ -76,7 +76,6 @@ pub(crate) mod zip_archive {
 // also supports callers that do not extract entries.
 const MAX_ENTRY_NAME_BYTES: usize = 4096;
 const MAX_TOTAL_ENTRY_NAME_BYTES: usize = 16 * 1024 * 1024;
-const MAX_TOTAL_UNPACKED_BYTES: u64 = 2 * 1024 * 1024 * 1024;
 const MAX_ENTRY_METADATA_BYTES: usize = 200 * 1024;
 const MAX_TOTAL_METADATA_BYTES: usize = 64 * 1024 * 1024;
 
@@ -468,11 +467,12 @@ impl<R: Read + io::Seek> ZipArchive<R> {
             total_unpacked_bytes = total_unpacked_bytes
                 .checked_add(file.uncompressed_size)
                 .ok_or(ZipError::InvalidArchive("ZIP declared size overflow"))?;
-            if total_unpacked_bytes > MAX_TOTAL_UNPACKED_BYTES {
-                return Err(ZipError::InvalidArchive(
-                    "ZIP declared unpacked size exceeds the safety limit",
-                ));
-            }
+            // Listing a ZIP does not decompress its entries. G.A.I reads pages
+            // individually with a bounded output and bounded cache; rejecting
+            // their aggregate declared size prevents legitimate large books.
+            // Keep the overflow, entry-count and metadata bounds here. Any
+            // caller that extracts multiple entries must impose its own total
+            // actual-output budget.
             names_map.insert(file.file_name.clone(), files.len());
             files.push(file);
         }
@@ -551,6 +551,16 @@ impl<R: Read + io::Seek> ZipArchive<R> {
     /// Returns an iterator over all the file and directory names in this archive.
     pub fn file_names(&self) -> impl Iterator<Item = &str> {
         self.shared.names_map.keys().map(|s| s.as_str())
+    }
+
+    /// Central-directory names and declared sizes in archive order, without
+    /// seeking to each local header or decompressing any entry. Values are
+    /// untrusted metadata; callers must still bound actual reads.
+    pub fn entry_metadata(&self) -> impl Iterator<Item = (&str, u64)> {
+        self.shared
+            .files
+            .iter()
+            .map(|entry| (entry.file_name.as_str(), entry.uncompressed_size))
     }
 
     /// Search for a file entry by name, decrypt with given password

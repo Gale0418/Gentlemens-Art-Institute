@@ -87,12 +87,18 @@ assert.doesNotMatch(html, /class="nav-arrow"/, 'reader arrows must not cover com
 assert.doesNotMatch(html, /data-filter-shortcut=/, 'duplicate smart collection controls must stay removed');
 assert.match(css, /\.main-layout\.library-panels-narrow \.sidebar:not\(\[hidden\]\)\s*\{\s*display: flex;/, 'narrow sidebar must override legacy display:none without overriding hidden fallback');
 assert.match(css, /\.main-layout\.library-panels-narrow \.comic-inspector:not\(\[hidden\]\)\s*\{\s*display: block;/, 'narrow inspector must override legacy display:none without overriding hidden fallback');
+assert.match(css, /@media \(min-width: 1024px\) and \(max-width: 1179px\)[\s\S]*?\.header-actions\s*\{[\s\S]*?width: 100%;[\s\S]*?\}[\s\S]*?\.action-btn\s*\{[\s\S]*?min-width: 44px;[\s\S]*?white-space: nowrap;/,
+  'iPad landscape medium widths keep a full-width action row with single-line 44px controls');
+assert.match(css, /@media \(min-width: 1180px\) and \(max-width: 1366px\)[\s\S]*?\.search-box,[\s\S]*?min-width: 190px;[\s\S]*?\.action-btn\s*\{[\s\S]*?min-width: 44px;[\s\S]*?white-space: nowrap;/,
+  'iPad landscape wide widths keep the search field and action labels from flex wrapping');
 
 // Shared frontend remains the Tauri UI, with the historical electronAPI name
 // acting only as an internal compatibility facade installed by tauri-api.js.
 mustContain(bridge, 'window.electronAPI = {', 'Tauri compatibility facade');
 mustContain(bridge, "invoke('open_comic'", 'native reader bridge');
 mustContain(bridge, "invoke('update_reader_cache_window'", 'native cache-window bridge');
+assert.match(bridge, /updateReaderCacheWindow:\s*\(comicId, pageIndex, sourceId\)/, 'cache-window bridge forwards optional source identity');
+assert.match(bridge, /closeComic:\s*\(comicId, sourceId\)/, 'close bridge forwards optional source identity');
 mustContain(bridge, "invoke('save_progress'", 'native progress bridge');
 mustContain(bridge, "invoke('plugin:dialog|open'", 'native folder picker');
 mustContain(bridge, "invoke('mutate_comic_file'", 'native file mutation bridge');
@@ -102,6 +108,8 @@ mustContain(app, 'fetchLibrary({ background: true })', 'background library refre
 mustContain(app, 'skipUnchanged && renderSignature === lastGridRenderSignature', 'unchanged shelf avoids DOM rebuild');
 mustContain(app, 'renderSignature === lastContinueRenderSignature', 'continue strip avoids DOM rebuild');
 mustContain(app, 'function scheduleReaderCacheWindowUpdate', 'reader cache scheduling');
+assert.match(app, /closeComic\(closingId, closingSourceId\)/, 'reader close keeps the closing source identity');
+assert.match(app, /function handleRamCacheProgress\(data\)/, 'RAM cache progress has a source-aware handler');
 mustContain(app, 'function prunePreloadedImages', 'bounded reader preload');
 mustContain(app, 'function showLoaderProgress', 'background loader progress');
 mustContain(app, 'function setOrganizeMode', 'catalog organizer');

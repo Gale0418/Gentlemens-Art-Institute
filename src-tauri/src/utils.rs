@@ -1,5 +1,5 @@
 use std::fs::File;
-use std::io::Read;
+use std::io::{BufReader, Read, Seek};
 use std::path::{Path, PathBuf};
 
 #[derive(Debug, PartialEq)]
@@ -47,25 +47,23 @@ fn zip_error(error: zip::result::ZipError) -> ArchiveError {
 /// ZIP crate applies bounded central-directory metadata checks before its
 /// `Vec`/`HashMap` allocation; this helper only adds the application file-size
 /// cap and maps crate errors into the app error type.
-pub(crate) fn open_zip_archive(path: &Path) -> Result<zip::ZipArchive<File>, ArchiveError> {
+type BufferedZip = zip::ZipArchive<BufReader<File>>;
+
+pub(crate) fn open_zip_archive(path: &Path) -> Result<BufferedZip, ArchiveError> {
     open_zip_archive_from_file(
         File::open(path).map_err(|error| ArchiveError::FileAccess(error.to_string()))?,
     )
 }
 
-pub(crate) fn open_zip_archive_from_file(
-    file: File,
-) -> Result<zip::ZipArchive<File>, ArchiveError> {
+pub(crate) fn open_zip_archive_from_file(file: File) -> Result<BufferedZip, ArchiveError> {
     open_zip_archive_with_file_size(file)
 }
 
-pub(crate) fn open_zip_archive_for_page_from_file(
-    file: File,
-) -> Result<zip::ZipArchive<File>, ArchiveError> {
+pub(crate) fn open_zip_archive_for_page_from_file(file: File) -> Result<BufferedZip, ArchiveError> {
     open_zip_archive_with_file_size(file)
 }
 
-fn open_zip_archive_with_file_size(file: File) -> Result<zip::ZipArchive<File>, ArchiveError> {
+fn open_zip_archive_with_file_size(file: File) -> Result<BufferedZip, ArchiveError> {
     let file_size = file
         .metadata()
         .map_err(|error| ArchiveError::FileAccess(error.to_string()))?
@@ -76,7 +74,7 @@ fn open_zip_archive_with_file_size(file: File) -> Result<zip::ZipArchive<File>, 
             crate::archive_reader::MAX_ARCHIVE_BYTES
         )));
     }
-    zip::ZipArchive::new(file).map_err(zip_error)
+    zip::ZipArchive::new(BufReader::with_capacity(64 * 1024, file)).map_err(zip_error)
 }
 
 fn visible_archive_page_name(name: &str) -> bool {
@@ -195,13 +193,18 @@ fn get_archive_images_with_file(
         Some(file) => open_zip_archive_from_file(file),
         None => open_zip_archive(zip_path),
     }?;
+    zip_image_names(&mut archive)
+}
 
+fn zip_image_names<R: Read + Seek>(
+    archive: &mut zip::ZipArchive<R>,
+) -> Result<Vec<String>, ArchiveError> {
     let mut entry_names = Vec::new();
-    for index in 0..archive.len() {
-        let entry = archive.by_index(index).map_err(zip_error)?;
-        let name = entry.name();
-        if entry.is_dir()
-            || entry.size() == 0
+    // Enumerate the central directory rather than seeking to every local
+    // header. Each page is validated when it is actually opened below or read.
+    for (name, size) in archive.entry_metadata() {
+        if name.ends_with(['/', '\\'])
+            || size == 0
             || !visible_archive_page_name(name)
             || !supported_image_extension(Path::new(name))
         {
@@ -280,6 +283,106 @@ mod tests {
         let images = get_archive_images(&path).unwrap();
         assert_eq!(images, ["page2.PNG", "page10.jpg"]);
         std::fs::remove_file(path).unwrap();
+    }
+
+    #[test]
+    fn zip_listing_does_not_reject_large_aggregate_declared_size() {
+        let path = temp_zip_path("large-declared-total");
+        let mut writer = zip::ZipWriter::new(std::io::Cursor::new(Vec::new()));
+        for (name, content) in [("cover.jpg", b"cover".as_slice()), ("notes.txt", b"x")] {
+            writer
+                .start_file(name, zip::write::FileOptions::default())
+                .unwrap();
+            writer.write_all(content).unwrap();
+        }
+        let mut bytes = writer.finish().unwrap().into_inner();
+        // Change only the second central-directory entry's declared size. This
+        // tiny synthetic archive exercises the old 2 GiB rejection without
+        // allocating or expanding a multi-gigabyte test fixture.
+        let headers: Vec<_> = bytes
+            .windows(4)
+            .enumerate()
+            .filter_map(|(index, signature)| (signature == b"PK\x01\x02").then_some(index))
+            .collect();
+        assert_eq!(headers.len(), 2);
+        bytes[headers[1] + 24..headers[1] + 28]
+            .copy_from_slice(&(2_u32 * 1024 * 1024 * 1024 + 1).to_le_bytes());
+        std::fs::write(&path, bytes).unwrap();
+
+        assert_eq!(get_archive_images(&path).unwrap(), ["cover.jpg"]);
+        let mut cover = Vec::new();
+        open_zip_archive(&path)
+            .unwrap()
+            .by_name("cover.jpg")
+            .unwrap()
+            .read_to_end(&mut cover)
+            .unwrap();
+        assert_eq!(cover, b"cover");
+        std::fs::remove_file(path).unwrap();
+    }
+
+    #[test]
+    fn zip_listing_seeks_only_for_the_cover_not_every_page() {
+        struct CountingReader {
+            cursor: std::io::Cursor<Vec<u8>>,
+            seeks: std::rc::Rc<std::cell::Cell<usize>>,
+        }
+        impl Read for CountingReader {
+            fn read(&mut self, bytes: &mut [u8]) -> std::io::Result<usize> {
+                self.cursor.read(bytes)
+            }
+        }
+        impl Seek for CountingReader {
+            fn seek(&mut self, position: std::io::SeekFrom) -> std::io::Result<u64> {
+                self.seeks.set(self.seeks.get() + 1);
+                self.cursor.seek(position)
+            }
+        }
+
+        let mut writer = zip::ZipWriter::new(std::io::Cursor::new(Vec::new()));
+        for index in 0..100 {
+            writer
+                .start_file(
+                    format!("{index:03}.jpg"),
+                    zip::write::FileOptions::default(),
+                )
+                .unwrap();
+            writer.write_all(b"image").unwrap();
+        }
+        let seeks = std::rc::Rc::new(std::cell::Cell::new(0));
+        let mut archive = zip::ZipArchive::new(CountingReader {
+            cursor: std::io::Cursor::new(writer.finish().unwrap().into_inner()),
+            seeks: seeks.clone(),
+        })
+        .unwrap();
+        let before = seeks.get();
+        assert_eq!(zip_image_names(&mut archive).unwrap().len(), 100);
+        assert!(seeks.get() - before <= 4, "listing sought once per page");
+    }
+
+    #[test]
+    fn later_damaged_local_header_is_rejected_when_that_page_is_opened() {
+        let mut writer = zip::ZipWriter::new(std::io::Cursor::new(Vec::new()));
+        for name in ["001.jpg", "002.jpg"] {
+            writer
+                .start_file(name, zip::write::FileOptions::default())
+                .unwrap();
+            writer.write_all(b"image").unwrap();
+        }
+        let mut bytes = writer.finish().unwrap().into_inner();
+        let local_headers: Vec<_> = bytes
+            .windows(4)
+            .enumerate()
+            .filter_map(|(index, signature)| (signature == b"PK\x03\x04").then_some(index))
+            .collect();
+        assert_eq!(local_headers.len(), 2);
+        bytes[local_headers[1]] = 0;
+        let mut archive = zip::ZipArchive::new(std::io::Cursor::new(bytes)).unwrap();
+        assert_eq!(
+            zip_image_names(&mut archive).unwrap(),
+            ["001.jpg", "002.jpg"]
+        );
+        assert!(archive.by_name("002.jpg").is_err());
     }
 
     #[test]

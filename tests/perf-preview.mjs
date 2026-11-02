@@ -56,9 +56,14 @@ const FIXTURE_BOOTSTRAP = String.raw`
 
   let fixtureMode = true;
   let fixtureRevision = 0;
+  // 預設只改動一筆，讓驗收反映真實的 library-changed sparse update。
+  // 需要壓測 dense DOM replacement 時，可用 ?fixtureChanges=dense 或
+  // window.__gaiFixture.setChangeMode('dense') 明確切換。
+  let fixtureChangeMode = new URLSearchParams(window.location.search).get('fixtureChanges') === 'dense'
+    ? 'dense'
+    : 'sparse';
   let scanState = { isScanning: false, found: FIXTURE_COUNT, total: FIXTURE_COUNT };
   let acceptanceTimers = [];
-  let electronReads = 0;
   const originalScanDir = (() => {
     try { return localStorage.getItem('gai:scanDir'); } catch (_) { return null; }
   })();
@@ -82,12 +87,18 @@ const FIXTURE_BOOTSTRAP = String.raw`
   function emitLibraryChanged() {
     fixtureRevision += 1;
     const changedIndex = (fixtureRevision - 1) % fixtureComics.length;
-    const changedComic = fixtureComics[changedIndex];
-    fixtureComics[changedIndex] = {
-      ...changedComic,
+    const updateTitle = comic => ({
+      ...comic,
       // 真的改動回傳給 app.js 的 comic 內容，避免 skipUnchanged 以相同 signature 假通過。
-      title: changedComic.title + ' · library event ' + fixtureRevision,
-    };
+      title: comic.title + ' · library event ' + fixtureRevision,
+    });
+    if (fixtureChangeMode === 'dense') {
+      fixtureComics.forEach((comic, index) => {
+        fixtureComics[index] = updateTitle(comic);
+      });
+    } else {
+      fixtureComics[changedIndex] = updateTitle(fixtureComics[changedIndex]);
+    }
     eventStats.libraryChanged += 1;
     for (const listener of listeners.libraryChanged) listener();
     for (const listener of listeners.catalogChanged) listener();
@@ -126,8 +137,7 @@ const FIXTURE_BOOTSTRAP = String.raw`
 
   function getLibrary() {
     if (!fixtureMode) return [];
-    const revisionSuffix = fixtureRevision ? ' · 驗收批次 ' + fixtureRevision : '';
-    return fixtureComics.map((comic) => ({ ...comic, title: comic.title + revisionSuffix }));
+    return fixtureComics.map((comic) => ({ ...comic }));
   }
 
   function addListener(collection, listener) {
@@ -171,10 +181,10 @@ const FIXTURE_BOOTSTRAP = String.raw`
   };
 
   // app.js 需要 isElectron=true 才會接上原本的 scan/library event listener；
-  // 但 getCoverUrl() 必須走瀏覽器 fallback。只讓 bindEvents 的一次初始化檢查讀到 true。
+  // 等兩個 listener 註冊完成後才走瀏覽器 fallback，避免依賴初始化讀取次數。
   Object.defineProperty(api, 'isElectron', {
     enumerable: true,
-    get() { return electronReads++ === 0; },
+    get() { return !listeners.libraryChanged.size || !listeners.scanProgress.size; },
   });
 
   window.electronAPI = api;
@@ -184,7 +194,19 @@ const FIXTURE_BOOTSTRAP = String.raw`
     eventStats,
     beginAcceptance,
     stopAcceptance,
+    getListenerStats() {
+      return {
+        libraryChanged: listeners.libraryChanged.size,
+        scanProgress: listeners.scanProgress.size,
+        catalogChanged: listeners.catalogChanged.size,
+      };
+    },
     get mode() { return fixtureMode ? 'fixture' : 'built-in-demo'; },
+    get changeMode() { return fixtureChangeMode; },
+    setChangeMode(mode) {
+      fixtureChangeMode = mode === 'dense' ? 'dense' : 'sparse';
+      return fixtureChangeMode;
+    },
     toggleMode() {
       stopAcceptance();
       fixtureMode = !fixtureMode;
@@ -255,6 +277,7 @@ const FIXTURE_BOOTSTRAP = String.raw`
     let gridChildListMutations = 0;
     let gridReplacementNodes = 0;
     let startedStats = { ...eventStats };
+    let startedListenerStats = fixture.getListenerStats();
 
     function setModeText(mode) {
       result.textContent = mode === 'fixture'
@@ -274,10 +297,13 @@ const FIXTURE_BOOTSTRAP = String.raw`
       const scanTrue = eventStats.scanTrue - startedStats.scanTrue;
       const scanFalse = eventStats.scanFalse - startedStats.scanFalse;
       const libraryChanged = eventStats.libraryChanged - startedStats.libraryChanged;
+      const listenerStats = fixture.getListenerStats();
       const p95 = percentile(frameSamples, 0.95);
       const max = frameSamples.length ? Math.max(...frameSamples) : 0;
       const passed = scanTrue > 0 && scanFalse > 0 && libraryChanged >= 3
-        && gridChildListMutations > 0 && p95 <= 34 && max <= 100;
+        && startedListenerStats.libraryChanged > 0
+        && startedListenerStats.scanProgress > 0
+        && p95 <= 34 && max <= 100;
       const content = document.querySelector('.content-area');
       if (content) content.scrollTop = 0;
 
@@ -285,8 +311,10 @@ const FIXTURE_BOOTSTRAP = String.raw`
         '結果：' + (passed ? 'PASS（捲動幀時間門檻）' : 'FAIL（事件、重繪或幀時間未達門檻）'),
         'fixture非實機（synthetic data，未讀取正式 DB／NAS）',
         '資料：' + FIXTURE_COUNT + ' 本，同一平面目錄；目前 renderer 顯示上限 200 cards',
+        '變更模式：' + fixture.changeMode + '（sparse 預設；dense 僅供明確壓測）',
         '捲動：content-area 上下約 5 秒；requestAnimationFrame 採樣 ' + frameSamples.length + ' 次',
         '掃描事件：isScanning=true ' + scanTrue + ' 次；library-changed ' + libraryChanged + ' 次；isScanning=false ' + scanFalse + ' 次',
+        '事件 listener：library-changed ' + listenerStats.libraryChanged + '；scan-progress ' + listenerStats.scanProgress,
         'DOM：comic-grid childList 替換 ' + gridChildListMutations + ' 次；節點變動 ' + gridReplacementNodes + ' 個節點',
         'Long Task：' + (longTasks.length ? longTasks.length + ' 次，最長 ' + Math.round(Math.max(...longTasks)) + ' ms' : '未觀察到（瀏覽器未提供或本次沒有）'),
         'Frame：p95 ' + p95.toFixed(1) + ' ms；max ' + max.toFixed(1) + ' ms',
@@ -332,6 +360,7 @@ const FIXTURE_BOOTSTRAP = String.raw`
       running = true;
       runButton.disabled = true;
       startedStats = { ...eventStats };
+      startedListenerStats = fixture.getListenerStats();
       frameSamples = [];
       longTasks = [];
       gridChildListMutations = 0;
@@ -527,6 +556,7 @@ server.on('error', (error) => {
 server.listen(PORT, HOST, () => {
   console.log(`G.A.I perf fixture 已啟動：http://${HOST}:${PORT}/`);
   console.log('資料來源：程式內 synthetic 5000 筆平面漫畫；未讀取 config、正式 DB、NAS。');
+  console.log('變更模式：預設 sparse 單筆更新；需要全卡片 dense stress 時使用 ?fixtureChanges=dense。');
   console.log('按頁面 overlay 的「執行捲動驗收」開始約 5 秒驗收；「開關示範驗收」可切回原 app demo。');
   console.log('停止：Ctrl-C');
 });

@@ -138,6 +138,8 @@ function extractFunction(source, name) {
   throw new Error(`unable to extract ${name}`);
 }
 
+const comicSourceId = vm.runInNewContext(`(${extractFunction(app, 'getComicSourceId')})`);
+
 const revokeResolvers = [];
 const mockContext = {
   state: {
@@ -498,6 +500,7 @@ console.log('PASS: stale AI status refresh cannot overwrite a newer mutation');
     },
     eAPI: { explainPage: () => new Promise(resolve => { resolveExplanation = resolve; }) },
     isBuiltInDemoComic: () => false,
+    getComicSourceId: comicSourceId,
     getAiExplainLocale: () => 'zh-Hant',
     aiExplainCacheKey: (comicId, pageIndex, locale) => [comicId, pageIndex, locale].join(':'),
     pageDataUrl: async () => 'data:image/png;base64,page',
@@ -526,6 +529,9 @@ console.log('PASS: stale AI status refresh cannot overwrite a newer mutation');
   const resultContainer = { hidden: true, textContent: '' };
   const metadataContext = {
     state: {
+      comics: [{ id: 'comic-1', sourceId: 'local:test' }],
+      selectedComicId: 'comic-1',
+      selectedComicSourceId: 'local:test',
       aiSessionSwitchPending: false,
       aiSessionMutationPending: false,
       aiSessionRevocationFailed: false,
@@ -533,11 +539,19 @@ console.log('PASS: stale AI status refresh cannot overwrite a newer mutation');
       aiSessionSwitchGeneration: 0,
       aiSessionMutationGeneration: 0,
     },
-    eAPI: { suggestComicMetadata: (payload) => {
-      metadataPayload = payload;
-      return new Promise(resolve => { resolveMetadata = resolve; });
-    } },
+    eAPI: {
+      getComicMetadata: async () => ({ comicId: 'catalog-comic-1', sourceId: 'local:test' }),
+      suggestComicMetadata: (payload) => {
+        metadataPayload = payload;
+        return new Promise(resolve => { resolveMetadata = resolve; });
+      },
+    },
     sampleComicForAiMetadata: async () => ({ dataUrls: ['data:image/png;base64,cover'], indexes: [0] }),
+    isComicSourceAmbiguous: () => false,
+    isSelectedComic: () => true,
+    resolveInspectorMetadataTarget: (comic, metadata) => ({ comicId: metadata.comicId, sourceId: metadata.sourceId }),
+    comicMetadataMutationBlockedMessage: () => 'blocked',
+    getComicSourceId: comicSourceId,
     getAiExplainLocale: () => 'zh-Hant',
     isComicOffline: () => false,
     renderAiMetadataCandidates() { renderedCandidates += 1; },
@@ -545,10 +559,11 @@ console.log('PASS: stale AI status refresh cannot overwrite a newer mutation');
   };
   const suggest = vm.runInNewContext(`(${extractFunction(app, 'suggestInspectorMetadata')})`, metadataContext);
   const button = { disabled: false, isConnected: true, setAttribute() {} };
-  const suggesting = suggest({ id: 'comic-1' }, button, resultContainer);
+  const suggesting = suggest({ id: 'comic-1', sourceId: 'local:test' }, button, resultContainer);
   await new Promise(resolve => setImmediate(resolve));
   assert.deepEqual(Array.from(metadataPayload.dataUrls), ['data:image/png;base64,cover']);
   assert.equal(metadataPayload.targetLocale, 'zh-Hant');
+  assert.equal(metadataPayload.comicId, 'catalog-comic-1', 'AI suggestion must use verified stable catalog comic id');
   metadataContext.state.aiSessionMutationGeneration = 1;
   metadataContext.state.aiSessionMutationPending = true;
   resolveMetadata([{ field: 'summary', value: 'stale metadata' }]);
@@ -565,6 +580,9 @@ console.log('PASS: stale AI status refresh cannot overwrite a newer mutation');
   const button = { disabled: false, isConnected: true, setAttribute() {} };
   const context = {
     state: {
+      comics: [{ id: 'comic-1', sourceId: 'local:test' }],
+      selectedComicId: 'comic-1',
+      selectedComicSourceId: 'local:test',
       aiSessionSwitchPending: false,
       aiSessionMutationPending: false,
       aiSessionRevocationFailed: false,
@@ -572,18 +590,215 @@ console.log('PASS: stale AI status refresh cannot overwrite a newer mutation');
       aiSessionSwitchGeneration: 0,
       aiSessionMutationGeneration: 0,
     },
-    eAPI: { suggestComicMetadata: async () => { providerCalls += 1; return []; } },
+    eAPI: {
+      getComicMetadata: async () => ({ comicId: 'catalog-comic-1', sourceId: 'local:test' }),
+      suggestComicMetadata: async () => { providerCalls += 1; return []; },
+    },
     sampleComicForAiMetadata: () => new Promise(resolve => { finishSampling = resolve; }),
+    isComicSourceAmbiguous: () => false,
+    isSelectedComic: () => true,
+    resolveInspectorMetadataTarget: (comic, metadata) => ({ comicId: metadata.comicId, sourceId: metadata.sourceId }),
+    comicMetadataMutationBlockedMessage: () => 'blocked',
+    getComicSourceId: comicSourceId,
     getAiExplainLocale: () => 'zh-Hant',
     isComicOffline: () => false,
     readerText: message => message,
   };
   const suggest = vm.runInNewContext(`(${extractFunction(app, 'suggestInspectorMetadata')})`, context);
-  const pending = suggest({ id: 'comic-1' }, button, resultContainer);
+  const pending = suggest({ id: 'comic-1', sourceId: 'local:test' }, button, resultContainer);
+  await new Promise(resolve => setImmediate(resolve));
   button.isConnected = false;
   finishSampling({ dataUrls: ['data:image/png;base64,cover'], indexes: [0] });
   await pending;
   assert.equal(providerCalls, 0, 'leaving the inspector before sampling completes must not spend an AI request');
+}
+
+// Metadata APIs and AI metadata writes are still id-only in the native API.
+// Refuse ambiguous ids before calling them, and re-check after async reads.
+{
+  const sourceHelpers = [
+    extractFunction(app, 'getComicSourceId'),
+    extractFunction(app, 'isComicSourceAmbiguous'),
+    extractFunction(app, 'comicSourceCollisionMessage'),
+    extractFunction(app, 'comicMetadataMutationBlockedMessage'),
+    extractFunction(app, 'resolveInspectorMetadataTarget'),
+    extractFunction(app, 'getOrganizerSourceTarget'),
+    extractFunction(app, 'comicMatchesIdentity'),
+    extractFunction(app, 'isSelectedComic'),
+    extractFunction(app, 'loadInspectorMetadata'),
+  ].join('\n');
+  const first = { id: 'metadata-collision', sourceId: 'local:A', relativePath: 'a/book.cbz', title: 'A' };
+  const second = { id: 'metadata-collision', sourceId: 'smb:B', title: 'B' };
+  let metadataSuggestionClick;
+  const metadataSuggestionButton = {
+    dataset: { suggestNamespace: 'genre', suggestValue: 'safe' },
+    addEventListener(type, handler) { if (type === 'click') metadataSuggestionClick = handler; },
+    closest: () => target,
+  };
+  const target = { innerHTML: '', querySelectorAll: () => [metadataSuggestionButton] };
+  let metadataApplyPayload;
+  const context = {
+    // loadInspectorMetadata is extracted into an isolated VM below, so
+    // provide the production-scoped generation dependency explicitly.
+    inspectorMetadataRequestGeneration: 0,
+    state: { comics: [first, second], selectedComicId: first.id, selectedComicSourceId: first.sourceId, tagInventoryItems: [] },
+    elements: { comicInspector: { querySelector: selector => selector === '#inspector-metadata' ? target : null } },
+    eAPI: {
+      getComicMetadata: async () => { throw new Error('must fail closed'); },
+      listRelatedTags: async () => { throw new Error('must fail closed'); },
+      applyBatchMetadata: async payload => { metadataApplyPayload = payload; return { updated: 1, undoToken: 'undo' }; },
+    },
+    readerText: message => message,
+    escapeHtml: value => String(value),
+    tagColorKey: () => '',
+    formatReadingDirection: value => value || '—',
+  };
+  // The isolated function needs the real source collision helper and its
+  // identity dependency, so execute the complete helper set in one context.
+  vm.runInNewContext(`${sourceHelpers}\nglobalThis.load = loadInspectorMetadata;`, context);
+  await context.load(first);
+  assert.match(target.innerHTML, /metadata 與 AI 整理已暫停/);
+
+  let metadataCalls = 0;
+  context.state.comics = [first];
+  context.eAPI.getComicMetadata = async () => { metadataCalls += 1; return {
+    comicId: 'stable-metadata-A', sourceId: 'local:A',
+    title: 'A', creators: {}, tags: [], candidates: [], lockedFields: [], diagnostics: [],
+  }; };
+  context.eAPI.listRelatedTags = async () => { metadataCalls += 1; return [{
+    tag: { namespace: 'genre', value: 'safe' }, sharedComics: 1, reason: 'test',
+  }]; };
+  target.innerHTML = '';
+  await context.load(first);
+  assert.equal(metadataCalls, 2, '非歧義 Inspector metadata 仍呼叫既有 id-only API');
+  await metadataSuggestionClick();
+  assert.equal(metadataApplyPayload.comicIds[0], first.id);
+  assert.equal(metadataApplyPayload.targets[0].sourceId, first.sourceId);
+  assert.equal(metadataApplyPayload.targets[0].relativePath, first.relativePath,
+    'Inspector suggestion must be validated against the exact source location in the database');
+
+  let resolveMetadata;
+  let relatedCalls = 0;
+  context.eAPI.getComicMetadata = () => new Promise(resolve => { resolveMetadata = resolve; });
+  context.eAPI.listRelatedTags = async () => { relatedCalls += 1; return []; };
+  context.state.comics = [first];
+  target.innerHTML = '';
+  const pending = context.load(first);
+  await new Promise(resolve => setImmediate(resolve));
+  context.state.comics = [second];
+  resolveMetadata({ comicId: 'stable-metadata-A', sourceId: 'local:A', title: 'stale A', creators: {}, tags: [], candidates: [], lockedFields: [], diagnostics: [] });
+  await pending;
+  assert.equal(relatedCalls, 0, 'source collision must block related-tag lookup after metadata resolves');
+  assert.equal(target.innerHTML, '', 'async collision must not render stale metadata or overwrite the current inspector');
+}
+
+{
+  const helperSource = [
+    extractFunction(app, 'getComicSourceId'),
+    extractFunction(app, 'isComicSourceAmbiguous'),
+    extractFunction(app, 'comicSourceCollisionMessage'),
+    extractFunction(app, 'comicMetadataMutationBlockedMessage'),
+    extractFunction(app, 'resolveInspectorMetadataTarget'),
+    extractFunction(app, 'getOrganizerSourceTarget'),
+    extractFunction(app, 'comicMatchesIdentity'),
+    extractFunction(app, 'isSelectedComic'),
+    extractFunction(app, 'renderAiMetadataCandidates'),
+  ].join('\n');
+  const first = { id: 'ai-candidate-collision', sourceId: 'local:A', relativePath: 'a/book.cbz' };
+  const second = { id: 'ai-candidate-collision', sourceId: 'smb:B' };
+  const result = { innerHTML: '', textContent: '' };
+  const applyButton = {
+    disabled: false,
+    title: '',
+    closest: () => ({ dataset: { candidateIndex: '0' } }),
+    addEventListener(type, handler) { if (type === 'click') this.click = handler; },
+  };
+  result.querySelectorAll = () => [applyButton];
+  let applyCalls = 0;
+  let applyPayload;
+  const context = {
+    state: { comics: [first, second], selectedComicId: first.id, selectedComicSourceId: first.sourceId },
+    elements: {},
+    eAPI: { applyBatchMetadata: async payload => { applyCalls += 1; applyPayload = payload; } },
+    readerText: message => message,
+    escapeHtml: value => String(value),
+  };
+  vm.runInNewContext(`${helperSource}\nglobalThis.render = renderAiMetadataCandidates;`, context);
+  context.render([{ field: 'summary', value: 'wrong source', confidence: 0.9 }], first, result, { comicId: 'stable-A', sourceId: 'local:A' });
+  await applyButton.click();
+  assert.equal(applyCalls, 0, 'ambiguous AI candidate must not call id-only apply');
+  assert.match(result.textContent, /metadata 與 AI 整理已暫停/);
+
+  context.state.comics = [first];
+  result.innerHTML = '';
+  result.textContent = '';
+  context.render([{ field: 'summary', value: 'safe', confidence: 0.9 }], first, result, { comicId: 'stable-A', sourceId: 'local:A' });
+  await applyButton.click();
+  assert.equal(applyCalls, 1, 'unique AI candidate may use the verified stable apply id');
+  assert.equal(applyPayload.comicIds.length, 1);
+  assert.equal(applyPayload.comicIds[0], first.id);
+  assert.equal(applyPayload.targets[0].sourceId, first.sourceId);
+  assert.equal(applyPayload.targets[0].relativePath, first.relativePath,
+    'AI apply must be validated against the exact source location in the database');
+
+  // A disappearing source must not let the remaining same-runtime-id book
+  // inherit the old candidate's stable target.
+  context.state.comics = [second];
+  await applyButton.click();
+  assert.equal(applyCalls, 1, 'source removal must fail closed instead of applying to the replacement');
+}
+
+// Sampling uses the normalized source_id field, and a collision introduced
+// while sampling finishes must stop the id-only suggest request.
+{
+  const first = { id: 'ai-sample-collision', source_id: 'local:A' };
+  const second = { id: 'ai-sample-collision', sourceId: 'smb:B' };
+  let finishSampling;
+  let sampleArgs;
+  let suggestCalls = 0;
+  const result = { hidden: true, textContent: '' };
+  const button = { disabled: false, isConnected: true, setAttribute() {} };
+  const context = {
+    state: {
+      comics: [first],
+      aiSessionStatus: { configured: true },
+      aiSessionSwitchPending: false,
+      aiSessionMutationPending: false,
+      aiSessionRevocationFailed: false,
+      aiSessionSwitchGeneration: 0,
+      aiSessionMutationGeneration: 0,
+    },
+    eAPI: {
+      getComicMetadata: async () => ({ comicId: 'stable-sample-A', sourceId: 'local:A' }),
+      suggestComicMetadata: async () => { suggestCalls += 1; return []; },
+    },
+    sampleComicForAiMetadata: (id, sourceId) => {
+      sampleArgs = [id, sourceId];
+      return new Promise(resolve => { finishSampling = resolve; });
+    },
+    getAiExplainLocale: () => 'zh-Hant',
+    isComicOffline: () => false,
+    isSelectedComic: () => true,
+    getComicSourceId: comicSourceId,
+    readerText: message => message,
+    isComicSourceAmbiguous: comic => context.state.comics.filter(item => item.id === comic.id)
+      .map(item => item.sourceId || item.source_id || 'legacy').filter((value, index, all) => all.indexOf(value) === index).length > 1,
+    comicSourceCollisionMessage: () => 'collision',
+    comicMetadataMutationBlockedMessage: () => 'blocked',
+    resolveInspectorMetadataTarget: (comic, metadata) => {
+      if (!metadata?.comicId || !metadata.sourceId || context.state.comics.length !== 1) return null;
+      return { comicId: metadata.comicId, sourceId: metadata.sourceId };
+    },
+  };
+  const suggest = vm.runInNewContext(`(${extractFunction(app, 'suggestInspectorMetadata')})`, context);
+  const pending = suggest(first, button, result);
+  await new Promise(resolve => setImmediate(resolve));
+  assert.deepEqual(sampleArgs, [first.id, 'local:A'], 'AI sampling must pass normalized source_id');
+  context.state.comics = [first, second];
+  finishSampling({ dataUrls: ['data:image/png;base64,cover'], indexes: [0] });
+  await pending;
+  assert.equal(suggestCalls, 0, 'async source collision must block id-only AI suggestion');
+  assert.equal(result.textContent, 'collision');
 }
 console.log('PASS: stale test, explanation, and metadata responses cannot write UI or cache');
 

@@ -5,7 +5,7 @@ use crate::state::ComicItem;
 use base64::{engine::general_purpose, Engine as _};
 use cap_fs_ext::DirExt;
 use rayon::prelude::*;
-use rusqlite::{params, Connection, OptionalExtension, Transaction};
+use rusqlite::{params, Connection, OptionalExtension, Transaction, TransactionBehavior};
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
@@ -26,14 +26,58 @@ const RUNTIME_ITEM_QUERY: &str = "SELECT l.runtime_id,c.title,c.series,l.online,
         p.current_page,p.total_pages,p.percent,p.updated_at
  FROM comic_locations l JOIN comics c ON c.id=l.comic_id
  LEFT JOIN reading_progress p ON p.comic_id=c.id
- WHERE l.runtime_id=?1 OR l.comic_id=?1
+ WHERE (l.runtime_id=?1 OR l.comic_id=?1)
  ORDER BY l.online DESC,l.last_seen_at DESC LIMIT 1";
+const RUNTIME_ITEMS_QUERY: &str = "SELECT l.runtime_id,c.title,c.series,l.online,l.last_seen_at,l.relative_path,l.actual_path,l.kind,l.source_id,
+        p.current_page,p.total_pages,p.percent,p.updated_at
+ FROM comic_locations l JOIN comics c ON c.id=l.comic_id
+ LEFT JOIN reading_progress p ON p.comic_id=c.id
+ WHERE (l.runtime_id=?1 OR l.comic_id=?1)
+ AND (l.online=1 OR NOT EXISTS (
+     SELECT 1 FROM comic_locations newer
+     WHERE (newer.runtime_id=?1 OR newer.comic_id=?1) AND newer.online=1
+ ))
+ GROUP BY l.source_id,l.relative_path
+ ORDER BY l.online DESC,l.last_seen_at DESC LIMIT 2";
+const RUNTIME_ITEMS_SOURCE_QUERY: &str = "SELECT l.runtime_id,c.title,c.series,l.online,l.last_seen_at,l.relative_path,l.actual_path,l.kind,l.source_id,
+        p.current_page,p.total_pages,p.percent,p.updated_at
+ FROM comic_locations l JOIN comics c ON c.id=l.comic_id
+ LEFT JOIN reading_progress p ON p.comic_id=c.id
+ WHERE (l.runtime_id=?1 OR l.comic_id=?1) AND l.source_id=?2
+ AND (l.online=1 OR NOT EXISTS (
+     SELECT 1 FROM comic_locations newer
+     WHERE (newer.runtime_id=?1 OR newer.comic_id=?1)
+       AND newer.source_id=?2 AND newer.online=1
+ ))
+ GROUP BY l.source_id,l.relative_path
+ ORDER BY l.online DESC,l.last_seen_at DESC LIMIT 2";
 const RUNTIME_ITEM_SOURCE_QUERY: &str = "SELECT l.runtime_id,c.title,c.series,l.online,l.last_seen_at,l.relative_path,l.actual_path,l.kind,l.source_id,
         p.current_page,p.total_pages,p.percent,p.updated_at
  FROM comic_locations l JOIN comics c ON c.id=l.comic_id
  LEFT JOIN reading_progress p ON p.comic_id=c.id
  WHERE (l.runtime_id=?1 OR l.comic_id=?1) AND l.source_id=?2
  ORDER BY l.online DESC,l.last_seen_at DESC LIMIT 1";
+const RUNTIME_ITEM_SOURCE_PATH_QUERY: &str = "SELECT l.runtime_id,c.title,c.series,l.online,l.last_seen_at,l.relative_path,l.actual_path,l.kind,l.source_id,
+        p.current_page,p.total_pages,p.percent,p.updated_at
+ FROM comic_locations l JOIN comics c ON c.id=l.comic_id
+ LEFT JOIN reading_progress p ON p.comic_id=c.id
+ WHERE (l.runtime_id=?1 OR l.comic_id=?1) AND l.source_id=?2 AND l.relative_path=?3
+ ORDER BY l.online DESC,l.last_seen_at DESC LIMIT 1";
+fn visible_location_predicate(alias: &str) -> String {
+    format!(
+        "NOT (replace({alias}.relative_path,char(92),'/') = '.gai-quarantine'
+           OR replace({alias}.relative_path,char(92),'/') LIKE '.gai-quarantine/%'
+           OR replace({alias}.relative_path,char(92),'/') = './.gai-quarantine'
+           OR replace({alias}.relative_path,char(92),'/') LIKE './.gai-quarantine/%')"
+    )
+}
+
+pub(crate) fn is_quarantine_relative_path(relative_path: &str) -> bool {
+    let normalized = relative_path.replace('\\', "/");
+    let normalized = normalized.strip_prefix("./").unwrap_or(&normalized);
+    normalized == ".gai-quarantine" || normalized.starts_with(".gai-quarantine/")
+}
+
 fn runtime_type_for_location(online: bool, kind: &str, _source_id: &str) -> String {
     if !online {
         return "offline".into();
@@ -86,6 +130,15 @@ pub struct ImportDiagnostic {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
+pub struct CatalogLocationView {
+    pub runtime_id: Option<String>,
+    pub source_id: String,
+    pub relative_path: String,
+    pub offline: bool,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
 pub struct ComicMetadataView {
     pub comic_id: String,
     pub runtime_id: Option<String>,
@@ -100,6 +153,10 @@ pub struct ComicMetadataView {
     pub relative_path: Option<String>,
     pub source_id: Option<String>,
     pub offline: bool,
+    /// All source/path locations are populated for catalog search results.
+    /// Non-search metadata views leave this empty and omit it from JSON.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub locations: Vec<CatalogLocationView>,
     pub creators: BTreeMap<String, Vec<String>>,
     pub tags: Vec<ScopedTag>,
     pub candidates: Vec<MetadataCandidate>,
@@ -132,18 +189,36 @@ pub struct DiscoveryTagGroup {
     pub namespace: String,
     pub value: String,
     pub comic_ids: Vec<String>,
+    /// Source-qualified identities. `comic_ids` remains for older bridges.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub targets: Vec<BatchEditTarget>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
 #[serde(rename_all = "camelCase")]
 pub struct BatchEditRequest {
+    /// Legacy stable catalog IDs. Runtime IDs are rejected here unless the
+    /// caller uses `targets`, because a source disappearing can make the
+    /// same runtime ID resolve to a different work.
     pub comic_ids: Vec<String>,
+    /// Source-qualified organizer targets. Every target is resolved inside
+    /// the same immediate SQLite transaction as the metadata writes.
+    #[serde(default)]
+    pub targets: Vec<BatchEditTarget>,
     #[serde(default)]
     pub fields: BTreeMap<String, Option<String>>,
     #[serde(default)]
     pub add_tags: Vec<ScopedTag>,
     #[serde(default)]
     pub exclude_tags: Vec<ScopedTag>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct BatchEditTarget {
+    pub runtime_id: String,
+    pub source_id: String,
+    pub relative_path: String,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -362,6 +437,10 @@ pub struct CatalogImportResult {
 pub struct ReimportRequest {
     #[serde(default)]
     pub comic_ids: Vec<String>,
+    /// Optional source-qualified locations captured by the organizer. These
+    /// are revalidated in the final write transaction after parsing.
+    #[serde(default)]
+    pub targets: Vec<BatchEditTarget>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -647,10 +726,57 @@ impl CatalogStore {
         })
     }
 
+    pub fn get_metadata_for_source(
+        &self,
+        identifier: &str,
+        source_id: &str,
+        relative_path: &str,
+    ) -> Result<ComicMetadataView, String> {
+        if source_id.trim().is_empty() || relative_path.trim().is_empty() {
+            return Err("漫畫來源位置資訊不完整，已拒絕 metadata 查詢".into());
+        }
+        self.with_connection(|connection| {
+            let mut statement = connection
+                .prepare(
+                    "SELECT DISTINCT l.comic_id
+                     FROM comic_locations l
+                     WHERE (l.runtime_id=?1 OR l.comic_id=?1)
+                       AND l.source_id=?2
+                       AND l.relative_path=?3
+                     LIMIT 2",
+                )
+                .map_err(|error| error.to_string())?;
+            let comic_ids = statement
+                .query_map(params![identifier, source_id, relative_path], |row| {
+                    row.get::<_, String>(0)
+                })
+                .map_err(|error| error.to_string())?
+                .collect::<Result<Vec<_>, _>>()
+                .map_err(|error| error.to_string())?;
+            let comic_id = match comic_ids.as_slice() {
+                [comic_id] => comic_id,
+                [] => return Err("找不到指定來源位置的漫畫 metadata".into()),
+                _ => return Err("漫畫來源位置不唯一，已拒絕 metadata 查詢".into()),
+            };
+            build_view_for_location(connection, comic_id, source_id, relative_path)
+        })
+    }
+
     pub fn get_location(&self, identifier: &str) -> Result<ComicLocationView, String> {
         self.with_connection(|connection| {
             let comic_id = resolve_comic_id(connection, identifier)?
                 .ok_or_else(|| "找不到已登記的漫畫位置".to_string())?;
+            let location_count: i64 = connection
+                .query_row(
+                    "SELECT COUNT(DISTINCT source_id || char(0) || relative_path)
+                     FROM comic_locations WHERE comic_id=?1",
+                    [&comic_id],
+                    |row| row.get(0),
+                )
+                .map_err(|error| error.to_string())?;
+            if location_count > 1 {
+                return Err("漫畫有多個來源位置，為避免誤操作，暫時無法管理檔案".into());
+            }
             connection.query_row(
                 "SELECT l.id,l.comic_id,l.runtime_id,l.source_id,l.relative_path,l.actual_path,l.kind,l.size,l.mtime,l.fingerprint,
                         CASE WHEN l.fingerprint IS NOT NULL AND EXISTS(
@@ -669,6 +795,60 @@ impl CatalogStore {
                     online: row.get::<_, i64>(11)? != 0,
                 }),
             ).map_err(|error| error.to_string())
+        })
+    }
+
+    pub fn get_location_for_source(
+        &self,
+        identifier: &str,
+        source_id: &str,
+        relative_path: &str,
+    ) -> Result<ComicLocationView, String> {
+        if source_id.trim().is_empty() || relative_path.is_empty() {
+            return Err("漫畫來源位置資訊不完整，已拒絕檔案操作".into());
+        }
+        self.with_connection(|connection| {
+            let mut statement = connection
+                .prepare(
+                    "SELECT DISTINCT comic_id FROM comic_locations
+                     WHERE (runtime_id=?1 OR comic_id=?1)
+                       AND source_id=?2 AND relative_path=?3 LIMIT 2",
+                )
+                .map_err(|error| error.to_string())?;
+            let comic_ids = statement
+                .query_map(params![identifier, source_id, relative_path], |row| {
+                    row.get::<_, String>(0)
+                })
+                .map_err(|error| error.to_string())?
+                .collect::<Result<Vec<_>, _>>()
+                .map_err(|error| error.to_string())?;
+            let comic_id = match comic_ids.as_slice() {
+                [comic_id] => comic_id,
+                [] => return Err("找不到指定來源位置的漫畫".into()),
+                _ => return Err("漫畫來源位置不唯一，已拒絕檔案操作".into()),
+            };
+            connection
+                .query_row(
+                    "SELECT l.id,l.comic_id,l.runtime_id,l.source_id,l.relative_path,l.actual_path,l.kind,l.size,l.mtime,l.fingerprint,
+                            CASE WHEN l.fingerprint IS NOT NULL AND EXISTS(
+                              SELECT 1 FROM comic_locations other
+                               WHERE other.fingerprint=l.fingerprint
+                                 AND other.fingerprint_version=l.fingerprint_version
+                                 AND other.comic_id<>l.comic_id
+                            ) THEN 1 ELSE 0 END,l.online
+                     FROM comic_locations l
+                     WHERE l.comic_id=?1 AND l.source_id=?2 AND l.relative_path=?3
+                     ORDER BY l.online DESC,l.last_seen_at DESC LIMIT 1",
+                    params![comic_id, source_id, relative_path],
+                    |row| Ok(ComicLocationView {
+                        id: row.get(0)?, comic_id: row.get(1)?, runtime_id: row.get(2)?, source_id: row.get(3)?,
+                        relative_path: row.get(4)?, actual_path: row.get(5)?, kind: row.get(6)?,
+                        size: row.get(7)?, mtime: row.get(8)?, fingerprint: row.get(9)?,
+                        fingerprint_collision: row.get::<_, i64>(10)? != 0,
+                        online: row.get::<_, i64>(11)? != 0,
+                    }),
+                )
+                .map_err(|error| error.to_string())
         })
     }
 
@@ -908,6 +1088,7 @@ impl CatalogStore {
         catalog_only_sources: &BTreeSet<String>,
         include_unreadable_external_sources: bool,
     ) -> Result<Vec<ComicItem>, String> {
+        items.retain(|item| !is_quarantine_relative_path(&item.relative_path));
         self.with_connection(|connection| {
             let mut statement = connection.prepare(
                 "SELECT l.runtime_id,c.title,c.series,l.online,l.last_seen_at,l.relative_path,l.actual_path,l.kind,l.source_id,
@@ -952,6 +1133,9 @@ impl CatalogStore {
                 }
             }
             for (runtime_id, title, series, online, last_seen_at, relative_path, actual_path, kind, source_id, current_page, total_pages, percent, progress_updated_at) in metadata.into_values() {
+                if is_quarantine_relative_path(&relative_path) {
+                    continue;
+                }
                 if present.contains(&(runtime_id.clone(), source_id.clone())) { continue; }
                 let include_as_unreadable_external = include_unreadable_external_sources
                     && source_id.starts_with("external:");
@@ -996,6 +1180,36 @@ impl CatalogStore {
         })
     }
 
+    pub fn get_runtime_items_for_id(&self, identifier: &str) -> Result<Vec<ComicItem>, String> {
+        self.with_connection(|connection| {
+            let mut statement = connection
+                .prepare(RUNTIME_ITEMS_QUERY)
+                .map_err(|error| error.to_string())?;
+            let rows = statement
+                .query_map([identifier], comic_item_from_row)
+                .map_err(|error| error.to_string())?;
+            rows.collect::<Result<Vec<_>, _>>()
+                .map_err(|error| error.to_string())
+        })
+    }
+
+    pub fn get_runtime_items_for_source(
+        &self,
+        identifier: &str,
+        source_id: &str,
+    ) -> Result<Vec<ComicItem>, String> {
+        self.with_connection(|connection| {
+            let mut statement = connection
+                .prepare(RUNTIME_ITEMS_SOURCE_QUERY)
+                .map_err(|error| error.to_string())?;
+            let rows = statement
+                .query_map(params![identifier, source_id], comic_item_from_row)
+                .map_err(|error| error.to_string())?;
+            rows.collect::<Result<Vec<_>, _>>()
+                .map_err(|error| error.to_string())
+        })
+    }
+
     pub fn get_runtime_item_for_source(
         &self,
         identifier: &str,
@@ -1006,6 +1220,26 @@ impl CatalogStore {
                 .prepare(RUNTIME_ITEM_SOURCE_QUERY)
                 .map_err(|error| error.to_string())?;
             load_runtime_item_from_statement_for_source(&mut statement, identifier, source_id)
+        })
+    }
+
+    pub fn get_runtime_item_for_source_path(
+        &self,
+        identifier: &str,
+        source_id: &str,
+        relative_path: &str,
+    ) -> Result<Option<ComicItem>, String> {
+        self.with_connection(|connection| {
+            let mut statement = connection
+                .prepare(RUNTIME_ITEM_SOURCE_PATH_QUERY)
+                .map_err(|error| error.to_string())?;
+            statement
+                .query_row(
+                    params![identifier, source_id, relative_path],
+                    comic_item_from_row,
+                )
+                .optional()
+                .map_err(|error| error.to_string())
         })
     }
 
@@ -1034,35 +1268,48 @@ impl CatalogStore {
     }
 
     pub fn get_recent_reading_runtime_item(&self) -> Result<Option<ComicItem>, String> {
-        let runtime_id = self.with_connection(|connection| {
+        self.with_connection(|connection| {
+            let visible_location = visible_location_predicate("l");
+            let query = format!(
+                "SELECT l.runtime_id,c.title,c.series,l.online,l.last_seen_at,l.relative_path,l.actual_path,l.kind,l.source_id,
+                        p.current_page,p.total_pages,p.percent,p.updated_at
+                 FROM reading_progress p
+                 JOIN comic_locations l ON l.comic_id=p.comic_id
+                 JOIN comics c ON c.id=l.comic_id
+                 WHERE (p.current_page > 0 OR p.total_pages = 1)
+                   AND p.updated_at IS NOT NULL
+                   AND trim(p.updated_at) <> ''
+                   AND l.runtime_id IS NOT NULL
+                   AND trim(l.runtime_id) <> ''
+                   AND {visible_location}
+                 ORDER BY datetime(p.updated_at) DESC,p.updated_at DESC,
+                          l.online DESC,l.last_seen_at DESC
+                 LIMIT 1"
+            );
             connection
-                .query_row(
-                    "SELECT l.runtime_id
-                     FROM reading_progress p
-                     JOIN comic_locations l ON l.comic_id=p.comic_id
-                     WHERE (p.current_page > 0 OR p.total_pages = 1)
-                       AND p.updated_at IS NOT NULL
-                       AND trim(p.updated_at) <> ''
-                       AND l.runtime_id IS NOT NULL
-                       AND trim(l.runtime_id) <> ''
-                     ORDER BY datetime(p.updated_at) DESC,p.updated_at DESC,
-                              l.online DESC,l.last_seen_at DESC
-                     LIMIT 1",
-                    [],
-                    |row| row.get::<_, String>(0),
-                )
+                .query_row(&query, [], comic_item_from_row)
                 .optional()
                 .map_err(|error| error.to_string())
-        })?;
-        runtime_id
-            .as_deref()
-            .map(|identifier| self.get_runtime_item(identifier))
-            .transpose()
-            .map(|item| item.flatten())
+        })
     }
 
     pub fn search(&self, query: CatalogQuery) -> Result<CatalogSearchResult, String> {
-        self.with_connection(|connection| search_catalog(connection, query))
+        self.with_connection(|connection| {
+            // Keep candidate selection and view hydration on one SQLite
+            // snapshot. Otherwise a source cleanup between the EXISTS query
+            // and build_view could turn a valid candidate into a locationless
+            // orphan (or vice versa).
+            let tx = connection
+                .transaction_with_behavior(TransactionBehavior::Deferred)
+                .map_err(|error| error.to_string())?;
+            match search_catalog(&tx, query) {
+                Ok(result) => {
+                    tx.commit().map_err(|error| error.to_string())?;
+                    Ok(result)
+                }
+                Err(error) => Err(error),
+            }
+        })
     }
 
     pub fn discovery_tags(&self, runtime_ids: &[String]) -> Result<Vec<DiscoveryTagGroup>, String> {
@@ -1075,7 +1322,27 @@ impl CatalogStore {
         if runtime_ids.is_empty() {
             return Ok(Vec::new());
         }
-        self.with_connection(|connection| discovery_tag_groups(connection, runtime_ids))
+        self.with_connection(|connection| discovery_tag_groups(connection, runtime_ids, &[]))
+    }
+
+    pub fn discovery_tags_for_targets(
+        &self,
+        targets: &[BatchEditTarget],
+    ) -> Result<Vec<DiscoveryTagGroup>, String> {
+        if targets.len() > RUNTIME_ITEM_IDS_MAX {
+            return Err("一次探索的作品數量超過限制".into());
+        }
+        if targets.iter().any(|target| {
+            target.runtime_id.len() > 4096
+                || target.source_id.len() > 4096
+                || target.relative_path.len() > 4096
+        }) {
+            return Err("探索作品來源識別碼過長".into());
+        }
+        if targets.is_empty() {
+            return Ok(Vec::new());
+        }
+        self.with_connection(|connection| discovery_tag_groups(connection, &[], targets))
     }
 
     pub fn tag_inventory(&self, query: TagInventoryQuery) -> Result<TagInventoryResult, String> {
@@ -1295,11 +1562,22 @@ impl CatalogStore {
     }
 
     pub fn apply_batch(&self, request: BatchEditRequest) -> Result<BatchEditResult, String> {
-        if request.comic_ids.is_empty() {
+        if request.comic_ids.is_empty() && request.targets.is_empty() {
             return Err("請至少選取一本漫畫".into());
         }
-        if request.comic_ids.len() > 10_000 {
+        let target_count = if request.targets.is_empty() {
+            request.comic_ids.len()
+        } else {
+            request.targets.len()
+        };
+        if target_count > 10_000 {
             return Err("單次批次操作上限為 10,000 本".into());
+        }
+        if !request.targets.is_empty()
+            && !request.comic_ids.is_empty()
+            && request.targets.len() != request.comic_ids.len()
+        {
+            return Err("批次 comicIds 與 targets 數量不一致".into());
         }
         for field in request.fields.keys() {
             if !allowed_user_field(field) {
@@ -1307,8 +1585,38 @@ impl CatalogStore {
             }
         }
         self.with_connection(|connection| {
-            let tx = connection.transaction().map_err(|error| error.to_string())?;
-            let comic_ids = request.comic_ids.iter().map(|id| resolve_comic_id_tx(&tx, id)).collect::<Result<BTreeSet<_>, _>>()?;
+            // Take the write lock before resolving any target. A concurrent
+            // forget/reimport must wait for this complete batch, so the
+            // source-qualified lookup and all writes share one snapshot.
+            let tx = connection
+                .transaction_with_behavior(TransactionBehavior::Immediate)
+                .map_err(|error| error.to_string())?;
+            let resolved_ids = if request.targets.is_empty() {
+                request
+                    .comic_ids
+                    .iter()
+                    .map(|id| resolve_legacy_batch_id_tx(&tx, id))
+                    .collect::<Result<Vec<_>, _>>()?
+            } else {
+                if !request.comic_ids.is_empty()
+                    && request
+                        .comic_ids
+                        .iter()
+                        .zip(&request.targets)
+                        .any(|(id, target)| id != &target.runtime_id)
+                {
+                    return Err("批次 comicIds 與 targets runtimeId 不一致".into());
+                }
+                request
+                    .targets
+                    .iter()
+                    .map(|target| resolve_batch_target_tx(&tx, target))
+                    .collect::<Result<Vec<_>, _>>()?
+            };
+            let comic_ids = resolved_ids.into_iter().collect::<BTreeSet<_>>();
+            if comic_ids.is_empty() {
+                return Err("請至少選取一本漫畫".into());
+            }
             let before = snapshot_overrides(&tx, &comic_ids)?;
             for comic_id in &comic_ids {
                 for (field, value) in &request.fields {
@@ -1429,20 +1737,75 @@ impl CatalogStore {
     }
 
     pub fn reimport(&self, request: ReimportRequest) -> Result<ReimportResult, String> {
+        if request.comic_ids.len() > 10_000 || request.targets.len() > 10_000 {
+            return Err("單次指定重新匯入上限為 10,000 本".into());
+        }
+        if request.comic_ids.is_empty() && request.targets.is_empty() {
+            // Empty means reimport the whole currently online catalog.
+        } else if !request.targets.is_empty()
+            && !request.comic_ids.is_empty()
+            && request.targets.len() != request.comic_ids.len()
+        {
+            return Err("重匯 comicIds 與 targets 數量不一致".into());
+        }
         let targets = self.with_connection(|connection| {
+            let tx = connection
+                .transaction_with_behavior(TransactionBehavior::Immediate)
+                .map_err(|error| error.to_string())?;
             let mut targets = Vec::new();
-            if request.comic_ids.is_empty() {
-                let mut statement = connection.prepare("SELECT comic_id, actual_path FROM comic_locations WHERE online = 1 AND actual_path IS NOT NULL").map_err(|error| error.to_string())?;
-                let rows = statement.query_map([], |row| Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))).map_err(|error| error.to_string())?;
-                for row in rows { targets.push(row.map_err(|error| error.to_string())?); }
+            if request.comic_ids.is_empty() && request.targets.is_empty() {
+                let rows = {
+                    let mut statement = tx
+                        .prepare("SELECT comic_id, actual_path FROM comic_locations WHERE online = 1 AND actual_path IS NOT NULL")
+                        .map_err(|error| error.to_string())?;
+                    let rows = statement
+                        .query_map([], |row| {
+                            Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
+                        })
+                        .map_err(|error| error.to_string())?
+                        .collect::<Result<Vec<_>, _>>()
+                        .map_err(|error| error.to_string())?;
+                    rows
+                };
+                for (comic_id, path) in rows {
+                    targets.push(ReimportResolvedTarget {
+                        comic_id,
+                        path,
+                        identity: None,
+                    });
+                }
+            } else if !request.targets.is_empty() {
+                if !request.comic_ids.is_empty()
+                    && request
+                        .comic_ids
+                        .iter()
+                        .zip(&request.targets)
+                        .any(|(id, target)| id != &target.runtime_id)
+                {
+                    return Err("重匯 comicIds 與 targets runtimeId 不一致".into());
+                }
+                for target in &request.targets {
+                    targets.push(resolve_reimport_target_tx(&tx, target)?);
+                }
             } else {
                 for identifier in &request.comic_ids {
-                    let comic_id = resolve_comic_id(connection, identifier)?.ok_or_else(|| format!("找不到漫畫：{identifier}"))?;
-                    let mut statement = connection.prepare("SELECT actual_path FROM comic_locations WHERE comic_id = ?1 AND online = 1 AND actual_path IS NOT NULL ORDER BY last_seen_at DESC").map_err(|error| error.to_string())?;
-                    let rows = statement.query_map([comic_id.as_str()], |row| row.get::<_, String>(0)).map_err(|error| error.to_string())?;
-                    for path in rows { targets.push((comic_id.clone(), path.map_err(|error| error.to_string())?)); }
+                    let comic_id = resolve_legacy_batch_id_tx(&tx, identifier)?;
+                    let mut statement = tx
+                        .prepare("SELECT actual_path FROM comic_locations WHERE comic_id = ?1 AND online = 1 AND actual_path IS NOT NULL ORDER BY last_seen_at DESC")
+                        .map_err(|error| error.to_string())?;
+                    let rows = statement
+                        .query_map([comic_id.as_str()], |row| row.get::<_, String>(0))
+                        .map_err(|error| error.to_string())?;
+                    for path in rows {
+                        targets.push(ReimportResolvedTarget {
+                            comic_id: comic_id.clone(),
+                            path: path.map_err(|error| error.to_string())?,
+                            identity: None,
+                        });
+                    }
                 }
             }
+            tx.commit().map_err(|error| error.to_string())?;
             Ok(targets)
         })?;
         let pool = rayon::ThreadPoolBuilder::new()
@@ -1453,32 +1816,56 @@ impl CatalogStore {
         let parsed = pool.install(|| {
             targets
                 .into_par_iter()
-                .map(|(comic_id, path)| {
-                    (
-                        comic_id,
-                        path.clone(),
-                        metadata::parse_metadata_for_path(Path::new(&path)),
-                    )
+                .map(|target| {
+                    let outcome = metadata::parse_metadata_for_path(Path::new(&target.path));
+                    (target, outcome)
                 })
                 .collect::<Vec<_>>()
         });
         self.with_connection(|connection| {
             let tx = connection
-                .transaction()
+                .transaction_with_behavior(TransactionBehavior::Immediate)
                 .map_err(|error| error.to_string())?;
             let mut diagnostics = 0;
-            for (comic_id, path, outcome) in parsed.iter() {
+            for (target, outcome) in parsed.iter() {
+                if let Some(identity) = target.identity.as_ref() {
+                    let current: Option<(String, String)> = tx
+                        .query_row(
+                            "SELECT comic_id,actual_path
+                             FROM comic_locations
+                             WHERE runtime_id=?1 AND source_id=?2 AND relative_path=?3
+                               AND online=1 AND actual_path IS NOT NULL
+                             LIMIT 1",
+                            params![
+                                identity.runtime_id,
+                                identity.source_id,
+                                identity.relative_path
+                            ],
+                            |row| Ok((row.get(0)?, row.get(1)?)),
+                        )
+                        .optional()
+                        .map_err(|error| error.to_string())?;
+                    if current.as_ref().map(|(_, path)| path.as_str()) != Some(target.path.as_str())
+                        || current.as_ref().map(|(comic_id, _)| comic_id.as_str())
+                            != Some(target.comic_id.as_str())
+                    {
+                        return Err(format!(
+                            "重匯期間來源位置已變更：{} / {} / {}",
+                            identity.runtime_id, identity.source_id, identity.relative_path
+                        ));
+                    }
+                }
                 diagnostics += outcome.diagnostics.len();
                 replace_imports(
                     &tx,
-                    comic_id,
-                    path,
+                    &target.comic_id,
+                    &target.path,
                     outcome.sources.clone(),
                     outcome.diagnostics.clone(),
                     outcome.failures.clone(),
                 )?;
-                resolve_effective_metadata(&tx, comic_id)?;
-                refresh_fts(&tx, comic_id)?;
+                resolve_effective_metadata(&tx, &target.comic_id)?;
+                refresh_fts(&tx, &target.comic_id)?;
             }
             tx.commit().map_err(|error| error.to_string())?;
             Ok(ReimportResult {
@@ -2714,14 +3101,20 @@ fn resolve_effective_metadata(tx: &Transaction<'_>, comic_id: &str) -> Result<()
 }
 
 fn build_search_view(connection: &Connection, comic_id: &str) -> Result<ComicMetadataView, String> {
+    let visible_location = visible_location_predicate("l");
     let mut view = connection.query_row(
-        "SELECT c.id,c.title,c.series,c.volume,c.number,c.summary,c.language,c.reading_direction,c.published_at,c.offline,
-          l.runtime_id,l.relative_path,l.source_id FROM comics c LEFT JOIN comic_locations l ON l.comic_id=c.id WHERE c.id=?1 ORDER BY l.online DESC,l.last_seen_at DESC LIMIT 1",
+        &format!(
+            "SELECT c.id,c.title,c.series,c.volume,c.number,c.summary,c.language,c.reading_direction,c.published_at,c.offline,
+              l.runtime_id,l.relative_path,l.source_id FROM comics c
+              LEFT JOIN comic_locations l ON l.comic_id=c.id AND {visible_location}
+              WHERE c.id=?1 ORDER BY l.online DESC,l.last_seen_at DESC LIMIT 1"
+        ),
         [comic_id],
         |row| Ok(ComicMetadataView {
             comic_id: row.get(0)?, title: row.get(1)?, series: row.get(2)?, volume: row.get(3)?, number: row.get(4)?, summary: row.get(5)?,
             language: row.get(6)?, reading_direction: row.get(7)?, published_at: row.get(8)?, offline: row.get::<_, i64>(9)? != 0,
             runtime_id: row.get(10)?, relative_path: row.get(11)?, source_id: row.get(12)?, creators: BTreeMap::new(), tags: vec![], candidates: vec![], locked_fields: vec![], diagnostics: vec![],
+            locations: Vec::new(),
         }),
     ).map_err(|error| error.to_string())?;
     view.creators = effective_creators(connection, comic_id)?;
@@ -2734,7 +3127,7 @@ fn build_search_views_batch(
 ) -> Result<HashMap<String, ComicMetadataView>, String> {
     let mut views = HashMap::new();
     let mut statement = connection
-        .prepare(
+        .prepare(&format!(
             "WITH ranked_locations AS (
                SELECT l.*,
                       ROW_NUMBER() OVER (
@@ -2742,14 +3135,20 @@ fn build_search_views_batch(
                         ORDER BY l.online DESC,l.last_seen_at DESC
                       ) AS location_rank
                FROM comic_locations l
+               WHERE {visible_location}
              )
              SELECT c.id,c.title,c.series,c.volume,c.number,c.summary,c.language,
                     c.reading_direction,c.published_at,c.offline,
                     l.runtime_id,l.relative_path,l.source_id
              FROM comics c
              LEFT JOIN ranked_locations l
-               ON l.comic_id=c.id AND l.location_rank=1",
-        )
+               ON l.comic_id=c.id AND l.location_rank=1
+             WHERE EXISTS (SELECT 1 FROM comic_locations visible
+                            WHERE visible.comic_id=c.id
+                              AND {visible_location_predicate})",
+            visible_location = visible_location_predicate("l"),
+            visible_location_predicate = visible_location_predicate("visible"),
+        ))
         .map_err(|error| error.to_string())?;
     for row in statement
         .query_map([], |row| {
@@ -2772,6 +3171,7 @@ fn build_search_views_batch(
                 candidates: Vec::new(),
                 locked_fields: Vec::new(),
                 diagnostics: Vec::new(),
+                locations: Vec::new(),
             })
         })
         .map_err(|error| error.to_string())?
@@ -3000,6 +3400,99 @@ fn build_view(connection: &Connection, comic_id: &str) -> Result<ComicMetadataVi
     Ok(view)
 }
 
+fn build_view_for_location(
+    connection: &Connection,
+    comic_id: &str,
+    source_id: &str,
+    relative_path: &str,
+) -> Result<ComicMetadataView, String> {
+    let mut view = build_view(connection, comic_id)?;
+    let location = connection
+        .query_row(
+            &format!(
+                "SELECT l.runtime_id,l.relative_path,l.source_id,l.online
+             FROM comic_locations l
+             WHERE l.comic_id=?1 AND l.source_id=?2
+                       AND l.relative_path=?3
+                       AND {visible_location}
+             ORDER BY l.online DESC,l.last_seen_at DESC
+             LIMIT 1",
+                visible_location = visible_location_predicate("l")
+            ),
+            params![comic_id, source_id, relative_path],
+            |row| {
+                Ok((
+                    row.get::<_, String>(0)?,
+                    row.get::<_, String>(1)?,
+                    row.get::<_, String>(2)?,
+                    row.get::<_, i64>(3)? != 0,
+                ))
+            },
+        )
+        .map_err(|error| error.to_string())?;
+    view.runtime_id = Some(location.0);
+    view.relative_path = Some(location.1);
+    view.source_id = Some(location.2);
+    view.offline = !location.3;
+    Ok(view)
+}
+
+fn attach_search_locations(
+    connection: &Connection,
+    items: &mut [ComicMetadataView],
+) -> Result<(), String> {
+    if items.is_empty() {
+        return Ok(());
+    }
+    let placeholders = (1..=items.len())
+        .map(|index| format!("?{index}"))
+        .collect::<Vec<_>>()
+        .join(",");
+    let sql = format!(
+        "SELECT l.comic_id,l.runtime_id,l.source_id,l.relative_path,l.online
+         FROM comic_locations l
+         WHERE l.comic_id IN ({placeholders})
+           AND {visible_location}
+         ORDER BY l.comic_id,l.online DESC,l.last_seen_at DESC,l.source_id,l.relative_path",
+        visible_location = visible_location_predicate("l")
+    );
+    let ids = items
+        .iter()
+        .map(|item| item.comic_id.as_str())
+        .collect::<Vec<_>>();
+    let mut statement = connection
+        .prepare(&sql)
+        .map_err(|error| error.to_string())?;
+    let rows = statement
+        .query_map(rusqlite::params_from_iter(ids), |row| {
+            Ok((
+                row.get::<_, String>(0)?,
+                CatalogLocationView {
+                    runtime_id: row.get(1)?,
+                    source_id: row.get(2)?,
+                    relative_path: row.get(3)?,
+                    offline: row.get::<_, i64>(4)? == 0,
+                },
+            ))
+        })
+        .map_err(|error| error.to_string())?;
+    let mut locations_by_comic = HashMap::<String, Vec<CatalogLocationView>>::new();
+    for row in rows {
+        let (comic_id, location) = row.map_err(|error| error.to_string())?;
+        locations_by_comic
+            .entry(comic_id)
+            .or_default()
+            .push(location);
+    }
+    drop(statement);
+    for item in items {
+        item.locations = locations_by_comic
+            .remove(&item.comic_id)
+            .unwrap_or_default();
+    }
+    Ok(())
+}
+
 fn effective_creators(
     connection: &Connection,
     comic_id: &str,
@@ -3017,15 +3510,27 @@ fn effective_creators(
 fn discovery_tag_groups(
     connection: &Connection,
     runtime_ids: &[String],
+    targets: &[BatchEditTarget],
 ) -> Result<Vec<DiscoveryTagGroup>, String> {
     let ids = serde_json::to_string(runtime_ids).map_err(|error| error.to_string())?;
+    let targets_json = serde_json::to_string(targets).map_err(|error| error.to_string())?;
+    let source_qualified = if targets.is_empty() { 0 } else { 1 };
     let mut statement = connection
         .prepare(
             "WITH selected AS (
            SELECT DISTINCT l.runtime_id,l.comic_id,l.source_id,
-                  trim(replace(l.relative_path,char(92),'/'),'/') AS relative_path
+                  l.relative_path,
+                  trim(replace(l.relative_path,char(92),'/'),'/') AS normalized_relative_path
            FROM comic_locations l
-           WHERE l.online=1 AND l.runtime_id IN (SELECT value FROM json_each(?1))
+           WHERE l.online=1 AND (
+             (?2=0 AND l.runtime_id IN (SELECT value FROM json_each(?1)))
+             OR (?2=1 AND EXISTS (
+               SELECT 1 FROM json_each(?3) requested
+               WHERE json_extract(requested.value,'$.runtimeId')=l.runtime_id
+                 AND json_extract(requested.value,'$.sourceId')=l.source_id
+                 AND json_extract(requested.value,'$.relativePath')=l.relative_path
+             ))
+           )
          ), projected AS (
            SELECT raw.id AS raw_id,final.id AS canonical_id,
                   final.namespace,final.display_value
@@ -3038,62 +3543,88 @@ fn discovery_tag_groups(
            SELECT source_id,tag_id,trim(replace(folder_path,char(92),'/'),'/') AS folder_path
            FROM folder_tag_rules WHERE enabled=1
          ), seeds AS (
-           SELECT s.runtime_id,c.tag_id FROM selected s
+           SELECT s.runtime_id,s.source_id,s.relative_path,c.tag_id FROM selected s
            JOIN comic_tag_candidates c ON c.comic_id=s.comic_id
            JOIN metadata_sources m ON m.id=c.source_id
            WHERE m.parser_id NOT LIKE 'ai:%'
            UNION
-           SELECT s.runtime_id,r.tag_id FROM selected s
+           SELECT s.runtime_id,s.source_id,s.relative_path,r.tag_id FROM selected s
            JOIN folder_rules r ON r.source_id=s.source_id
-           WHERE r.folder_path='' OR s.relative_path=r.folder_path
-              OR substr(s.relative_path,1,length(r.folder_path)+1)=r.folder_path||'/'
+           WHERE r.folder_path='' OR s.normalized_relative_path=r.folder_path
+              OR substr(s.normalized_relative_path,1,length(r.folder_path)+1)=r.folder_path||'/'
          ), inherited AS (
-           SELECT DISTINCT s.runtime_id,p.canonical_id FROM seeds s
+           SELECT DISTINCT s.runtime_id,s.source_id,s.relative_path,p.canonical_id FROM seeds s
            JOIN projected p ON p.raw_id=s.tag_id
          ), overrides AS (
-           SELECT s.runtime_id,p.canonical_id,o.action,
+           SELECT s.runtime_id,s.source_id,s.relative_path,p.canonical_id,o.action,
                   ROW_NUMBER() OVER (
-                    PARTITION BY s.runtime_id,p.canonical_id ORDER BY o.rowid DESC
+                    PARTITION BY s.runtime_id,s.source_id,s.relative_path,p.canonical_id
+                    ORDER BY o.rowid DESC
                   ) AS precedence
            FROM selected s JOIN comic_tag_overrides o ON o.comic_id=s.comic_id
            JOIN projected p ON p.raw_id=o.tag_id
          ), effective AS (
-           SELECT i.runtime_id,i.canonical_id FROM inherited i
+           SELECT i.runtime_id,i.source_id,i.relative_path,i.canonical_id FROM inherited i
            WHERE NOT EXISTS (
              SELECT 1 FROM overrides o WHERE o.runtime_id=i.runtime_id
+               AND o.source_id=i.source_id AND o.relative_path=i.relative_path
                AND o.canonical_id=i.canonical_id AND o.precedence=1 AND o.action='exclude'
            )
            UNION
-           SELECT runtime_id,canonical_id FROM overrides WHERE precedence=1 AND action='include'
+           SELECT runtime_id,source_id,relative_path,canonical_id FROM overrides
+             WHERE precedence=1 AND action='include'
          )
-         SELECT DISTINCT p.namespace,p.display_value,e.runtime_id
+         SELECT DISTINCT p.namespace,p.display_value,e.runtime_id,e.source_id,e.relative_path
          FROM effective e JOIN projected p ON p.canonical_id=e.canonical_id
-         ORDER BY p.namespace,p.display_value,e.runtime_id",
+         ORDER BY p.namespace,p.display_value,e.runtime_id,e.source_id,e.relative_path",
         )
         .map_err(|error| error.to_string())?;
     let rows = statement
-        .query_map([ids], |row| {
+        .query_map(params![ids, source_qualified, targets_json], |row| {
             Ok((
                 row.get::<_, String>(0)?,
                 row.get::<_, String>(1)?,
                 row.get::<_, String>(2)?,
+                row.get::<_, String>(3)?,
+                row.get::<_, String>(4)?,
             ))
         })
         .map_err(|error| error.to_string())?;
-    let mut groups: BTreeMap<(String, String), BTreeSet<String>> = BTreeMap::new();
+    type TagKey = (String, String);
+    type DiscoveryLocation = (String, String, String);
+    let mut groups: BTreeMap<TagKey, BTreeSet<DiscoveryLocation>> = BTreeMap::new();
     for row in rows {
-        let (namespace, value, runtime_id) = row.map_err(|error| error.to_string())?;
-        groups
-            .entry((namespace, value))
-            .or_default()
-            .insert(runtime_id);
+        let (namespace, value, runtime_id, source_id, relative_path) =
+            row.map_err(|error| error.to_string())?;
+        groups.entry((namespace, value)).or_default().insert((
+            runtime_id,
+            source_id,
+            relative_path,
+        ));
     }
     Ok(groups
         .into_iter()
-        .map(|((namespace, value), comic_ids)| DiscoveryTagGroup {
-            namespace,
-            value,
-            comic_ids: comic_ids.into_iter().collect(),
+        .map(|((namespace, value), targets)| {
+            let comic_ids = targets
+                .iter()
+                .map(|(runtime_id, _, _)| runtime_id.clone())
+                .collect::<BTreeSet<_>>()
+                .into_iter()
+                .collect();
+            let targets = targets
+                .into_iter()
+                .map(|(runtime_id, source_id, relative_path)| BatchEditTarget {
+                    runtime_id,
+                    source_id,
+                    relative_path,
+                })
+                .collect();
+            DiscoveryTagGroup {
+                namespace,
+                value,
+                comic_ids,
+                targets,
+            }
         })
         .collect())
 }
@@ -3394,15 +3925,28 @@ fn search_catalog(
         .cloned()
         .chain(parsed.include.iter().map(|(_, value)| value.clone()))
         .collect::<Vec<_>>();
+    let visible_location = visible_location_predicate("l");
     if seed_terms.is_empty() && parsed.exclude.is_empty() {
         let total = connection
-            .query_row("SELECT COUNT(*) FROM comics", [], |row| {
-                row.get::<_, i64>(0)
-            })
+            .query_row(
+                &format!(
+                    "SELECT COUNT(*) FROM comics c
+                     WHERE EXISTS (SELECT 1 FROM comic_locations l
+                                    WHERE l.comic_id=c.id AND {visible_location})"
+                ),
+                [],
+                |row| row.get::<_, i64>(0),
+            )
             .map_err(|error| error.to_string())? as usize;
         let limit = query.limit.clamp(1, PAGE_SIZE_MAX);
         let mut statement = connection
-            .prepare("SELECT id FROM comics ORDER BY updated_at DESC,title COLLATE NOCASE LIMIT ?1 OFFSET ?2")
+            .prepare(&format!(
+                "SELECT c.id FROM comics c
+                 WHERE EXISTS (SELECT 1 FROM comic_locations l
+                                WHERE l.comic_id=c.id AND {visible_location})
+                 ORDER BY c.updated_at DESC,c.title COLLATE NOCASE
+                 LIMIT ?1 OFFSET ?2"
+            ))
             .map_err(|error| error.to_string())?;
         let rows = statement
             .query_map(
@@ -3414,10 +3958,11 @@ fn search_catalog(
             .collect::<Result<Vec<String>, _>>()
             .map_err(|error| error.to_string())?;
         drop(statement);
-        let items = ids
+        let mut items = ids
             .iter()
             .map(|id| build_view(connection, id))
             .collect::<Result<Vec<_>, _>>()?;
+        attach_search_locations(connection, &mut items)?;
         return Ok(CatalogSearchResult {
             items,
             total,
@@ -3463,7 +4008,12 @@ fn search_catalog(
         // searches do not prepare and execute several statements per comic.
         let mut search_views = build_search_views_batch(connection)?;
         let mut statement = connection
-            .prepare("SELECT id FROM comics ORDER BY updated_at DESC,title COLLATE NOCASE")
+            .prepare(&format!(
+                "SELECT c.id FROM comics c
+                 WHERE EXISTS (SELECT 1 FROM comic_locations l
+                                WHERE l.comic_id=c.id AND {visible_location})
+                 ORDER BY c.updated_at DESC,c.title COLLATE NOCASE",
+            ))
             .map_err(|error| error.to_string())?;
         let rows = statement
             .query_map([], |row| row.get::<_, String>(0))
@@ -3512,7 +4062,9 @@ fn search_catalog(
             let sql = format!(
                 "SELECT DISTINCT base.comic_id FROM catalog_short_ngrams base
                  JOIN comics c ON c.id=base.comic_id
-                 WHERE {} ORDER BY c.updated_at DESC,c.title COLLATE NOCASE,base.comic_id",
+                 WHERE EXISTS (SELECT 1 FROM comic_locations l
+                                WHERE l.comic_id=c.id AND {visible_location})
+                   AND {} ORDER BY c.updated_at DESC,c.title COLLATE NOCASE,base.comic_id",
                 predicates.join(" AND ")
             );
             let mut statement = connection
@@ -3526,6 +4078,7 @@ fn search_catalog(
             for row in rows {
                 process_id(row.map_err(|error| error.to_string())?)?;
             }
+            attach_search_locations(connection, &mut items)?;
             return Ok(CatalogSearchResult {
                 items,
                 total,
@@ -3557,7 +4110,11 @@ fn search_catalog(
             bind_values.extend(grams);
         }
         let sql = format!(
-            "SELECT comic_id FROM catalog_fts WHERE {} ORDER BY rank",
+            "SELECT catalog_fts.comic_id FROM catalog_fts
+             JOIN comics c ON c.id=catalog_fts.comic_id
+             WHERE EXISTS (SELECT 1 FROM comic_locations l
+                            WHERE l.comic_id=c.id AND {visible_location})
+               AND {} ORDER BY rank",
             predicates.join(" AND ")
         );
         let mut statement = connection
@@ -3572,6 +4129,7 @@ fn search_catalog(
             process_id(row.map_err(|error| error.to_string())?)?;
         }
     }
+    attach_search_locations(connection, &mut items)?;
     Ok(CatalogSearchResult {
         items,
         total,
@@ -4032,7 +4590,26 @@ fn tokenize(query: &str) -> Vec<String> {
 }
 
 fn resolve_comic_id(connection: &Connection, identifier: &str) -> Result<Option<String>, String> {
-    connection.query_row("SELECT id FROM comics WHERE id=?1 UNION SELECT comic_id FROM comic_locations WHERE runtime_id=?1 LIMIT 1", [identifier], |row| row.get(0)).optional().map_err(|error| error.to_string())
+    // A runtime ID is not globally unique. Bound the lookup at two distinct
+    // comic IDs so normal multi-location rows remain valid while callers can
+    // fail closed instead of inheriting SQLite's arbitrary LIMIT 1 choice.
+    let mut statement = connection
+        .prepare(
+            "SELECT id FROM comics WHERE id=?1
+             UNION SELECT comic_id FROM comic_locations WHERE runtime_id=?1
+             LIMIT 2",
+        )
+        .map_err(|error| error.to_string())?;
+    let ids = statement
+        .query_map([identifier], |row| row.get::<_, String>(0))
+        .map_err(|error| error.to_string())?
+        .collect::<Result<Vec<_>, _>>()
+        .map_err(|error| error.to_string())?;
+    match ids.as_slice() {
+        [] => Ok(None),
+        [comic_id] => Ok(Some(comic_id.clone())),
+        _ => Err(format!("漫畫識別碼不唯一，已拒絕任選：{identifier}")),
+    }
 }
 
 fn resolve_progress_comic_id(
@@ -4105,6 +4682,124 @@ fn save_progress_row(
 
 fn resolve_comic_id_tx(tx: &Transaction<'_>, identifier: &str) -> Result<String, String> {
     resolve_comic_id(tx, identifier)?.ok_or_else(|| format!("找不到漫畫：{identifier}"))
+}
+
+fn resolve_batch_target_tx(
+    tx: &Transaction<'_>,
+    target: &BatchEditTarget,
+) -> Result<String, String> {
+    if target.runtime_id.trim().is_empty()
+        || target.source_id.trim().is_empty()
+        || target.relative_path.trim().is_empty()
+        || target.runtime_id.len() > 4096
+        || target.source_id.len() > 4096
+        || target.relative_path.len() > 4096
+    {
+        return Err("批次目標的 runtimeId、sourceId、relativePath 格式不正確".into());
+    }
+    let mut statement = tx
+        .prepare(
+            "SELECT DISTINCT comic_id
+             FROM comic_locations
+             WHERE runtime_id=?1 AND source_id=?2 AND relative_path=?3
+             LIMIT 2",
+        )
+        .map_err(|error| error.to_string())?;
+    let comic_ids = statement
+        .query_map(
+            params![target.runtime_id, target.source_id, target.relative_path],
+            |row| row.get::<_, String>(0),
+        )
+        .map_err(|error| error.to_string())?
+        .collect::<Result<Vec<_>, _>>()
+        .map_err(|error| error.to_string())?;
+    match comic_ids.as_slice() {
+        [comic_id] => Ok(comic_id.clone()),
+        [] => Err(format!(
+            "找不到批次目標：{} / {} / {}",
+            target.runtime_id, target.source_id, target.relative_path
+        )),
+        _ => Err(format!(
+            "批次目標位置不唯一：{} / {} / {}",
+            target.runtime_id, target.source_id, target.relative_path
+        )),
+    }
+}
+
+fn resolve_legacy_batch_id_tx(tx: &Transaction<'_>, identifier: &str) -> Result<String, String> {
+    // Only a canonical comics.id is safe without source/path evidence. A
+    // runtime-only identifier cannot distinguish an old forgotten source
+    // from a newly visible work with the same runtime ID.
+    let canonical: Option<String> = tx
+        .query_row("SELECT id FROM comics WHERE id=?1", [identifier], |row| {
+            row.get(0)
+        })
+        .optional()
+        .map_err(|error| error.to_string())?;
+    let Some(canonical) = canonical else {
+        return Err(format!(
+            "舊版 id-only 批次目標缺少來源位置，請改用 targets：{identifier}"
+        ));
+    };
+    let mut statement = tx
+        .prepare("SELECT DISTINCT comic_id FROM comic_locations WHERE runtime_id=?1 LIMIT 2")
+        .map_err(|error| error.to_string())?;
+    let runtime_matches = statement
+        .query_map([identifier], |row| row.get::<_, String>(0))
+        .map_err(|error| error.to_string())?
+        .collect::<Result<Vec<_>, _>>()
+        .map_err(|error| error.to_string())?;
+    if runtime_matches
+        .iter()
+        .any(|comic_id| comic_id != &canonical)
+    {
+        return Err(format!(
+            "漫畫識別碼不唯一，已拒絕舊版 id-only 批次目標：{identifier}"
+        ));
+    }
+    Ok(canonical)
+}
+
+#[derive(Debug, Clone)]
+struct ReimportResolvedTarget {
+    comic_id: String,
+    path: String,
+    identity: Option<BatchEditTarget>,
+}
+
+fn resolve_reimport_target_tx(
+    tx: &Transaction<'_>,
+    target: &BatchEditTarget,
+) -> Result<ReimportResolvedTarget, String> {
+    let comic_id = resolve_batch_target_tx(tx, target)?;
+    let path: Option<String> = tx
+        .query_row(
+            "SELECT actual_path
+             FROM comic_locations
+             WHERE comic_id=?1 AND runtime_id=?2 AND source_id=?3
+               AND relative_path=?4 AND online=1 AND actual_path IS NOT NULL
+             LIMIT 1",
+            params![
+                comic_id,
+                target.runtime_id,
+                target.source_id,
+                target.relative_path
+            ],
+            |row| row.get(0),
+        )
+        .optional()
+        .map_err(|error| error.to_string())?;
+    let Some(path) = path else {
+        return Err(format!(
+            "批次重匯目標已離線或缺少實際路徑：{} / {} / {}",
+            target.runtime_id, target.source_id, target.relative_path
+        ));
+    };
+    Ok(ReimportResolvedTarget {
+        comic_id,
+        path,
+        identity: Some(target.clone()),
+    })
 }
 
 fn ensure_tag(connection: &Connection, tag: &ScopedTag) -> Result<i64, String> {
@@ -4953,6 +5648,18 @@ mod tests {
         CatalogStore::new(path).unwrap()
     }
 
+    fn batch_target(store: &CatalogStore, runtime_id: &str) -> BatchEditTarget {
+        let item = store
+            .get_runtime_item(runtime_id)
+            .unwrap()
+            .expect("test runtime item exists");
+        BatchEditTarget {
+            runtime_id: item.id,
+            source_id: item.source_id,
+            relative_path: item.relative_path,
+        }
+    }
+
     fn comic(id: &str, path: &str) -> ComicItem {
         ComicItem {
             id: id.into(),
@@ -4986,6 +5693,46 @@ mod tests {
                 item
             })
             .collect()
+    }
+
+    #[test]
+    fn resolve_comic_id_rejects_multiple_comic_ids_but_accepts_locations_of_one() {
+        let connection = Connection::open_in_memory().unwrap();
+        connection
+            .execute_batch(
+                "CREATE TABLE comics(id TEXT PRIMARY KEY);
+                 CREATE TABLE comic_locations(comic_id TEXT NOT NULL, runtime_id TEXT NOT NULL);",
+            )
+            .unwrap();
+        connection
+            .execute(
+                "INSERT INTO comics(id) VALUES (?1), (?2)",
+                ["comic-a", "comic-b"],
+            )
+            .unwrap();
+        connection
+            .execute(
+                "INSERT INTO comic_locations(comic_id,runtime_id) VALUES (?1,?3), (?2,?3)",
+                rusqlite::params!["comic-a", "comic-b", "shared-runtime"],
+            )
+            .unwrap();
+        connection
+            .execute(
+                "INSERT INTO comic_locations(comic_id,runtime_id) VALUES (?1,?2)",
+                ["comic-a", "shared-runtime"],
+            )
+            .unwrap();
+
+        let error = resolve_comic_id(&connection, "shared-runtime").unwrap_err();
+        assert!(error.contains("不唯一"));
+
+        connection
+            .execute("DELETE FROM comic_locations WHERE comic_id=?1", ["comic-b"])
+            .unwrap();
+        assert_eq!(
+            resolve_comic_id(&connection, "shared-runtime").unwrap(),
+            Some("comic-a".into())
+        );
     }
 
     #[test]
@@ -5170,6 +5917,7 @@ mod tests {
         store
             .apply_batch(BatchEditRequest {
                 comic_ids: vec![stable_id.clone()],
+                targets: vec![],
                 fields: BTreeMap::from([(String::from("title"), Some(String::from("手動標題")))]),
                 ..Default::default()
             })
@@ -5577,6 +6325,172 @@ mod tests {
     }
 
     #[test]
+    fn recent_reading_runtime_item_keeps_the_source_of_selected_progress() {
+        let store = store("recent_reading_source_qualified");
+        let mut older_source = comic("shared-runtime", "A/book.cbz");
+        older_source.source_id = "external:a".into();
+        older_source.updated_at = "2026-09-01T00:00:00Z".into();
+        older_source.progress = crate::state::Progress {
+            current_page: 2,
+            total_pages: 10,
+            percent: 20.0,
+            updated_at: Some("2026-09-01T00:00:00Z".into()),
+        };
+        let mut newer_source = comic("shared-runtime", "B/book.cbz");
+        newer_source.source_id = "external:b".into();
+        newer_source.updated_at = "2026-08-01T00:00:00Z".into();
+        newer_source.progress = crate::state::Progress {
+            current_page: 8,
+            total_pages: 10,
+            percent: 80.0,
+            updated_at: Some("2026-09-02T00:00:00Z".into()),
+        };
+        store.sync_library(&[older_source, newer_source]).unwrap();
+
+        let recent = store
+            .get_recent_reading_runtime_item()
+            .unwrap()
+            .expect("已讀項目應可取得");
+        assert_eq!(recent.id, "shared-runtime");
+        assert_eq!(recent.source_id, "external:b");
+        assert_eq!(recent.relative_path, "B/book.cbz");
+        assert_eq!(recent.progress.current_page, 8);
+    }
+
+    #[test]
+    fn quarantine_locations_are_excluded_from_search_and_recent_reading() {
+        let store = store("quarantine_visibility");
+        let mut normal = comic("normal-runtime", "library/book.cbz");
+        normal.source_id = "local:normal".into();
+        normal.progress = crate::state::Progress {
+            current_page: 7,
+            total_pages: 20,
+            percent: 35.0,
+            updated_at: Some("2026-09-05T00:00:00Z".into()),
+        };
+        store.sync_library(&[normal]).unwrap();
+        let comic_id = store.get_metadata("normal-runtime").unwrap().comic_id;
+
+        store
+            .with_connection(|connection| {
+                connection
+                    .execute(
+                        "INSERT INTO comic_locations(
+                            comic_id,runtime_id,source_id,relative_path,kind,online,last_seen_at
+                         ) VALUES(?1,?2,?3,?4,'archive',0,'2026-09-05T00:00:00Z')",
+                        params![
+                            comic_id,
+                            "quarantine-runtime",
+                            "local:quarantine",
+                            ".gai-quarantine/operation/book.cbz"
+                        ],
+                    )
+                    .map_err(|error| error.to_string())?;
+                connection
+                    .execute(
+                        "INSERT INTO comic_locations(
+                            comic_id,runtime_id,source_id,relative_path,kind,online,last_seen_at
+                         ) VALUES(?1,?2,?3,?4,'archive',0,'2026-09-05T00:00:00Z')",
+                        params![
+                            comic_id,
+                            "lookalike-runtime",
+                            "local:lookalike",
+                            ".gai-quarantinex/book.cbz"
+                        ],
+                    )
+                    .map_err(|error| error.to_string())?;
+                connection
+                    .execute("UPDATE comics SET offline=0 WHERE id=?1", [&comic_id])
+                    .map_err(|error| error.to_string())?;
+                Ok(())
+            })
+            .unwrap();
+
+        assert!(store
+            .get_runtime_item_for_source_path(
+                &comic_id,
+                "local:quarantine",
+                ".gai-quarantine/operation/book.cbz",
+            )
+            .unwrap()
+            .is_some());
+
+        for query in ["", "book"] {
+            let result = store
+                .search(CatalogQuery {
+                    query: query.into(),
+                    offset: 0,
+                    limit: 20,
+                })
+                .unwrap();
+            assert_eq!(result.total, 1, "query={query}");
+            let item = &result.items[0];
+            assert_eq!(item.relative_path.as_deref(), Some("library/book.cbz"));
+            assert!(item
+                .locations
+                .iter()
+                .all(|location| !is_quarantine_relative_path(&location.relative_path)));
+            assert!(item
+                .locations
+                .iter()
+                .any(|location| location.relative_path == ".gai-quarantinex/book.cbz"));
+        }
+
+        let recent = store
+            .get_recent_reading_runtime_item()
+            .unwrap()
+            .expect("正常位置仍應可作為最近閱讀");
+        assert_eq!(recent.relative_path, "library/book.cbz");
+        assert_eq!(recent.progress.current_page, 7);
+
+        let only_quarantine = self::store("quarantine_only_visibility");
+        let mut isolated = comic("isolated-runtime", ".gai-quarantine/only.cbz");
+        isolated.source_id = "local:isolated".into();
+        isolated.progress = crate::state::Progress {
+            current_page: 9,
+            total_pages: 20,
+            percent: 45.0,
+            updated_at: Some("2026-09-06T00:00:00Z".into()),
+        };
+        only_quarantine.sync_library(&[isolated]).unwrap();
+        only_quarantine
+            .with_connection(|connection| {
+                connection
+                    .execute(
+                        "UPDATE comic_locations SET online=0 WHERE source_id=?1 AND relative_path=?2",
+                        params!["local:isolated", ".gai-quarantine/only.cbz"],
+                    )
+                    .map_err(|error| error.to_string())?;
+                connection
+                    .execute(
+                        "UPDATE comics SET offline=1 WHERE id=(
+                            SELECT comic_id FROM comic_locations
+                            WHERE source_id=?1 AND relative_path=?2
+                        )",
+                        params!["local:isolated", ".gai-quarantine/only.cbz"],
+                    )
+                    .map_err(|error| error.to_string())?;
+                Ok(())
+            })
+            .unwrap();
+
+        for query in ["", "only"] {
+            let result = only_quarantine
+                .search(CatalogQuery {
+                    query: query.into(),
+                    offset: 0,
+                    limit: 20,
+                })
+                .unwrap();
+            assert_eq!(result.total, 0, "query={query}");
+        }
+        assert!(only_quarantine
+            .get_recent_reading_runtime_item()
+            .unwrap()
+            .is_none());
+    }
+
+    #[test]
     fn runtime_items_by_ids_preserves_requested_order_and_deduplicates() {
         let store = store("runtime_items_batch");
         store
@@ -5909,6 +6823,22 @@ mod tests {
     }
 
     #[test]
+    fn quarantine_locations_are_not_added_to_the_runtime_shelf() {
+        let store = store("overlay_hides_quarantine");
+        let mut item = comic(
+            "quarantine-runtime",
+            ".gai-quarantine/comics/operation/book.cbz",
+        );
+        item.source_id = "local:root-a".into();
+        item.source_path = Some("/Volumes/Comics/.gai-quarantine/comics/operation/book.cbz".into());
+        store.sync_library(&[item]).unwrap();
+
+        let active_sources = BTreeSet::from(["local:root-a".to_string()]);
+        let shelf = store.overlay_library(Vec::new(), &active_sources).unwrap();
+        assert!(shelf.is_empty());
+    }
+
+    #[test]
     fn catalog_overlay_does_not_mix_inactive_library_roots() {
         let store = store("overlay_source_scope");
         let mut old = comic("old-runtime", "old/book.zip");
@@ -5967,6 +6897,102 @@ mod tests {
                 .collect::<BTreeSet<_>>(),
             BTreeSet::from([("local:root-a", "A", 1usize), ("local:root-b", "B", 7usize),])
         );
+        let all = store.get_runtime_items_for_id("same-runtime").unwrap();
+        assert_eq!(all.len(), 2);
+        assert_eq!(
+            all.iter()
+                .map(|item| item.source_id.as_str())
+                .collect::<BTreeSet<_>>(),
+            BTreeSet::from(["local:root-a", "local:root-b"])
+        );
+    }
+
+    #[test]
+    fn runtime_lookup_bounds_and_exposes_same_source_path_ambiguity() {
+        let store = store("runtime_same_source_paths");
+        store
+            .with_connection(|connection| {
+                connection
+                    .execute_batch(
+                        "INSERT INTO comics(id,title) VALUES('comic-a','A'),('comic-b','B');
+                         INSERT INTO comic_locations(comic_id,runtime_id,source_id,relative_path,kind,online)
+                         VALUES('comic-a','same-runtime','local:root','a.cbz','archive',1),
+                               ('comic-b','same-runtime','local:root','b.cbz','archive',1);",
+                    )
+                    .map_err(|error| error.to_string())
+            })
+            .unwrap();
+
+        let all = store.get_runtime_items_for_id("same-runtime").unwrap();
+        assert_eq!(all.len(), 2);
+        assert_ne!(all[0].relative_path, all[1].relative_path);
+        assert_eq!(
+            store
+                .get_runtime_items_for_source("same-runtime", "local:root")
+                .unwrap()
+                .len(),
+            2
+        );
+        let exact = store
+            .get_runtime_item_for_source_path("same-runtime", "local:root", "b.cbz")
+            .unwrap()
+            .unwrap();
+        assert_eq!(exact.relative_path, "b.cbz");
+    }
+
+    #[test]
+    fn runtime_lookup_prefers_online_over_retired_offline_location() {
+        let store = store("runtime_online_over_offline");
+        store
+            .with_connection(|connection| {
+                connection
+                    .execute_batch(
+                        "INSERT INTO comics(id,title) VALUES('comic-old','Old'),('comic-new','New');
+                         INSERT INTO comic_locations(comic_id,runtime_id,source_id,relative_path,kind,online)
+                         VALUES('comic-old','same-runtime','local:old','old/book.cbz','archive',0),
+                               ('comic-new','same-runtime','local:new','new/book.cbz','archive',1);",
+                    )
+                    .map_err(|error| error.to_string())
+            })
+            .unwrap();
+
+        let all = store.get_runtime_items_for_id("same-runtime").unwrap();
+        assert_eq!(all.len(), 1);
+        assert_eq!(all[0].source_id, "local:new");
+        assert_eq!(all[0].r#type, "external-archive");
+
+        let offline = store
+            .get_runtime_items_for_source("same-runtime", "local:old")
+            .unwrap();
+        assert_eq!(offline.len(), 1);
+        assert_eq!(offline[0].r#type, "offline");
+    }
+
+    #[test]
+    fn runtime_lookup_keeps_legacy_local_source_queryable_for_bound_fallback() {
+        let store = store("runtime_legacy_local_source");
+        store
+            .with_connection(|connection| {
+                connection
+                    .execute_batch(
+                        "INSERT INTO comics(id,title) VALUES('comic-legacy','Legacy');
+                         INSERT INTO comic_locations(comic_id,runtime_id,source_id,relative_path,kind,online)
+                         VALUES('comic-legacy','legacy-runtime','local','book.cbz','archive',1);",
+                    )
+                    .map_err(|error| error.to_string())
+            })
+            .unwrap();
+
+        assert!(store
+            .get_runtime_items_for_source("legacy-runtime", "local:captured-root")
+            .unwrap()
+            .is_empty());
+        let legacy = store
+            .get_runtime_items_for_source("legacy-runtime", "local")
+            .unwrap();
+        assert_eq!(legacy.len(), 1);
+        assert_eq!(legacy[0].source_id, "local");
+        assert_eq!(legacy[0].relative_path, "book.cbz");
     }
 
     #[test]
@@ -6085,6 +7111,7 @@ mod tests {
         let result = store
             .apply_batch(BatchEditRequest {
                 comic_ids: vec!["runtime".into()],
+                targets: vec![batch_target(&store, "runtime")],
                 fields: BTreeMap::from([("title".into(), Some("人工標題".into()))]),
                 add_tags: vec![ScopedTag {
                     namespace: "general".into(),
@@ -6098,6 +7125,142 @@ mod tests {
         assert!(view.tags.iter().any(|tag| tag.value == "百合"));
         store.undo_batch(&result.undo_token).unwrap();
         assert_eq!(store.get_metadata("runtime").unwrap().title, "a");
+    }
+
+    #[test]
+    fn source_qualified_batch_targets_reject_stale_location_and_roll_back_all() {
+        let store = store("batch_source_targets");
+        let mut first = comic("shared-runtime", "A/book.cbz");
+        first.source_id = "external:a".into();
+        let mut second = comic("shared-runtime", "B/book.cbz");
+        second.source_id = "external:b".into();
+        store.sync_library(&[first, second]).unwrap();
+
+        let stale = BatchEditTarget {
+            runtime_id: "shared-runtime".into(),
+            source_id: "external:a".into(),
+            relative_path: "A/book.cbz".into(),
+        };
+        let current = BatchEditTarget {
+            runtime_id: "shared-runtime".into(),
+            source_id: "external:b".into(),
+            relative_path: "B/book.cbz".into(),
+        };
+        let before = store.get_metadata("shared-runtime").err();
+        assert!(before.is_some(), "兩個在線來源時 runtime ID 應保持歧義");
+        store.forget_source_locations("external:a").unwrap();
+        let before_current = store.get_metadata("shared-runtime").unwrap();
+
+        let legacy_error = store
+            .apply_batch(BatchEditRequest {
+                comic_ids: vec!["shared-runtime".into()],
+                targets: vec![],
+                fields: BTreeMap::from([("title".into(), Some("舊 API 不應漂移".into()))]),
+                ..Default::default()
+            })
+            .unwrap_err();
+        assert!(legacy_error.contains("舊版 id-only"));
+        assert_eq!(
+            store.get_metadata("shared-runtime").unwrap().title,
+            before_current.title
+        );
+
+        let error = store
+            .apply_batch(BatchEditRequest {
+                comic_ids: vec!["shared-runtime".into(), "shared-runtime".into()],
+                targets: vec![stale, current],
+                fields: BTreeMap::from([("title".into(), Some("不可部分套用".into()))]),
+                ..Default::default()
+            })
+            .unwrap_err();
+        assert!(error.contains("找不到批次目標"));
+        assert_eq!(
+            store.get_metadata("shared-runtime").unwrap().title,
+            before_current.title,
+            "stale target 應讓整批 rollback"
+        );
+    }
+
+    #[test]
+    fn source_qualified_batch_target_requires_exact_path_and_allows_same_work_locations() {
+        let store = store("batch_source_path");
+        let mut item = comic("runtime", "A/book.cbz");
+        item.source_id = "external:a".into();
+        store.sync_library(&[item]).unwrap();
+        let comic_id = store.get_metadata("runtime").unwrap().comic_id;
+        store
+            .with_connection(|connection| {
+                connection
+                    .execute(
+                        "INSERT INTO comic_locations(comic_id,runtime_id,source_id,relative_path,kind,online) VALUES(?1,?2,?3,?4,'archive',1)",
+                        params![comic_id, "runtime", "external:b", "B/book.cbz"],
+                    )
+                    .map_err(|error| error.to_string())
+            })
+            .unwrap();
+
+        let wrong_path = BatchEditTarget {
+            runtime_id: "runtime".into(),
+            source_id: "external:a".into(),
+            relative_path: "A/renamed.cbz".into(),
+        };
+        assert!(store
+            .apply_batch(BatchEditRequest {
+                comic_ids: vec!["runtime".into()],
+                targets: vec![wrong_path],
+                fields: BTreeMap::from([("title".into(), Some("不應套用".into()))]),
+                ..Default::default()
+            })
+            .is_err());
+
+        let result = store
+            .apply_batch(BatchEditRequest {
+                comic_ids: vec!["runtime".into(), "runtime".into()],
+                targets: vec![
+                    BatchEditTarget {
+                        runtime_id: "runtime".into(),
+                        source_id: "external:a".into(),
+                        relative_path: "A/book.cbz".into(),
+                    },
+                    BatchEditTarget {
+                        runtime_id: "runtime".into(),
+                        source_id: "external:b".into(),
+                        relative_path: "B/book.cbz".into(),
+                    },
+                ],
+                fields: BTreeMap::from([("title".into(), Some("同作品安全套用".into()))]),
+                ..Default::default()
+            })
+            .unwrap();
+        assert_eq!(result.updated, 1);
+        assert_eq!(
+            store.get_metadata("runtime").unwrap().title,
+            "同作品安全套用"
+        );
+    }
+
+    #[test]
+    fn legacy_batch_id_only_accepts_canonical_id_but_rejects_runtime_only_id() {
+        let store = store("batch_legacy_id_only");
+        store
+            .sync_library(&[comic("runtime", "legacy.cbz")])
+            .unwrap();
+        let canonical_id = store.get_metadata("runtime").unwrap().comic_id;
+        assert!(store
+            .apply_batch(BatchEditRequest {
+                comic_ids: vec!["runtime".into()],
+                targets: vec![],
+                fields: BTreeMap::from([("title".into(), Some("拒絕漂移".into()))]),
+                ..Default::default()
+            })
+            .is_err());
+        store
+            .apply_batch(BatchEditRequest {
+                comic_ids: vec![canonical_id],
+                fields: BTreeMap::from([("title".into(), Some("canonical 安全".into()))]),
+                ..Default::default()
+            })
+            .unwrap();
     }
 
     #[test]
@@ -6164,6 +7327,7 @@ mod tests {
         store
             .apply_batch(BatchEditRequest {
                 comic_ids: vec![comic_id.clone()],
+                targets: vec![],
                 fields: BTreeMap::from([("title".into(), Some("Ab!漫畫".into()))]),
                 ..Default::default()
             })
@@ -6276,6 +7440,7 @@ mod tests {
         let first = store
             .apply_batch(BatchEditRequest {
                 comic_ids: vec!["runtime".into()],
+                targets: vec![batch_target(&store, "runtime")],
                 fields: BTreeMap::from([("title".into(), Some("第一版標題".into()))]),
                 add_tags: vec![ScopedTag {
                     namespace: "general".into(),
@@ -6287,6 +7452,7 @@ mod tests {
         store
             .apply_batch(BatchEditRequest {
                 comic_ids: vec!["runtime".into()],
+                targets: vec![batch_target(&store, "runtime")],
                 fields: BTreeMap::from([
                     ("title".into(), Some("後續標題".into())),
                     ("series".into(), Some("後續系列".into())),
@@ -6316,6 +7482,7 @@ mod tests {
         let applied = store
             .apply_batch(BatchEditRequest {
                 comic_ids: vec!["runtime".into()],
+                targets: vec![batch_target(&store, "runtime")],
                 fields: BTreeMap::from([("title".into(), Some("保留標題".into()))]),
                 add_tags: vec![],
                 exclude_tags: vec![],
@@ -6360,12 +7527,28 @@ mod tests {
         store
             .apply_batch(BatchEditRequest {
                 comic_ids: vec!["runtime".into()],
+                targets: vec![batch_target(&store, "runtime")],
                 fields: BTreeMap::new(),
                 add_tags: vec![],
                 exclude_tags: vec![tag.clone()],
             })
             .unwrap();
         assert!(!store.get_metadata("runtime").unwrap().tags.contains(&tag));
+    }
+
+    #[test]
+    fn reimport_rejects_oversized_explicit_requests_before_resolving_targets() {
+        let store = store("reimport_limit");
+        let target = BatchEditTarget {
+            runtime_id: "runtime".into(),
+            source_id: "local".into(),
+            relative_path: "book.cbz".into(),
+        };
+        let result = store.reimport(ReimportRequest {
+            comic_ids: vec![],
+            targets: vec![target; 10_001],
+        });
+        assert!(result.unwrap_err().contains("10,000"));
     }
 
     #[test]
@@ -6382,9 +7565,16 @@ mod tests {
         item.r#type = "folder".into();
         item.source_path = Some(folder.to_string_lossy().into_owned());
         store.sync_library(&[item]).unwrap();
+        let stable_id = store.get_metadata("runtime").unwrap().comic_id;
+        let reimport_target = BatchEditTarget {
+            runtime_id: "runtime".into(),
+            source_id: "local".into(),
+            relative_path: "測試漫畫".into(),
+        };
         store
             .apply_batch(BatchEditRequest {
-                comic_ids: vec!["runtime".into()],
+                comic_ids: vec![stable_id.clone()],
+                targets: vec![],
                 fields: BTreeMap::from([("title".into(), Some("人工標題".into()))]),
                 add_tags: vec![],
                 exclude_tags: vec![],
@@ -6398,6 +7588,7 @@ mod tests {
         store
             .reimport(ReimportRequest {
                 comic_ids: vec!["runtime".into()],
+                targets: vec![reimport_target],
             })
             .unwrap();
         let view = store.get_metadata("runtime").unwrap();
@@ -6422,6 +7613,11 @@ mod tests {
         item.r#type = "folder".into();
         item.source_path = Some(folder.to_string_lossy().into_owned());
         store.sync_library(&[item]).unwrap();
+        let reimport_target = BatchEditTarget {
+            runtime_id: "runtime".into(),
+            source_id: "local".into(),
+            relative_path: "失敗恢復測試".into(),
+        };
         assert_eq!(
             store.get_metadata("runtime").unwrap().summary.as_deref(),
             Some("保留摘要")
@@ -6431,6 +7627,7 @@ mod tests {
         let failed = store
             .reimport(ReimportRequest {
                 comic_ids: vec!["runtime".into()],
+                targets: vec![reimport_target.clone()],
             })
             .unwrap();
         assert!(failed.diagnostics > 0);
@@ -6446,6 +7643,7 @@ mod tests {
         store
             .reimport(ReimportRequest {
                 comic_ids: vec!["runtime".into()],
+                targets: vec![reimport_target.clone()],
             })
             .unwrap();
         let recovered = store.get_metadata("runtime").unwrap();
@@ -6456,6 +7654,7 @@ mod tests {
         store
             .reimport(ReimportRequest {
                 comic_ids: vec!["runtime".into()],
+                targets: vec![reimport_target],
             })
             .unwrap();
         let removed = store.get_metadata("runtime").unwrap();
@@ -7041,6 +8240,7 @@ mod tests {
         store
             .apply_batch(BatchEditRequest {
                 comic_ids: vec!["runtime".into()],
+                targets: vec![batch_target(&store, "runtime")],
                 fields: BTreeMap::from([("title".into(), Some("手動標題".into()))]),
                 add_tags: vec![],
                 exclude_tags: vec![],
@@ -7079,6 +8279,16 @@ mod tests {
                         params![format!("comic-{index}"), format!("漫畫 {index}")],
                     )
                     .map_err(|error| error.to_string())?;
+                    tx.execute(
+                        "INSERT INTO comic_locations(comic_id,runtime_id,source_id,relative_path,kind)
+                         VALUES(?1,?2,'synthetic',?3,'archive')",
+                        params![
+                            format!("comic-{index}"),
+                            format!("runtime-{index}"),
+                            format!("book-{index}.cbz")
+                        ],
+                    )
+                    .map_err(|error| error.to_string())?;
                 }
                 tx.commit().map_err(|error| error.to_string())
             })
@@ -7095,6 +8305,158 @@ mod tests {
     }
 
     #[test]
+    fn search_excludes_locationless_orphans_but_keeps_offline_locations() {
+        let store = store("search_locationless_orphan");
+        let mut orphan = comic("orphan-runtime", "orphan.cbz");
+        orphan.source_id = "external:gone".into();
+        let mut offline = comic("offline-runtime", "offline.cbz");
+        offline.source_id = "external:kept".into();
+        store.sync_library(&[orphan, offline]).unwrap();
+        let (orphan_id, offline_id) = store
+            .with_connection(|connection| {
+                let orphan_id = connection
+                    .query_row(
+                        "SELECT comic_id FROM comic_locations WHERE runtime_id='orphan-runtime'",
+                        [],
+                        |row| row.get::<_, String>(0),
+                    )
+                    .map_err(|error| error.to_string())?;
+                let offline_id = connection
+                    .query_row(
+                        "SELECT comic_id FROM comic_locations WHERE runtime_id='offline-runtime'",
+                        [],
+                        |row| row.get::<_, String>(0),
+                    )
+                    .map_err(|error| error.to_string())?;
+                Ok((orphan_id, offline_id))
+            })
+            .unwrap();
+        store
+            .with_connection(|connection| {
+                connection
+                    .execute(
+                        "UPDATE comics SET title='stabletitle' WHERE id IN (?1,?2)",
+                        params![&orphan_id, &offline_id],
+                    )
+                    .map_err(|error| error.to_string())?;
+                refresh_fts_batch(
+                    connection,
+                    &BTreeSet::from([orphan_id.clone(), offline_id.clone()]),
+                )
+            })
+            .unwrap();
+        store.forget_source_locations("external:gone").unwrap();
+        store
+            .with_connection(|connection| {
+                connection
+                    .execute(
+                        "UPDATE comics SET title='孤兒資料' WHERE id=?1",
+                        [&orphan_id],
+                    )
+                    .map_err(|error| error.to_string())?;
+                connection
+                    .execute("UPDATE comics SET offline=1 WHERE id=?1", [&offline_id])
+                    .map_err(|error| error.to_string())?;
+                connection
+                    .execute(
+                        "UPDATE comic_locations SET online=0 WHERE runtime_id='offline-runtime'",
+                        [],
+                    )
+                    .map_err(|error| error.to_string())
+            })
+            .unwrap();
+
+        let empty = store
+            .search(CatalogQuery {
+                query: String::new(),
+                offset: 0,
+                limit: 20,
+            })
+            .unwrap();
+        assert_eq!(empty.total, 1);
+        assert_eq!(empty.items.len(), 1);
+        assert_eq!(
+            empty.items[0].runtime_id.as_deref(),
+            Some("offline-runtime")
+        );
+        assert!(empty.items[0].offline);
+
+        // The direct title update intentionally does not refresh FTS. The
+        // stale indexed candidate must still be filtered by the location
+        // predicate, while the remaining offline location is hydrated from
+        // the same read snapshot with its current title.
+        let stale_index_query = store
+            .search(CatalogQuery {
+                query: "stabletitle".into(),
+                offset: 0,
+                limit: 20,
+            })
+            .unwrap();
+        assert_eq!(stale_index_query.total, 1);
+        assert_eq!(
+            stale_index_query.items[0].runtime_id.as_deref(),
+            Some("offline-runtime")
+        );
+        assert_eq!(stale_index_query.items[0].title, "stabletitle");
+    }
+
+    #[test]
+    fn search_attaches_all_locations_for_one_work() {
+        let store = store("search_all_locations");
+        let mut item = comic("shared-runtime", "online/book.cbz");
+        item.source_id = "external:online".into();
+        store.sync_library(&[item]).unwrap();
+        let comic_id = store
+            .with_connection(|connection| {
+                connection
+                    .query_row(
+                        "SELECT comic_id FROM comic_locations WHERE runtime_id='shared-runtime'",
+                        [],
+                        |row| row.get::<_, String>(0),
+                    )
+                    .map_err(|error| error.to_string())
+            })
+            .unwrap();
+        store
+            .with_connection(|connection| {
+                connection
+                    .execute(
+                        "INSERT INTO comic_locations(comic_id,runtime_id,source_id,relative_path,kind,online)
+                         VALUES(?1,'retired-runtime','external:offline','offline/book.cbz','archive',0)",
+                        [&comic_id],
+                    )
+                    .map_err(|error| error.to_string())
+            })
+            .unwrap();
+
+        let result = store
+            .search(CatalogQuery {
+                query: String::new(),
+                offset: 0,
+                limit: 20,
+            })
+            .unwrap();
+        assert_eq!(result.total, 1);
+        assert_eq!(result.items.len(), 1);
+        let locations = &result.items[0].locations;
+        assert_eq!(locations.len(), 2);
+        assert_eq!(locations[0].runtime_id.as_deref(), Some("shared-runtime"));
+        assert_eq!(locations[0].source_id, "external:online");
+        assert_eq!(locations[0].relative_path, "online/book.cbz");
+        assert!(!locations[0].offline);
+        assert_eq!(locations[1].runtime_id.as_deref(), Some("retired-runtime"));
+        assert_eq!(locations[1].source_id, "external:offline");
+        assert_eq!(locations[1].relative_path, "offline/book.cbz");
+        assert!(locations[1].offline);
+
+        let json = serde_json::to_value(&result.items[0]).unwrap();
+        assert!(json["locations"][0].get("runtimeId").is_some());
+        assert!(json["locations"][0].get("sourceId").is_some());
+        assert!(json["locations"][0].get("relativePath").is_some());
+        assert!(json["locations"][0].get("offline").is_some());
+    }
+
+    #[test]
     fn tag_alias_expands_search_without_rewriting_original_tag() {
         let store = store("tag_alias");
         store
@@ -7103,6 +8465,7 @@ mod tests {
         store
             .apply_batch(BatchEditRequest {
                 comic_ids: vec!["runtime".into()],
+                targets: vec![batch_target(&store, "runtime")],
                 fields: BTreeMap::new(),
                 add_tags: vec![ScopedTag {
                     namespace: "general".into(),
@@ -7138,6 +8501,7 @@ mod tests {
         store
             .apply_batch(BatchEditRequest {
                 comic_ids: vec!["runtime".into()],
+                targets: vec![batch_target(&store, "runtime")],
                 fields: BTreeMap::new(),
                 add_tags: vec![ScopedTag {
                     namespace: "ＡＲＴＩＳＴ".into(),
@@ -7149,6 +8513,7 @@ mod tests {
         store
             .apply_batch(BatchEditRequest {
                 comic_ids: vec!["runtime".into()],
+                targets: vec![batch_target(&store, "runtime")],
                 fields: BTreeMap::new(),
                 add_tags: vec![ScopedTag {
                     namespace: "artist".into(),
@@ -7193,6 +8558,7 @@ mod tests {
         store
             .apply_batch(BatchEditRequest {
                 comic_ids: vec!["one".into(), "two".into()],
+                targets: vec![batch_target(&store, "one"), batch_target(&store, "two")],
                 fields: BTreeMap::new(),
                 add_tags: vec![tag.clone()],
                 exclude_tags: vec![],
@@ -7219,6 +8585,7 @@ mod tests {
         store
             .apply_batch(BatchEditRequest {
                 comic_ids: vec!["two".into()],
+                targets: vec![batch_target(&store, "two")],
                 fields: BTreeMap::new(),
                 add_tags: vec![],
                 exclude_tags: vec![tag],
@@ -7245,6 +8612,7 @@ mod tests {
         store
             .apply_batch(BatchEditRequest {
                 comic_ids: vec!["runtime".into()],
+                targets: vec![batch_target(&store, "runtime")],
                 fields: BTreeMap::new(),
                 add_tags: vec![
                     ScopedTag {
@@ -7348,6 +8716,7 @@ mod tests {
         store
             .apply_batch(BatchEditRequest {
                 comic_ids: vec!["runtime".into()],
+                targets: vec![batch_target(&store, "runtime")],
                 fields: BTreeMap::new(),
                 add_tags: vec![tag.clone()],
                 exclude_tags: vec![],
@@ -7371,6 +8740,7 @@ mod tests {
         store
             .apply_batch(BatchEditRequest {
                 comic_ids: vec!["runtime".into()],
+                targets: vec![batch_target(&store, "runtime")],
                 fields: BTreeMap::new(),
                 add_tags: vec![tag],
                 exclude_tags: vec![],
@@ -7442,6 +8812,7 @@ mod tests {
         store
             .apply_batch(BatchEditRequest {
                 comic_ids: vec!["runtime".into()],
+                targets: vec![batch_target(&store, "runtime")],
                 fields: BTreeMap::new(),
                 add_tags: vec![ScopedTag {
                     namespace: "general".into(),
@@ -7539,6 +8910,7 @@ mod tests {
         store
             .apply_batch(BatchEditRequest {
                 comic_ids: vec!["one".into(), "two".into()],
+                targets: vec![],
                 fields: BTreeMap::new(),
                 add_tags: vec![tag.clone()],
                 exclude_tags: vec![],
@@ -7585,6 +8957,7 @@ mod tests {
         store
             .apply_batch(BatchEditRequest {
                 comic_ids: vec!["one".into()],
+                targets: vec![],
                 fields: BTreeMap::new(),
                 add_tags: vec![],
                 exclude_tags: vec![tag],
@@ -7634,6 +9007,126 @@ mod tests {
     }
 
     #[test]
+    fn discovery_tags_keep_duplicate_runtime_ids_source_qualified() {
+        let store = store("discovery_tags_source_qualified");
+        store
+            .with_connection(|connection| {
+                connection
+                    .execute(
+                        "INSERT INTO comics(id,title) VALUES('one','One'),('two','Two')",
+                        [],
+                    )
+                    .map_err(|error| error.to_string())?;
+                connection
+                    .execute(
+                        "INSERT INTO comic_locations(comic_id,runtime_id,source_id,relative_path,kind) VALUES
+                         ('one','shared-runtime','external:a','A/book.cbz','archive'),
+                         ('two','shared-runtime','external:b','B/book.cbz','archive')",
+                        [],
+                    )
+                    .map_err(|error| error.to_string())?;
+                Ok(())
+            })
+            .unwrap();
+        let target_a = BatchEditTarget {
+            runtime_id: "shared-runtime".into(),
+            source_id: "external:a".into(),
+            relative_path: "A/book.cbz".into(),
+        };
+        let target_b = BatchEditTarget {
+            runtime_id: "shared-runtime".into(),
+            source_id: "external:b".into(),
+            relative_path: "B/book.cbz".into(),
+        };
+        store
+            .apply_batch(BatchEditRequest {
+                comic_ids: vec!["shared-runtime".into()],
+                targets: vec![target_a.clone()],
+                fields: BTreeMap::new(),
+                add_tags: vec![ScopedTag {
+                    namespace: "general".into(),
+                    value: "Only A".into(),
+                }],
+                exclude_tags: vec![],
+            })
+            .unwrap();
+        store
+            .apply_batch(BatchEditRequest {
+                comic_ids: vec!["shared-runtime".into()],
+                targets: vec![target_b.clone()],
+                fields: BTreeMap::new(),
+                add_tags: vec![ScopedTag {
+                    namespace: "general".into(),
+                    value: "Only B".into(),
+                }],
+                exclude_tags: vec![],
+            })
+            .unwrap();
+
+        let groups_a = store.discovery_tags_for_targets(&[target_a]).unwrap();
+        assert_eq!(groups_a.len(), 1);
+        assert_eq!(groups_a[0].value, "Only A");
+        assert_eq!(groups_a[0].comic_ids, vec!["shared-runtime"]);
+        assert_eq!(
+            groups_a[0].targets,
+            vec![BatchEditTarget {
+                runtime_id: "shared-runtime".into(),
+                source_id: "external:a".into(),
+                relative_path: "A/book.cbz".into(),
+            }]
+        );
+
+        let groups_b = store.discovery_tags_for_targets(&[target_b]).unwrap();
+        assert_eq!(groups_b.len(), 1);
+        assert_eq!(groups_b[0].value, "Only B");
+        assert_eq!(groups_b[0].targets[0].source_id, "external:b");
+    }
+
+    #[test]
+    fn metadata_and_file_location_queries_do_not_choose_another_source() {
+        let store = store("source_qualified_metadata");
+        store
+            .with_connection(|connection| {
+                connection
+                    .execute("INSERT INTO comics(id,title) VALUES('work','Work')", [])
+                    .map_err(|error| error.to_string())?;
+                connection
+                    .execute(
+                        "INSERT INTO comic_locations(comic_id,runtime_id,source_id,relative_path,kind) VALUES
+                         ('work','runtime-a','external:a','A/book.cbz','archive'),
+                         ('work','runtime-b','external:b','B/book.cbz','archive'),
+                         ('work','runtime-a-slash','external:a','A//book.cbz','archive')",
+                        [],
+                    )
+                    .map_err(|error| error.to_string())?;
+                Ok(())
+            })
+            .unwrap();
+
+        assert!(store
+            .get_location("work")
+            .unwrap_err()
+            .contains("多個來源位置"));
+        let metadata = store
+            .get_metadata_for_source("runtime-b", "external:b", "B/book.cbz")
+            .unwrap();
+        assert_eq!(metadata.runtime_id.as_deref(), Some("runtime-b"));
+        assert_eq!(metadata.source_id.as_deref(), Some("external:b"));
+        assert_eq!(metadata.relative_path.as_deref(), Some("B/book.cbz"));
+        let slash_metadata = store
+            .get_metadata_for_source("runtime-a-slash", "external:a", "A//book.cbz")
+            .unwrap();
+        assert_eq!(
+            slash_metadata.runtime_id.as_deref(),
+            Some("runtime-a-slash")
+        );
+        assert_eq!(slash_metadata.relative_path.as_deref(), Some("A//book.cbz"));
+        assert!(store
+            .get_metadata_for_source("runtime-a", "external:a", "A//book.cbz")
+            .is_err());
+    }
+
+    #[test]
     fn related_tags_are_read_only_ranked_suggestions_and_respect_excludes() {
         let store = store("related_tags");
         store.with_connection(|connection| {
@@ -7656,6 +9149,7 @@ mod tests {
         store
             .apply_batch(BatchEditRequest {
                 comic_ids: vec!["one".into()],
+                targets: vec![],
                 fields: BTreeMap::new(),
                 add_tags: vec![],
                 exclude_tags: vec![ScopedTag {
@@ -7677,6 +9171,7 @@ mod tests {
         source
             .apply_batch(BatchEditRequest {
                 comic_ids: vec![stable_id.clone()],
+                targets: vec![],
                 fields: BTreeMap::from([("title".into(), Some("來源人工標題".into()))]),
                 add_tags: vec![ScopedTag {
                     namespace: "general".into(),
@@ -7696,6 +9191,7 @@ mod tests {
         target
             .apply_batch(BatchEditRequest {
                 comic_ids: vec![stable_id.clone()],
+                targets: vec![],
                 fields: BTreeMap::from([("title".into(), Some("本機人工標題".into()))]),
                 add_tags: vec![],
                 exclude_tags: vec![],

@@ -150,7 +150,7 @@ assert.deepEqual(
   JSON.parse(JSON.stringify(invokeCalls)),
   [
     { command: 'open_comic', args: { id: 'resume-book' } },
-    { command: 'update_reader_cache_window', args: { comicId: 'resume-book', pageIndex: 7 } },
+    { command: 'update_reader_cache_window', args: { comicId: 'resume-book', pageIndex: 7, sourceId: 'smb' } },
   ],
   'stale native preload must be realigned exactly once to the authoritative resume page'
 );

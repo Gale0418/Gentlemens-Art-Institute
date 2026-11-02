@@ -16,6 +16,11 @@ assert.match(tauriBridgeSource, /restoreBookmarks: \(data, legacyCacheReadable\)
 assert.match(tauriBridgeSource, /repairExternalBookmarks: \(data\) => invoke\('repair_external_bookmarks', \{ data \}\)/, 'corrupt bookmark recovery must use the dedicated native repair command');
 assert.match(tauriBridgeSource, /invoke\('scan_priority_library', \{[\s\S]*favoriteIds/, 'native bridge must expose the priority scan command');
 assert.match(tauriBridgeSource, /scanVisibleDirectory: \(relativePath, sourceId\) => invoke\('scan_visible_directory', \{[\s\S]*\.\.\.\(sourceId \? \{ sourceId \} : \{\}\)/, 'visible directory bridge must accept an optional source id');
+assert.match(appSource, /eAPI\.listRelatedTags\(mutationTarget\.comicId, 8\)/, 'related tags must use the stable canonical metadata id');
+assert.match(appSource, /標籤建議暫時無法載入。/, 'related tag failures must have a dedicated warning');
+assert.match(appSource, /let inspectorMetadataRequestGeneration = 0;/, 'inspector metadata must use one bounded global request generation');
+assert.doesNotMatch(appSource, /inspectorMetadataRequestTokens/, 'inspector metadata must not retain a per-comic token map');
+assert.match(appSource, /function buildOrganizerIdentityIndex\(\)/, 'organizer selection must build one identity index per resolution');
 
 class FakeClock {
   constructor() {
@@ -160,6 +165,7 @@ class FakeElement {
   removeAttribute(name) { this.attributes.delete(name); if (name === 'src') this.src = ''; }
   closest(selector) {
     if (selector === '.comic-cover-wrapper') return this.coverWrapper || (this.coverWrapper = new FakeElement('div'));
+    if (selector === '.comic-card[data-comic-id]' && this.dataset.comicId) return this;
     if (selector === '.comic-card') return this.card || (this.card = new FakeElement('div'));
     return null;
   }
@@ -291,6 +297,8 @@ function createHarness({ width = 1000, storageFails = false } = {}) {
 
 const { clock, context, hooks } = createHarness();
 assert.doesNotThrow(() => createHarness({ storageFails: true }), 'a blocked settings store must not prevent app script startup');
+const catalogSearchKey = (testHooks, runtimeId, sourceId = '', relativePath = '') =>
+  testHooks.getCatalogSearchKey(runtimeId, sourceId, relativePath);
 const makeCover = id => {
   const img = new FakeElement('img');
   img.dataset.coverId = id;
@@ -371,6 +379,39 @@ assert.equal(hooks.catalogThumbnailURL('/fixture/page-3.png'), '/fixture/page-3.
   assert.notEqual(hooks.elements.continueStrip.innerHTML, firstMarkup, 'progress changes invalidate the Continue render signature');
 }
 
+// Continue 卡片已有閱讀時間時，檔案 updatedAt 改變仍必須重新建立封面 URL／DOM。
+{
+  const continueRender = createHarness();
+  const strip = continueRender.hooks.elements.continueStrip;
+  let renderWrites = 0;
+  let markup = '';
+  Object.defineProperty(strip, 'innerHTML', {
+    configurable: true,
+    get: () => markup,
+    set: value => {
+      renderWrites += 1;
+      markup = String(value);
+    },
+  });
+  const comic = {
+    id: 'continue-file-revision',
+    title: 'Continue revision',
+    relativePath: 'continue/revision.cbz',
+    type: 'archive',
+    pageCount: 20,
+    updatedAt: '2026-11-01T00:00:00Z',
+    progress: { currentPage: 3, totalPages: 20, percent: 15, updatedAt: '2026-11-01T01:00:00Z' },
+  };
+  continueRender.hooks.state.comics = [comic];
+  continueRender.hooks.setFavorites([]);
+  continueRender.hooks.renderContinueStrip();
+  const firstRenderWrites = renderWrites;
+  comic.updatedAt = '2026-11-02T12:00:00Z';
+  continueRender.hooks.renderContinueStrip();
+  assert.equal(renderWrites, firstRenderWrites + 1,
+    '閱讀時間存在時，檔案 updatedAt 改變仍會重新 render Continue 封面');
+}
+
 // 同名的繼續閱讀卡片顯示來源路徑，路徑改動也必須更新畫面。
 {
   const sharedProgress = { currentPage: 3, totalPages: 20, percent: 15, updatedAt: '2026-10-03T00:00:00Z' };
@@ -428,6 +469,18 @@ assert.equal(hooks.catalogThumbnailURL('/fixture/page-3.png'), '/fixture/page-3.
   hooks.resetCoverLoadQueue();
 }
 
+// IntersectionObserver 判定可視封面後，應立即啟動既有限流 pump；
+// 不增加 concurrency 或預載範圍，非可視／一般 enqueue 仍保留 80ms 延遲。
+{
+  const immediate = makeCover('immediate-visible');
+  hooks.setCoverVisibility(immediate, true);
+  hooks.enqueueCoverLoad(immediate, { immediate: true });
+  clock.tick(0);
+  assert.equal(immediate.src, '/cover/immediate-visible', '可視封面立即開始載入');
+  assert.equal(hooks.getCoverQueueState().active, 1, '立即載入仍維持單一 task 生命週期');
+  hooks.resetCoverLoadQueue();
+}
+
 // 目前資料夾的可見封面優先於「繼續閱讀」，舊卡片取消不佔名額。
 {
   const shelf = createHarness();
@@ -466,6 +519,21 @@ assert.equal(hooks.catalogThumbnailURL('/fixture/page-3.png'), '/fixture/page-3.
   assert.equal(hooks.hasFailedCover('retryable'), true);
   clock.tick(30_000);
   assert.equal(hooks.hasFailedCover('retryable'), false);
+}
+
+// 封面失敗黑名單必須包含來源；A 來源失敗不可阻擋同 id 的 B 來源。
+{
+  const failedLocal = makeCover('shared-cover');
+  failedLocal.dataset.coverSourceId = 'local:one';
+  const failedSmb = makeCover('shared-cover');
+  failedSmb.dataset.coverSourceId = 'smb:two';
+  hooks.markCoverUnavailable(failedLocal);
+  assert.equal(hooks.hasFailedCover('shared-cover', 'local:one'), true);
+  assert.equal(hooks.hasFailedCover('shared-cover', 'smb:two'), false,
+    '同 id 的另一來源封面仍可嘗試');
+  hooks.markCoverUnavailable(failedSmb);
+  assert.equal(hooks.hasFailedCover('shared-cover', 'local:one'), true);
+  assert.equal(hooks.hasFailedCover('shared-cover', 'smb:two'), true);
 }
 
 // Timer 觸發時重新檢查 gate；解除捲動後只執行一次 deferred refresh。
@@ -593,6 +661,16 @@ assert.equal(hooks.catalogThumbnailURL('/fixture/page-3.png'), '/fixture/page-3.
   }), true);
   assert.deepEqual(incremental.hooks.state.comics.map(item => item.id), ['book-a', 'book-b']);
   assert.equal(incremental.hooks.state.scanStatus.found, 2);
+  assert.equal(incremental.hooks.applyIncrementalLibraryBatch({
+    generation: 12,
+    found: 3,
+    items: [{ id: 'book-a', title: 'A（SMB）', relativePath: 'a.cbz', sourceId: 'smb:test' }],
+  }), true);
+  assert.deepEqual(
+    incremental.hooks.state.comics.filter(item => item.id === 'book-a').map(item => item.sourceId),
+    ['local:test', 'smb:test'],
+    '增量 merge 以 sourceId + id 辨識，不能覆蓋另一來源同 id 書籍',
+  );
   incremental.hooks.state.currentComic = null;
   vm.runInContext(`
     filterAndRenderGrid = () => { incrementalRenders += 1; };
@@ -671,7 +749,57 @@ assert.equal(hooks.catalogThumbnailURL('/fixture/page-3.png'), '/fixture/page-3.
     found: 99,
     items: [{ id: 'stale-book', title: 'Stale', relativePath: 'stale.cbz', sourceId: 'local:old' }],
   }), true);
-  assert.deepEqual(incremental.hooks.state.comics.map(item => item.id), ['book-a', 'book-b', 'book-c', 'book-d', 'visible-book']);
+  assert.deepEqual(incremental.hooks.state.comics.map(item => item.id), ['book-a', 'book-b', 'book-a', 'book-c', 'book-d', 'visible-book']);
+}
+
+// 增量批次若在滑動期間抵達，停止滑動後應補一次增量 render；掃描尚未完成時
+// 不應因 visual render 被 gate 擋下而重抓整個書庫。
+{
+  const scrolling = createHarness();
+  let refreshes = 0;
+  scrolling.hooks.setLibraryRefreshRunner(() => { refreshes += 1; });
+  scrolling.hooks.state.scanStatus = { isScanning: true, generation: 21, found: 0 };
+  vm.runInContext('filterAndRenderGrid = () => { incrementalRenders += 1; }; renderSidebar = () => {}; renderContinueStrip = () => {}; updateStats = () => {};', scrolling.context);
+  scrolling.context.incrementalRenders = 0;
+  scrolling.hooks.noteCatalogScroll();
+  assert.equal(scrolling.hooks.applyIncrementalLibraryBatch({
+    generation: 21,
+    found: 1,
+    items: [{ id: 'scroll-book', title: 'Scroll', relativePath: 'scroll.cbz', sourceId: 'local:scroll' }],
+  }), true);
+  scrolling.clock.tick(0);
+  assert.equal(scrolling.context.incrementalRenders, 0, '滑動期間先不執行增量 render');
+  assert.equal(refreshes, 0, '掃描中不能因滑動 gate 觸發 full refresh');
+  scrolling.clock.tick(180);
+  scrolling.clock.tick(0);
+  assert.equal(scrolling.context.incrementalRenders, 1, '停止滑動後補一次被 gate 的增量 render');
+  assert.equal(refreshes, 0, '增量 render 補償不應重抓整庫');
+  scrolling.hooks.setLibraryRefreshRunner(null);
+}
+
+// 已完成掃描後的 visible batch 仍需保留 full refresh，避免局部目錄快照取代
+// 權威全庫 reconciliation；增量 render 只負責先讓目前畫面及時更新。
+{
+  const visible = createHarness();
+  let refreshes = 0;
+  visible.hooks.setLibraryRefreshRunner(() => { refreshes += 1; });
+  visible.hooks.state.scanStatus = { isScanning: false, generation: 22, found: 1 };
+  vm.runInContext('filterAndRenderGrid = () => { incrementalRenders += 1; }; renderSidebar = () => {}; renderContinueStrip = () => {}; updateStats = () => {};', visible.context);
+  visible.context.incrementalRenders = 0;
+  visible.hooks.noteCatalogScroll();
+  assert.equal(visible.hooks.applyIncrementalLibraryBatch({
+    generation: 22,
+    visible: true,
+    found: 1,
+    items: [{ id: 'visible-scroll-book', title: 'Visible', relativePath: 'visible.cbz', sourceId: 'local:visible' }],
+  }), true);
+  visible.clock.tick(0);
+  assert.equal(visible.context.incrementalRenders, 0, 'visible batch 仍尊重滑動 gate');
+  visible.clock.tick(180);
+  visible.clock.tick(0);
+  assert.equal(visible.context.incrementalRenders, 1, 'visible batch 停止滑動後先補增量 render');
+  assert.equal(refreshes, 1, '已完成掃描的 visible batch 仍執行權威 full refresh');
+  visible.hooks.setLibraryRefreshRunner(null);
 }
 
 // Poll 不重疊，舊世代回覆也不能覆蓋新一輪 scan 狀態；暫時故障不能假報完成。
@@ -824,6 +952,496 @@ assert.equal(hooks.catalogThumbnailURL('/fixture/page-3.png'), '/fixture/page-3.
   assert.equal(pages.children.filter(child => child.className === 'webtoon-img').length, 3);
   hooks.renderPages();
   assert.equal(pages.children.filter(child => child.className === 'webtoon-img').length, 3);
+}
+
+// 書架接近尾端時只增加下一批可見卡片；遠離尾端不應提前建立整庫 DOM。
+{
+  const shelf = createHarness();
+  shelf.hooks.state.comics = Array.from({ length: 401 }, (_, index) => ({
+    id: 'shelf-' + index, title: 'Shelf ' + index, relativePath: 'shelf/' + index + '.cbz',
+    sourceId: 'local:test', type: 'archive', pageCount: 1,
+  }));
+  shelf.hooks.state.filteredComics = shelf.hooks.state.comics.slice();
+  shelf.hooks.state.renderLimit = 200;
+  shelf.hooks.elements.contentArea = shelf.document.body;
+  shelf.hooks.elements.contentArea.scrollTop = 100;
+  shelf.hooks.elements.contentArea.scrollHeight = 4000;
+  shelf.hooks.elements.contentArea.clientHeight = 800;
+  assert.equal(shelf.hooks.maybeAutoLoadCatalogBatch(), false, '遠離尾端不提前載入下一批');
+  assert.equal(shelf.hooks.state.renderLimit, 200);
+  shelf.hooks.elements.contentArea.scrollTop = 2700;
+  assert.equal(shelf.hooks.maybeAutoLoadCatalogBatch(), true, '接近尾端會載入下一批');
+  assert.equal(shelf.hooks.state.renderLimit, 400);
+  assert.equal(shelf.hooks.elements.comicGrid.children.length, 400, '401 本只建立目前兩批卡片');
+  shelf.hooks.elements.contentArea.scrollTop = 3200;
+  shelf.hooks.maybeAutoLoadCatalogBatch();
+  assert.equal(shelf.hooks.state.renderLimit, 401, '尾批只補到實際總數');
+}
+
+// 搜尋 append 必須去重 in-flight；舊 query 回覆不得覆蓋新 query。
+{
+  const search = createHarness();
+  search.hooks.state.catalogSearchIds = new Set([catalogSearchKey(search.hooks, 'old-0'), catalogSearchKey(search.hooks, 'old-1')]);
+  search.hooks.state.catalogSearchItems = new Map([
+    [catalogSearchKey(search.hooks, 'old-0'), { runtimeId: 'old-0', title: 'old' }],
+    [catalogSearchKey(search.hooks, 'old-1'), { runtimeId: 'old-1', title: 'old' }],
+  ]);
+  search.hooks.state.catalogSearchTotal = 401;
+  search.hooks.state.catalogSearchBackendOffset = 2;
+  search.hooks.state.renderLimit = 200;
+  search.hooks.elements.contentArea = search.document.body;
+  search.hooks.elements.searchInput.value = 'old';
+  let appendResolve;
+  const searchCalls = [];
+  search.context.window.electronAPI.searchCatalog = request => {
+    searchCalls.push(request);
+    if (request.query === 'old' && request.offset === 2) {
+      return new Promise(resolve => { appendResolve = resolve; });
+    }
+    return Promise.resolve({ items: [{ runtimeId: request.query + '-0' }], total: 1, facets: {} });
+  };
+  assert.equal(search.hooks.requestNextCatalogBatch(), true);
+  assert.equal(search.hooks.requestNextCatalogBatch(), false, '同一搜尋 append 不得重複 in-flight');
+  assert.equal(searchCalls.length, 1);
+  assert.equal(searchCalls[0].offset, 2);
+  appendResolve({ items: [{ runtimeId: 'old-2' }], total: 401, facets: {} });
+  await new Promise(resolve => setImmediate(resolve));
+  assert.equal(search.hooks.state.catalogSearchItems.has(catalogSearchKey(search.hooks, 'old-2')), true);
+
+  const oldQuery = search.hooks.refreshCatalogSearch('old');
+  const newQuery = search.hooks.refreshCatalogSearch('new');
+  await newQuery;
+  appendResolve?.({ items: [{ runtimeId: 'late-old' }], total: 401, facets: {} });
+  await oldQuery;
+  assert.equal(search.hooks.state.catalogSearchItems.has(catalogSearchKey(search.hooks, 'new-0')), true, '新 query 應提交');
+  assert.equal(search.hooks.state.catalogSearchItems.has(catalogSearchKey(search.hooks, 'late-old')), false, '過時 query 不得覆蓋新結果');
+}
+
+// 新 query 的 debounce 期間也不能沿用舊 append cursor；舊 append 回來後
+// 不得重新填回已清空的 snapshot。
+{
+  const interleaved = createHarness();
+  interleaved.hooks.elements.contentArea = interleaved.document.body;
+  interleaved.hooks.state.comics = Array.from({ length: 401 }, (_, index) => ({
+    id: 'debounce-' + index, title: 'new item ' + index, relativePath: 'new/' + index,
+  }));
+  // This scenario exercises backend append gating; local results are filled
+  // only after the new query refresh, so they must not preempt the old append.
+  interleaved.hooks.state.filteredComics = [];
+  interleaved.hooks.state.catalogSearchIds = new Set([catalogSearchKey(interleaved.hooks, 'old-0'), catalogSearchKey(interleaved.hooks, 'old-1')]);
+  interleaved.hooks.state.catalogSearchItems = new Map([
+    [catalogSearchKey(interleaved.hooks, 'old-0'), { runtimeId: 'old-0' }],
+    [catalogSearchKey(interleaved.hooks, 'old-1'), { runtimeId: 'old-1' }],
+  ]);
+  interleaved.hooks.state.catalogSearchTotal = 401;
+  interleaved.hooks.state.catalogSearchBackendOffset = 2;
+  interleaved.hooks.state.renderLimit = 200;
+  interleaved.hooks.elements.searchInput.value = 'old';
+  let resolveOldAppend;
+  let resolveNewAppend;
+  const calls = [];
+  interleaved.context.window.electronAPI.searchCatalog = request => {
+    calls.push(request);
+    if (request.query === 'old') return new Promise(resolve => { resolveOldAppend = resolve; });
+    if (request.offset === 1) return new Promise(resolve => { resolveNewAppend = resolve; });
+    return Promise.resolve({ items: [{ runtimeId: 'new-0' }], total: 401, facets: {} });
+  };
+  assert.equal(interleaved.hooks.requestNextCatalogBatch(), true);
+  const input = interleaved.hooks.elements.searchInput;
+  input.value = 'new';
+  interleaved.hooks.handleSearch({ target: input });
+  assert.equal(interleaved.hooks.state.catalogSearchIds, null, '輸入新 query 立即清除舊 ids');
+  assert.equal(interleaved.hooks.state.catalogSearchItems.size, 0, '輸入新 query 立即清除舊結果');
+  const callsBeforeDebounceScroll = calls.length;
+  interleaved.hooks.requestNextCatalogBatch();
+  assert.equal(calls.length, callsBeforeDebounceScroll, 'debounce 期間 scroll 不得以舊 offset append');
+  interleaved.clock.tick(180);
+  await new Promise(resolve => setImmediate(resolve));
+  assert.equal(calls.at(-1).query, 'new');
+  assert.equal(calls.at(-1).offset, 0, '新 query 初次請求必須從 offset 0 開始');
+  assert.equal(interleaved.hooks.requestNextCatalogBatch(), true, '舊 query pending 不得阻塞新 query append');
+  assert.equal(calls.at(-1).query, 'new');
+  assert.equal(calls.at(-1).offset, 1);
+  resolveNewAppend({ items: [{ runtimeId: 'new-1' }], total: 401, facets: {} });
+  resolveOldAppend({ items: [{ runtimeId: 'late-old' }], total: 401, facets: {} });
+  await new Promise(resolve => setImmediate(resolve));
+  assert.equal(interleaved.hooks.state.catalogSearchItems.has(catalogSearchKey(interleaved.hooks, 'new-1')), true);
+  assert.equal(interleaved.hooks.state.catalogSearchItems.has(catalogSearchKey(interleaved.hooks, 'late-old')), false);
+}
+
+// ABA query 交錯：舊 A append pending，A -> B -> A 後，新 A append 不得被
+// 舊 A gate 擋住；舊 A finally 也不得清掉新 A token。
+{
+  const aba = createHarness();
+  aba.hooks.elements.contentArea = aba.document.body;
+  aba.hooks.state.catalogSearchIds = new Set([catalogSearchKey(aba.hooks, 'a-old-0'), catalogSearchKey(aba.hooks, 'a-old-1')]);
+  aba.hooks.state.catalogSearchItems = new Map([
+    [catalogSearchKey(aba.hooks, 'a-old-0'), { runtimeId: 'a-old-0' }],
+    [catalogSearchKey(aba.hooks, 'a-old-1'), { runtimeId: 'a-old-1' }],
+  ]);
+  aba.hooks.state.catalogSearchTotal = 401;
+  aba.hooks.state.catalogSearchBackendOffset = 2;
+  aba.hooks.elements.searchInput.value = 'A';
+  let resolveOldA;
+  let resolveNewA;
+  const calls = [];
+  aba.context.window.electronAPI.searchCatalog = request => {
+    calls.push(request);
+    if (request.query === 'A' && request.offset === 2) {
+      return new Promise(resolve => { resolveOldA = resolve; });
+    }
+    if (request.query === 'A' && request.offset === 1) {
+      return new Promise(resolve => { resolveNewA = resolve; });
+    }
+    return Promise.resolve({
+      items: [{ runtimeId: request.query + '-0' }],
+      total: 401,
+      facets: {},
+    });
+  };
+  assert.equal(aba.hooks.requestNextCatalogBatch(), true);
+  const input = aba.hooks.elements.searchInput;
+  input.value = 'B';
+  aba.hooks.handleSearch({ target: input });
+  aba.clock.tick(180);
+  await new Promise(resolve => setImmediate(resolve));
+  input.value = 'A';
+  aba.hooks.handleSearch({ target: input });
+  aba.clock.tick(180);
+  await new Promise(resolve => setImmediate(resolve));
+  assert.equal(aba.hooks.requestNextCatalogBatch(), true, '新 A append 不得被舊 A gate 擋住');
+  assert.equal(calls.at(-1).query, 'A');
+  assert.equal(calls.at(-1).offset, 1);
+  resolveOldA({ items: [{ runtimeId: 'late-old-A' }], total: 401, facets: {} });
+  await new Promise(resolve => setImmediate(resolve));
+  assert.equal(aba.hooks.requestNextCatalogBatch(), false, '舊 A finally 不得清掉新 A gate');
+  resolveNewA({ items: [{ runtimeId: 'new-A-1' }], total: 401, facets: {} });
+  await new Promise(resolve => setImmediate(resolve));
+  assert.equal(aba.hooks.state.catalogSearchItems.has(catalogSearchKey(aba.hooks, 'new-A-1')), true);
+  assert.equal(aba.hooks.state.catalogSearchItems.has(catalogSearchKey(aba.hooks, 'late-old-A')), false);
+}
+
+// restoreLibraryViewContext 也會使搜尋 snapshot 失效；pending A 回來時，
+// 恢復 A 的新 append 不得被舊 token 卡住。
+{
+  const restored = createHarness();
+  restored.hooks.state.comics = [{ id: 'restore-a', title: 'A', relativePath: 'a' }];
+  restored.hooks.elements.searchInput.value = 'A';
+  restored.hooks.state.catalogSearchIds = new Set([catalogSearchKey(restored.hooks, 'restore-a')]);
+  restored.hooks.state.catalogSearchItems = new Map([[catalogSearchKey(restored.hooks, 'restore-a'), { runtimeId: 'restore-a' }]]);
+  restored.hooks.state.catalogSearchTotal = 401;
+  restored.hooks.state.catalogSearchBackendOffset = 1;
+  let resolveOld;
+  let resolveNew;
+  let oldStarted = false;
+  const calls = [];
+  restored.context.window.electronAPI.searchCatalog = request => {
+    calls.push(request);
+    if (request.offset === 1 && !oldStarted) {
+      oldStarted = true;
+      return new Promise(resolve => { resolveOld = resolve; });
+    }
+    if (request.offset === 1) {
+      return new Promise(resolve => { resolveNew = resolve; });
+    }
+    return Promise.resolve({ items: [{ runtimeId: 'restore-a' }], total: 401, facets: {} });
+  };
+  assert.equal(restored.hooks.requestNextCatalogBatch(), true);
+  restored.hooks.restoreLibraryViewContext({
+    currentPath: '',
+    currentSourceId: '',
+    activeSeries: 'all',
+    activeFilter: 'all',
+    searchQuery: 'A',
+    selectedComicId: null,
+    selectedComicSourceId: '',
+    catalogSearchIds: new Set([catalogSearchKey(restored.hooks, 'restore-a')]),
+    catalogSearchItems: new Map([[catalogSearchKey(restored.hooks, 'restore-a'), { runtimeId: 'restore-a' }]]),
+    catalogSearchTotal: 401,
+    catalogSearchBackendOffset: 1,
+    scrollTop: null,
+  });
+  assert.equal(restored.hooks.requestNextCatalogBatch(), true, 'restore 後 A 可重新 append');
+  assert.equal(calls.length, 2);
+  resolveOld({ items: [{ runtimeId: 'old-restore' }], total: 401, facets: {} });
+  await new Promise(resolve => setImmediate(resolve));
+  assert.equal(restored.hooks.requestNextCatalogBatch(), false, '舊 A finally 不得解除恢復後的新 gate');
+  resolveNew({ items: [{ runtimeId: 'new-restore' }], total: 401, facets: {} });
+  await new Promise(resolve => setImmediate(resolve));
+  assert.equal(restored.hooks.state.catalogSearchItems.has(catalogSearchKey(restored.hooks, 'new-restore')), true);
+  assert.equal(restored.hooks.state.catalogSearchItems.has(catalogSearchKey(restored.hooks, 'old-restore')), false);
+}
+
+// 非 append refresh 會替換搜尋 snapshot；它也必須解除舊 append gate，
+// 讓同 query 的新 append 不被 pending 舊請求永久卡住。
+{
+  const refreshed = createHarness();
+  refreshed.hooks.elements.searchInput.value = 'A';
+  refreshed.hooks.state.catalogSearchIds = new Set([catalogSearchKey(refreshed.hooks, 'a-0')]);
+  refreshed.hooks.state.catalogSearchItems = new Map([[catalogSearchKey(refreshed.hooks, 'a-0'), { runtimeId: 'a-0' }]]);
+  refreshed.hooks.state.catalogSearchTotal = 401;
+  refreshed.hooks.state.catalogSearchBackendOffset = 1;
+  let resolveOldAppend;
+  let resolveNewAppend;
+  let appendCount = 0;
+  refreshed.context.window.electronAPI.searchCatalog = request => {
+    if (request.offset === 0) {
+      return Promise.resolve({ items: [{ runtimeId: 'a-0' }], total: 401, facets: {} });
+    }
+    appendCount += 1;
+    if (appendCount === 1) return new Promise(resolve => { resolveOldAppend = resolve; });
+    return new Promise(resolve => { resolveNewAppend = resolve; });
+  };
+  assert.equal(refreshed.hooks.requestNextCatalogBatch(), true);
+  await refreshed.hooks.refreshCatalogSearch('A');
+  assert.equal(refreshed.hooks.requestNextCatalogBatch(), true, 'refresh 後可重新啟動同 query append');
+  assert.equal(appendCount, 2);
+  resolveOldAppend({ items: [{ runtimeId: 'old-refresh' }], total: 401, facets: {} });
+  await new Promise(resolve => setImmediate(resolve));
+  assert.equal(refreshed.hooks.requestNextCatalogBatch(), false, '舊 finally 不得解除新 append gate');
+  resolveNewAppend({ items: [{ runtimeId: 'new-refresh' }], total: 401, facets: {} });
+  await new Promise(resolve => setImmediate(resolve));
+  assert.equal(refreshed.hooks.state.catalogSearchItems.has(catalogSearchKey(refreshed.hooks, 'new-refresh')), true);
+  assert.equal(refreshed.hooks.state.catalogSearchItems.has(catalogSearchKey(refreshed.hooks, 'old-refresh')), false);
+}
+
+// 搜尋結果必須以來源 + runtimeId + exact relativePath 去重；同一來源的
+// 相同 runtimeId 只要位置不同，也不得互相覆蓋。
+{
+  const collision = createHarness();
+  collision.hooks.elements.searchInput.value = 'same';
+  collision.context.window.electronAPI.searchCatalog = async request => {
+    assert.equal(request.offset, 0);
+    return {
+      items: [
+        { runtimeId: 'same', sourceId: 'local:A', relativePath: 'Shelf/Local.cbz', title: 'Local copy' },
+        { runtimeId: 'same', sourceId: 'smb:B', relativePath: 'Shelf/SMB.cbz', title: 'SMB copy' },
+      ],
+      total: 3,
+      facets: {},
+    };
+  };
+  await collision.hooks.refreshCatalogSearch('same');
+  const localKey = collision.hooks.getCatalogSearchKey('same', 'local:A', 'Shelf/Local.cbz');
+  const smbKey = collision.hooks.getCatalogSearchKey('same', 'smb:B', 'Shelf/SMB.cbz');
+  assert.notEqual(localKey, smbKey, '不同來源的相同 runtimeId 必須有不同 identity');
+  assert.equal(collision.hooks.state.catalogSearchItems.size, 2);
+  assert.equal(collision.hooks.state.catalogSearchItems.get(localKey).title, 'Local copy');
+  assert.equal(collision.hooks.state.catalogSearchItems.get(smbKey).title, 'SMB copy');
+  assert.equal(collision.hooks.state.catalogSearchBackendOffset, 2);
+
+  const sameSourceDifferentPath = createHarness();
+  sameSourceDifferentPath.hooks.elements.searchInput.value = 'same';
+  sameSourceDifferentPath.context.window.electronAPI.searchCatalog = async () => ({
+    items: [
+      { runtimeId: 'same', sourceId: 'local:A', relative_path: 'Shelf/One.cbz', title: 'One' },
+      { runtimeId: 'same', sourceId: 'local:A', relative_path: 'Shelf/Two.cbz', title: 'Two' },
+    ],
+    total: 2,
+    facets: {},
+  });
+  await sameSourceDifferentPath.hooks.refreshCatalogSearch('same');
+  const oneKey = sameSourceDifferentPath.hooks.getCatalogSearchKey('same', 'local:A', 'Shelf/One.cbz');
+  const twoKey = sameSourceDifferentPath.hooks.getCatalogSearchKey('same', 'local:A', 'Shelf/Two.cbz');
+  assert.notEqual(oneKey, twoKey, '同來源同 runtimeId 的不同 relativePath 必須有不同 identity');
+  assert.equal(sameSourceDifferentPath.hooks.state.catalogSearchItems.size, 2);
+  assert.equal(sameSourceDifferentPath.hooks.state.catalogSearchItems.get(oneKey).title, 'One');
+  assert.equal(sameSourceDifferentPath.hooks.state.catalogSearchItems.get(twoKey).title, 'Two');
+
+  const workLocations = createHarness();
+  workLocations.hooks.elements.searchInput.value = 'work';
+  workLocations.context.window.electronAPI.searchCatalog = async () => ({
+    items: [{
+      runtimeId: 'work-runtime', sourceId: 'local:A', relativePath: 'Shelf/Online.cbz', offline: false,
+      title: 'One work',
+      locations: [
+        { runtimeId: 'work-runtime', sourceId: 'local:A', relativePath: 'Shelf/Online.cbz', offline: false },
+        { runtimeId: 'work-runtime', sourceId: 'smb:B', relativePath: 'Archive/Offline.cbz', offline: true },
+      ],
+    }],
+    total: 1,
+    facets: {},
+  });
+  await workLocations.hooks.refreshCatalogSearch('work');
+  const onlineLocationKey = workLocations.hooks.getCatalogSearchKey(
+    'work-runtime', 'local:A', 'Shelf/Online.cbz',
+  );
+  const offlineLocationKey = workLocations.hooks.getCatalogSearchKey(
+    'work-runtime', 'smb:B', 'Archive/Offline.cbz',
+  );
+  assert.equal(workLocations.hooks.state.catalogSearchItems.size, 2,
+    '單一 work 的 locations 必須展開成各自可查詢的位置');
+  assert.equal(workLocations.hooks.state.catalogSearchItems.get(onlineLocationKey).offline, false);
+  assert.equal(workLocations.hooks.state.catalogSearchItems.get(offlineLocationKey).offline, true,
+    '每個 location 必須保留自己的 offline 狀態');
+  assert.equal(workLocations.hooks.state.catalogSearchBackendOffset, 1,
+    'locations 展開不得把 per-work offset 誤增為位置數');
+
+  const expanded = createHarness();
+  const expandedLocations = Array.from({ length: 201 }, (_, index) => ({
+    runtimeId: 'expanded-work',
+    sourceId: 'local:expanded',
+    relativePath: `Shelf/location-${index}.cbz`,
+    offline: index === 200,
+  }));
+  expanded.hooks.state.comics = expandedLocations.map(location => ({
+    id: location.runtimeId,
+    sourceId: location.sourceId,
+    relativePath: location.relativePath,
+    title: location.relativePath,
+    pageCount: 1,
+  }));
+  expanded.hooks.elements.searchInput.value = 'expanded';
+  let expandedCalls = 0;
+  expanded.context.window.electronAPI.searchCatalog = async () => {
+    expandedCalls += 1;
+    return {
+      items: [{
+        runtimeId: 'expanded-work', sourceId: 'local:expanded', relativePath: expandedLocations[0].relativePath,
+        title: 'Expanded work', locations: expandedLocations,
+      }],
+      total: 1,
+      facets: {},
+    };
+  };
+  await expanded.hooks.refreshCatalogSearch('expanded');
+  assert.equal(expanded.hooks.state.filteredComics.length, 201);
+  assert.equal(expanded.hooks.state.renderLimit, 200);
+  assert.equal(expanded.hooks.requestNextCatalogBatch({ manual: true }), true,
+    'backend 已到 work 尾端時，手動按鈕仍先補完本地 location 卡片');
+  assert.equal(expanded.hooks.state.renderLimit, 201);
+  assert.equal(expandedCalls, 1, '本地 location 尚未顯示完不得再 append backend');
+  expanded.hooks.state.renderLimit = 200;
+  expanded.hooks.elements.contentArea = expanded.document.body;
+  expanded.hooks.elements.contentArea.scrollTop = 2000;
+  expanded.hooks.elements.contentArea.scrollHeight = 2500;
+  expanded.hooks.elements.contentArea.clientHeight = 800;
+  assert.equal(expanded.hooks.maybeAutoLoadCatalogBatch(), true,
+    '接近尾端時自動分頁也必須先補本地 location');
+  assert.equal(expanded.hooks.state.renderLimit, 201);
+  assert.equal(expandedCalls, 1, '自動補本地 location 不得重打已耗盡的 backend work');
+
+  const loadMore = createHarness();
+  const loadMoreLocations = Array.from({ length: 200 }, (_, index) => ({
+    runtimeId: 'load-more-work',
+    sourceId: 'local:load-more',
+    relativePath: `Shelf/location-${index}.cbz`,
+  }));
+  loadMore.hooks.state.comics = loadMoreLocations.map(location => ({
+    id: location.runtimeId,
+    sourceId: location.sourceId,
+    relativePath: location.relativePath,
+    title: location.relativePath,
+    pageCount: 1,
+  }));
+  loadMore.hooks.elements.searchInput.value = 'load-more';
+  loadMore.context.window.electronAPI.searchCatalog = async () => ({
+    items: [{
+      runtimeId: 'load-more-work', sourceId: 'local:load-more',
+      relativePath: loadMoreLocations[0].relativePath,
+      locations: loadMoreLocations,
+    }],
+    total: 2,
+    facets: {},
+  });
+  await loadMore.hooks.refreshCatalogSearch('load-more');
+  assert.equal(loadMore.hooks.state.catalogSearchBackendOffset, 1);
+  assert.equal(loadMore.hooks.state.filteredComics.length, 200);
+  assert.equal(loadMore.hooks.state.renderLimit, 200);
+  assert.equal(loadMore.hooks.elements.catalogLoadMore.hidden, false,
+    '位置數已顯示完但 backend 尚有 work 時，手動分頁按鈕不可隱藏');
+
+  const scopedSearch = createHarness();
+  scopedSearch.hooks.state.currentSourceId = 'local:target';
+  scopedSearch.hooks.state.comics = [{
+    id: 'target-work', sourceId: 'local:target', relativePath: 'Target/book.cbz', title: 'scoped Target book',
+  }];
+  scopedSearch.hooks.elements.searchInput.value = 'scoped';
+  const scopedCalls = [];
+  scopedSearch.context.window.electronAPI.searchCatalog = async request => {
+    scopedCalls.push(request);
+    if (request.offset === 0) {
+      return {
+        items: [{ runtimeId: 'other-work', sourceId: 'local:other', relativePath: 'Other/book.cbz' }],
+        total: 2,
+        facets: {},
+      };
+    }
+    return {
+      items: [{ runtimeId: 'target-work', sourceId: 'local:target', relativePath: 'Target/book.cbz', title: 'scoped Target book' }],
+      total: 2,
+      facets: {},
+    };
+  };
+  await scopedSearch.hooks.refreshCatalogSearch('scoped');
+  assert.equal(scopedSearch.hooks.elements.catalogLoadMore.hidden, false,
+    '目前 source 無結果但 backend 尚有後頁時，空狀態仍提供手動載入');
+  await new Promise(resolve => setImmediate(resolve));
+  assert.deepEqual(scopedCalls.map(request => request.offset), [0, 1],
+    '目前 source 無結果時會串行推進 backend 到下一個可見 work');
+  assert.equal(scopedSearch.hooks.state.filteredComics.length, 1);
+  assert.equal(scopedSearch.hooks.state.catalogSearchBackendOffset, 2);
+  assert.equal(scopedSearch.hooks.elements.catalogLoadMore.hidden, true,
+    '找到目前 source 結果且 backend 已耗盡後隱藏載入按鈕');
+}
+
+// 沒有 runtimeId 的孤兒列不能進顯示 Map，但仍必須消耗 backend offset，
+// 否則下一次 append 會重讀同一頁，並可能被錯誤判成無進展。
+{
+  const orphan = createHarness();
+  orphan.hooks.elements.searchInput.value = 'orphan';
+  const calls = [];
+  orphan.context.window.electronAPI.searchCatalog = async request => {
+    calls.push(request);
+    if (request.offset === 0) {
+      return { items: [{ runtimeId: 'known', sourceId: 'local:A' }], total: 3, facets: {} };
+    }
+    if (request.offset === 1) {
+      return { items: [{ title: 'orphan row without runtime id' }], total: 3, facets: {} };
+    }
+    return { items: [{ runtimeId: 'last', sourceId: 'local:A' }], total: 3, facets: {} };
+  };
+  await orphan.hooks.refreshCatalogSearch('orphan');
+  assert.equal(orphan.hooks.requestNextCatalogBatch(), true);
+  await new Promise(resolve => setImmediate(resolve));
+  assert.equal(orphan.hooks.state.catalogSearchBackendOffset, 2);
+  assert.equal(orphan.hooks.state.catalogSearchItems.size, 1, '孤兒列不應污染可顯示結果');
+  assert.equal(orphan.hooks.state.catalogSearchNoProgress, false, '孤兒列仍代表 backend 有前進');
+  assert.equal(orphan.hooks.requestNextCatalogBatch(), true);
+  await new Promise(resolve => setImmediate(resolve));
+  assert.deepEqual(calls.map(request => request.offset), [0, 1, 2]);
+  assert.equal(orphan.hooks.state.catalogSearchBackendOffset, 3);
+  assert.equal(orphan.hooks.state.catalogSearchItems.size, 2);
+}
+
+// 伺服器回傳零進展時停止自動重試；手動按鈕仍可明確重試一次。
+{
+  const stalled = createHarness();
+  stalled.hooks.state.catalogSearchIds = new Set([catalogSearchKey(stalled.hooks, 'same-0'), catalogSearchKey(stalled.hooks, 'same-1')]);
+  stalled.hooks.state.catalogSearchItems = new Map([
+    [catalogSearchKey(stalled.hooks, 'same-0'), { runtimeId: 'same-0' }],
+    [catalogSearchKey(stalled.hooks, 'same-1'), { runtimeId: 'same-1' }],
+  ]);
+  stalled.hooks.state.catalogSearchTotal = 401;
+  stalled.hooks.state.catalogSearchBackendOffset = 2;
+  stalled.hooks.elements.contentArea = stalled.document.body;
+  stalled.hooks.elements.searchInput.value = 'same';
+  let stalledCalls = 0;
+  stalled.context.window.electronAPI.searchCatalog = async () => {
+    stalledCalls += 1;
+    return { items: [], total: 401, facets: {} };
+  };
+  assert.equal(stalled.hooks.requestNextCatalogBatch(), true);
+  await new Promise(resolve => setImmediate(resolve));
+  assert.equal(stalled.hooks.state.catalogSearchNoProgress, true);
+  stalled.hooks.elements.contentArea.scrollTop = 2000;
+  stalled.hooks.elements.contentArea.scrollHeight = 2500;
+  stalled.hooks.elements.contentArea.clientHeight = 800;
+  assert.equal(stalled.hooks.maybeAutoLoadCatalogBatch(), false, '零進展不得形成自動請求迴圈');
+  assert.equal(stalledCalls, 1);
+  assert.equal(stalled.hooks.requestNextCatalogBatch({ manual: true }), true, '手動按鈕可明確重試');
+  await new Promise(resolve => setImmediate(resolve));
+  assert.equal(stalledCalls, 2);
 }
 
 // 目錄縮圖只保留固定頁窗，避免大本漫畫一次建立數千個節點。
@@ -1209,6 +1827,261 @@ for (let columns = 1; columns <= 12; columns += 1) {
   const changedCards = [...shelf.hooks.elements.comicGrid.children];
   assert.equal(changedCards.find(card => card.dataset.comicId === 'shelf-25'), firstCards[25], '未變更卡片仍沿用原節點');
   assert.notEqual(changedCards.find(card => card.dataset.comicId === 'shelf-174'), firstCards[174], '變更卡片重建為新節點');
+  assert.equal(shelf.hooks.elements.comicGrid.replaceChildrenCalls, firstReplaceCount, '單一卡片變更不整批 replaceChildren');
+  assert.equal(firstObserver.disconnectCalls, 0, '單一卡片變更不中斷舊封面 observer');
+
+  const updatedAtChanged = changed.map(comic => comic.id === 'shelf-100'
+    ? { ...comic, updatedAt: '2026-11-02T12:00:00.000Z' }
+    : comic);
+  const beforeUpdatedAtCard = changedCards.find(card => card.dataset.comicId === 'shelf-100');
+  shelf.hooks.state.filteredComics = updatedAtChanged;
+  shelf.hooks.renderGrid();
+  const updatedAtCards = [...shelf.hooks.elements.comicGrid.children];
+  assert.notEqual(updatedAtCards.find(card => card.dataset.comicId === 'shelf-100'), beforeUpdatedAtCard,
+    '同 id 檔案更新時，該書封面卡片必須重新建立');
+  assert.equal(updatedAtCards.find(card => card.dataset.comicId === 'shelf-25'), firstCards[25],
+    '只有 updatedAt 改變的書受影響，其他卡片仍沿用原節點');
+}
+
+// 虛擬資料夾的封面版本必須跟隨選中的 coverComicId；封面書更新時只重建對應資料夾。
+{
+  const shelf = createHarness();
+  shelf.hooks.elements.searchInput.value = '';
+  shelf.hooks.state.activeSeries = 'all';
+  shelf.hooks.state.activeFilter = 'all';
+  shelf.hooks.state.currentPath = '';
+  shelf.hooks.state.comics = [
+    {
+      id: 'folder-a-cover', title: 'A cover', relativePath: 'Series A/cover.cbz',
+      sourceId: 'local:test', updatedAt: '2026-11-01T00:00:00.000Z', pageCount: 3,
+    },
+    {
+      id: 'folder-b-cover', title: 'B cover', relativePath: 'Series B/cover.cbz',
+      sourceId: 'local:test', updatedAt: '2026-11-01T00:00:00.000Z', pageCount: 3,
+    },
+  ];
+  shelf.hooks.state.filteredComics = shelf.hooks.getDirectoryItems();
+  shelf.hooks.renderGrid();
+  const firstCards = new Map([...shelf.hooks.elements.comicGrid.children]
+    .map(card => [card.dataset.comicId, card]));
+  const firstFolders = new Map(shelf.hooks.state.filteredComics
+    .filter(item => item.isDirectory)
+    .map(item => [item.relativePath, item]));
+  assert.equal(firstFolders.get('Series A').coverUpdatedAt, '2026-11-01T00:00:00.000Z');
+
+  shelf.hooks.state.comics = shelf.hooks.state.comics.map(comic => comic.id === 'folder-a-cover'
+    ? { ...comic, updatedAt: '2026-11-02T12:00:00.000Z' }
+    : comic);
+  shelf.hooks.state.filteredComics = shelf.hooks.getDirectoryItems();
+  shelf.hooks.renderGrid();
+  const updatedCards = new Map([...shelf.hooks.elements.comicGrid.children]
+    .map(card => [card.dataset.comicId, card]));
+  const updatedFolders = new Map(shelf.hooks.state.filteredComics
+    .filter(item => item.isDirectory)
+    .map(item => [item.relativePath, item]));
+  assert.equal(updatedFolders.get('Series A').coverUpdatedAt, '2026-11-02T12:00:00.000Z');
+  assert.notEqual(updatedCards.get(firstFolders.get('Series A').id), firstCards.get(firstFolders.get('Series A').id),
+    '封面書 updatedAt 改變時，對應虛擬資料夾必須重新建立');
+  assert.equal(updatedCards.get(firstFolders.get('Series B').id), firstCards.get(firstFolders.get('Series B').id),
+    '其他虛擬資料夾仍沿用原節點');
+}
+
+// merged root 可同時保留相同 id 的在線／離線來源；refresh、selection 與焦點都必須以 sourceId + id 辨識。
+{
+  const collision = createHarness();
+  const offline = {
+    id: 'same-runtime-id',
+    title: '離線副本',
+    relativePath: 'offline/book.cbz',
+    sourceId: 'smb:offline',
+    type: 'offline',
+    pageCount: 12,
+    progress: { currentPage: 0, totalPages: 12 },
+  };
+  const online = {
+    id: 'same-runtime-id',
+    title: '在線副本',
+    relativePath: 'online/book.cbz',
+    sourceId: 'local:online',
+    type: 'archive',
+    pageCount: 12,
+    progress: { currentPage: 0, totalPages: 12 },
+  };
+  collision.hooks.state.comics = [offline, online];
+  collision.hooks.state.filteredComics = [offline, online];
+  collision.hooks.elements.contentArea = new FakeElement();
+  collision.hooks.renderGrid();
+  const firstCards = new Map([...collision.hooks.elements.comicGrid.children]
+    .map(card => [card.dataset.sourceId, card]));
+  assert.equal(firstCards.size, 2, '同 id 不同 source 必須保留兩張書卡');
+  assert.equal(firstCards.get('smb:offline').dataset.comicId, offline.id);
+  assert.equal(firstCards.get('local:online').dataset.comicId, online.id);
+
+  collision.hooks.activateGridComic(online);
+  assert.equal(collision.hooks.state.selectedComicId, online.id);
+  assert.equal(collision.hooks.state.selectedComicSourceId, online.sourceId,
+    'Inspector selection 必須同步保存在線 sourceId');
+  collision.document.activeElement = firstCards.get(online.sourceId);
+  collision.hooks.state.filteredComics = [online, offline];
+  collision.hooks.renderGrid({ background: true });
+  const refreshedCards = new Map([...collision.hooks.elements.comicGrid.children]
+    .map(card => [card.dataset.sourceId, card]));
+  assert.equal(refreshedCards.get(online.sourceId), firstCards.get(online.sourceId),
+    '在線卡片 refresh 後沿用原節點');
+  assert.equal(refreshedCards.get(offline.sourceId), firstCards.get(offline.sourceId),
+    '離線卡片 refresh 後沿用原節點');
+  assert.equal(refreshedCards.get(online.sourceId).classList.contains('selected'), true,
+    '焦點／選取仍指向在線 source');
+  assert.equal(refreshedCards.get(offline.sourceId).classList.contains('selected'), false,
+    '離線同 id 卡片不可誤套在線選取狀態');
+  assert.equal(collision.document.activeElement, firstCards.get(online.sourceId),
+    '同 id 不同 source 的 focus refresh 後不應跳到另一來源');
+
+  let recoveryPrompts = 0;
+  collision.context.window.confirm = () => { recoveryPrompts += 1; return false; };
+  await collision.hooks.openReader(offline);
+  assert.equal(recoveryPrompts, 1, '離線來源仍走各自的來源復原流程');
+  assert.equal(collision.hooks.state.selectedComicSourceId, online.sourceId,
+    '離線復原提示不可污染目前在線 Inspector selection');
+}
+
+// Native organizer commands still receive id-only payloads.  If the same id
+// is visible from multiple roots, refuse selection and batch mutation instead
+// of risking a write to the wrong source.
+{
+  const organizer = createHarness();
+  for (const id of ['organizeTag', 'organizeAuthor', 'organizeSeries', 'organizeLanguage', 'organizeDirection']) {
+    organizer.hooks.elements[id].value = '';
+  }
+  const offline = { id: 'organizer-collision', title: '離線', sourceId: 'smb:offline', relativePath: 'offline/book.cbz' };
+  const online = { id: 'organizer-collision', title: '在線', sourceId: 'local:online', relativePath: 'online/book.cbz' };
+  organizer.hooks.state.comics = [offline, online];
+  organizer.hooks.toggleOrganizerSelection(online);
+  assert.equal(organizer.hooks.state.organizeSelection.size, 0, '同 id 多來源不可建立無法表達 source 的選取');
+  assert.match(organizer.hooks.elements.organizeStatus.textContent, /多個來源/);
+  let batchCalls = 0;
+  organizer.context.window.electronAPI.applyBatchMetadata = async () => { batchCalls += 1; return { updated: 1 }; };
+  organizer.hooks.state.organizeSelection.add(offline.id);
+  await organizer.hooks.applyOrganizerBatch('include');
+  assert.equal(batchCalls, 0, '既有歧義選取也必須在 native 呼叫前 fail closed');
+  assert.match(organizer.hooks.elements.organizeStatus.textContent, /避免誤改/);
+}
+
+// Large selections resolve through one library-wide identity index while
+// retaining source ambiguity and same-source duplicate protection.
+{
+  const organizer = createHarness();
+  const scale = 4000;
+  const comics = Array.from({ length: scale }, (_, index) => ({
+    id: `organizer-scale-${index}`,
+    sourceId: index % 2 ? 'smb:library' : 'local:library',
+    relativePath: `books/${index}.cbz`,
+  }));
+  organizer.hooks.state.comics = comics;
+  organizer.hooks.state.organizeSelection = new Set(comics.map(comic => comic.id));
+  organizer.hooks.state.organizeSelectionSources = new Map(comics.map(comic => [comic.id, comic.sourceId]));
+  const resolved = organizer.hooks.resolveOrganizerSelection();
+  assert.equal(resolved.ambiguous.length, 0, 'large unique selection remains source-safe');
+  assert.equal(resolved.selected.length, scale, 'large selection resolves every selected comic');
+  assert.equal(resolved.selected[3999].relativePath, 'books/3999.cbz');
+
+  const sameSourceA = { id: 'organizer-same-source', sourceId: 'local:library', relativePath: 'books/a.cbz' };
+  const sameSourceB = { id: 'organizer-same-source', sourceId: 'local:library', relativePath: 'books/b.cbz' };
+  const otherSource = { id: 'organizer-other-source', sourceId: 'smb:library', relativePath: 'books/c.cbz' };
+  organizer.hooks.state.comics = [sameSourceA, sameSourceB, otherSource];
+  organizer.hooks.state.organizeSelection = new Set([sameSourceA.id, otherSource.id]);
+  organizer.hooks.state.organizeSelectionSources = new Map([
+    [sameSourceA.id, sameSourceA.sourceId],
+    [otherSource.id, otherSource.sourceId],
+  ]);
+  const collision = organizer.hooks.resolveOrganizerSelection();
+  assert.deepEqual([...collision.ambiguous], [sameSourceA.id], 'duplicate locations in one source remain ambiguous');
+  assert.equal(collision.selected.length, 1, 'unrelated unique source remains selectable beside collision');
+  assert.equal(collision.selected[0].id, otherSource.id);
+  assert.equal(collision.selected[0].relativePath, otherSource.relativePath);
+  assert.equal(organizer.hooks.isOrganizerIdentitySafe(sameSourceA), false,
+    'duplicate locations in one source cannot enter organizer selection');
+
+  const missingSource = { id: 'organizer-missing-source', relativePath: 'books/missing-source.cbz' };
+  organizer.hooks.state.comics = [missingSource];
+  organizer.hooks.state.organizeSelection = new Set([missingSource.id]);
+  organizer.hooks.state.organizeSelectionSources = new Map([[missingSource.id, '']]);
+  const missingSourceResolution = organizer.hooks.resolveOrganizerSelection();
+  assert.deepEqual([...missingSourceResolution.ambiguous], [missingSource.id], 'missing source must fail closed');
+  assert.equal(organizer.hooks.isOrganizerIdentitySafe(missingSource), false, 'missing source cannot enter organizer selection');
+
+  const missingPath = { id: 'organizer-missing-path', sourceId: 'local:library' };
+  organizer.hooks.state.comics = [missingPath];
+  organizer.hooks.state.organizeSelection = new Set([missingPath.id]);
+  organizer.hooks.state.organizeSelectionSources = new Map([[missingPath.id, missingPath.sourceId]]);
+  const missingPathResolution = organizer.hooks.resolveOrganizerSelection();
+  assert.deepEqual([...missingPathResolution.ambiguous], [missingPath.id], 'missing path must fail closed');
+  assert.equal(organizer.hooks.isOrganizerIdentitySafe(missingPath), false, 'missing path cannot enter organizer selection');
+
+  const noSelectedSource = { id: 'organizer-no-selected-source', sourceId: 'local:library', relativePath: 'books/no-source-selection.cbz' };
+  organizer.hooks.state.comics = [noSelectedSource];
+  organizer.hooks.state.organizeSelection = new Set([noSelectedSource.id]);
+  organizer.hooks.state.organizeSelectionSources = new Map();
+  const noSelectedSourceResolution = organizer.hooks.resolveOrganizerSelection();
+  assert.deepEqual([...noSelectedSourceResolution.ambiguous], [noSelectedSource.id], 'missing selected source must not guess the first match');
+}
+
+// Organizer requests carry the selected source and path. If source A vanishes
+// before a later apply, the saved source identity must not fall through to B.
+{
+  const race = createHarness();
+  for (const id of ['organizeTag', 'organizeAuthor', 'organizeLanguage', 'organizeDirection']) {
+    race.hooks.elements[id].value = '';
+  }
+  race.hooks.elements.organizeSeries.value = 'Stable series';
+  const sourceA = { id: 'organizer-race', title: 'A', sourceId: 'local:A', relativePath: 'a/book.cbz' };
+  const sourceB = { id: 'organizer-race', title: 'B', sourceId: 'smb:B', relativePath: 'b/book.cbz' };
+  race.hooks.state.comics = [sourceA];
+  race.hooks.state.filteredComics = [sourceA];
+  race.hooks.toggleOrganizerSelection(sourceA);
+  let applyCalls = 0;
+  let request;
+  race.context.window.electronAPI.applyBatchMetadata = async payload => {
+    applyCalls += 1;
+    request = payload;
+    return { updated: 1, undoToken: 'undo-race' };
+  };
+  await race.hooks.applyOrganizerBatch('include');
+  assert.equal(applyCalls, 1, 'unique organizer selection remains usable');
+  assert.equal(request.targets.length, 1);
+  assert.equal(request.targets[0].runtimeId, 'organizer-race');
+  assert.equal(request.targets[0].sourceId, 'local:A');
+  assert.equal(request.targets[0].relativePath, 'a/book.cbz', 'organizer request must include source-qualified runtime target');
+  race.hooks.state.comics = [sourceB];
+  await race.hooks.applyOrganizerBatch('include');
+  assert.equal(applyCalls, 1, 'removed source must not be applied to replacement source');
+  assert.match(race.hooks.elements.organizeStatus.textContent, /多個來源|避免誤改/);
+}
+
+// 已選取的唯一 id 在背景掃描帶入第二來源後，也要立即撤銷 UI 選取。
+{
+  const refreshed = createHarness();
+  for (const id of ['organizeTag', 'organizeAuthor', 'organizeSeries', 'organizeLanguage', 'organizeDirection']) {
+    refreshed.hooks.elements[id].value = '';
+  }
+  const online = { id: 'late-organizer-collision', title: '在線', sourceId: 'local:online', relativePath: 'online/book.cbz' };
+  const offline = { id: 'late-organizer-collision', title: '離線', sourceId: 'smb:offline', relativePath: 'offline/book.cbz' };
+  refreshed.hooks.state.organizeMode = true;
+  refreshed.hooks.state.comics = [online];
+  refreshed.hooks.state.filteredComics = [online];
+  refreshed.hooks.state.organizeSelection.add(online.id);
+  refreshed.hooks.renderGrid();
+  assert.equal(refreshed.hooks.elements.comicGrid.children[0].classList.contains('organize-selected'), true);
+  refreshed.hooks.state.scanStatus = { generation: 77, isScanning: true };
+  refreshed.hooks.applyIncrementalLibraryBatch({ generation: 77, items: [offline], found: 2 });
+  assert.equal(refreshed.hooks.state.organizeSelection.has(online.id), false,
+    '背景 merge 產生來源衝突時會移除不安全 organizer selection');
+  assert.match(refreshed.hooks.elements.organizeStatus.textContent, /多個來源/);
+  refreshed.hooks.state.filteredComics = [online, offline];
+  refreshed.hooks.renderGrid();
+  assert.equal([...refreshed.hooks.elements.comicGrid.children]
+    .some(card => card.classList.contains('organize-selected')), false,
+  '來源衝突後兩張卡都不可顯示假選取');
 }
 
 // 目錄快速切窗時，舊世代仍在解碼的 8 張圖不能占住新世代的併發槽位；
@@ -1628,7 +2501,7 @@ for (let columns = 1; columns <= 12; columns += 1) {
     syncLibraryPanelsForViewport({ initial: true });
     window.readerOpens = [];
     openReader = comic => window.readerOpens.push(comic.id || comic);
-    renderComicInspector = comic => { state.selectedComicId = comic.id; };
+    renderComicInspector = comic => { state.selectedComicId = comic.id; state.selectedComicSourceId = comic.sourceId || ''; };
     syncGridSelectionState = () => {};
     activateGridComic({ id: 'normal-book', title: '測試書' });
   `, selection.context);
@@ -1716,7 +2589,7 @@ for (let columns = 1; columns <= 12; columns += 1) {
 
   catalog.hooks.state.currentPath = '';
   catalog.hooks.elements.searchInput.value = '宇宙';
-  catalog.hooks.state.catalogSearchIds = new Set(['formal-a']);
+  catalog.hooks.state.catalogSearchIds = new Set([catalogSearchKey(catalog.hooks, 'formal-a')]);
   const search = catalog.hooks.getDirectoryItems();
   assert.deepEqual(Array.from(search, item => item.id), [], '正式書架搜尋不混入內建示範');
 
@@ -1924,7 +2797,7 @@ for (const formalLibrary of [
 // getCoverUrl 只抽出函式放進 isolated VM 也要能處理內建路由，不依賴 eAPI lexical binding。
 {
   const source = fs.readFileSync(new URL('../public/app.js', import.meta.url), 'utf8');
-  const functionSource = source.match(/function getCoverUrl\(comicId\) \{[\s\S]*?\n\}\n\nconst READER_PRELOAD/)[0].replace(/\n\nconst READER_PRELOAD[\s\S]*$/, '');
+  const functionSource = source.match(/function getCoverUrl\([^)]*\) \{[\s\S]*?\n\}\n\n\/\/ 目錄縮圖/)[0].replace(/\n\n\/\/ 目錄縮圖[\s\S]*$/, '');
   const isolated = {};
   vm.createContext(isolated);
   vm.runInContext(`${functionSource}\nresult = getCoverUrl('builtin:landscape-cosmos');`, isolated);
@@ -2417,7 +3290,9 @@ console.log('Finder platform boundary tests passed');
   state.activeFilter = 'all';
   elements.searchInput.value = 'outside';
   assert.deepEqual(Array.from(discovery.hooks.getDiscoveryCandidates(), comic => comic.id), ['outside'], '搜尋沿用書架的目前來源全庫範圍');
-  state.catalogSearchItems.set('outside', { offline: true });
+  state.catalogSearchItems.set(catalogSearchKey(discovery.hooks, 'outside', 'local:A', 'Other/Outside'), {
+    runtimeId: 'outside', sourceId: 'local:A', relativePath: 'Other/Outside', offline: true,
+  });
   assert.equal(discovery.hooks.getDiscoveryCandidates().length, 0, '搜尋結果的離線 metadata 不能被忽略');
   state.catalogSearchItems.clear();
   elements.searchInput.value = '';
@@ -2538,6 +3413,33 @@ console.log('discovery scope, repeat, rapid activation and first-use copy tests 
 }
 {
   const h = createHarness();
+  const sourceA = { id: 'shared', title: 'A', sourceId: 'external:a', relativePath: 'A/book.cbz' };
+  const sourceB = { id: 'shared', title: 'B', sourceId: 'external:b', relativePath: 'B/book.cbz' };
+  const groups = h.hooks.normalizeDiscoveryTagGroups([
+    {
+      namespace: 'general',
+      value: 'Only A',
+      targets: [{ runtimeId: 'shared', sourceId: 'external:a', relativePath: 'A/book.cbz' }],
+      comicIds: ['shared'],
+    },
+  ], [sourceA, sourceB]);
+  assert.equal(groups.length, 1, '來源限定 TAG 應保留有效群組');
+  assert.equal(groups[0].targets.length, 1);
+  assert.equal(groups[0].targets[0].runtimeId, 'shared');
+  assert.equal(groups[0].targets[0].sourceId, 'external:a');
+  assert.equal(groups[0].targets[0].relativePath, 'A/book.cbz');
+  assert.equal(groups[0].comicIds.length, 1, 'TAG 群組只應保留來源限定候選');
+  assert.equal(h.hooks.normalizeDiscoveryTagGroups([
+    {
+      namespace: 'general',
+      value: 'Slash variant',
+      targets: [{ runtimeId: 'shared', sourceId: 'external:a', relativePath: 'A//book.cbz' }],
+      comicIds: ['shared'],
+    },
+  ], [sourceA]).length, 0, '來源路徑斜線變體不可被正規化成同一候選');
+}
+{
+  const h = createHarness();
   const { state, elements } = h.hooks;
   elements.searchInput.value = '';
   elements.libraryTagDiscoveryPanel.hidden = true;
@@ -2556,3 +3458,311 @@ console.log('discovery scope, repeat, rapid activation and first-use copy tests 
 console.log('tag discovery selection, scope, stale response and empty/failure tests passed');
 
 assert.equal(hooks.getCoverUrl('photos:YWxidW0'), 'gai://cover/photos:YWxidW0', '照片封面ID保留protocol可識別的冒號');
+assert.notEqual(
+  hooks.getCoverUrl('same-cover-id', 'local:one'),
+  hooks.getCoverUrl('same-cover-id', 'smb:two'),
+  '同 id 不同來源的 native 封面 URL 必須可區分',
+);
+assert.match(hooks.getCoverUrl('same-cover-id', 'smb:two'), /\?sourceId=smb%3Atwo$/);
+
+// Inspector metadata must remain usable when optional related-tag suggestions
+// fail. The suggestion lookup also has to wait for source-qualified metadata so
+// an ambiguous runtime ID cannot block the metadata panel.
+{
+  const h = createHarness();
+  const { state, elements } = h.hooks;
+  const metadataTarget = new FakeElement('section');
+  elements.comicInspector.querySelector = selector => selector === '#inspector-metadata' ? metadataTarget : null;
+  const comic = {
+    id: 'runtime-shared',
+    title: 'Shared comic',
+    sourceId: 'local:root',
+    relativePath: 'books/shared.cbz',
+  };
+  state.comics = [comic];
+  state.selectedComicId = comic.id;
+  state.selectedComicSourceId = comic.sourceId;
+  let relatedId = null;
+  h.context.window.electronAPI.getComicMetadata = async (id, sourceId, relativePath) => {
+    assert.equal(id, comic.id);
+    assert.equal(sourceId, comic.sourceId);
+    assert.equal(relativePath, comic.relativePath);
+    return {
+      comicId: 'canonical-shared',
+      sourceId: comic.sourceId,
+      title: 'Shared comic',
+      series: '',
+      language: '',
+      readingDirection: '',
+      offline: false,
+      creators: {},
+      tags: [],
+      candidates: [],
+      lockedFields: [],
+      diagnostics: [],
+    };
+  };
+  h.context.window.electronAPI.listRelatedTags = async id => {
+    relatedId = id;
+    throw new Error('ambiguous runtime id');
+  };
+  await h.hooks.loadInspectorMetadata(comic);
+  await new Promise(resolve => setImmediate(resolve));
+  assert.equal(relatedId, 'canonical-shared', 'related tags must use metadata canonical ID');
+  assert.match(metadataTarget.innerHTML, /整理資料/, 'metadata must render when related tags fail');
+  assert.match(metadataTarget.innerHTML, /標籤建議暫時無法載入/, 'tag failure must be visible and not presented as no suggestions');
+  assert.doesNotMatch(metadataTarget.innerHTML, /metadata-suggestions/, 'failed suggestions must not render fake suggestion controls');
+}
+
+// A related-tag request that never resolves must not hold metadata hostage.
+{
+  const h = createHarness();
+  const { state, elements } = h.hooks;
+  const metadataTarget = new FakeElement('section');
+  elements.comicInspector.querySelector = selector => selector === '#inspector-metadata' ? metadataTarget : null;
+  const comic = { id: 'never-tags', sourceId: 'local:root', relativePath: 'never-tags.cbz' };
+  state.comics = [comic];
+  state.selectedComicId = comic.id;
+  state.selectedComicSourceId = comic.sourceId;
+  h.context.window.electronAPI.getComicMetadata = async () => ({
+    comicId: 'canonical-never-tags', sourceId: comic.sourceId, title: 'Never tags', series: '',
+    language: '', readingDirection: '', offline: false, creators: {}, tags: [], candidates: [],
+    lockedFields: [], diagnostics: [],
+  });
+  h.context.window.electronAPI.listRelatedTags = () => new Promise(() => {});
+  await h.hooks.loadInspectorMetadata(comic);
+  assert.match(metadataTarget.innerHTML, /整理資料/, 'metadata must render before a hanging tag request resolves');
+  assert.match(metadataTarget.innerHTML, /正在載入標籤建議/, 'hanging tag request must remain visibly pending');
+}
+
+// A metadata failure still uses the metadata error path and must not invoke
+// the optional related-tag API at all.
+{
+  const h = createHarness();
+  const { state, elements } = h.hooks;
+  const metadataTarget = new FakeElement('section');
+  elements.comicInspector.querySelector = selector => selector === '#inspector-metadata' ? metadataTarget : null;
+  const comic = { id: 'metadata-failure', sourceId: 'local:root', relativePath: 'failure.cbz' };
+  state.comics = [comic];
+  state.selectedComicId = comic.id;
+  state.selectedComicSourceId = comic.sourceId;
+  let relatedCalls = 0;
+  h.context.window.electronAPI.getComicMetadata = async () => { throw new Error('metadata unavailable'); };
+  h.context.window.electronAPI.listRelatedTags = async () => { relatedCalls += 1; return []; };
+  await h.hooks.loadInspectorMetadata(comic);
+  assert.equal(relatedCalls, 0, 'related tags must not run after metadata failure');
+  assert.match(metadataTarget.innerHTML, /無法驗證漫畫的穩定來源/, 'metadata failure must remain fail-closed');
+}
+
+// A bridge without listRelatedTags is an unavailable optional capability, not
+// an empty suggestion result; metadata still renders with the warning.
+{
+  const h = createHarness();
+  const { state, elements } = h.hooks;
+  const metadataTarget = new FakeElement('section');
+  elements.comicInspector.querySelector = selector => selector === '#inspector-metadata' ? metadataTarget : null;
+  const comic = { id: 'missing-tags-api', sourceId: 'local:root', relativePath: 'missing-tags.cbz' };
+  state.comics = [comic];
+  state.selectedComicId = comic.id;
+  state.selectedComicSourceId = comic.sourceId;
+  h.context.window.electronAPI.getComicMetadata = async () => ({
+    comicId: 'canonical-missing-tags', sourceId: comic.sourceId, title: 'No tag API', series: '',
+    language: '', readingDirection: '', offline: false, creators: {}, tags: [], candidates: [],
+    lockedFields: [], diagnostics: [],
+  });
+  delete h.context.window.electronAPI.listRelatedTags;
+  await h.hooks.loadInspectorMetadata(comic);
+  assert.match(metadataTarget.innerHTML, /整理資料/, 'metadata must render without related-tag API');
+  assert.match(metadataTarget.innerHTML, /標籤建議暫時無法載入/, 'missing related-tag API must be visible');
+}
+
+// A selection change while the optional query is in flight must prevent a
+// stale metadata response from committing to the inspector.
+{
+  const h = createHarness();
+  const { state, elements } = h.hooks;
+  const metadataTarget = new FakeElement('section');
+  elements.comicInspector.querySelector = selector => selector === '#inspector-metadata' ? metadataTarget : null;
+  const comic = { id: 'stale-metadata', sourceId: 'local:root', relativePath: 'stale.cbz' };
+  state.comics = [comic];
+  state.selectedComicId = comic.id;
+  state.selectedComicSourceId = comic.sourceId;
+  h.context.window.electronAPI.getComicMetadata = async () => ({
+    comicId: 'canonical-stale', sourceId: comic.sourceId, title: 'Stale', series: '',
+    language: '', readingDirection: '', offline: false, creators: {}, tags: [], candidates: [],
+    lockedFields: [], diagnostics: [],
+  });
+  h.context.window.electronAPI.listRelatedTags = async () => {
+    state.selectedComicId = 'another-selection';
+    return [];
+  };
+  await h.hooks.loadInspectorMetadata(comic);
+  const initialMarkup = metadataTarget.innerHTML;
+  await new Promise(resolve => setImmediate(resolve));
+  assert.equal(metadataTarget.innerHTML, initialMarkup, 'stale selection must not commit a late tag update');
+}
+
+// Re-entering the same source-qualified comic starts a new metadata request.
+// A late suggestion response from the prior request must not overwrite the
+// newer metadata even though the selected runtime id/source remain unchanged.
+{
+  const h = createHarness();
+  const { state, elements } = h.hooks;
+  const metadataTarget = new FakeElement('section');
+  elements.comicInspector.querySelector = selector => selector === '#inspector-metadata' ? metadataTarget : null;
+  const comic = { id: 'reentered-metadata', sourceId: 'local:root', relativePath: 'reentered.cbz' };
+  state.comics = [comic];
+  state.selectedComicId = comic.id;
+  state.selectedComicSourceId = comic.sourceId;
+  const deferred = () => {
+    let resolve;
+    const promise = new Promise(nextResolve => { resolve = nextResolve; });
+    return { promise, resolve };
+  };
+  const firstTags = deferred();
+  const secondTags = deferred();
+  let metadataCalls = 0;
+  let relatedCalls = 0;
+  h.context.window.electronAPI.getComicMetadata = async () => {
+    metadataCalls += 1;
+    const isFirst = metadataCalls === 1;
+    return {
+      comicId: isFirst ? 'canonical-old' : 'canonical-new',
+      sourceId: comic.sourceId,
+      title: isFirst ? 'Old metadata' : 'New metadata',
+      series: '',
+      language: '',
+      readingDirection: '',
+      offline: false,
+      creators: {},
+      tags: [],
+      candidates: [],
+      lockedFields: [],
+      diagnostics: [],
+    };
+  };
+  h.context.window.electronAPI.listRelatedTags = id => {
+    relatedCalls += 1;
+    assert.equal(id, relatedCalls === 1 ? 'canonical-old' : 'canonical-new');
+    return relatedCalls === 1 ? firstTags.promise : secondTags.promise;
+  };
+
+  await h.hooks.loadInspectorMetadata(comic);
+  await new Promise(resolve => setImmediate(resolve));
+  assert.equal(relatedCalls, 1, 'first metadata load must start its related-tag request');
+  assert.match(metadataTarget.innerHTML, /Old metadata/);
+
+  await h.hooks.loadInspectorMetadata(comic);
+  await new Promise(resolve => setImmediate(resolve));
+  assert.equal(relatedCalls, 2, 're-entering the same comic must start a fresh related-tag request');
+  assert.match(metadataTarget.innerHTML, /New metadata/, 'new metadata must replace the first render');
+
+  firstTags.resolve([{
+    tag: { namespace: 'general', value: 'old-suggestion' },
+    sharedComics: 1,
+    reason: 'old response',
+  }]);
+  await new Promise(resolve => setImmediate(resolve));
+  assert.match(metadataTarget.innerHTML, /New metadata/, 'late old suggestions must preserve new metadata');
+  assert.doesNotMatch(metadataTarget.innerHTML, /old-suggestion/, 'late old suggestions must not overwrite the new render');
+
+  secondTags.resolve([{
+    tag: { namespace: 'general', value: 'new-suggestion' },
+    sharedComics: 1,
+    reason: 'new response',
+  }]);
+  await new Promise(resolve => setImmediate(resolve));
+  assert.match(metadataTarget.innerHTML, /New metadata/);
+  assert.match(metadataTarget.innerHTML, /new-suggestion/, 'current suggestions may update the current metadata');
+}
+
+// A -> B -> A must still invalidate the first A request: selection checks
+// alone cannot distinguish the old A response from the re-entered A request.
+{
+  const h = createHarness();
+  const { state, elements } = h.hooks;
+  const metadataTarget = new FakeElement('section');
+  elements.comicInspector.querySelector = selector => selector === '#inspector-metadata' ? metadataTarget : null;
+  const comicA = { id: 'aba-a', sourceId: 'local:root', relativePath: 'aba-a.cbz' };
+  const comicB = { id: 'aba-b', sourceId: 'local:root', relativePath: 'aba-b.cbz' };
+  state.comics = [comicA, comicB];
+  const deferred = () => {
+    let resolve;
+    const promise = new Promise(nextResolve => { resolve = nextResolve; });
+    return { promise, resolve };
+  };
+  const firstATags = deferred();
+  const finalATags = deferred();
+  let aMetadataCalls = 0;
+  let relatedCalls = 0;
+  h.context.window.electronAPI.getComicMetadata = async id => {
+    if (id === comicA.id) {
+      aMetadataCalls += 1;
+      const isFirst = aMetadataCalls === 1;
+      return {
+        comicId: isFirst ? 'canonical-aba-a-old' : 'canonical-aba-a-new',
+        sourceId: comicA.sourceId,
+        title: isFirst ? 'ABA A old' : 'ABA A new',
+        series: '', language: '', readingDirection: '', offline: false,
+        creators: {}, tags: [], candidates: [], lockedFields: [], diagnostics: [],
+      };
+    }
+    return {
+      comicId: 'canonical-aba-b',
+      sourceId: comicB.sourceId,
+      title: 'ABA B',
+      series: '', language: '', readingDirection: '', offline: false,
+      creators: {}, tags: [], candidates: [], lockedFields: [], diagnostics: [],
+    };
+  };
+  h.context.window.electronAPI.listRelatedTags = id => {
+    relatedCalls += 1;
+    if (relatedCalls === 1) {
+      assert.equal(id, 'canonical-aba-a-old');
+      return firstATags.promise;
+    }
+    if (relatedCalls === 2) {
+      assert.equal(id, 'canonical-aba-b');
+      return [];
+    }
+    assert.equal(id, 'canonical-aba-a-new');
+    return finalATags.promise;
+  };
+
+  state.selectedComicId = comicA.id;
+  state.selectedComicSourceId = comicA.sourceId;
+  await h.hooks.loadInspectorMetadata(comicA);
+  await new Promise(resolve => setImmediate(resolve));
+  assert.equal(relatedCalls, 1);
+
+  state.selectedComicId = comicB.id;
+  state.selectedComicSourceId = comicB.sourceId;
+  await h.hooks.loadInspectorMetadata(comicB);
+  await new Promise(resolve => setImmediate(resolve));
+  assert.equal(relatedCalls, 2);
+  assert.match(metadataTarget.innerHTML, /ABA B/);
+
+  state.selectedComicId = comicA.id;
+  state.selectedComicSourceId = comicA.sourceId;
+  await h.hooks.loadInspectorMetadata(comicA);
+  await new Promise(resolve => setImmediate(resolve));
+  assert.equal(relatedCalls, 3);
+  assert.match(metadataTarget.innerHTML, /ABA A new/);
+
+  firstATags.resolve([{
+    tag: { namespace: 'general', value: 'aba-old-suggestion' },
+    sharedComics: 1,
+    reason: 'old ABA response',
+  }]);
+  await new Promise(resolve => setImmediate(resolve));
+  assert.match(metadataTarget.innerHTML, /ABA A new/);
+  assert.doesNotMatch(metadataTarget.innerHTML, /aba-old-suggestion/, 'old A response must stay invalid after A -> B -> A');
+
+  finalATags.resolve([{
+    tag: { namespace: 'general', value: 'aba-new-suggestion' },
+    sharedComics: 1,
+    reason: 'current ABA response',
+  }]);
+  await new Promise(resolve => setImmediate(resolve));
+  assert.match(metadataTarget.innerHTML, /aba-new-suggestion/);
+}

@@ -3,11 +3,12 @@ use encoding_rs::{Encoding, UTF_8};
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 use std::collections::{BTreeMap, BTreeSet};
-use std::fs::File;
 use std::io::Read;
 use std::path::{Path, PathBuf};
 
 const MAX_METADATA_BYTES: usize = 2 * 1024 * 1024;
+const MAX_ARCHIVE_METADATA_ENTRIES: usize = 128;
+const MAX_ARCHIVE_METADATA_BYTES: usize = 16 * 1024 * 1024;
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, PartialOrd, Ord)]
 #[serde(rename_all = "camelCase")]
@@ -423,69 +424,93 @@ pub fn filename_metadata_for_path(path: &Path) -> ParsedMetadataSource {
 }
 
 fn parse_zip_metadata(path: &Path, outcome: &mut ParseOutcome) {
-    let Ok(file) = File::open(path) else {
-        outcome.failures.push(ParseFailure::Scope {
-            source_prefix: archive_source_prefix(path),
-        });
-        outcome
-            .diagnostics
-            .push(diagnostic(None, path, "無法開啟壓縮檔"));
-        return;
-    };
-    let Ok(mut archive) = zip::ZipArchive::new(file) else {
-        outcome.failures.push(ParseFailure::Scope {
-            source_prefix: archive_source_prefix(path),
-        });
-        outcome.diagnostics.push(diagnostic(
-            None,
-            path,
-            "ZIP 中央目錄損壞或不是支援的 ZIP/CBZ",
-        ));
-        return;
+    let mut archive = match crate::utils::open_zip_archive(path) {
+        Ok(archive) => archive,
+        Err(error) => {
+            record_zip_scope_failure(outcome, path, format!("無法開啟壓縮檔：{error}"));
+            return;
+        }
     };
     let mut targets = Vec::new();
-    for index in 0..archive.len() {
-        match archive.by_index(index) {
-            Ok(file) => {
-                let name = file.name().replace('\\', "/");
-                if !name.trim_matches('/').contains('/') && is_metadata_name(&name) {
-                    targets.push((index, name));
-                }
-            }
-            Err(error) => {
-                outcome.failures.push(ParseFailure::Scope {
-                    source_prefix: archive_source_prefix(path),
-                });
-                outcome.diagnostics.push(diagnostic(
-                    None,
+    for (index, (raw_name, declared_size)) in archive.entry_metadata().enumerate() {
+        let name = raw_name.replace('\\', "/");
+        if !name.trim_matches('/').contains('/') && is_metadata_name(&name) {
+            if targets.len() >= MAX_ARCHIVE_METADATA_ENTRIES {
+                record_zip_scope_failure(
+                    outcome,
                     path,
-                    format!("無法讀取 ZIP metadata 索引：{error}"),
-                ));
+                    format!(
+                        "ZIP metadata 項目超過單一封存檔上限 {}",
+                        MAX_ARCHIVE_METADATA_ENTRIES
+                    ),
+                );
+                return;
             }
+            targets.push((index, name, declared_size));
         }
     }
-    for (index, name) in targets {
-        let result = archive
-            .by_index(index)
-            .map_err(|error| error.to_string())
-            .and_then(|mut entry| {
-                if entry.size() as usize > MAX_METADATA_BYTES {
-                    return Err(format!(
-                        "metadata 超過 {} MiB 安全上限",
-                        MAX_METADATA_BYTES / 1024 / 1024
-                    ));
+
+    let mut actual_archive_bytes = 0_usize;
+    for (index, name, declared_size) in targets {
+        let source_path = format!("{}::{name}", path.to_string_lossy());
+        if declared_size > MAX_METADATA_BYTES as u64 {
+            parse_artifact(
+                &source_path,
+                Err(format!(
+                    "metadata 超過 {} MiB 安全上限",
+                    MAX_METADATA_BYTES / 1024 / 1024
+                )),
+                outcome,
+            );
+            continue;
+        }
+
+        let remaining = MAX_ARCHIVE_METADATA_BYTES.saturating_sub(actual_archive_bytes);
+        if remaining == 0 {
+            record_zip_scope_failure(
+                outcome,
+                path,
+                format!(
+                    "ZIP metadata 實際解壓大小超過單一封存檔上限 {} bytes",
+                    MAX_ARCHIVE_METADATA_BYTES
+                ),
+            );
+            return;
+        }
+
+        let read_limit = remaining.min(MAX_METADATA_BYTES);
+        let result = match archive.by_index(index) {
+            Ok(entry) => {
+                let mut bytes = Vec::new();
+                let read_result = entry
+                    .take((read_limit.saturating_add(1)) as u64)
+                    .read_to_end(&mut bytes);
+                actual_archive_bytes = actual_archive_bytes.saturating_add(bytes.len());
+                match read_result {
+                    Err(error) => Err(error.to_string()),
+                    Ok(_) if bytes.len() > read_limit => {
+                        if read_limit < MAX_METADATA_BYTES {
+                            record_zip_scope_failure(
+                                outcome,
+                                path,
+                                format!(
+                                    "ZIP metadata 實際解壓大小超過單一封存檔上限 {} bytes",
+                                    MAX_ARCHIVE_METADATA_BYTES
+                                ),
+                            );
+                            return;
+                        }
+                        Err(format!(
+                            "metadata 實際解壓內容超過 {} MiB 安全上限",
+                            MAX_METADATA_BYTES / 1024 / 1024
+                        ))
+                    }
+                    Ok(_) => Ok(bytes),
                 }
-                let mut bytes = Vec::with_capacity(entry.size() as usize);
-                entry
-                    .read_to_end(&mut bytes)
-                    .map_err(|error| error.to_string())?;
-                Ok(bytes)
-            });
-        parse_artifact(
-            &format!("{}::{name}", path.to_string_lossy()),
-            result,
-            outcome,
-        );
+            }
+            Err(error) => Err(error.to_string()),
+        };
+        parse_artifact(&source_path, result, outcome);
     }
 }
 
@@ -839,6 +864,17 @@ fn diagnostic(
     }
 }
 
+fn record_zip_scope_failure(outcome: &mut ParseOutcome, path: &Path, message: impl Into<String>) {
+    let archive_prefix = archive_source_prefix(path);
+    outcome
+        .sources
+        .retain(|source| !source.source_path.starts_with(&archive_prefix));
+    outcome.failures.push(ParseFailure::Scope {
+        source_prefix: archive_prefix,
+    });
+    outcome.diagnostics.push(diagnostic(None, path, message));
+}
+
 fn clean(value: Option<String>) -> Option<String> {
     value
         .map(|item| item.trim().to_string())
@@ -938,6 +974,133 @@ fn normalize_direction(value: &str) -> Option<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::io::Write;
+
+    fn temp_zip_path(name: &str) -> PathBuf {
+        std::env::temp_dir().join(format!(
+            "gai-metadata-{name}-{}-{}.zip",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap_or_default()
+                .as_nanos()
+        ))
+    }
+
+    fn write_duplicate_metadata_zip(path: &Path, count: usize, payload: &[u8]) {
+        let file = std::fs::File::create(path).unwrap();
+        let mut writer = zip::ZipWriter::new(file);
+        for _ in 0..count {
+            writer
+                .start_file("info.txt", zip::write::FileOptions::default())
+                .unwrap();
+            writer.write_all(payload).unwrap();
+        }
+        writer.finish().unwrap();
+    }
+
+    #[test]
+    fn zip_metadata_entry_count_limit_is_reported_as_scope_failure() {
+        let path = temp_zip_path("entry-count");
+        write_duplicate_metadata_zip(&path, MAX_ARCHIVE_METADATA_ENTRIES + 1, b"x");
+
+        let outcome = parse_metadata_for_path(&path);
+        assert!(outcome
+            .failures
+            .iter()
+            .any(|failure| matches!(failure, ParseFailure::Scope { .. })));
+        assert!(outcome
+            .diagnostics
+            .iter()
+            .any(|diagnostic| diagnostic.message.contains("項目超過單一封存檔上限")));
+        std::fs::remove_file(path).unwrap();
+    }
+
+    #[test]
+    fn zip_metadata_actual_archive_bytes_limit_is_not_silent() {
+        let path = temp_zip_path("aggregate-bytes");
+        let payload = vec![b'x'; MAX_METADATA_BYTES];
+        write_duplicate_metadata_zip(
+            &path,
+            MAX_ARCHIVE_METADATA_BYTES / MAX_METADATA_BYTES + 1,
+            &payload,
+        );
+
+        let outcome = parse_metadata_for_path(&path);
+        assert!(outcome
+            .failures
+            .iter()
+            .any(|failure| matches!(failure, ParseFailure::Scope { .. })));
+        assert!(outcome.diagnostics.iter().any(|diagnostic| diagnostic
+            .message
+            .contains("實際解壓大小超過單一封存檔上限")));
+        std::fs::remove_file(path).unwrap();
+    }
+
+    #[test]
+    fn zip_scope_failure_discards_partial_archive_sources_but_keeps_siblings() {
+        let path = temp_zip_path("aggregate-sources");
+        let sibling = path.with_extension("json");
+        let mut payload = r#"{"title":"封存 metadata","tags":[]}"#.as_bytes().to_vec();
+        payload.resize(MAX_METADATA_BYTES, b' ');
+        write_duplicate_metadata_zip(
+            &path,
+            MAX_ARCHIVE_METADATA_BYTES / MAX_METADATA_BYTES + 1,
+            &payload,
+        );
+        std::fs::write(&sibling, r#"{"title":"旁邊 metadata","tags":[]}"#).unwrap();
+
+        let outcome = parse_metadata_for_path(&path);
+        let archive_prefix = archive_source_prefix(&path);
+        assert!(outcome
+            .failures
+            .iter()
+            .any(|failure| matches!(failure, ParseFailure::Scope { .. })));
+        assert!(!outcome
+            .sources
+            .iter()
+            .any(|source| source.source_path.starts_with(&archive_prefix)));
+        assert!(outcome
+            .sources
+            .iter()
+            .any(|source| source.source_path == sibling.to_string_lossy()));
+        assert!(outcome
+            .sources
+            .iter()
+            .any(|source| source.source_path == path.to_string_lossy()));
+
+        std::fs::remove_file(path).unwrap();
+        std::fs::remove_file(sibling).unwrap();
+    }
+
+    #[test]
+    fn zip_metadata_actual_entry_bytes_are_bounded_when_declared_size_lies() {
+        let path = temp_zip_path("entry-bytes");
+        let payload = vec![b'x'; MAX_METADATA_BYTES + 1];
+        let mut writer = zip::ZipWriter::new(std::io::Cursor::new(Vec::new()));
+        writer
+            .start_file("info.txt", zip::write::FileOptions::default())
+            .unwrap();
+        writer.write_all(&payload).unwrap();
+        let mut bytes = writer.finish().unwrap().into_inner();
+        let central_header = bytes
+            .windows(4)
+            .position(|signature| signature == b"PK\x01\x02")
+            .unwrap();
+        bytes[central_header + 24..central_header + 28].copy_from_slice(&1_u32.to_le_bytes());
+        std::fs::write(&path, bytes).unwrap();
+
+        let outcome = parse_metadata_for_path(&path);
+        assert!(outcome.failures.iter().any(|failure| matches!(
+            failure,
+            ParseFailure::Artifact { source_path } if source_path.ends_with("::info.txt")
+        )));
+        assert!(outcome
+            .diagnostics
+            .iter()
+            .any(|diagnostic| diagnostic.message.contains("實際解壓內容超過")));
+        std::fs::remove_file(path).unwrap();
+    }
 
     #[test]
     fn comicinfo_normalizes_creators_and_tags() {

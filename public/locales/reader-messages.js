@@ -1,4 +1,20 @@
 window.GAIL10n.register({
+  "無法驗證漫畫的來源位置；為避免誤改其他檔案，批次編輯已取消。請重新掃描後再試。": {
+    "en": "The comic's source location could not be verified. The operation was cancelled to avoid changing another file. Rescan the library and try again.",
+    "ja": "漫画のソースの場所を確認できませんでした。別のファイルを変更しないよう操作を中止しました。ライブラリを再スキャンしてから再試行してください。"
+  },
+  "同一漫畫 ID 對應多個來源；metadata 與 AI 整理已暫停，請先分開來源後再操作。": {
+    "en": "This comic ID belongs to multiple sources. Metadata and AI organization are paused to avoid changing the wrong source. Separate the sources before continuing.",
+    "ja": "同じ漫画 ID が複数のソースに存在します。誤ったソースを変更しないよう、metadata と AI 整理を停止しました。ソースを分けてから続行してください。"
+  },
+  "無法驗證漫畫的穩定來源；metadata 與 AI 整理已暫停，請重新掃描後再試。": {
+    "en": "The comic's stable source could not be verified. Metadata and AI organization are paused; rescan the library and try again.",
+    "ja": "漫画の安定したソースを確認できないため、metadata と AI 整理を停止しました。ライブラリを再スキャンしてから再試行してください。"
+  },
+  "同一漫畫 ID 對應多個來源；為避免誤改另一個來源，批次編輯已取消這筆選取。請先分開來源後再操作。": {
+    "en": "This comic ID belongs to multiple sources. The selection was cancelled to avoid changing another source. Separate the sources before editing.",
+    "ja": "同じ漫画 ID が複数のソースに存在します。別のソースを変更しないよう選択を解除しました。ソースを分けてから編集してください。"
+  },
   "依標籤探索": {
     "en": "Explore by tag",
     "ja": "タグから探す"
@@ -745,9 +761,9 @@ window.GAIL10n.register({
     "en": "Enter a new filename (keep the .cbz/.zip extension):",
     "ja": "新しいファイル名を入力（.cbz/.zip拡張子を維持）："
   },
-  "輸入漫畫書庫內的目的相對路徑（包含檔名）：": {
-    "en": "Enter the destination relative path in the comic library (including the filename):",
-    "ja": "コミックライブラリ内の移動先相対パスを入力（ファイル名を含む）："
+  "輸入漫畫書庫內的目的相對路徑（包含檔名；目的資料夾須已存在）：": {
+    "en": "Enter the destination relative path in the comic library, including the filename. The destination folder must already exist:",
+    "ja": "コミックライブラリ内の移動先相対パスを入力してください（ファイル名を含む。移動先フォルダは作成済みである必要があります）："
   },
   "要將「{title}」移到可復原隔離區嗎？\n不會直接永久刪除。": {
     "en": "Move “{title}” to recoverable quarantine?\nIt will not be permanently deleted.",
@@ -848,6 +864,14 @@ window.GAIL10n.register({
   "相關標籤建議": {
     "en": "Related tag suggestions",
     "ja": "関連タグの提案"
+  },
+  "標籤建議暫時無法載入。": {
+    "en": "Related tag suggestions are temporarily unavailable.",
+    "ja": "関連タグの提案を一時的に読み込めません。"
+  },
+  "正在載入標籤建議…": {
+    "en": "Loading related tag suggestions…",
+    "ja": "関連タグの提案を読み込んでいます…"
   },
   "依收藏中的共同標籤提出；只有按下後才會套用。": {
     "en": "Based on tags shared by your favorites; applied only after you click.",
@@ -1432,6 +1456,14 @@ window.GAIL10n.register({
   "載入中…": {
     "en": "Loading…",
     "ja": "読み込み中…"
+  },
+  "封面暫時無法載入": {
+    "en": "Cover temporarily unavailable",
+    "ja": "表紙を一時的に読み込めません"
+  },
+  "重試": {
+    "en": "Retry",
+    "ja": "再試行"
   },
   "上一本": {
     "en": "Previous comic",

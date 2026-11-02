@@ -96,7 +96,7 @@ async fn wait_for_ai_sends() {
     drop(ai_send_lifecycle().write().await);
 }
 
-fn normalize_runtime_item(mut item: ComicItem) -> ComicItem {
+pub(crate) fn normalize_runtime_item(mut item: ComicItem) -> ComicItem {
     if item.r#type == "offline" {
         return item;
     }
@@ -129,13 +129,33 @@ fn normalize_runtime_item(mut item: ComicItem) -> ComicItem {
 
 fn register_comic_capability(comics: &mut Vec<ComicItem>, item: &ComicItem) {
     let normalized = normalize_runtime_item(item.clone());
-    if let Some(existing) = comics.iter_mut().find(|comic| comic.id == normalized.id) {
-        if existing.source_id == normalized.source_id && existing.r#type != normalized.r#type {
+    if let Some(existing) = comics.iter_mut().find(|comic| {
+        comic.id == normalized.id
+            && comic.source_id == normalized.source_id
+            && comic.relative_path == normalized.relative_path
+    }) {
+        if existing.r#type != normalized.r#type {
             existing.r#type.clone_from(&normalized.r#type);
         }
-    } else {
-        comics.push(normalized);
+        return;
     }
+
+    if let Some(existing) = comics.iter_mut().find(|comic| {
+        comic.id == normalized.id
+            && comic.relative_path == normalized.relative_path
+            && protocol::is_legacy_local_source_id(&comic.source_id)
+            && normalized.source_id.starts_with("local:")
+            && normalized.r#type != "offline"
+    }) {
+        // Legacy catalog entries had no root identity. `item` has already
+        // been bound to the current scan snapshot, so same-path promotion is
+        // safe; unrelated retired locations remain available for recovery.
+        existing.source_id.clone_from(&normalized.source_id);
+        existing.r#type.clone_from(&normalized.r#type);
+        return;
+    }
+
+    comics.push(normalized);
 }
 
 fn validate_scan_directory(input: &str) -> Result<String, String> {
@@ -224,14 +244,251 @@ fn authoritative_total_pages(
     }
 }
 
-fn runtime_id_has_multiple_sources(comics: &[ComicItem], id: &str) -> bool {
-    comics
+fn runtime_id_has_multiple_locations(comics: &[ComicItem], id: &str) -> bool {
+    let matching = comics
         .iter()
         .filter(|comic| comic.id == id)
-        .map(|comic| comic.source_id.as_str())
+        .collect::<Vec<_>>();
+    let online_exists = matching.iter().any(|comic| comic.r#type != "offline");
+    matching
+        .into_iter()
+        .filter(|comic| !online_exists || comic.r#type != "offline")
+        .map(|comic| (comic.source_id.as_str(), comic.relative_path.as_str()))
         .collect::<std::collections::BTreeSet<_>>()
         .len()
         > 1
+}
+
+fn runtime_id_has_multiple_locations_for_source(
+    comics: &[ComicItem],
+    id: &str,
+    source_id: &str,
+) -> bool {
+    let matching = comics
+        .iter()
+        .filter(|comic| comic.id == id && comic.source_id == source_id)
+        .collect::<Vec<_>>();
+    let online_exists = matching.iter().any(|comic| comic.r#type != "offline");
+    matching
+        .into_iter()
+        .filter(|comic| !online_exists || comic.r#type != "offline")
+        .map(|comic| comic.relative_path.as_str())
+        .collect::<std::collections::BTreeSet<_>>()
+        .len()
+        > 1
+}
+
+#[cfg(test)]
+fn runtime_id_conflicts_with_requested_source(
+    comics: &[ComicItem],
+    id: &str,
+    requested_source_id: &str,
+    requested_item_is_offline: bool,
+) -> bool {
+    comics.iter().any(|comic| {
+        comic.id == id
+            && comic.source_id != requested_source_id
+            && (requested_item_is_offline || comic.r#type != "offline")
+    })
+}
+
+fn normalize_requested_source_id(source_id: Option<String>, scan_dir: &str) -> Option<String> {
+    source_id.map(|source| {
+        if protocol::is_legacy_local_source_id(&source) && !scan_dir.is_empty() {
+            scanner::local_source_id(Path::new(scan_dir))
+        } else {
+            source
+        }
+    })
+}
+
+fn reader_route_url(route: &str, id: &str, page_index: usize, source_id: &str) -> String {
+    format!(
+        "gai://{route}/{id}/{page_index}?sourceId={}",
+        protocol::encode_query_component(source_id)
+    )
+}
+
+fn close_request_matches_reader(
+    id: &str,
+    requested_source_id: Option<&str>,
+    active_id: Option<&str>,
+    active_source_id: Option<&str>,
+    pending_id: Option<&str>,
+    pending_source_id: Option<&str>,
+) -> bool {
+    let source_matches =
+        |source: Option<&str>| requested_source_id.is_none() || requested_source_id == source;
+    (active_id == Some(id) && source_matches(active_source_id))
+        || (pending_id == Some(id) && source_matches(pending_source_id))
+}
+
+fn cleanup_source_id_for_close(
+    id: &str,
+    requested_source_id: Option<&str>,
+    active_id: Option<&str>,
+    active_source_id: Option<&str>,
+    pending_id: Option<&str>,
+    pending_source_id: Option<&str>,
+) -> Option<String> {
+    let source_matches =
+        |source: Option<&str>| requested_source_id.is_none() || requested_source_id == source;
+    if active_id == Some(id) && source_matches(active_source_id) {
+        active_source_id.map(str::to_owned)
+    } else if pending_id == Some(id) && source_matches(pending_source_id) {
+        pending_source_id.map(str::to_owned)
+    } else {
+        None
+    }
+}
+
+fn select_runtime_item_from_state(
+    comics: &[ComicItem],
+    id: &str,
+    requested_source_id: Option<&str>,
+) -> Option<ComicItem> {
+    let online_exists = comics
+        .iter()
+        .any(|comic| comic.id == id && comic.r#type != "offline");
+    let requested_online_exists = requested_source_id.is_some_and(|source| {
+        comics
+            .iter()
+            .any(|comic| comic.id == id && comic.source_id == source && comic.r#type != "offline")
+    });
+    comics
+        .iter()
+        .find(|comic| {
+            comic.id == id
+                && if requested_source_id.is_some() {
+                    !requested_online_exists || comic.r#type != "offline"
+                } else {
+                    !online_exists || comic.r#type != "offline"
+                }
+                && requested_source_id
+                    .map(|source| comic.source_id == source)
+                    .unwrap_or(true)
+        })
+        .cloned()
+}
+
+fn unique_catalog_runtime_item(items: Vec<ComicItem>) -> Result<Option<ComicItem>, String> {
+    let items = items
+        .into_iter()
+        .filter(|item| !catalog::is_quarantine_relative_path(&item.relative_path))
+        .collect::<Vec<_>>();
+    let online_items = items
+        .iter()
+        .filter(|item| item.r#type != "offline")
+        .collect::<Vec<_>>();
+    let candidates = if online_items.is_empty() {
+        items.iter().collect::<Vec<_>>()
+    } else {
+        online_items
+    };
+    let Some(first) = candidates.first().cloned().cloned() else {
+        return Ok(None);
+    };
+    if candidates
+        .iter()
+        .any(|item| item.source_id != first.source_id || item.relative_path != first.relative_path)
+    {
+        return Err("漫畫識別碼不唯一，請提供 sourceId".into());
+    }
+    Ok(Some(first))
+}
+
+fn unique_catalog_runtime_item_for_operation(
+    items: Vec<ComicItem>,
+) -> Result<Option<ComicItem>, String> {
+    let Some(first) = items.first() else {
+        return Ok(None);
+    };
+    if items
+        .iter()
+        .any(|item| item.source_id != first.source_id || item.relative_path != first.relative_path)
+    {
+        return Err("漫畫有多個來源位置，為避免誤操作，暫時無法管理檔案".into());
+    }
+    let fallback = first.clone();
+    Ok(items
+        .into_iter()
+        .find(|item| item.r#type != "offline")
+        .or(Some(fallback)))
+}
+
+fn replace_file_operation_state(
+    comics: &mut Vec<ComicItem>,
+    source_id: &str,
+    before_relative_path: &str,
+    refreshed: Option<ComicItem>,
+) {
+    comics.retain(|current| {
+        !(current.source_id == source_id && current.relative_path == before_relative_path)
+    });
+    if let Some(item) = refreshed {
+        comics.push(normalize_runtime_item(item));
+    }
+}
+
+async fn refresh_file_operation_state(
+    state: &Arc<AppState>,
+    source_id: &str,
+    before_relative_path: &str,
+    hide_quarantine: bool,
+    refreshed: Result<Option<ComicItem>, String>,
+) -> state::ScanProgress {
+    let (refreshed, refresh_error) = match refreshed {
+        Ok(Some(item)) if hide_quarantine && is_quarantine_relative_path(&item.relative_path) => {
+            (None, None)
+        }
+        Ok(Some(item)) => (Some(item), None),
+        Ok(None) => (
+            None,
+            Some("漫畫位置刷新未找到精確來源位置，請重新整理書庫".into()),
+        ),
+        Err(error) => (None, Some(error)),
+    };
+    let _scan_lifecycle = state.scan_lifecycle.lock().await;
+    let generation = state
+        .scan_generation
+        .fetch_add(1, std::sync::atomic::Ordering::SeqCst)
+        + 1;
+    let mut comics = state.comics.lock().await;
+    replace_file_operation_state(comics.as_mut(), source_id, before_relative_path, refreshed);
+    let mut progress = state.scan_progress.lock().await;
+    progress.generation = generation;
+    progress.is_scanning = false;
+    progress.phase = if refresh_error.is_some() {
+        "refresh-required".into()
+    } else {
+        "complete".into()
+    };
+    progress.error = refresh_error;
+    progress.found = comics.len();
+    progress.completed_at = Some(chrono::Utc::now().to_rfc3339());
+    progress.clone()
+}
+
+fn is_quarantine_relative_path(relative_path: &str) -> bool {
+    let normalized = relative_path.replace('\\', "/");
+    let normalized = normalized.strip_prefix("./").unwrap_or(&normalized);
+    normalized == ".gai-quarantine" || normalized.starts_with(".gai-quarantine/")
+}
+
+fn prefer_online_catalog_item(
+    state_item: Option<ComicItem>,
+    catalog_item: Option<ComicItem>,
+) -> Option<ComicItem> {
+    if state_item
+        .as_ref()
+        .is_some_and(|item| item.r#type == "offline")
+    {
+        catalog_item
+            .filter(|item| item.r#type != "offline")
+            .or(state_item)
+    } else {
+        state_item
+    }
 }
 
 fn reader_generation_is_current(state: &AppState, generation: u64) -> bool {
@@ -460,17 +717,23 @@ async fn search_catalog(
 #[tauri::command]
 async fn get_discovery_tags(
     runtime_ids: Vec<String>,
+    targets: Option<Vec<catalog::BatchEditTarget>>,
     state: State<'_, Arc<AppState>>,
 ) -> Result<Vec<catalog::DiscoveryTagGroup>, String> {
     let store = catalog_store(&state)?;
-    tokio::task::spawn_blocking(move || store.discovery_tags(&runtime_ids))
-        .await
-        .map_err(|error| error.to_string())?
+    tokio::task::spawn_blocking(move || match targets {
+        Some(targets) if !targets.is_empty() => store.discovery_tags_for_targets(&targets),
+        _ => store.discovery_tags(&runtime_ids),
+    })
+    .await
+    .map_err(|error| error.to_string())?
 }
 
 #[tauri::command]
 async fn get_comic_metadata(
     id: String,
+    source_id: Option<String>,
+    relative_path: Option<String>,
     state: State<'_, Arc<AppState>>,
 ) -> Result<catalog::ComicMetadataView, String> {
     if let Some(item) = photo_library::find_item(state.inner(), &id).await {
@@ -498,6 +761,7 @@ async fn get_comic_metadata(
             relative_path: Some(item.relative_path),
             source_id: Some(item.source_id),
             offline: !album_available,
+            locations: Vec::new(),
             creators: std::collections::BTreeMap::new(),
             tags: Vec::new(),
             candidates: Vec::new(),
@@ -506,9 +770,18 @@ async fn get_comic_metadata(
         });
     }
     let store = catalog_store(&state)?;
-    tokio::task::spawn_blocking(move || store.get_metadata(&id))
-        .await
-        .map_err(|error| error.to_string())?
+    if source_id.is_some() != relative_path.is_some() {
+        return Err("漫畫來源位置資訊不完整，已拒絕 metadata 查詢".into());
+    }
+    tokio::task::spawn_blocking(move || match (source_id, relative_path) {
+        (Some(source_id), Some(relative_path)) => {
+            store.get_metadata_for_source(&id, &source_id, &relative_path)
+        }
+        (None, None) => store.get_metadata(&id),
+        _ => unreachable!("source metadata arguments were checked above"),
+    })
+    .await
+    .map_err(|error| error.to_string())?
 }
 
 #[tauri::command]
@@ -517,7 +790,21 @@ async fn apply_batch_metadata(
     request: catalog::BatchEditRequest,
     state: State<'_, Arc<AppState>>,
 ) -> Result<catalog::BatchEditResult, String> {
-    if commerce::is_batch(&request.comic_ids) {
+    let commerce_batch_ids = if request.targets.is_empty() {
+        request.comic_ids.clone()
+    } else {
+        request
+            .targets
+            .iter()
+            .map(|target| {
+                format!(
+                    "{}\0{}\0{}",
+                    target.runtime_id, target.source_id, target.relative_path
+                )
+            })
+            .collect()
+    };
+    if commerce::is_batch(&commerce_batch_ids) {
         commerce::require_pro(&app_handle).await?;
     }
     let store = catalog_store(&state)?;
@@ -556,7 +843,21 @@ async fn reimport_metadata(
     request: catalog::ReimportRequest,
     state: State<'_, Arc<AppState>>,
 ) -> Result<catalog::ReimportResult, String> {
-    if request.comic_ids.is_empty() || commerce::is_batch(&request.comic_ids) {
+    let commerce_batch_ids = if request.targets.is_empty() {
+        request.comic_ids.clone()
+    } else {
+        request
+            .targets
+            .iter()
+            .map(|target| {
+                format!(
+                    "{}\0{}\0{}",
+                    target.runtime_id, target.source_id, target.relative_path
+                )
+            })
+            .collect()
+    };
+    if commerce_batch_ids.is_empty() || commerce::is_batch(&commerce_batch_ids) {
         commerce::require_pro(&app_handle).await?;
     }
     let _catalog_sync = state.catalog_sync.lock().await;
@@ -945,6 +1246,7 @@ async fn open_comic(
                 .fetch_add(1, std::sync::atomic::Ordering::SeqCst)
                 + 1;
             *state.pending_open_id.lock().unwrap() = Some(id.clone());
+            *state.pending_open_source_id.lock().unwrap() = Some(item.source_id.clone());
             generation
         };
         let preload_generation = {
@@ -958,15 +1260,19 @@ async fn open_comic(
                 .unwrap()
                 .insert(id.clone(), assets.clone());
             state.ram_cache_pool.lock().unwrap().clear();
+            state.ram_cache_revisions.lock().unwrap().clear();
+            state.opened_comic_revisions.write().unwrap().remove(&id);
             *state.active_comic_id.lock().unwrap() = Some(id.clone());
+            *state.active_comic_source_id.lock().unwrap() = Some(item.source_id.clone());
             *state.pending_open_id.lock().unwrap() = None;
+            *state.pending_open_source_id.lock().unwrap() = None;
             state
                 .preload_generation
                 .fetch_add(1, std::sync::atomic::Ordering::SeqCst)
                 + 1
         };
         let pages = (0..assets.len())
-            .map(|index| format!("gai://page/{id}/{index}"))
+            .map(|index| reader_route_url("page", &id, index, &item.source_id))
             .collect::<Vec<_>>();
         return Ok(serde_json::json!({
             "id": id,
@@ -987,54 +1293,99 @@ async fn open_comic(
     if source_id.is_some() && requested_source_id.is_none() {
         return Err("漫畫來源識別碼格式不正確".into());
     }
-    let comic_info = if let Some(item) = {
+    // Keep the legacy spelling long enough to permit a narrowly scoped
+    // catalog fallback.  Once a configured root is captured, `local` is
+    // normalized to its root-bound identity; arbitrary source IDs must never
+    // receive this fallback.
+    let requested_legacy_local = requested_source_id.as_deref() == Some("local");
+    // Snapshot the root before looking up/cloning a legacy item.  Such items
+    // carry no source identity, so binding them after a concurrent scan-root
+    // switch could silently attach an old catalog row to the new root.
+    let legacy_scan_dir = state.scan_dir.read().unwrap().clone();
+    let requested_source_id = normalize_requested_source_id(requested_source_id, &legacy_scan_dir);
+    let state_item = {
         let comics = state.comics.lock().await;
-        // Page URLs and the native reader cache still use the runtime ID.
-        // Until those surfaces also carry a source, an ambiguous live ID
-        // must fail closed even when the caller supplied the intended source.
-        if runtime_id_has_multiple_sources(&comics, &id) {
-            return Err("不同書庫的漫畫識別碼衝突，請先只連接其中一個書庫".into());
+        // ID-only opens remain fail-closed when multiple live locations exist;
+        // an explicit source is resolved and bound below.
+        let ambiguous = requested_source_id.as_deref().map_or_else(
+            || runtime_id_has_multiple_locations(&comics, &id),
+            |source| runtime_id_has_multiple_locations_for_source(&comics, &id, source),
+        );
+        if ambiguous {
+            return Err("漫畫識別碼對應多個來源位置，請先提供唯一來源".into());
         }
-        let matching = comics
-            .iter()
-            .filter(|comic| {
-                comic.id == id
-                    && requested_source_id
-                        .as_deref()
-                        .map(|source| comic.source_id == source)
-                        .unwrap_or(true)
+        select_runtime_item_from_state(&comics, &id, requested_source_id.as_deref())
+    };
+    let comic_info = if state_item
+        .as_ref()
+        .is_some_and(|item| item.r#type == "offline")
+        && requested_source_id.is_none()
+    {
+        let catalog_online = if let Ok(store) = catalog_store(&state) {
+            let lookup_id = id.clone();
+            let catalog_item = tokio::task::spawn_blocking(move || {
+                unique_catalog_runtime_item(store.get_runtime_items_for_id(&lookup_id)?)
             })
-            .collect::<Vec<_>>();
-        if requested_source_id.is_none()
-            && matching
-                .iter()
-                .map(|comic| comic.source_id.as_str())
-                .collect::<std::collections::BTreeSet<_>>()
-                .len()
-                > 1
-        {
-            return Err("漫畫識別碼不唯一，請提供 sourceId".into());
-        }
-        matching.first().copied().cloned()
-    } {
+            .await
+            .map_err(|error| error.to_string())??;
+            catalog_item.filter(|item| item.r#type != "offline")
+        } else {
+            None
+        };
+        prefer_online_catalog_item(state_item, catalog_online)
+            .ok_or_else(|| "找不到漫畫資料，請重新掃描書庫".to_string())?
+    } else if let Some(item) = state_item {
         item
     } else {
         let store = catalog_store(&state)?;
         let lookup_id = id.clone();
         let lookup_source_id = requested_source_id.clone();
+        let allow_legacy_local_fallback = requested_legacy_local;
         tokio::task::spawn_blocking(move || {
-            lookup_source_id.as_deref().map_or_else(
-                || store.get_runtime_item(&lookup_id),
-                |source| store.get_runtime_item_for_source(&lookup_id, source),
-            )
+            if let Some(source) = lookup_source_id.as_deref() {
+                let scoped = store.get_runtime_items_for_source(&lookup_id, source)?;
+                if !scoped.is_empty() || !allow_legacy_local_fallback {
+                    return unique_catalog_runtime_item(scoped);
+                }
+                // Old catalog rows used the unscoped `local` marker.  Only a
+                // caller that explicitly supplied that legacy spelling may
+                // reach this query; the returned item is rebound to the
+                // captured root below before any capability is opened.
+                return unique_catalog_runtime_item(
+                    store.get_runtime_items_for_source(&lookup_id, "local")?,
+                );
+            }
+            unique_catalog_runtime_item(store.get_runtime_items_for_id(&lookup_id)?)
         })
         .await
         .map_err(|error| error.to_string())??
         .ok_or_else(|| "找不到漫畫資料，請重新掃描書庫".to_string())?
     };
+    let comic_info = {
+        protocol::bind_legacy_local_source(&comic_info, &legacy_scan_dir)
+            .ok_or_else(|| "舊版本機漫畫缺少可綁定的目前掃描目錄".to_string())?
+    };
     let comic_info = normalize_runtime_item(comic_info);
+    if catalog::is_quarantine_relative_path(&comic_info.relative_path) {
+        return Err("隔離區漫畫不可直接開啟，請先還原檔案操作".into());
+    }
+    if let Some(requested_source_id) = requested_source_id.as_deref() {
+        if comic_info.source_id != requested_source_id {
+            return Err("漫畫識別碼已綁定其他來源，拒絕切換來源開啟".into());
+        }
+    }
+    let is_smb =
+        state::is_smb_source_id(&comic_info.source_id) || comic_info.r#type == "smb-archive";
+    let is_external =
+        comic_info.source_id.starts_with("external:") || comic_info.r#type.starts_with("external-");
     if commerce::is_direct_smb(&comic_info.source_id, &comic_info.r#type) {
         commerce::require_pro(&app_handle).await?;
+    }
+    if !is_smb && !is_external && comic_info.r#type != "offline" {
+        let scan_dir = state.scan_dir.read().unwrap().clone();
+        if scan_dir.is_empty() || !protocol::local_source_matches_scan_dir(&comic_info, &scan_dir) {
+            return Err("漫畫來源與目前的掃描目錄不符，請重新掃描書庫".into());
+        }
     }
     {
         let mut comics = state.comics.lock().await;
@@ -1048,16 +1399,13 @@ async fn open_comic(
             .fetch_add(1, std::sync::atomic::Ordering::SeqCst)
             + 1;
         *state.pending_open_id.lock().unwrap() = Some(id.clone());
+        *state.pending_open_source_id.lock().unwrap() = Some(comic_info.source_id.clone());
         generation
     };
 
-    let is_smb =
-        state::is_smb_source_id(&comic_info.source_id) || comic_info.r#type == "smb-archive";
-    let is_external =
-        comic_info.source_id.starts_with("external:") || comic_info.r#type.starts_with("external-");
-
     let full_path: PathBuf;
     let is_dir: bool;
+    let mut opened_source_revision: Option<state::SourceRevision> = None;
     // Every local, external, offline and SMB open keeps the capability root
     // used for discovery alive through page enumeration.  Later protocol
     // reads independently reacquire the same root and remain descriptor based.
@@ -1325,6 +1673,9 @@ async fn open_comic(
         if scan_dir.is_empty() {
             return Err("漫畫目錄尚未設定".into());
         }
+        if !protocol::local_source_matches_scan_dir(&comic_info, &scan_dir) {
+            return Err("漫畫來源與目前的掃描目錄不符，請重新掃描書庫".into());
+        }
         let root = cap_std::fs::Dir::open_ambient_dir(&scan_dir, cap_std::ambient_authority())
             .map_err(|error| format!("掃描目錄無法開啟: {error}"))?;
         let relative = PathBuf::from(&relative_path_str);
@@ -1361,7 +1712,12 @@ async fn open_comic(
         let image_names = crate::utils::get_folder_image_names_from_dir(&folder);
         let mut cached_files = Vec::new();
         for (index, name) in image_names.iter().enumerate() {
-            pages.push(format!("gai://folder/{}/{}", id, index));
+            pages.push(reader_route_url(
+                "folder",
+                &id,
+                index,
+                &comic_info.source_id,
+            ));
             cached_files.push(full_path.join(name).to_string_lossy().to_string());
         }
         cached_files
@@ -1374,7 +1730,7 @@ async fn open_comic(
             .ok_or_else(|| "漫畫缺少授權路徑".to_string())?;
         root.open(relative)
             .map_err(|error| format!("無法開啟漫畫圖片: {error}"))?;
-        pages.push(format!("gai://page/{id}/0"));
+        pages.push(reader_route_url("page", &id, 0, &comic_info.source_id));
         vec![full_path.to_string_lossy().into_owned()]
     } else {
         let root = authorized_root
@@ -1385,8 +1741,13 @@ async fn open_comic(
             .ok_or_else(|| "漫畫缺少授權路徑".to_string())?;
         let archive_file = root
             .open(relative)
-            .map_err(|error| format!("無法開啟漫畫封存檔: {error}"))?
-            .into_std();
+            .map_err(|error| format!("無法開啟漫畫封存檔: {error}"))?;
+        opened_source_revision = Some(state::SourceRevision::from_cap_metadata(
+            &archive_file
+                .metadata()
+                .map_err(|error| format!("無法讀取漫畫封存檔 metadata: {error}"))?,
+        ));
+        let archive_file = archive_file.into_std();
         let archive_path = full_path.clone();
         let entry_names = tauri::async_runtime::spawn_blocking(move || {
             crate::utils::get_archive_images_from_file(&archive_path, archive_file)
@@ -1395,7 +1756,7 @@ async fn open_comic(
         .map_err(|error| format!("讀取漫畫封存檔的背景工作失敗：{error}"))?
         .map_err(|error| error.to_string())?;
         for index in 0..entry_names.len() {
-            pages.push(format!("gai://page/{}/{}", id, index));
+            pages.push(reader_route_url("page", &id, index, &comic_info.source_id));
         }
         entry_names
     };
@@ -1415,8 +1776,16 @@ async fn open_comic(
             .unwrap()
             .insert(id.clone(), opened_files);
         state.ram_cache_pool.lock().unwrap().clear();
+        state.ram_cache_revisions.lock().unwrap().clear();
+        let mut revisions = state.opened_comic_revisions.write().unwrap();
+        revisions.remove(&id);
+        if let Some(revision) = opened_source_revision {
+            revisions.insert(id.clone(), revision);
+        }
         *state.active_comic_id.lock().unwrap() = Some(id.clone());
+        *state.active_comic_source_id.lock().unwrap() = Some(comic_info.source_id.clone());
         *state.pending_open_id.lock().unwrap() = None;
+        *state.pending_open_source_id.lock().unwrap() = None;
         state
             .preload_generation
             .fetch_add(1, std::sync::atomic::Ordering::SeqCst)
@@ -1424,9 +1793,17 @@ async fn open_comic(
     };
     let state_clone = state.inner().clone();
     let id_clone = id.clone();
+    let source_id_clone = comic_info.source_id.clone();
     let handle_clone = app_handle.clone();
     tauri::async_runtime::spawn(async move {
-        crate::cache::preload_comic(state_clone, handle_clone, id_clone, preload_generation).await;
+        crate::cache::preload_comic(
+            state_clone,
+            handle_clone,
+            id_clone,
+            source_id_clone,
+            preload_generation,
+        )
+        .await;
     });
 
     Ok(serde_json::json!({
@@ -1449,50 +1826,65 @@ async fn open_folder_dialog(_app: tauri::AppHandle) -> Result<String, String> {
 #[tauri::command]
 async fn close_comic(
     comic_id: Option<String>,
+    source_id: Option<String>,
     state: State<'_, Arc<AppState>>,
     app_handle: tauri::AppHandle,
 ) -> Result<(), String> {
     if let Some(ref id) = comic_id {
-        let (is_smb, source_id) = {
-            let comics = state.comics.lock().await;
-            comics
-                .iter()
-                .find(|comic| comic.id == *id)
-                .map(|comic| {
-                    (
-                        state::is_smb_source_id(&comic.source_id) || comic.r#type == "smb-archive",
-                        comic.source_id.clone(),
-                    )
-                })
-                .unwrap_or((false, String::new()))
-        };
-        let _lifecycle = state.comic_lifecycle.lock().unwrap();
-        let mut active_id = state.active_comic_id.lock().unwrap();
-        let mut pending_open_id = state.pending_open_id.lock().unwrap();
-        let closes_current = active_id.as_ref().is_some_and(|active| active == id)
-            || pending_open_id
-                .as_ref()
-                .is_some_and(|pending| pending == id);
-        if closes_current {
-            state
-                .reader_generation
-                .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
-            state
-                .preload_generation
-                .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
-            if active_id.as_ref().is_some_and(|active| active == id) {
-                *active_id = None;
-            }
-            if pending_open_id
-                .as_ref()
-                .is_some_and(|pending| pending == id)
-            {
-                *pending_open_id = None;
-            }
+        let requested_source_id = source_id
+            .as_deref()
+            .map(str::trim)
+            .filter(|source| !source.is_empty())
+            .map(str::to_owned);
+        if source_id.is_some() && requested_source_id.is_none() {
+            return Err("關閉漫畫來源識別碼格式不正確".into());
         }
+        // Capture the root and normalize legacy `local` while the reader
+        // lifecycle is held. A concurrent source transition must not bind an
+        // old close request to whichever root happens to be current later.
+        let _lifecycle = state.comic_lifecycle.lock().unwrap();
+        let scan_dir = state.scan_dir.read().unwrap().clone();
+        let requested_source_id = normalize_requested_source_id(requested_source_id, &scan_dir);
+        let mut active_id = state.active_comic_id.lock().unwrap();
+        let mut active_source_id = state.active_comic_source_id.lock().unwrap();
+        let mut pending_open_id = state.pending_open_id.lock().unwrap();
+        let mut pending_source_id = state.pending_open_source_id.lock().unwrap();
+        if !close_request_matches_reader(
+            id,
+            requested_source_id.as_deref(),
+            active_id.as_deref(),
+            active_source_id.as_deref(),
+            pending_open_id.as_deref(),
+            pending_source_id.as_deref(),
+        ) {
+            return Ok(());
+        }
+        state
+            .reader_generation
+            .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        state
+            .preload_generation
+            .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        let cleanup_source_id = cleanup_source_id_for_close(
+            id,
+            requested_source_id.as_deref(),
+            active_id.as_deref(),
+            active_source_id.as_deref(),
+            pending_open_id.as_deref(),
+            pending_source_id.as_deref(),
+        )
+        .unwrap_or_default();
+        // A matching close ends the single reader session. This also drops a
+        // superseded pending open so an old same-ID worker cannot republish.
+        *active_id = None;
+        *active_source_id = None;
+        *pending_open_id = None;
+        *pending_source_id = None;
         state.ram_cache_pool.lock().unwrap().remove(id);
+        state.ram_cache_revisions.lock().unwrap().remove(id);
         state.opened_comic_files.write().unwrap().remove(id);
-        if is_smb {
+        state.opened_comic_revisions.write().unwrap().remove(id);
+        if state::is_smb_source_id(&cleanup_source_id) {
             if let Ok(relative_text) = protocol::decode_capability_path(id) {
                 let temp_base = app_handle
                     .path()
@@ -1511,7 +1903,7 @@ async fn close_comic(
                 {
                     return Err("拒絕清除不安全的 SMB 暫存路徑".into());
                 }
-                let _ = remove_smb_temp_entry(&temp_base, &source_id, relative);
+                let _ = remove_smb_temp_entry(&temp_base, &cleanup_source_id, relative);
             }
         }
     } else {
@@ -1524,9 +1916,13 @@ async fn close_comic(
                 .preload_generation
                 .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
             *state.active_comic_id.lock().unwrap() = None;
+            *state.active_comic_source_id.lock().unwrap() = None;
             *state.pending_open_id.lock().unwrap() = None;
+            *state.pending_open_source_id.lock().unwrap() = None;
             state.ram_cache_pool.lock().unwrap().clear();
+            state.ram_cache_revisions.lock().unwrap().clear();
             state.opened_comic_files.write().unwrap().clear();
+            state.opened_comic_revisions.write().unwrap().clear();
         }
         let temp_dir = app_handle
             .path()
@@ -1545,9 +1941,27 @@ async fn close_comic(
 async fn update_reader_cache_window(
     comic_id: String,
     page_index: usize,
+    source_id: Option<String>,
     state: State<'_, Arc<AppState>>,
     app_handle: tauri::AppHandle,
 ) -> Result<u64, String> {
+    let active_source_id = state
+        .active_reader_source(&comic_id)
+        .ok_or_else(|| "漫畫目前不是閱讀中的漫畫".to_string())?;
+    let requested_source_id = source_id
+        .as_deref()
+        .map(str::trim)
+        .filter(|source| !source.is_empty());
+    if source_id.is_some() && requested_source_id.is_none() {
+        return Err("閱讀快取來源識別碼格式不正確".into());
+    }
+    let scan_dir = state.scan_dir.read().unwrap().clone();
+    let requested_source_id = requested_source_id
+        .map(str::to_owned)
+        .and_then(|source| normalize_requested_source_id(Some(source), &scan_dir));
+    if requested_source_id.as_deref() != Some(active_source_id.as_str()) && source_id.is_some() {
+        return Err("閱讀快取來源已不是目前開啟的漫畫".into());
+    }
     let total_pages = {
         let opened = state.opened_comic_files.read().unwrap();
         opened.get(&comic_id).map(Vec::len).unwrap_or(0)
@@ -1556,13 +1970,17 @@ async fn update_reader_cache_window(
         return Err("頁碼超出漫畫範圍".into());
     }
 
-    let whole_book_cached = state
-        .ram_cache_pool
-        .lock()
-        .unwrap()
-        .get(&comic_id)
-        .is_some_and(|pages| total_pages > 0 && pages.len() == total_pages);
-    if whole_book_cached {
+    {
+        let _lifecycle = state.comic_lifecycle.lock().unwrap();
+        if !state.active_reader_matches_locked(&comic_id, &active_source_id) {
+            return Err("漫畫目前不是閱讀中的漫畫".into());
+        }
+    }
+
+    // A complete cache for the same opened archive revision needs no new
+    // preload worker. Protocol requests still verify the live FD revision,
+    // so an atomic replacement cannot turn this fast path into stale bytes.
+    if crate::cache::whole_book_cache_matches_index(state.inner(), &comic_id, &active_source_id) {
         return Ok(state
             .preload_generation
             .load(std::sync::atomic::Ordering::Acquire));
@@ -1570,13 +1988,7 @@ async fn update_reader_cache_window(
 
     let generation = {
         let _lifecycle = state.comic_lifecycle.lock().unwrap();
-        let is_active = state
-            .active_comic_id
-            .lock()
-            .unwrap()
-            .as_ref()
-            .is_some_and(|active_id| active_id == &comic_id);
-        if !is_active {
+        if !state.active_reader_matches_locked(&comic_id, &active_source_id) {
             return Err("漫畫目前不是閱讀中的漫畫".into());
         }
 
@@ -1593,6 +2005,7 @@ async fn update_reader_cache_window(
             state_clone,
             app_handle,
             id_clone,
+            active_source_id,
             page_index,
             generation,
         )
@@ -1654,6 +2067,7 @@ async fn set_config(
             .document_dir()
             .map_err(|error| error.to_string())?,
     );
+    let _scan_lifecycle = state.scan_lifecycle.lock().await;
     let current_scan_dir = state.scan_dir.read().unwrap().clone();
     if current_scan_dir == scan_dir {
         return Ok(serde_json::json!({ "success": true, "changed": false, "scanDir": scan_dir }));
@@ -1665,7 +2079,6 @@ async fn set_config(
         .await
         .map_err(|error| format!("漫畫目錄設定工作失敗：{error}"))??;
 
-    let _scan_lifecycle = state.scan_lifecycle.lock().await;
     *state.scan_dir.write().unwrap() = scan_dir.clone();
     state.comics.lock().await.clear();
     state.invalidate_reader_cache();
@@ -2999,6 +3412,8 @@ async fn browse_folders(_dir_path: Option<String>) -> Result<serde_json::Value, 
 #[tauri::command]
 async fn show_item_in_folder(
     comic_id: String,
+    source_id: Option<String>,
+    relative_path: Option<String>,
     state: State<'_, Arc<AppState>>,
 ) -> Result<(), String> {
     if photo_library::is_photo_album_id(&comic_id) {
@@ -3006,22 +3421,24 @@ async fn show_item_in_folder(
     }
     #[cfg(not(any(target_os = "macos", target_os = "windows")))]
     {
-        let _ = state;
+        let _ = (state, source_id, relative_path);
         return Err("目前平台不支援在檔案管理器顯示漫畫".into());
     }
     #[cfg(any(target_os = "macos", target_os = "windows"))]
     {
+        let source_id = source_id.ok_or("缺少漫畫來源識別，已拒絕開啟檔案位置")?;
+        let relative_path = relative_path.ok_or("缺少漫畫來源位置，已拒絕開啟檔案位置")?;
         let store = catalog_store(&state)?;
-        let item = tokio::task::spawn_blocking(move || store.get_runtime_item(&comic_id))
-            .await
-            .map_err(|error| format!("漫畫位置查詢失敗: {error}"))??
-            .map(normalize_runtime_item)
-            .ok_or_else(|| "找不到已登記的漫畫位置".to_string())?;
-        if item.r#type == "offline" {
+        let location = tokio::task::spawn_blocking(move || {
+            store.get_location_for_source(&comic_id, &source_id, &relative_path)
+        })
+        .await
+        .map_err(|error| format!("漫畫位置查詢失敗: {error}"))??;
+        if !location.online {
             return Err("漫畫來源目前離線".into());
         }
-        let path = item
-            .source_path
+        let path = location
+            .actual_path
             .ok_or_else(|| "漫畫沒有可顯示的已登記位置".to_string())?;
         #[cfg(target_os = "macos")]
         {
@@ -3047,12 +3464,18 @@ async fn show_item_in_folder(
 async fn get_file_capability(
     app_handle: AppHandle,
     comic_id: String,
+    source_id: Option<String>,
+    relative_path: Option<String>,
     state: State<'_, Arc<AppState>>,
 ) -> Result<file_ops::FileCapability, String> {
     let store = catalog_store(&state)?;
-    let location = tokio::task::spawn_blocking(move || store.get_location(&comic_id))
-        .await
-        .map_err(|error| error.to_string())??;
+    let source_id = source_id.ok_or("缺少漫畫來源識別，已拒絕檔案管理")?;
+    let relative_path = relative_path.ok_or("缺少漫畫來源位置，已拒絕檔案管理")?;
+    let location = tokio::task::spawn_blocking(move || {
+        store.get_location_for_source(&comic_id, &source_id, &relative_path)
+    })
+    .await
+    .map_err(|error| error.to_string())??;
     let smb_config = state
         .smb_config
         .read()
@@ -3094,39 +3517,43 @@ async fn mutate_comic_file(
         .clone();
     let location_store = store.clone();
     let location_id = requested_id.clone();
-    let location = tokio::task::spawn_blocking(move || location_store.get_location(&location_id))
-        .await
-        .map_err(|error| error.to_string())??;
+    let location_source = request
+        .source_id
+        .clone()
+        .ok_or("缺少漫畫來源識別，已拒絕檔案操作")?;
+    let location_path = request
+        .relative_path
+        .clone()
+        .ok_or("缺少漫畫來源位置，已拒絕檔案操作")?;
+    let location = tokio::task::spawn_blocking(move || {
+        location_store.get_location_for_source(&location_id, &location_source, &location_path)
+    })
+    .await
+    .map_err(|error| error.to_string())??;
     if state::is_smb_source_id(&location.source_id) {
         commerce::require_pro(&app_handle).await?;
     }
+    let target_source_id = location.source_id.clone();
+    let target_before_relative_path = location.relative_path.clone();
     let result = file_ops::mutate(&store, smb, request).await?;
     let lookup_store = store.clone();
     let lookup_id = result.comic_id.clone();
-    let refreshed = tokio::task::spawn_blocking(move || lookup_store.get_runtime_item(&lookup_id))
-        .await
-        .map_err(|error| format!("漫畫位置刷新工作失敗：{error}"))??
-        .map(normalize_runtime_item);
-    let scan_status = {
-        let _scan_lifecycle = state.scan_lifecycle.lock().await;
-        let generation = state
-            .scan_generation
-            .fetch_add(1, std::sync::atomic::Ordering::SeqCst)
-            + 1;
-        let mut comics = state.comics.lock().await;
-        comics.retain(|item| item.id != requested_id && item.id != result.comic_id);
-        if let Some(item) = refreshed {
-            comics.push(item);
-        }
-        let mut progress = state.scan_progress.lock().await;
-        progress.generation = generation;
-        progress.is_scanning = false;
-        progress.phase = "complete".into();
-        progress.error = None;
-        progress.found = comics.len();
-        progress.completed_at = Some(chrono::Utc::now().to_rfc3339());
-        progress.clone()
-    };
+    let lookup_source = target_source_id.clone();
+    let lookup_path = result.relative_path.clone();
+    let refreshed = tokio::task::spawn_blocking(move || {
+        lookup_store.get_runtime_item_for_source_path(&lookup_id, &lookup_source, &lookup_path)
+    })
+    .await
+    .map_err(|error| format!("漫畫位置刷新工作失敗：{error}"))
+    .and_then(|result| result.map_err(|error| format!("漫畫位置刷新工作失敗：{error}")));
+    let scan_status = refresh_file_operation_state(
+        state.inner(),
+        &target_source_id,
+        &target_before_relative_path,
+        result.action == "trash",
+        refreshed,
+    )
+    .await;
     use tauri::Emitter;
     let _ = app_handle.emit("scan-progress", scan_status);
     let _ = app_handle.emit("library-changed", 0usize);
@@ -3150,6 +3577,11 @@ async fn undo_comic_file_operation(
     })
     .await
     .map_err(|error| format!("檔案操作紀錄查詢失敗：{error}"))??;
+    let target_source_id = operation.source_id.clone();
+    let target_before_relative_path = operation
+        .after_relative_path
+        .clone()
+        .ok_or("操作沒有可還原位置")?;
     let smb = state
         .smb_config
         .read()
@@ -3158,37 +3590,22 @@ async fn undo_comic_file_operation(
     let result = file_ops::undo(&store, smb, &token).await?;
     let lookup_store = store.clone();
     let lookup_id = result.comic_id.clone();
-    let refreshed = tokio::task::spawn_blocking(move || lookup_store.get_runtime_item(&lookup_id))
-        .await
-        .map_err(|error| format!("漫畫位置刷新工作失敗：{error}"))??
-        .map(normalize_runtime_item);
-    let scan_status = {
-        let _scan_lifecycle = state.scan_lifecycle.lock().await;
-        let generation = state
-            .scan_generation
-            .fetch_add(1, std::sync::atomic::Ordering::SeqCst)
-            + 1;
-        let mut comics = state.comics.lock().await;
-        comics.retain(|current| {
-            refreshed.as_ref().is_none_or(|item| {
-                current.id != item.id && current.relative_path != item.relative_path
-            }) && operation
-                .after_relative_path
-                .as_deref()
-                .is_none_or(|path| current.relative_path != path)
-        });
-        if let Some(item) = refreshed {
-            comics.push(item);
-        }
-        let mut progress = state.scan_progress.lock().await;
-        progress.generation = generation;
-        progress.is_scanning = false;
-        progress.phase = "complete".into();
-        progress.error = None;
-        progress.found = comics.len();
-        progress.completed_at = Some(chrono::Utc::now().to_rfc3339());
-        progress.clone()
-    };
+    let lookup_source = target_source_id.clone();
+    let lookup_path = result.relative_path.clone();
+    let refreshed = tokio::task::spawn_blocking(move || {
+        lookup_store.get_runtime_item_for_source_path(&lookup_id, &lookup_source, &lookup_path)
+    })
+    .await
+    .map_err(|error| format!("漫畫位置刷新工作失敗：{error}"))
+    .and_then(|result| result.map_err(|error| format!("漫畫位置刷新工作失敗：{error}")));
+    let scan_status = refresh_file_operation_state(
+        state.inner(),
+        &target_source_id,
+        &target_before_relative_path,
+        false,
+        refreshed,
+    )
+    .await;
     use tauri::Emitter;
     let _ = app_handle.emit("scan-progress", scan_status);
     let _ = app_handle.emit("library-changed", 0usize);
@@ -3200,17 +3617,36 @@ async fn undo_comic_file_operation(
 async fn trash_page(
     comic_id: String,
     page_index: usize,
+    source_id: Option<String>,
+    relative_path: Option<String>,
+    expected_page_name: Option<String>,
     state: State<'_, Arc<AppState>>,
 ) -> Result<serde_json::Value, String> {
+    // Keep the command registered for future clients, but do not expose
+    // pathname-based deletion until a safe page journal can bind the opened
+    // page identity to the filesystem mutation atomically.
+    require_safe_single_page_trash()?;
     let _bookmark_lifecycle = state.bookmark_lifecycle.lock().await;
     let _file_lifecycle = state.file_lifecycle.lock().await;
+    let source_id = source_id.ok_or("缺少漫畫來源識別，已拒絕刪除頁面")?;
+    let relative_path = relative_path.ok_or("缺少漫畫來源位置，已拒絕刪除頁面")?;
+    let expected_page_name = expected_page_name.ok_or("缺少預期頁面識別，已拒絕刪除頁面")?;
     let store = catalog_store(&state)?;
     let lookup_id = comic_id.clone();
-    let item = tokio::task::spawn_blocking(move || store.get_runtime_item(&lookup_id))
-        .await
-        .map_err(|error| format!("漫畫位置查詢失敗: {error}"))??
-        .map(normalize_runtime_item)
-        .ok_or_else(|| "找不到已登記的漫畫位置".to_string())?;
+    let lookup_source = source_id.clone();
+    let lookup_path = relative_path.clone();
+    let item = tokio::task::spawn_blocking(move || {
+        let location = store.get_location_for_source(&lookup_id, &lookup_source, &lookup_path)?;
+        let items = store.get_runtime_items_for_source(&lookup_id, &lookup_source)?;
+        let item = unique_catalog_runtime_item_for_operation(items)?
+            .ok_or_else(|| "找不到已登記的漫畫位置".to_string())?;
+        if item.relative_path != location.relative_path {
+            return Err("漫畫來源位置已變更，已拒絕刪除頁面".to_string());
+        }
+        Ok(item)
+    })
+    .await
+    .map_err(|error| format!("漫畫位置查詢失敗: {error}"))??;
     if item.r#type == "offline" {
         return Err("漫畫來源目前離線".into());
     }
@@ -3223,6 +3659,9 @@ async fn trash_page(
     let state = state.inner().clone();
     tokio::task::spawn_blocking(move || {
         let _lifecycle = state.comic_lifecycle.lock().unwrap();
+        if !state.active_reader_matches_locked(&comic_id, &item.source_id) {
+            return Err("目前閱讀器未綁定這個漫畫來源，為避免誤刪已停止操作".into());
+        }
         let scan_dir = state.scan_dir.read().unwrap().clone();
         let bookmarks = state.external_bookmarks.read().unwrap().clone();
         let active = state.active_bookmarks.lock().unwrap().clone();
@@ -3244,7 +3683,8 @@ async fn trash_page(
             }
             drop(opened);
             if page_index < images.len() {
-                let canonical_target = images[page_index]
+                let target = expected_trash_page_path(&images, page_index, &expected_page_name)?;
+                let canonical_target = target
                     .canonicalize()
                     .map_err(|error| format!("頁面路徑無效: {error}"))?;
                 if !canonical_target.starts_with(&canon_full) || !canonical_target.is_file() {
@@ -3278,6 +3718,12 @@ async fn trash_page(
                         .map_err(|error| format!("無法將頁面移入隔離區: {error}"))?;
                 }
 
+                // Invalidate page responses that were resolved against the
+                // pre-delete index. The next reader request must be opened
+                // against the updated page list and expected page identity.
+                state
+                    .reader_generation
+                    .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
                 {
                     let mut opened = state.opened_comic_files.write().unwrap();
                     if let Some(files) = opened.get_mut(&comic_id) {
@@ -3292,6 +3738,7 @@ async fn trash_page(
                     .preload_generation
                     .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
                 state.ram_cache_pool.lock().unwrap().remove(&comic_id);
+                state.ram_cache_revisions.lock().unwrap().remove(&comic_id);
 
                 return Ok(serde_json::json!({ "success": true }));
             }
@@ -3303,6 +3750,28 @@ async fn trash_page(
     })
     .await
     .map_err(|error| format!("刪除頁面背景工作失敗: {error}"))?
+}
+
+fn require_safe_single_page_trash() -> Result<(), String> {
+    Err("刪除單頁暫不提供：安全頁面日誌尚未完成，為避免誤刪目前不會刪除檔案".into())
+}
+
+fn expected_trash_page_path(
+    images: &[PathBuf],
+    page_index: usize,
+    expected_page_name: &str,
+) -> Result<PathBuf, String> {
+    let target = images
+        .get(page_index)
+        .ok_or_else(|| "頁面超出已登記漫畫資料夾".to_string())?;
+    let actual_page_name = target
+        .file_name()
+        .and_then(|name| name.to_str())
+        .ok_or_else(|| "頁面檔名無效".to_string())?;
+    if actual_page_name != expected_page_name {
+        return Err("漫畫頁面已變更，已拒絕刪除頁面".into());
+    }
+    Ok(target.clone())
 }
 
 fn authorized_page_comic_path(
@@ -3575,19 +4044,56 @@ async fn save_progress(
     if data.source_id.is_some() && requested_source_id.is_none() {
         return Err("閱讀進度來源識別碼格式不正確".into());
     }
-    let progress_identity = requested_source_id
-        .as_deref()
-        .map(|source_id| format!("{source_id}\0{id}"))
-        .unwrap_or_else(|| id.clone());
+    let scan_dir = state.scan_dir.read().unwrap().clone();
+    let requested_source_id = normalize_requested_source_id(requested_source_id, &scan_dir);
+    // Capture the validated active source before choosing the sequence lock.
+    // Legacy requests without sourceId must still serialize per source; an
+    // id-only sequence key would let A and B suppress each other's updates.
+    let captured_source_id = {
+        let _lifecycle = state.comic_lifecycle.lock().unwrap();
+        let active_source_id = state
+            .active_comic_id
+            .lock()
+            .unwrap()
+            .as_deref()
+            .filter(|active_id| *active_id == id)
+            .and_then(|_| state.active_comic_source_id.lock().unwrap().clone())
+            .ok_or_else(|| "漫畫目前不是閱讀中的漫畫".to_string())?;
+        if let Some(requested_source_id) = requested_source_id.as_deref() {
+            if active_source_id != requested_source_id {
+                return Err("閱讀進度來源已不是目前開啟的漫畫".into());
+            }
+        }
+        active_source_id
+    };
+    let progress_identity = format!("{captured_source_id}\0{id}");
     let progress_lock = comic_progress_lock(state.inner(), &progress_identity).await;
     let _progress_lifecycle = progress_lock.lock().await;
     progress_sequence_is_current(state.inner(), &progress_identity, data.sequence).await?;
-    let opened_total_pages = state
-        .opened_comic_files
-        .read()
-        .unwrap()
-        .get(&id)
-        .map(Vec::len);
+    // Keep the source selected by this lifecycle snapshot for the rest of
+    // the write. Without this binding, B can reopen the same runtime ID
+    // after the progress lock and the later catalogue lookup could silently
+    // persist A's page count into B.
+    let (requested_source_id, opened_total_pages) = {
+        let _lifecycle = state.comic_lifecycle.lock().unwrap();
+        let active_source_id = state
+            .active_comic_id
+            .lock()
+            .unwrap()
+            .as_deref()
+            .filter(|active_id| *active_id == id)
+            .and_then(|_| state.active_comic_source_id.lock().unwrap().clone());
+        if active_source_id.as_deref() != Some(captured_source_id.as_str()) {
+            return Err("閱讀進度來源已不是目前開啟的漫畫".into());
+        }
+        let opened_total_pages = state
+            .opened_comic_files
+            .read()
+            .unwrap()
+            .get(&id)
+            .map(Vec::len);
+        (Some(captured_source_id.clone()), opened_total_pages)
+    };
     let total_pages = authoritative_total_pages(opened_total_pages, data.total_pages)?;
     let (current_page, total_pages, percent) =
         normalize_progress_values(data.current_page, total_pages)?;
@@ -3619,7 +4125,6 @@ async fn save_progress(
         commit_progress_sequence(state.inner(), &progress_identity, data.sequence).await;
         return Ok(());
     }
-    let scan_dir = state.scan_dir.read().unwrap().clone();
     let now = chrono::Utc::now().to_rfc3339();
     let (progress, is_local_source) = {
         let comics = state.comics.lock().await;
@@ -3965,6 +4470,187 @@ mod tests {
     }
 
     #[test]
+    fn close_cleanup_source_follows_the_matching_reader_slot() {
+        // A new open can leave the old active reader in place while its
+        // replacement is pending. Closing the pending ID must not clean the
+        // old active source's temporary SMB entry.
+        assert_eq!(
+            cleanup_source_id_for_close(
+                "pending-book",
+                None,
+                Some("active-book"),
+                Some("smb:active"),
+                Some("pending-book"),
+                Some("smb:pending"),
+            )
+            .as_deref(),
+            Some("smb:pending")
+        );
+        assert_eq!(
+            cleanup_source_id_for_close(
+                "same-runtime",
+                Some("smb:pending"),
+                Some("same-runtime"),
+                Some("smb:active"),
+                Some("same-runtime"),
+                Some("smb:pending"),
+            )
+            .as_deref(),
+            Some("smb:pending")
+        );
+        assert_eq!(
+            cleanup_source_id_for_close(
+                "broken-reader",
+                None,
+                Some("broken-reader"),
+                None,
+                Some("other-book"),
+                Some("smb:pending"),
+            ),
+            None
+        );
+    }
+
+    #[test]
+    fn trash_page_rejects_reusing_an_old_index_after_page_removal() {
+        let mut images = vec![
+            PathBuf::from("001.jpg"),
+            PathBuf::from("002.jpg"),
+            PathBuf::from("003.jpg"),
+        ];
+        assert_eq!(
+            expected_trash_page_path(&images, 1, "002.jpg").unwrap(),
+            PathBuf::from("002.jpg")
+        );
+
+        images.remove(1);
+        assert!(expected_trash_page_path(&images, 1, "002.jpg").is_err());
+        assert_eq!(
+            expected_trash_page_path(&images, 1, "003.jpg").unwrap(),
+            PathBuf::from("003.jpg")
+        );
+    }
+
+    #[test]
+    fn trash_page_guard_is_fail_closed_until_safe_page_journal_exists() {
+        let error = require_safe_single_page_trash().unwrap_err();
+        assert!(error.starts_with("刪除單頁暫不提供："));
+        assert!(error.contains("安全頁面日誌"));
+    }
+
+    #[tokio::test]
+    async fn file_operation_refresh_is_source_path_scoped_and_reports_failure() {
+        let state = Arc::new(AppState::new());
+        let mut old_a = capability_comic("same-runtime", "A");
+        old_a.source_id = "local:a".into();
+        old_a.relative_path = "book.cbz".into();
+        let mut same_runtime_b = capability_comic("same-runtime", "B");
+        same_runtime_b.source_id = "local:b".into();
+        same_runtime_b.relative_path = "book.cbz".into();
+        let mut same_path_c = capability_comic("other-runtime", "C");
+        same_path_c.source_id = "local:c".into();
+        same_path_c.relative_path = "book.cbz".into();
+        state
+            .comics
+            .lock()
+            .await
+            .extend([old_a, same_runtime_b, same_path_c]);
+
+        let mut renamed_a = capability_comic("renamed-runtime", "A");
+        renamed_a.source_id = "local:a".into();
+        renamed_a.relative_path = "renamed.cbz".into();
+        let progress =
+            refresh_file_operation_state(&state, "local:a", "book.cbz", false, Ok(Some(renamed_a)))
+                .await;
+        assert_eq!(progress.phase, "complete");
+        assert!(progress.error.is_none());
+        {
+            let comics = state.comics.lock().await;
+            assert!(comics
+                .iter()
+                .any(|item| item.source_id == "local:a" && item.relative_path == "renamed.cbz"));
+            assert!(comics
+                .iter()
+                .any(|item| item.source_id == "local:b" && item.relative_path == "book.cbz"));
+            assert!(comics
+                .iter()
+                .any(|item| item.source_id == "local:c" && item.relative_path == "book.cbz"));
+        }
+
+        let mut quarantined_a = capability_comic("quarantined-runtime", "A");
+        quarantined_a.source_id = "local:a".into();
+        quarantined_a.relative_path = ".gai-quarantine/comics/op/book.cbz".into();
+        let progress = refresh_file_operation_state(
+            &state,
+            "local:a",
+            "renamed.cbz",
+            true,
+            Ok(Some(quarantined_a)),
+        )
+        .await;
+        assert_eq!(progress.phase, "complete");
+        {
+            let comics = state.comics.lock().await;
+            assert!(!comics.iter().any(|item| item.source_id == "local:a"));
+            assert!(comics
+                .iter()
+                .any(|item| item.source_id == "local:b" && item.relative_path == "book.cbz"));
+            assert!(comics
+                .iter()
+                .any(|item| item.source_id == "local:c" && item.relative_path == "book.cbz"));
+        }
+
+        let mut restored_a = capability_comic("restored-runtime", "A");
+        restored_a.source_id = "local:a".into();
+        restored_a.relative_path = "book.cbz".into();
+        let progress = refresh_file_operation_state(
+            &state,
+            "local:a",
+            ".gai-quarantine/comics/op/book.cbz",
+            false,
+            Ok(Some(restored_a)),
+        )
+        .await;
+        assert_eq!(progress.phase, "complete");
+        {
+            let comics = state.comics.lock().await;
+            assert!(comics
+                .iter()
+                .any(|item| item.source_id == "local:a" && item.relative_path == "book.cbz"));
+            assert!(comics
+                .iter()
+                .any(|item| item.source_id == "local:b" && item.relative_path == "book.cbz"));
+            assert!(comics
+                .iter()
+                .any(|item| item.source_id == "local:c" && item.relative_path == "book.cbz"));
+        }
+
+        let progress = refresh_file_operation_state(
+            &state,
+            "local:a",
+            "book.cbz",
+            false,
+            Err("漫畫位置刷新工作失敗：database is locked".into()),
+        )
+        .await;
+        assert_eq!(progress.phase, "refresh-required");
+        assert!(progress
+            .error
+            .as_deref()
+            .is_some_and(|error| error.contains("database is locked")));
+        let comics = state.comics.lock().await;
+        assert!(!comics
+            .iter()
+            .any(|item| item.source_id == "local:a" && item.relative_path == "book.cbz"));
+        assert!(comics
+            .iter()
+            .any(|item| item.source_id == "local:b" && item.relative_path == "book.cbz"));
+        assert!(comics
+            .iter()
+            .any(|item| item.source_id == "local:c" && item.relative_path == "book.cbz"));
+    }
+
+    #[test]
     fn atomically_replaces_settings_without_leaving_temporary_files() {
         let settings_dir =
             std::env::temp_dir().join(format!("gai-settings-write-test-{}", uuid::Uuid::new_v4()));
@@ -4090,12 +4776,196 @@ mod tests {
     fn duplicate_runtime_ids_from_different_sources_cannot_open() {
         let first = capability_comic("shared", "A");
         let mut second = capability_comic("shared", "B");
-        assert!(!runtime_id_has_multiple_sources(
+        assert!(!runtime_id_has_multiple_locations(
             &[first.clone(), second.clone()],
             "shared"
         ));
         second.source_id = "external:other".into();
-        assert!(runtime_id_has_multiple_sources(&[first, second], "shared"));
+        assert!(runtime_id_has_multiple_locations(
+            &[first, second],
+            "shared"
+        ));
+    }
+
+    #[test]
+    fn explicit_source_cannot_replace_a_live_runtime_id_from_another_source() {
+        let first = capability_comic("shared", "A");
+        assert!(runtime_id_conflicts_with_requested_source(
+            &[first],
+            "shared",
+            "external:other",
+            true
+        ));
+    }
+
+    #[test]
+    fn explicit_online_source_ignores_retired_offline_source() {
+        let mut retired = capability_comic("shared", "old");
+        retired.r#type = "offline".into();
+        retired.source_id = "local:old".into();
+        assert!(!runtime_id_conflicts_with_requested_source(
+            &[retired],
+            "shared",
+            "local:new",
+            false
+        ));
+        let mut online = capability_comic("shared", "new");
+        online.source_id = "local:new".into();
+        assert!(runtime_id_conflicts_with_requested_source(
+            &[online],
+            "shared",
+            "local:old",
+            true
+        ));
+    }
+
+    #[test]
+    fn runtime_id_with_same_source_but_different_path_is_ambiguous() {
+        let first = capability_comic("shared", "A");
+        let mut second = first.clone();
+        second.relative_path = "other.cbz".into();
+        assert!(runtime_id_has_multiple_locations(
+            &[first, second],
+            "shared"
+        ));
+    }
+
+    #[test]
+    fn explicit_source_still_rejects_multiple_online_paths() {
+        let first = capability_comic("shared", "A");
+        let mut second = first.clone();
+        second.relative_path = "other.cbz".into();
+        assert!(runtime_id_has_multiple_locations_for_source(
+            &[first, second],
+            "shared",
+            "local:test"
+        ));
+    }
+
+    #[test]
+    fn close_request_cannot_close_a_different_source_with_same_id() {
+        assert!(!close_request_matches_reader(
+            "shared",
+            Some("local:old"),
+            Some("shared"),
+            Some("local:new"),
+            None,
+            None,
+        ));
+        assert!(close_request_matches_reader(
+            "shared",
+            Some("local:new"),
+            Some("shared"),
+            Some("local:new"),
+            None,
+            None,
+        ));
+        assert!(close_request_matches_reader(
+            "shared",
+            None,
+            Some("shared"),
+            Some("local:new"),
+            Some("shared"),
+            Some("local:pending"),
+        ));
+    }
+
+    #[test]
+    fn runtime_id_location_ambiguity_ignores_retired_offline_rows_when_online_exists() {
+        let mut offline = capability_comic("shared", "old");
+        offline.r#type = "offline".into();
+        offline.source_id = "local:old".into();
+        let online = capability_comic("shared", "new");
+        assert!(!runtime_id_has_multiple_locations(
+            &[offline, online],
+            "shared"
+        ));
+    }
+
+    #[test]
+    fn state_selection_prefers_online_path_for_explicit_source() {
+        let mut offline = capability_comic("shared", "old");
+        offline.r#type = "offline".into();
+        offline.source_id = "local:new".into();
+        offline.relative_path = "old/book.cbz".into();
+        let mut online = capability_comic("shared", "new");
+        online.source_id = "local:new".into();
+        online.relative_path = "new/book.cbz".into();
+        let selected =
+            select_runtime_item_from_state(&[offline, online], "shared", Some("local:new"))
+                .unwrap();
+        assert_eq!(selected.title, "new");
+        assert_eq!(selected.relative_path, "new/book.cbz");
+    }
+
+    #[test]
+    fn unqualified_open_prefers_catalog_online_over_retired_state_item() {
+        let mut retired = capability_comic("shared", "Old");
+        retired.r#type = "offline".into();
+        retired.source_id = "local:old".into();
+        let online = capability_comic("shared", "New");
+        let selected = prefer_online_catalog_item(Some(retired), Some(online)).unwrap();
+        assert_eq!(selected.title, "New");
+    }
+
+    #[test]
+    fn legacy_requested_local_is_normalized_to_captured_root() {
+        let scan_dir = "/books/current";
+        let expected = scanner::local_source_id(Path::new(scan_dir));
+        assert_eq!(
+            normalize_requested_source_id(Some("local".into()), scan_dir),
+            Some(expected.clone())
+        );
+        assert_eq!(
+            normalize_requested_source_id(Some(expected.clone()), scan_dir),
+            Some(expected)
+        );
+    }
+
+    #[test]
+    fn catalog_runtime_fallback_rejects_cross_source_duplicates() {
+        let first = capability_comic("shared", "A");
+        let mut second = capability_comic("shared", "B");
+        second.source_id = "external:other".into();
+        assert!(unique_catalog_runtime_item(vec![first, second]).is_err());
+    }
+
+    #[test]
+    fn catalog_runtime_fallback_rejects_same_source_different_paths() {
+        let first = capability_comic("shared", "A");
+        let mut second = first.clone();
+        second.relative_path = "other.cbz".into();
+        assert!(unique_catalog_runtime_item(vec![first, second]).is_err());
+    }
+
+    #[test]
+    fn catalog_runtime_fallback_hides_quarantine_but_keeps_normal_location() {
+        let mut quarantined = capability_comic("quarantined", "隔離");
+        quarantined.relative_path = ".gai-quarantine/operation/book.cbz".into();
+        quarantined.r#type = "offline".into();
+        assert!(unique_catalog_runtime_item(vec![quarantined])
+            .unwrap()
+            .is_none());
+
+        let mut normal = capability_comic("normal", "正常");
+        normal.relative_path = "library/book.cbz".into();
+        let selected = unique_catalog_runtime_item(vec![normal]).unwrap().unwrap();
+        assert_eq!(selected.relative_path, "library/book.cbz");
+    }
+
+    #[test]
+    fn catalog_runtime_fallback_prefers_online_over_retired_offline_item() {
+        let mut offline = capability_comic("shared", "old");
+        offline.r#type = "offline".into();
+        offline.source_id = "local:old".into();
+        let online = capability_comic("shared", "new");
+        assert_eq!(
+            unique_catalog_runtime_item(vec![offline, online])
+                .unwrap()
+                .unwrap()
+                .title,
+            "new"
+        );
     }
 
     #[test]
@@ -4127,6 +4997,51 @@ mod tests {
         let mut unknown = capability_comic("unknown", "舊來源");
         unknown.source_id = "legacy-unknown".into();
         assert_eq!(normalize_runtime_item(unknown).r#type, "external-archive");
+    }
+
+    #[test]
+    fn register_comic_capability_promotes_legacy_local_identity() {
+        let root = std::env::temp_dir().join(format!(
+            "gai-legacy-local-register-{}-{}",
+            std::process::id(),
+            uuid::Uuid::new_v4()
+        ));
+        let source_id = scanner::local_source_id(&root);
+        let mut legacy = capability_comic("legacy", "Legacy");
+        legacy.source_id = "local".into();
+        let mut current = legacy.clone();
+        current.source_id = source_id.clone();
+        current.r#type = "archive".into();
+
+        let mut comics = vec![legacy];
+        register_comic_capability(&mut comics, &current);
+        assert_eq!(comics[0].source_id, source_id);
+        assert_eq!(comics[0].r#type, "archive");
+    }
+
+    #[test]
+    fn register_comic_capability_replaces_retired_offline_location_with_online() {
+        let mut retired = capability_comic("same", "Old");
+        retired.r#type = "offline".into();
+        retired.source_id = "local:old".into();
+        retired.relative_path = "old/book.zip".into();
+        let mut online = capability_comic("same", "New");
+        online.source_id = "local:new".into();
+        online.relative_path = "new/book.zip".into();
+
+        let mut comics = vec![retired];
+        register_comic_capability(&mut comics, &online);
+        assert_eq!(comics.len(), 2);
+        assert_eq!(comics[0].source_id, "local:old");
+        assert_eq!(comics[0].r#type, "offline");
+        assert_eq!(comics[1].source_id, "local:new");
+        assert_eq!(comics[1].title, "New");
+        assert_eq!(
+            select_runtime_item_from_state(&comics, "same", None)
+                .unwrap()
+                .source_id,
+            "local:new"
+        );
     }
 
     #[test]
@@ -4643,12 +5558,42 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn progress_sequence_isolated_by_validated_source_snapshot() {
+        let state = AppState::new();
+        commit_progress_sequence(&state, "local:a\0shared", Some(2)).await;
+        assert!(
+            progress_sequence_is_current(&state, "local:b\0shared", Some(1))
+                .await
+                .is_ok()
+        );
+        assert!(
+            progress_sequence_is_current(&state, "local:a\0shared", Some(1))
+                .await
+                .is_err()
+        );
+    }
+
+    #[tokio::test]
     async fn bookmark_lifecycle_serializes_full_list_updates() {
         let state = Arc::new(AppState::new());
         let first_guard = state.bookmark_lifecycle.lock().await;
         let state_for_update = state.clone();
         let update = tokio::spawn(async move {
             let _guard = state_for_update.bookmark_lifecycle.lock().await;
+        });
+        tokio::task::yield_now().await;
+        assert!(!update.is_finished());
+        drop(first_guard);
+        update.await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn scan_lifecycle_serializes_configured_root_transitions() {
+        let state = Arc::new(AppState::new());
+        let first_guard = state.scan_lifecycle.lock().await;
+        let state_for_update = state.clone();
+        let update = tokio::spawn(async move {
+            let _guard = state_for_update.scan_lifecycle.lock().await;
         });
         tokio::task::yield_now().await;
         assert!(!update.is_finished());

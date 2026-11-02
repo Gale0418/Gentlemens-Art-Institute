@@ -4,6 +4,9 @@ import vm from 'node:vm';
 
 const appSource = fs.readFileSync(new URL('../public/app.js', import.meta.url), 'utf8');
 const apiSource = fs.readFileSync(new URL('../public/tauri-api.js', import.meta.url), 'utf8');
+const styleSource = fs.readFileSync(new URL('../public/style.css', import.meta.url), 'utf8');
+const readerMessagesSource = fs.readFileSync(new URL('../public/locales/reader-messages.js', import.meta.url), 'utf8');
+const featureMessagesSource = fs.readFileSync(new URL('../public/locales/feature-messages.js', import.meta.url), 'utf8');
 
 function extractFunction(source, name) {
   const asyncStart = source.indexOf(`async function ${name}`);
@@ -36,6 +39,7 @@ function extractSection(source, startMarker, endMarker) {
     extractFunction(appSource, 'readingProgressKey'),
     extractFunction(appSource, 'readingProgressIntentSequence'),
     extractFunction(appSource, 'enqueueReadingProgressSnapshot'),
+    extractFunction(appSource, 'clearReaderPageNotice'),
     extractFunction(appSource, 'closeReader'),
   ].join('\n');
   let sequence = 0;
@@ -115,8 +119,8 @@ function extractSection(source, startMarker, endMarker) {
     document: { fullscreenElement: null, body: { style: {} } },
     window: {
       electronAPI: {
-        closeComic: async id => {
-          closes.push(id);
+        closeComic: async (id, sourceId) => {
+          closes.push({ id, sourceId });
           if (closeError) throw new Error('native close failed');
         },
       },
@@ -155,7 +159,7 @@ function extractSection(source, startMarker, endMarker) {
     restoreReaderFocus() {},
     scheduleLibraryRefresh() {},
   };
-  vm.runInNewContext(`${functions}\n${extractFunction(appSource, 'openReader')}\nglobalThis.closeReader = closeReader;\nglobalThis.openReader = openReader;`, context);
+  vm.runInNewContext(`${extractFunction(appSource, 'getComicSourceId')}\n${extractFunction(appSource, 'setSelectedComic')}\n${functions}\n${extractFunction(appSource, 'openReader')}\nglobalThis.closeReader = closeReader;\nglobalThis.openReader = openReader;`, context);
   const closing = context.closeReader();
   await Promise.resolve();
   await Promise.resolve();
@@ -163,7 +167,8 @@ function extractSection(source, startMarker, endMarker) {
   assert.deepEqual(closes, [], 'native close waits for the progress queue');
   releaseSave();
   await closing;
-  assert.deepEqual(closes, ['comic-a']);
+  assert.deepEqual(closes, [{ id: 'comic-a', sourceId: 'local:test' }],
+    'delayed close keeps the source identity of the closing reader');
 
   closeError = false;
   await assert.doesNotReject(
@@ -174,9 +179,132 @@ function extractSection(source, startMarker, endMarker) {
     'the next comic still becomes the active reader after close recovery');
 }
 
+// A failed reader open must release modal/scroll state, clear stale page DOM,
+// and leave a clean status panel for the next open attempt.
+{
+  const openReader = extractFunction(appSource, 'openReader');
+  const alerts = [];
+  const context = {
+    state: {
+      comics: [{ id: 'broken', title: 'Broken' }],
+      currentComic: null,
+      currentComicPages: ['stale-page'],
+      pendingComicId: null,
+      readerOperation: 0,
+      readerReturnFocus: null,
+      readerReturnComicFolder: null,
+      readerReturnLibraryContext: null,
+      readerClosePromise: Promise.resolve(),
+    },
+    elements: {
+      readerOverlay: {
+        style: { display: 'flex' },
+        contains: () => false,
+        setAttribute(name, value) { this[name] = value; },
+        classList: { remove() {} },
+      },
+      pagesContainer: { replaceChildren() { this.cleared = true; } },
+      statusLoading: { style: { display: 'flex' } },
+    },
+    document: { activeElement: null, body: { style: { overflow: 'hidden' } } },
+    eAPI: { openComic: async () => { throw new Error('temporary source loss'); } },
+    isComicOffline: () => false,
+    captureLibraryViewContext: () => null,
+    showLoader() {},
+    hideLoader() {},
+    restoreReaderFocus() {},
+    readerText: text => text,
+    alert: message => alerts.push(message),
+    console: { error() {} },
+    clearTimeout,
+  };
+  vm.runInNewContext(`${extractFunction(appSource, 'getComicSourceId')}\n${extractFunction(appSource, 'setSelectedComic')}\n${extractFunction(appSource, 'clearReaderPageNotice')}\n${openReader}\nglobalThis.openReader = openReader;`, context);
+  await context.openReader('broken');
+  assert.equal(context.elements.readerOverlay.style.display, 'none');
+  assert.equal(context.document.body.style.overflow, 'auto');
+  assert.equal(context.elements.readerOverlay['aria-hidden'], 'true');
+  assert.equal(context.elements.pagesContainer.cleared, true);
+  assert.equal(context.elements.statusLoading.style.display, 'none');
+  assert.equal(context.state.currentComic, null);
+  assert.equal(context.state.pendingComicId, null);
+  assert.equal(alerts.length, 1);
+}
+
+// Inspector cover failures must remain visible and actionable instead of
+// silently leaving an empty gradient panel. Keep the fallback localized.
+assert.match(appSource, /class="inspector-cover-fallback" hidden role="status"/);
+assert.match(appSource, /data-inspector-cover-action="retry"/);
+assert.doesNotMatch(appSource, /onerror="this\.style\.display='none';"/);
+assert.match(styleSource, /\.inspector-cover-fallback\s*\{/);
+assert.match(styleSource, /\.inspector-cover-fallback\[hidden\]\s*\{\s*display:\s*none;/);
+assert.match(readerMessagesSource, /"封面暫時無法載入"\s*:/);
+assert.match(readerMessagesSource, /"重試"\s*:/);
+{
+  const bindFallback = extractFunction(appSource, 'bindInspectorCoverFallback');
+  const listeners = {};
+  const attrs = { src: 'gai://cover/broken' };
+  const image = {
+    dataset: {},
+    style: { display: '' },
+    loading: 'lazy',
+    complete: false,
+    naturalWidth: 0,
+    addEventListener(type, handler) { listeners[type] = handler; },
+    getAttribute(name) { return attrs[name] || null; },
+    removeAttribute(name) { delete attrs[name]; },
+    setAttribute(name, value) { attrs[name] = value; },
+    set src(value) { attrs.src = value; },
+    get src() { return attrs.src || ''; },
+  };
+  const retry = { disabled: false, textContent: '', onclick: null };
+  const message = { textContent: '封面暫時無法載入' };
+  const fallback = {
+    hidden: true,
+    querySelector: selector => selector.includes('retry') ? retry : message,
+    setAttribute(name, value) { this[name] = value; },
+    removeAttribute(name) { delete this[name]; },
+  };
+  const root = {
+    querySelector: selector => selector === '.inspector-cover img' ? image : fallback,
+  };
+  const context = { readerText: text => text };
+  vm.runInNewContext(`${bindFallback}\nglobalThis.bind = bindInspectorCoverFallback;`, context);
+  context.bind(root);
+  listeners.error();
+  assert.equal(image.style.display, 'none');
+  assert.equal(image['aria-hidden'], undefined, 'ARIA state is set through setAttribute');
+  assert.equal(attrs['aria-hidden'], 'true');
+  assert.equal(fallback.hidden, false);
+  retry.onclick();
+  assert.equal(retry.disabled, true);
+  assert.equal(fallback.hidden, false, 'retry keeps the fallback visible while loading');
+  assert.equal(fallback['aria-busy'], 'true');
+  assert.equal(message.textContent, '載入中…');
+  assert.equal(image.style.display, 'none');
+  assert.equal(image.loading, 'eager', 'retry forces eager loading before assigning src');
+  assert.equal(image.src, 'gai://cover/broken');
+  listeners.load();
+  assert.equal(image.style.display, '');
+  assert.equal(fallback.hidden, true);
+  assert.equal(fallback['aria-busy'], undefined);
+  assert.equal(retry.disabled, false);
+  listeners.error();
+  assert.equal(fallback.hidden, false, 'a later error returns to the retry state');
+  assert.equal(message.textContent, '封面暫時無法載入');
+  assert.equal(retry.disabled, false);
+  retry.onclick();
+  assert.equal(fallback.hidden, false);
+  assert.equal(retry.disabled, true);
+  listeners.error();
+  assert.equal(fallback.hidden, false);
+  assert.equal(fallback['aria-busy'], undefined);
+  assert.equal(retry.disabled, false);
+}
+
 // Decode readiness, failed-page retry, and post-load progress use real helpers.
 {
   const functions = [
+    extractFunction(appSource, 'getComicSourceId'),
     extractFunction(appSource, 'readerImageIsReady'),
     extractFunction(appSource, 'decodeReaderImage'),
     extractFunction(appSource, 'markReaderPageReady'),
@@ -193,6 +321,7 @@ function extractSection(source, startMarker, endMarker) {
       currentComicPages: ['a', 'b'],
       renderGeneration: 4,
       readerReadyComicId: 'comic-b',
+      readerReadyComicSourceId: '',
       readerReadyPages: new Set(),
       readerFailedPages: new Set(),
       readerLastReadyPageIndex: null,
@@ -223,6 +352,7 @@ function extractSection(source, startMarker, endMarker) {
 // still needs to expose the failed page to the reader.
 {
   const functions = [
+    extractFunction(appSource, 'getComicSourceId'),
     extractFunction(appSource, 'readerText'),
     extractFunction(appSource, 'clearReaderImageError'),
     extractFunction(appSource, 'showReaderImageError'),
@@ -531,10 +661,11 @@ assert.match(appSource, /\.then\(\(\) => progressQueueToFlush\)/);
   let timerId = 0;
   let resolveCache;
   let rejectCache;
+  const cacheCalls = [];
   const context = {
     READER_CACHE_UPDATE_DELAY_MS: 0,
     state: {
-      currentComic: { id: 'comic-cache', preloadGeneration: 3 },
+      currentComic: { id: 'comic-cache', sourceId: 'local:A', preloadGeneration: 3 },
       currentPageIndex: 1,
       readerCacheWindowPage: null,
       readerCacheReadyPage: null,
@@ -544,7 +675,8 @@ assert.match(appSource, /\.then\(\(\) => progressQueueToFlush\)/);
       renderGeneration: 12,
     },
     eAPI: {
-      updateReaderCacheWindow: () => new Promise((resolve, reject) => {
+      updateReaderCacheWindow: (...args) => new Promise((resolve, reject) => {
+        cacheCalls.push(args);
         resolveCache = resolve;
         rejectCache = reject;
       }),
@@ -554,10 +686,12 @@ assert.match(appSource, /\.then\(\(\) => progressQueueToFlush\)/);
     setTimeout: callback => { timerCallback = callback; timerId += 1; return timerId; },
     console: { warn() {} },
   };
-  vm.runInNewContext(`${schedule}\nglobalThis.scheduleReaderCacheWindowUpdate = scheduleReaderCacheWindowUpdate;`, context);
+  vm.runInNewContext(`${extractFunction(appSource, 'getComicSourceId')}\n${schedule}\nglobalThis.scheduleReaderCacheWindowUpdate = scheduleReaderCacheWindowUpdate;`, context);
   context.scheduleReaderCacheWindowUpdate();
   const firstRequest = timerCallback();
-  context.state.currentComic = { id: 'comic-cache', preloadGeneration: 4 };
+  assert.deepEqual(cacheCalls[0], ['comic-cache', 1, 'local:A'],
+    'cache-window request carries the active source identity');
+  context.state.currentComic = { id: 'comic-cache', sourceId: 'smb:B', preloadGeneration: 4 };
   context.state.currentPageIndex = 2;
   context.state.readerOperation = 9;
   context.state.renderGeneration = 13;
@@ -569,6 +703,7 @@ assert.match(appSource, /\.then\(\(\) => progressQueueToFlush\)/);
   assert.equal(context.state.currentComic.preloadGeneration, 4, 'late cache success cannot poison a reopened same-id reader');
 
   context.state.currentPageIndex = 3;
+  context.state.currentComic = { id: 'comic-cache', sourceId: 'smb:B', preloadGeneration: 4 };
   context.state.readerCacheWindowPage = 3;
   context.state.readerOperation = 10;
   context.state.renderGeneration = 14;
@@ -590,7 +725,6 @@ assert.match(appSource, /\.then\(\(\) => progressQueueToFlush\)/);
   let panel;
   let retryCalls = 0;
   let discardCalls = 0;
-  let resizeCallback;
   const contentArea = { prepend: node => { panel = node; } };
   const workspace = { prepend: () => { throw new Error('recovery must not become a workspace grid item'); } };
   const failures = new Map([['comic-a', { sourceId: 'local:test' }]]);
@@ -626,26 +760,30 @@ assert.match(appSource, /\.then\(\(\) => progressQueueToFlush\)/);
     readerText: (text, values) => text.replace('{count}', values?.count),
     retryFailedReadingProgressSnapshots: () => { retryCalls += 1; },
     discardFailedReadingProgressSnapshots: () => { discardCalls += 1; },
-    ResizeObserver: class {
-      constructor(callback) { resizeCallback = callback; }
-      observe() {}
-    },
   };
-  vm.runInNewContext(`${extractFunction(appSource, 'renderReadingProgressRecovery')}\nglobalThis.render = renderReadingProgressRecovery;`, context);
+  const recoveryFunctions = [
+    'sanitizeReadingProgressDisplayText',
+    'decodeReadingProgressIdFilename',
+    'readingProgressComicCandidates',
+    'readingProgressCandidatePath',
+    'readingProgressCandidateLabel',
+    'readingProgressCandidateSourceType',
+    'readingProgressSourceBookmarkId',
+    'sanitizeReadingProgressSourceName',
+    'readingProgressExternalSourceNames',
+    'readingProgressCandidateSourceLabel',
+    'readingProgressCandidateDisplay',
+    'readingProgressCandidateSourceContext',
+    'readingProgressDetail',
+    'renderReadingProgressRecovery',
+  ].map(name => extractFunction(appSource, name)).join('\n');
+  vm.runInNewContext(`${recoveryFunctions}\nglobalThis.render = renderReadingProgressRecovery;`, context);
   context.render();
   assert.equal(panel.querySelector('.reading-progress-recovery-message').textContent, '有 1 本漫畫的閱讀進度尚未保存。');
-  const messageBox = panel.children[0];
-  const message = messageBox.children[0];
-  messageBox.clientWidth = 200;
-  message.scrollWidth = 350;
-  resizeCallback();
-  assert.equal(messageBox.style['--marquee-distance'], '150px');
-  assert.ok(messageBox.classList.values.has('is-overflowing'), 'long messages scroll inside their viewport');
-  messageBox.clientWidth = 400;
-  resizeCallback();
-  assert.equal(messageBox.style['--marquee-distance'], '0px');
-  assert.ok(!messageBox.classList.values.has('is-overflowing'), 'short messages stop scrolling after resize');
   assert.equal(panel.hidden, false);
+  context.state = { scanStatus: { isScanning: true }, comics: [] };
+  context.render();
+  assert.match(panel.querySelector('.reading-progress-recovery-message').textContent, /候選可能變動/);
   panel.children[1].click();
   assert.equal(retryCalls, 1, 'recovery action still retries saving');
   panel.children[2].click();
@@ -657,6 +795,114 @@ assert.match(appSource, /\.then\(\(\) => progressQueueToFlush\)/);
   failures.clear();
   context.render();
   assert.equal(panel.hidden, true, 'recovery disappears once all failures are cleared');
+}
+
+// Recovery details identify exact source matches without persisting private
+// titles/paths. Legacy source-less entries show candidates as unconfirmed, or
+// a strictly decoded terminal filename when the shelf has no candidate.
+{
+  const functions = [
+    'sanitizeReadingProgressDisplayText',
+    'decodeReadingProgressIdFilename',
+    'readingProgressComicCandidates',
+    'readingProgressCandidatePath',
+    'readingProgressCandidateLabel',
+    'readingProgressCandidateSourceType',
+    'readingProgressSourceBookmarkId',
+    'sanitizeReadingProgressSourceName',
+    'readingProgressExternalSourceNames',
+    'readingProgressCandidateSourceLabel',
+    'readingProgressCandidateDisplay',
+    'readingProgressCandidateSourceContext',
+    'readingProgressDetail',
+  ].map(name => extractFunction(appSource, name)).join('\n');
+  const context = {
+    state: {
+      comics: [
+        { id: 'shared', title: 'Same Book', relativePath: 'local/book.cbz', sourceId: 'local:one' },
+        { id: 'shared', title: 'Same Book', relativePath: 'remote/book.cbz', sourceId: 'smb:two' },
+      ],
+    },
+    isBuiltInDemoComic: () => false,
+    BUILT_IN_DEMO_SOURCE_ID: 'builtin:landscapes',
+    getComicSourceId: comic => comic?.sourceId || '',
+    readerText: (text, values = {}) => text.replace(/\{(\w+)\}/g, (_, key) => String(values[key] ?? `{${key}}`)),
+  };
+  vm.runInNewContext(`${functions}\nglobalThis.detail = readingProgressDetail;\nglobalThis.decode = decodeReadingProgressIdFilename;`, context);
+
+  const exact = context.detail({ id: 'shared', sourceId: 'local:one', currentPage: 2, totalPages: 10 });
+  assert.match(exact, /Same Book/);
+  assert.match(exact, /第 3 \/ 10 頁/);
+
+  const collision = context.detail({ id: 'shared', currentPage: 0, totalPages: 2757 });
+  assert.match(collision, /來源未確認/);
+  assert.match(collision, /可能候選（2，仍需確認）/);
+  assert.equal((collision.match(/Same Book/g) || []).length, 2, 'same-title candidates remain separate');
+  assert.match(collision, /本機/);
+  assert.match(collision, /SMB/);
+  assert.match(collision, /local\/book\.cbz/);
+  assert.match(collision, /remote\/book\.cbz/);
+  assert.match(collision, /第 1 \/ 2757 頁/);
+
+  context.state.comics.push({ id: 'opaque', title: 'Opaque Book', relativePath: 'other/book.cbz', sourceId: 'secret-source-token' });
+  const opaque = context.detail({ id: 'opaque', currentPage: 1, totalPages: 4 });
+  assert.match(opaque, /其他來源/);
+  assert.doesNotMatch(opaque, /secret-source-token/);
+
+  context.state.comics = [
+    { id: 'same-type', title: 'Same Local Book', relativePath: 'one/book.cbz', sourceId: 'local:one' },
+    { id: 'same-type', title: 'Same Local Book', relativePath: 'two/book.cbz', sourceId: 'local:two' },
+  ];
+  const sameType = context.detail({ id: 'same-type', currentPage: 0, totalPages: 2 });
+  assert.match(sameType, /可能候選（2，仍需確認）/);
+  assert.equal((sameType.match(/本機/g) || []).length, 2, 'same-type sources remain visible as separate candidates');
+
+  const externalBookmark = 'bookmark://folder-a';
+  const externalSourceId = `external:${btoa(externalBookmark).replaceAll('+', '-').replaceAll('/', '_').replace(/=+$/, '')}`;
+  context.btoa = btoa;
+  context.readExternalBookmarks = () => [{ bookmark: externalBookmark, name: '外接來源 A' }];
+  context.state.comics = [{ id: 'external', title: 'External Book', relativePath: 'same/book.cbz', sourceId: externalSourceId }];
+  const external = context.detail({ id: 'external', currentPage: 0, totalPages: 2 });
+  assert.match(external, /外接來源 A/);
+  assert.doesNotMatch(external, /bookmark:\/\/folder-a/);
+  context.readExternalBookmarks = () => [{ bookmark: externalBookmark, name: '/private/secret/Folder' }];
+  const externalPrivateName = context.detail({ id: 'external', currentPage: 0, totalPages: 2 });
+  assert.doesNotMatch(externalPrivateName, /private\/secret|Folder/);
+
+  const encodedPath = Buffer.from('private/library/old-book.cbz').toString('base64url');
+  assert.equal(context.decode(encodedPath), 'old-book.cbz', 'legacy IDs expose only the terminal filename');
+  const decodedFallback = context.detail({ id: encodedPath, currentPage: 0, totalPages: 2757 });
+  assert.match(decodedFallback, /old-book\.cbz/);
+  assert.doesNotMatch(decodedFallback, /private\/library/);
+  const unknownPageCount = context.detail({ id: encodedPath, currentPage: 0, totalPages: 0 });
+  assert.match(unknownPageCount, /第 \? \/ \? 頁/);
+
+  const bidiId = Buffer.from('safe\u202Ename.cbz').toString('base64url');
+  assert.equal(context.decode(bidiId), 'safename.cbz', 'bidi controls are removed from decoded filenames');
+
+  const malformedUtf8 = Buffer.from([0xff, 0xfe]).toString('base64url');
+  assert.equal(context.decode(malformedUtf8), '', 'invalid UTF-8 IDs stay unknown');
+  assert.match(context.detail({ id: malformedUtf8, currentPage: 0, totalPages: 2 }), /未知作品/);
+
+  const xssId = Buffer.from('<img src=x onerror=alert(1)>.cbz').toString('base64url');
+  assert.match(context.detail({ id: xssId, currentPage: 0, totalPages: 1 }), /<img src=x/);
+  const recoverySource = extractFunction(appSource, 'renderReadingProgressRecovery');
+  assert.match(recoverySource, /message\.textContent/);
+  assert.doesNotMatch(recoverySource, /message\.innerHTML/);
+  assert.match(recoverySource, /if \(message\.textContent !== nextMessageText\)/);
+  assert.match(recoverySource, /const comicIndex = new Map\(\)/);
+  assert.match(recoverySource, /readingProgressDetail\(snapshot, recoveryContext\)/);
+  assert.doesNotMatch(recoverySource, /ResizeObserver|marquee/);
+  assert.match(styleSource, /\.reading-progress-recovery-message\s*\{[\s\S]*white-space:\s*pre-line/);
+  assert.doesNotMatch(styleSource, /reading-progress-marquee|marquee-ready|is-overflowing/);
+  assert.match(styleSource, /prefers-reduced-motion:\s*reduce/);
+
+  assert.match(featureMessagesSource, /"未保存進度：\{name\}（\{pages\}）"/);
+  assert.match(featureMessagesSource, /"未保存進度：來源未確認；可能候選：\{candidates\}（\{pages\}）"/);
+  assert.match(featureMessagesSource, /"未保存進度：來源未確認；可能候選（\{count\}，仍需確認）：\{candidates\}（\{pages\}）"/);
+  assert.match(featureMessagesSource, /"未保存進度：未知作品（來源未確認；\{pages\}）"/);
+  assert.match(featureMessagesSource, /"書架仍在掃描，候選可能變動。"/);
+  assert.match(featureMessagesSource, /"本機"|"SMB"|"Files"|"其他來源"/);
 }
 
 // Explicit discard clears only pending snapshots and cannot be undone by an

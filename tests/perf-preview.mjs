@@ -310,7 +310,7 @@ const FIXTURE_BOOTSTRAP = String.raw`
       result.textContent = [
         '結果：' + (passed ? 'PASS（捲動幀時間門檻）' : 'FAIL（事件、重繪或幀時間未達門檻）'),
         'fixture非實機（synthetic data，未讀取正式 DB／NAS）',
-        '資料：' + FIXTURE_COUNT + ' 本，同一平面目錄；目前 renderer 顯示上限 200 cards',
+        '資料：' + FIXTURE_COUNT + ' 本，同一平面目錄；renderer 初始顯示上限 200 cards，接近尾端會逐批載入',
         '變更模式：' + fixture.changeMode + '（sparse 預設；dense 僅供明確壓測）',
         '捲動：content-area 上下約 5 秒；requestAnimationFrame 採樣 ' + frameSamples.length + ' 次',
         '掃描事件：isScanning=true ' + scanTrue + ' 次；library-changed ' + libraryChanged + ' 次；isScanning=false ' + scanFalse + ' 次',

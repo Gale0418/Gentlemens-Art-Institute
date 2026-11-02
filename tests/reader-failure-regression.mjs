@@ -113,6 +113,7 @@ function extractSection(source, startMarker, endMarker) {
     hideReaderContextMenu() {},
     dismissReaderDiscoveryHint() {},
     restoreReaderFocus() {},
+    resumeCatalogAppendRenderIfReady() {},
     scheduleLibraryRefresh() {},
     clearTimeout,
     cancelAnimationFrame() {},

@@ -139,6 +139,7 @@ let scanStatusPendingRequest = null;
 const SCAN_STATUS_POLL_INTERVAL_MS = 700;
 const SCAN_STATUS_REQUEST_TIMEOUT_MS = 5000;
 const SCAN_STATUS_POLL_WALLCLOCK_MS = 42 * 60 * 1000;
+const CATALOG_APPEND_FRAME_CHUNK = 32;
 let lastGridRenderSignature = '';
 let lastContinueRenderSignature = '';
 let lastInspectorRenderSignature = '';
@@ -147,6 +148,11 @@ let incrementalLibraryRenderFrame = null;
 // 增量批次若在滑動期間進入，RAF callback 會被 gate 擋下；保留這個 intent，
 // 讓滑動停止後重排一次增量畫面，而不是把它誤升級成全庫抓取。
 let incrementalLibraryRenderPending = false;
+let catalogAppendRenderFrame = null;
+let catalogAppendRenderGeneration = 0;
+let catalogAppendRenderTarget = null;
+let catalogAppendRenderContext = null;
+let catalogAppendDeferredIntent = null;
 let visibleDirectoryScanRequestId = 0;
 let visibleDirectoryScanInFlight = new Map();
 let visibleDirectoryNavigationEpoch = 0;
@@ -3361,13 +3367,152 @@ function noteCatalogScroll() {
   maybeAutoLoadCatalogBatch();
 }
 
+function catalogAppendContextMatchesCurrent(context) {
+  return Boolean(context)
+    && context.currentPath === state.currentPath
+    && context.currentSourceId === (state.currentSourceId || '')
+    && context.activeSeries === state.activeSeries
+    && context.activeFilter === state.activeFilter
+    && context.organizeMode === Boolean(state.organizeMode)
+    && context.searchQuery === (elements.searchInput?.value?.trim?.() || '');
+}
+
+function rememberCatalogAppendIntent(context = catalogAppendRenderContext) {
+  if (!context || !catalogAppendContextMatchesCurrent(context)) return false;
+  catalogAppendDeferredIntent = {
+    currentPath: context.currentPath,
+    currentSourceId: context.currentSourceId,
+    activeSeries: context.activeSeries,
+    activeFilter: context.activeFilter,
+    organizeMode: context.organizeMode,
+    searchQuery: context.searchQuery,
+    targetLimit: Math.max(
+      context.currentLimit,
+      catalogAppendRenderTarget ?? context.targetLimit,
+    ),
+  };
+  return true;
+}
+
+function cancelCatalogAppendRender({ preserveIntent = false } = {}) {
+  if (preserveIntent) {
+    if (catalogAppendRenderContext) {
+      if (!rememberCatalogAppendIntent()) catalogAppendDeferredIntent = null;
+    } else if (!catalogAppendDeferredIntent
+      || !catalogAppendContextMatchesCurrent(catalogAppendDeferredIntent)) {
+      // A reader-gated append can already be represented only by the deferred
+      // snapshot; repeated background refreshes must not erase that snapshot.
+      catalogAppendDeferredIntent = null;
+    }
+  } else {
+    catalogAppendDeferredIntent = null;
+  }
+  catalogAppendRenderGeneration += 1;
+  if (catalogAppendRenderFrame !== null) {
+    cancelAnimationFrame(catalogAppendRenderFrame);
+    catalogAppendRenderFrame = null;
+  }
+  catalogAppendRenderTarget = null;
+  catalogAppendRenderContext = null;
+}
+
+function resumeCatalogAppendRenderIfReady() {
+  if (state.currentComic || state.pendingComicId) return false;
+  const intent = catalogAppendDeferredIntent || catalogAppendRenderContext;
+  if (!intent) return false;
+  if (!catalogAppendContextMatchesCurrent(intent)) {
+    catalogAppendDeferredIntent = null;
+    return false;
+  }
+  if (catalogAppendRenderFrame !== null) return true;
+  const targetLimit = Math.min(
+    Math.max(state.renderLimit, Number(intent.targetLimit) || 0),
+    state.filteredComics.length,
+  );
+  catalogAppendDeferredIntent = null;
+  if (targetLimit <= state.renderLimit) {
+    catalogAppendRenderTarget = null;
+    catalogAppendRenderContext = null;
+    return false;
+  }
+  return scheduleCatalogAppendRender(targetLimit);
+}
+
+function scheduleCatalogAppendRender(targetLimit) {
+  const safeTarget = Math.max(state.renderLimit, Math.trunc(Number(targetLimit) || 0));
+  if (safeTarget <= state.renderLimit) return false;
+
+  catalogAppendDeferredIntent = null;
+
+  const generation = ++catalogAppendRenderGeneration;
+  const context = {
+    filteredComics: state.filteredComics,
+    currentPath: state.currentPath,
+    currentSourceId: state.currentSourceId || '',
+    activeSeries: state.activeSeries,
+    activeFilter: state.activeFilter,
+    organizeMode: Boolean(state.organizeMode),
+    searchQuery: elements.searchInput?.value?.trim?.() || '',
+    currentLimit: state.renderLimit,
+    targetLimit: safeTarget,
+  };
+  catalogAppendRenderTarget = safeTarget;
+  catalogAppendRenderContext = context;
+
+  const renderChunk = () => {
+    if (generation !== catalogAppendRenderGeneration) return;
+    catalogAppendRenderFrame = null;
+    const contextStillCurrent = catalogAppendRenderContext === context
+      && context.filteredComics === state.filteredComics
+      && catalogAppendContextMatchesCurrent(context)
+      && context.currentLimit === state.renderLimit;
+    if (!contextStillCurrent) {
+      catalogAppendDeferredIntent = null;
+      catalogAppendRenderTarget = null;
+      catalogAppendRenderContext = null;
+      return;
+    }
+
+    // Opening the reader must stop creating shelf cards immediately. Keep the
+    // same-context target so returning to the shelf can safely resume it.
+    if (state.currentComic || state.pendingComicId) {
+      rememberCatalogAppendIntent(context);
+      return;
+    }
+
+    const nextLimit = Math.min(
+      context.targetLimit,
+      state.filteredComics.length,
+      state.renderLimit + CATALOG_APPEND_FRAME_CHUNK,
+    );
+    if (nextLimit <= state.renderLimit) {
+      catalogAppendRenderTarget = null;
+      catalogAppendRenderContext = null;
+      return;
+    }
+    state.renderLimit = nextLimit;
+    context.currentLimit = nextLimit;
+    renderGrid({ skipUnchanged: true, appendOnly: true });
+
+    if (nextLimit < context.targetLimit && nextLimit < state.filteredComics.length) {
+      catalogAppendRenderFrame = requestAnimationFrame(renderChunk);
+    } else {
+      catalogAppendRenderTarget = null;
+      catalogAppendRenderContext = null;
+    }
+  };
+
+  catalogAppendRenderFrame = requestAnimationFrame(renderChunk);
+  return true;
+}
+
 function requestNextCatalogBatch({ manual = false } = {}) {
+  const appendRenderPending = catalogAppendRenderFrame !== null || catalogAppendRenderTarget !== null;
+  if (appendRenderPending) return false;
   const query = elements.searchInput?.value?.trim?.() || '';
   if (query && state.catalogSearchIds) {
     if (state.renderLimit < state.filteredComics.length) {
-      state.renderLimit = Math.min(state.renderLimit + 200, state.filteredComics.length);
-      renderGrid({ skipUnchanged: true });
-      return true;
+      return scheduleCatalogAppendRender(Math.min(state.renderLimit + 200, state.filteredComics.length));
     }
     if (state.catalogSearchBackendOffset >= state.catalogSearchTotal) return false;
     if (catalogSearchAppendInFlight?.query === query) return false;
@@ -3377,9 +3522,7 @@ function requestNextCatalogBatch({ manual = false } = {}) {
     return true;
   }
   if (state.renderLimit >= state.filteredComics.length) return false;
-  state.renderLimit = Math.min(state.renderLimit + 200, state.filteredComics.length);
-  renderGrid({ skipUnchanged: true });
-  return true;
+  return scheduleCatalogAppendRender(Math.min(state.renderLimit + 200, state.filteredComics.length));
 }
 
 function maybeAutoLoadCatalogBatch() {
@@ -3545,6 +3688,7 @@ async function refreshCatalogSearch(query, { append = false } = {}) {
   }
   const requestId = ++state.catalogSearchRequest;
   const previousBackendOffset = state.catalogSearchBackendOffset;
+  let appendRenderTarget = null;
   try {
     const result = await eAPI.searchCatalog({ query, offset: append ? previousBackendOffset : 0, limit: 200 });
     if (requestId !== state.catalogSearchRequest) return false;
@@ -3566,10 +3710,11 @@ async function refreshCatalogSearch(query, { append = false } = {}) {
       : nextBackendOffset;
     state.catalogSearchNoProgress = append && nextBackendOffset <= previousBackendOffset;
     if (append && nextBackendOffset > previousBackendOffset) {
-      state.renderLimit += 200;
+      appendRenderTarget = state.renderLimit + 200;
     }
     renderCatalogFacets(result?.facets || {});
     filterAndRenderGrid();
+    if (appendRenderTarget !== null) scheduleCatalogAppendRender(appendRenderTarget);
     return true;
   } catch (error) {
     console.warn('SQLite 目錄搜尋暫不可用，退回檔名搜尋：', error);
@@ -5476,6 +5621,8 @@ function getDirectoryItems() {
 
 // 核心過濾與渲染漫畫書架
 function filterAndRenderGrid(options = {}) {
+  const hadAppendIntent = Boolean(catalogAppendRenderContext || catalogAppendDeferredIntent);
+  cancelCatalogAppendRender({ preserveIntent: true });
   syncLibraryUpButton();
   // 1. 取得目前路徑下的項目
   state.filteredComics = getDirectoryItems();
@@ -5536,6 +5683,7 @@ function filterAndRenderGrid(options = {}) {
 
   renderGrid(options);
   ensureInspectorSelection({ skipUnchanged: Boolean(options.skipUnchanged) });
+  if (hadAppendIntent) resumeCatalogAppendRenderIfReady();
 }
 
 function getShelfCardRenderKey(comic) {
@@ -5733,7 +5881,8 @@ function restoreShelfFocus(snapshot) {
 }
 
 // 繪製漫畫卡片網格
-function renderGrid({ skipUnchanged = false, background = false } = {}) {
+function renderGrid({ skipUnchanged = false, background = false, appendOnly = false } = {}) {
+  const observerBeforeGrid = coverObserver;
   if (state.filteredComics.length === 0) {
     const folderScanKey = getDirectoryLocationKey(state.currentSourceId, state.currentPath);
     const emptyFolder = Boolean(state.currentPath
@@ -5828,6 +5977,13 @@ function renderGrid({ skipUnchanged = false, background = false } = {}) {
   );
   const focusSnapshot = captureShelfFocus();
   const scrollTop = Number.isFinite(elements.contentArea?.scrollTop) ? elements.contentArea.scrollTop : null;
+  const currentGridCards = appendOnly ? [...elements.comicGrid.children] : [];
+  const canAppendOnly = appendOnly
+    && visibleComics.length > currentGridCards.length
+    && currentGridCards.every((card, index) => getComicIdentityKey(visibleComics[index]) === getComicIdentityKey({
+      id: card.dataset?.comicId,
+      sourceId: card.dataset?.sourceId || '',
+    }));
 
   // 掃描進度、篩選器與背景刷新很常只改變卡片順序或選取狀態。沿用既有節點
   // 可以保留焦點、圖片 observer 與瀏覽器的圖片解碼快取，也避免 200 張卡片
@@ -5853,6 +6009,12 @@ function renderGrid({ skipUnchanged = false, background = false } = {}) {
     restoreShelfFocus(focusSnapshot);
     if (scrollTop !== null) elements.contentArea.scrollTop = scrollTop;
     if (background) requestAnimationFrame(() => elements.comicGrid.classList.remove('background-refresh'));
+    const observer = ensureCoverObserver();
+    if (observer !== observerBeforeGrid) {
+      // A rebuilt observer must recover every existing cover even when the
+      // catalog contents themselves were unchanged.
+      document.querySelectorAll('.lazy-cover').forEach(img => observer.observe(img));
+    }
     return;
   }
 
@@ -5863,9 +6025,10 @@ function renderGrid({ skipUnchanged = false, background = false } = {}) {
     resetCoverLoadQueue();
   }
   elements.comicGrid.classList.toggle('background-refresh', background);
-  const nextCards = [];
+  const nextCards = canAppendOnly ? currentGridCards.slice() : [];
 
-  visibleComics.forEach(comic => {
+  const comicsToRender = canAppendOnly ? visibleComics.slice(currentGridCards.length) : visibleComics;
+  comicsToRender.forEach(comic => {
     const renderKey = getShelfCardRenderKey(comic);
     const expectedTagName = getShelfCardTagName(comic);
     const reusableCard = existingCards.get(getComicIdentityKey(comic));
@@ -6056,32 +6219,53 @@ function renderGrid({ skipUnchanged = false, background = false } = {}) {
     nextCards.forEach(card => gridFragment.appendChild(card));
     elements.comicGrid.replaceChildren(gridFragment);
   } else {
-    // Patch only cards that changed. Moving a reused node with insertBefore()
-    // preserves its image, observer and focus state; replaceChildren() would
-    // detach every card even when a single library item changed.
-    const nextCardByKey = new Map(nextCards.map(card => [card.dataset.comicKey, card]));
-    [...elements.comicGrid.children].forEach(card => {
-      const wanted = nextCardByKey.get(card.dataset?.comicKey || getComicIdentityKey({
-        id: card.dataset?.comicId,
-        sourceId: card.dataset?.sourceId || '',
-      }));
-      if (wanted !== card) {
-        card.querySelectorAll?.('.lazy-cover').forEach(removeScheduledCover);
-        elements.comicGrid.removeChild(card);
-      }
-    });
-    nextCards.forEach((card, index) => {
-      const anchor = elements.comicGrid.children[index] || null;
-      if (anchor !== card) elements.comicGrid.insertBefore(card, anchor);
-    });
+    const currentCards = [...elements.comicGrid.children];
+    const hasStableCardPrefix = nextCards.length > currentCards.length
+      && currentCards.every((card, index) => nextCards[index] === card)
+      && nextCards.slice(currentCards.length).every(card => !card.parentNode);
+    if (hasStableCardPrefix) {
+      // Infinite-scroll append is common when the user reaches the end of the
+      // current window. Insert the new suffix as one fragment so the browser
+      // performs one child-list mutation/layout boundary instead of one per
+      // card, while preserving every existing card node and its observer state.
+      const appendedCards = document.createDocumentFragment();
+      nextCards.slice(currentCards.length).forEach(card => appendedCards.appendChild(card));
+      elements.comicGrid.appendChild(appendedCards);
+    } else {
+      // Patch only cards that changed. Moving a reused node with insertBefore()
+      // preserves its image, observer and focus state; replaceChildren() would
+      // detach every card even when a single library item changed.
+      const nextCardByKey = new Map(nextCards.map(card => [card.dataset.comicKey, card]));
+      [...elements.comicGrid.children].forEach(card => {
+        const wanted = nextCardByKey.get(card.dataset?.comicKey || getComicIdentityKey({
+          id: card.dataset?.comicId,
+          sourceId: card.dataset?.sourceId || '',
+        }));
+        if (wanted !== card) {
+          card.querySelectorAll?.('.lazy-cover').forEach(removeScheduledCover);
+          elements.comicGrid.removeChild(card);
+        }
+      });
+      nextCards.forEach((card, index) => {
+        const anchor = elements.comicGrid.children[index] || null;
+        if (anchor !== card) elements.comicGrid.insertBefore(card, anchor);
+      });
+    }
   }
 
   // IntersectionObserver 懶載入封面；請求另外限流，讓空框先完成繪製，
   // 避免大量 ZIP 封面同時解壓時拖慢書架滑動。
-  ensureCoverObserver(); // 保留少量預載，避免一次觸發整排封面
-  document.querySelectorAll('.lazy-cover').forEach(img => {
-    coverObserver.observe(img);
-  });
+  const observer = ensureCoverObserver(); // 保留少量預載，避免一次觸發整排封面
+  const observerRebuilt = observer !== observerBeforeGrid;
+  if (canAppendOnly && !observerRebuilt) {
+    nextCards.slice(currentGridCards.length).forEach(card => {
+      card.querySelectorAll?.('.lazy-cover').forEach(img => observer.observe(img));
+    });
+  } else {
+    // 新建／重建 observer 時仍需涵蓋既有卡片與 continue strip，避免遺漏
+    // 尚未進入 DOM 的懶載入封面。
+    document.querySelectorAll('.lazy-cover').forEach(img => observer.observe(img));
+  }
   if (background) {
     requestAnimationFrame(() => elements.comicGrid.classList.remove('background-refresh'));
   }
@@ -6425,6 +6609,7 @@ async function closeReader({ switchingComic = false } = {}) {
   }
 
   // 重新整理書架（更新最近閱讀與進度條）
+  if (!switchingComic) resumeCatalogAppendRenderIfReady();
   scheduleLibraryRefresh();
 }
 
@@ -10825,6 +11010,8 @@ getDiscoveryCandidates,
     requestNextCatalogBatch,
     maybeAutoLoadCatalogBatch,
     refreshCatalogSearch,
+    filterAndRenderGrid,
+    resumeCatalogAppendRenderIfReady,
     handleSearch,
     getCatalogSearchKey,
     getShelfCardRenderKey,

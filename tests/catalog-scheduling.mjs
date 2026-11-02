@@ -59,6 +59,19 @@ class FakeClock {
     }
     this.now = target;
   }
+
+  tickOne() {
+    const due = [...this.tasks.entries()]
+      .filter(([, task]) => task.at <= this.now)
+      .sort((a, b) => a[1].at - b[1].at)[0];
+    if (!due) return false;
+    const [id, task] = due;
+    this.now = task.at;
+    if (task.interval) task.at += task.interval;
+    else this.tasks.delete(id);
+    task.fn();
+    return true;
+  }
 }
 
 class FakeClassList {
@@ -86,15 +99,24 @@ class FakeElement {
     this.parentNode = null;
     this.nextElementSibling = null;
     this.textContent = '';
-    this.innerHTML = '';
+    this._innerHTML = '';
     this.src = '';
     this.replaceChildrenCalls = 0;
     this.appendChildCalls = 0;
+    this.fragmentAppendChildCalls = 0;
+  }
+
+  get innerHTML() { return this._innerHTML; }
+  set innerHTML(value) {
+    this._innerHTML = String(value ?? '');
+    this.lazyCover = this._innerHTML.includes('lazy-cover') ? new FakeElement('img') : null;
+    if (this.lazyCover) this.lazyCover.parentNode = this;
   }
 
   appendChild(child) {
     this.appendChildCalls += 1;
     if (child?.isFragment) {
+      this.fragmentAppendChildCalls += 1;
       for (const item of child.children.slice()) this.appendChild(item);
       child.children = [];
       return child;
@@ -187,6 +209,7 @@ class FakeElement {
     return null;
   }
   querySelectorAll(selector) {
+    if (selector === '.lazy-cover' && this.lazyCover) return [this.lazyCover];
     if (selector === 'img' || selector === '.lazy-cover') return this.children.filter(child => child.tagName === 'IMG');
     if (selector === 'img[data-src]') {
       const walk = node => node.children.flatMap(child => [child, ...walk(child)]);
@@ -217,7 +240,14 @@ function createHarness({ width = 1000, storageFails = false } = {}) {
       return elements.get(id);
     },
     querySelector() { return null; },
-    querySelectorAll() { return []; },
+    querySelectorAll(selector) {
+      if (selector !== '.lazy-cover') return [];
+      const walk = node => [
+        ...(node.lazyCover ? [node.lazyCover] : []),
+        ...node.children.flatMap(walk),
+      ];
+      return [...elements.values()].flatMap(walk);
+    },
     fullscreenElement: null,
   };
   const localStorage = {
@@ -971,11 +1001,107 @@ assert.equal(hooks.catalogThumbnailURL('/fixture/page-3.png'), '/fixture/page-3.
   assert.equal(shelf.hooks.state.renderLimit, 200);
   shelf.hooks.elements.contentArea.scrollTop = 2700;
   assert.equal(shelf.hooks.maybeAutoLoadCatalogBatch(), true, '接近尾端會載入下一批');
+  assert.equal(shelf.hooks.state.renderLimit, 200, '分幀載入尚未在同一呼叫堆疊同步擴張');
+  shelf.clock.tick(0);
   assert.equal(shelf.hooks.state.renderLimit, 400);
   assert.equal(shelf.hooks.elements.comicGrid.children.length, 400, '401 本只建立目前兩批卡片');
+  const initialObserver = shelf.context.IntersectionObserver.instances.at(-1);
+  assert.equal(initialObserver.targets.length, 400, '初次 observer 必須涵蓋目前所有封面');
+  const observedPrefix = initialObserver.targets.slice();
   shelf.hooks.elements.contentArea.scrollTop = 3200;
-  shelf.hooks.maybeAutoLoadCatalogBatch();
+  assert.equal(shelf.hooks.maybeAutoLoadCatalogBatch(), true);
+  shelf.clock.tick(0);
   assert.equal(shelf.hooks.state.renderLimit, 401, '尾批只補到實際總數');
+  assert.equal(initialObserver.targets.length, 401, 'append-only 只需向既有 observer 加入新封面');
+  assert.deepEqual(initialObserver.targets.slice(0, observedPrefix.length), observedPrefix, 'append 不得重建或重複 observe 舊封面');
+
+  const rebuilt = createHarness();
+  rebuilt.hooks.state.comics = shelf.hooks.state.comics.slice(0, 201);
+  rebuilt.hooks.state.filteredComics = rebuilt.hooks.state.comics.slice(0, 200);
+  rebuilt.hooks.state.renderLimit = 200;
+  rebuilt.hooks.renderGrid();
+  const previousObserver = rebuilt.context.IntersectionObserver.instances.at(-1);
+  rebuilt.hooks.setCoverObserver(null);
+  rebuilt.hooks.renderGrid();
+  const rebuiltObserver = rebuilt.context.IntersectionObserver.instances.at(-1);
+  assert.notEqual(rebuiltObserver, previousObserver, 'observer 重建時必須建立新實例');
+  assert.equal(rebuiltObserver.targets.length, 200, 'observer 重建仍須涵蓋既有封面');
+}
+
+// lazy append 執行第一個 chunk 後若進入閱讀器，後續 frame 不得繼續建立書架卡片；
+// 關閉閱讀器後，同一個安全 context 才能恢復剩餘意圖。
+{
+  const gated = createHarness();
+  gated.hooks.state.comics = Array.from({ length: 401 }, (_, index) => ({
+    id: 'gate-' + index, title: 'Gate ' + index, relativePath: 'gate/' + index,
+  }));
+  gated.hooks.state.filteredComics = gated.hooks.state.comics.slice();
+  gated.hooks.state.renderLimit = 200;
+  gated.hooks.renderGrid();
+  assert.equal(gated.hooks.requestNextCatalogBatch(), true);
+  assert.equal(gated.clock.tickOne(), true, '第一個 append frame 必須可單獨執行');
+  assert.equal(gated.hooks.state.renderLimit, 232);
+  assert.equal(gated.hooks.elements.comicGrid.children.length, 232);
+  gated.hooks.state.currentComic = { id: 'reading-now' };
+  assert.equal(gated.clock.tickOne(), true, '讀者切換後仍應消費已排程 frame 以觸發 gate');
+  assert.equal(gated.hooks.state.renderLimit, 232, '讀者開啟後不得再建立卡片');
+  assert.equal(gated.hooks.elements.comicGrid.children.length, 232, '讀者開啟後 DOM 不得繼續增加');
+  gated.hooks.state.currentComic = null;
+  assert.equal(gated.hooks.resumeCatalogAppendRenderIfReady(), true, '返回書架應恢復同 context 的 append 意圖');
+  gated.clock.tick(0);
+  assert.equal(gated.hooks.state.renderLimit, 400);
+  assert.equal(gated.hooks.elements.comicGrid.children.length, 400);
+}
+
+// reader gate 下若連續發生兩次背景 filter refresh，deferred-only intent 仍須保存；
+// 真實 closeReader 路徑解除 gate 後才恢復剩餘 append。
+{
+  const repeatedRefresh = createHarness();
+  repeatedRefresh.hooks.state.comics = Array.from({ length: 401 }, (_, index) => ({
+    id: 'repeat-' + index, title: 'Repeat ' + index, relativePath: 'repeat-' + index,
+  }));
+  repeatedRefresh.hooks.state.filteredComics = repeatedRefresh.hooks.state.comics.slice();
+  repeatedRefresh.hooks.state.renderLimit = 200;
+  repeatedRefresh.hooks.elements.searchInput.value = '';
+  repeatedRefresh.hooks.renderGrid();
+  assert.equal(repeatedRefresh.hooks.requestNextCatalogBatch(), true);
+  assert.equal(repeatedRefresh.clock.tickOne(), true);
+  repeatedRefresh.hooks.state.currentComic = { id: 'repeat-reading' };
+  assert.equal(repeatedRefresh.clock.tickOne(), true);
+  assert.equal(repeatedRefresh.hooks.state.renderLimit, 232);
+  repeatedRefresh.hooks.filterAndRenderGrid({ skipUnchanged: true });
+  repeatedRefresh.hooks.filterAndRenderGrid({ skipUnchanged: true });
+  assert.equal(repeatedRefresh.hooks.state.renderLimit, 232, 'reader 中連續 refresh 不得建立卡片或遺失 intent');
+  await repeatedRefresh.hooks.closeReader();
+  repeatedRefresh.clock.tick(0);
+  assert.equal(repeatedRefresh.hooks.state.renderLimit, 400, '真實 closeReader 後應恢復 deferred append');
+}
+
+// 掃描增量刷新會取消當前 frame；同 path/query 的 render 必須保留尾端 intent，
+// 而 query/path 改變時則不可把舊 append 洩漏到新畫面。
+{
+  const scan = createHarness();
+  scan.hooks.state.comics = Array.from({ length: 401 }, (_, index) => ({
+    id: 'scan-' + index, title: 'Scan ' + index, relativePath: 'scan-' + index,
+  }));
+  scan.hooks.state.filteredComics = scan.hooks.state.comics.slice();
+  scan.hooks.state.renderLimit = 200;
+  scan.hooks.renderGrid();
+  assert.equal(scan.hooks.requestNextCatalogBatch(), true);
+  assert.equal(scan.clock.tickOne(), true);
+  assert.equal(scan.hooks.state.renderLimit, 232);
+  scan.hooks.elements.searchInput.value = '';
+  scan.hooks.state.comics[0] = { ...scan.hooks.state.comics[0], title: 'Scan updated' };
+  scan.hooks.filterAndRenderGrid({ skipUnchanged: true });
+  assert.equal(scan.hooks.state.renderLimit, 232, '掃描刷新不得同步建立剩餘卡片');
+  for (let attempt = 0; attempt < 8 && scan.hooks.state.renderLimit === 232; attempt += 1) {
+    assert.equal(scan.clock.tickOne(), true, '同 context 的掃描刷新應恢復下一個 append frame');
+  }
+  assert.equal(scan.hooks.state.renderLimit, 264);
+  scan.hooks.elements.searchInput.value = 'different-query';
+  scan.hooks.filterAndRenderGrid({ skipUnchanged: true });
+  scan.clock.tick(0);
+  assert.equal(scan.hooks.state.renderLimit, 264, 'query 改變後不得執行舊 context append');
 }
 
 // 搜尋 append 必須去重 in-flight；舊 query 回覆不得覆蓋新 query。
@@ -1309,6 +1435,7 @@ assert.equal(hooks.catalogThumbnailURL('/fixture/page-3.png'), '/fixture/page-3.
   assert.equal(expanded.hooks.state.renderLimit, 200);
   assert.equal(expanded.hooks.requestNextCatalogBatch({ manual: true }), true,
     'backend 已到 work 尾端時，手動按鈕仍先補完本地 location 卡片');
+  expanded.clock.tick(0);
   assert.equal(expanded.hooks.state.renderLimit, 201);
   assert.equal(expandedCalls, 1, '本地 location 尚未顯示完不得再 append backend');
   expanded.hooks.state.renderLimit = 200;
@@ -1318,6 +1445,7 @@ assert.equal(hooks.catalogThumbnailURL('/fixture/page-3.png'), '/fixture/page-3.
   expanded.hooks.elements.contentArea.clientHeight = 800;
   assert.equal(expanded.hooks.maybeAutoLoadCatalogBatch(), true,
     '接近尾端時自動分頁也必須先補本地 location');
+  expanded.clock.tick(0);
   assert.equal(expanded.hooks.state.renderLimit, 201);
   assert.equal(expandedCalls, 1, '自動補本地 location 不得重打已耗盡的 backend work');
 
@@ -1407,6 +1535,7 @@ assert.equal(hooks.catalogThumbnailURL('/fixture/page-3.png'), '/fixture/page-3.
   assert.equal(orphan.hooks.state.catalogSearchBackendOffset, 2);
   assert.equal(orphan.hooks.state.catalogSearchItems.size, 1, '孤兒列不應污染可顯示結果');
   assert.equal(orphan.hooks.state.catalogSearchNoProgress, false, '孤兒列仍代表 backend 有前進');
+  orphan.clock.tick(0);
   assert.equal(orphan.hooks.requestNextCatalogBatch(), true);
   await new Promise(resolve => setImmediate(resolve));
   assert.deepEqual(calls.map(request => request.offset), [0, 1, 2]);
@@ -1802,12 +1931,31 @@ for (let columns = 1; columns <= 12; columns += 1) {
   shelf.hooks.renderGrid();
   const firstCards = [...shelf.hooks.elements.comicGrid.children];
   const firstReplaceCount = shelf.hooks.elements.comicGrid.replaceChildrenCalls;
-  const firstAppendCount = shelf.hooks.elements.comicGrid.appendChildCalls;
+  const firstFragmentAppendCount = shelf.hooks.elements.comicGrid.fragmentAppendChildCalls;
   const firstObserver = shelf.context.IntersectionObserver.instances.at(-1);
   assert.equal(firstCards.length, 200);
 
+  const appendedComics = [...comics, ...Array.from({ length: 200 }, (_, index) => ({
+    id: `shelf-appended-${index}`,
+    title: `Shelf appended ${index}`,
+    type: 'archive',
+    pageCount: 12,
+    progress: { currentPage: 0, totalPages: 12 },
+  }))];
+  shelf.hooks.state.filteredComics = appendedComics;
+  shelf.hooks.state.renderLimit = 400;
   shelf.hooks.renderGrid();
-  assert.equal(shelf.hooks.elements.comicGrid.appendChildCalls, firstAppendCount, '同順序刷新不重排卡片');
+  const appendedCards = [...shelf.hooks.elements.comicGrid.children];
+  const appendBatchAppendCount = shelf.hooks.elements.comicGrid.appendChildCalls;
+  assert.equal(appendedCards.length, 400, 'append-only render adds the next card batch');
+  assert.deepEqual(appendedCards.slice(0, 200), firstCards, 'append-only render preserves the existing card prefix');
+  assert.equal(shelf.hooks.elements.comicGrid.fragmentAppendChildCalls, firstFragmentAppendCount + 1,
+    'append-only render inserts the new suffix with one DocumentFragment');
+  shelf.hooks.state.filteredComics = comics;
+  shelf.hooks.state.renderLimit = 200;
+
+  shelf.hooks.renderGrid();
+  assert.equal(shelf.hooks.elements.comicGrid.appendChildCalls, appendBatchAppendCount, '同順序刷新不重排卡片');
 
   shelf.document.activeElement = firstCards[25];
   shelf.hooks.state.filteredComics = [...comics].reverse();
@@ -1841,6 +1989,44 @@ for (let columns = 1; columns <= 12; columns += 1) {
     '同 id 檔案更新時，該書封面卡片必須重新建立');
   assert.equal(updatedAtCards.find(card => card.dataset.comicId === 'shelf-25'), firstCards[25],
     '只有 updatedAt 改變的書受影響，其他卡片仍沿用原節點');
+}
+
+// 分幀 append 遇到新的書架快照時必須取消舊工作，不得把舊批次接回新結果；
+// 仍要保留目前卡片的焦點與封面 observer。
+{
+  const cancelled = createHarness();
+  const comics = Array.from({ length: 200 }, (_, index) => ({
+    id: `cancel-${index}`,
+    title: `Cancel ${index}`,
+    type: 'archive',
+    pageCount: 12,
+  }));
+  const appended = [...comics, ...Array.from({ length: 200 }, (_, index) => ({
+    id: `cancel-appended-${index}`,
+    title: `Cancel appended ${index}`,
+    type: 'archive',
+    pageCount: 12,
+  }))];
+  cancelled.hooks.state.filteredComics = comics;
+  cancelled.hooks.state.renderLimit = 200;
+  cancelled.hooks.elements.contentArea = new FakeElement();
+  cancelled.hooks.renderGrid();
+  const initialCards = [...cancelled.hooks.elements.comicGrid.children];
+  const observer = cancelled.context.IntersectionObserver.instances.at(-1);
+  cancelled.document.activeElement = initialCards[25];
+
+  cancelled.hooks.state.filteredComics = appended;
+  assert.equal(cancelled.hooks.requestNextCatalogBatch(), true);
+  assert.equal(cancelled.hooks.state.renderLimit, 200, '分幀工作尚未同步擴張 renderLimit');
+
+  const replacement = comics.map(comic => ({ ...comic, title: `${comic.title} replacement` }));
+  cancelled.hooks.state.filteredComics = replacement;
+  cancelled.hooks.renderGrid();
+  cancelled.clock.tick(0);
+  assert.equal(cancelled.hooks.state.renderLimit, 200, '新快照會取消舊 append target');
+  assert.equal(cancelled.hooks.elements.comicGrid.children.length, 200, '舊批次不可混入新快照');
+  assert.equal(cancelled.hooks.elements.comicGrid.children[0].dataset.renderKey.includes('replacement'), true);
+  assert.equal(observer.disconnectCalls, 0, '取消分幀工作不應中斷封面 observer');
 }
 
 // 虛擬資料夾的封面版本必須跟隨選中的 coverComicId；封面書更新時只重建對應資料夾。

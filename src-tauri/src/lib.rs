@@ -9,6 +9,7 @@ pub mod file_ops;
 pub mod metadata;
 pub mod photo_library;
 pub mod protocol;
+pub(crate) mod rar_quick_open;
 pub mod rar_reader;
 pub mod scanner;
 pub mod smb_scanner;

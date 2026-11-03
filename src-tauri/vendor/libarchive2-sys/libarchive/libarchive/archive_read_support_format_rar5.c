@@ -114,6 +114,7 @@ struct file_header {
 	/* Optional hash fields. */
 	uint32_t stored_crc32;
 	uint32_t calculated_crc32;
+	char has_crc32;
 	uint8_t blake2sp[32];
 	blake2sp_state b2state;
 	char has_blake2;
@@ -2022,6 +2023,7 @@ static int process_head_file(struct archive_read* a, struct rar5 *rar5,
 	}
 
 	if(file_flags & CRC32) {
+		rar5->file.has_crc32 = 1;
 		rar5->file.stored_crc32 = crc;
 	}
 
@@ -2630,8 +2632,8 @@ static void update_crc(struct rar5 *rar5, const uint8_t* p, size_t to_read) {
 
 	if(verify_crc) {
 		/* Don't update CRC32 if the file doesn't have the
-		 * `stored_crc32` info filled in. */
-		if(rar5->file.stored_crc32 > 0) {
+		 * CRC32 flag set. A valid CRC32 may be zero. */
+		if(rar5->file.has_crc32 > 0) {
 			rar5->file.calculated_crc32 =
 				crc32(rar5->file.calculated_crc32, p,
 				    (unsigned int)to_read);
@@ -4105,6 +4107,17 @@ static int do_unstore_file(struct archive_read* a,
 	return ARCHIVE_OK;
 }
 
+/* Return the number of bytes produced for the current entry. Stored and
+ * SERVICE entries bypass the decompression window, so their progress is
+ * tracked by last_unstore_ptr rather than last_write_ptr. */
+static int64_t current_output_ptr(const struct rar5 *rar5)
+{
+	if(rar5->file.service > 0 || rar5->cstate.method == 0)
+		return rar5->cstate.last_unstore_ptr;
+
+	return rar5->cstate.last_write_ptr;
+}
+
 static int do_unpack(struct archive_read* a, struct rar5 *rar5,
     const void** buf, size_t* size, int64_t* offset)
 {
@@ -4186,7 +4199,7 @@ static int verify_checksums(struct archive_read* a) {
 		 * process is already over and we can check if calculated
 		 * checksum (CRC32 or BLAKE2sp) is the same as what is stored
 		 * in the archive. */
-		if(rar5->file.stored_crc32 > 0) {
+		if(rar5->file.has_crc32 > 0) {
 			/* Check CRC32 only when the file contains a CRC32
 			 * value for this file. */
 
@@ -4295,7 +4308,8 @@ static int rar5_read_data(struct archive_read *a, const void **buff,
 		return ARCHIVE_FATAL;
 	}
 
-	if(!rar5->skip_mode && (rar5->cstate.last_write_ptr > rar5->file.unpacked_size)) {
+	if(!rar5->skip_mode &&
+	    (current_output_ptr(rar5) > rar5->file.unpacked_size)) {
 		archive_set_error(&a->archive, ARCHIVE_ERRNO_PROGRAMMER,
 		    "Unpacker has written too many bytes");
 		return ARCHIVE_FATAL;
@@ -4311,12 +4325,20 @@ static int rar5_read_data(struct archive_read *a, const void **buff,
 	}
 
 	ret = do_unpack(a, rar5, buff, size, offset);
-	if(ret != ARCHIVE_OK) {
+	/* Backport libarchive PR #3361: finalize an output-empty final block. */
+	if(ret == ARCHIVE_EOF &&
+		(rar5->file.bytes_remaining != 0 ||
+			current_output_ptr(rar5) != rar5->file.unpacked_size)) {
+		archive_set_error(&a->archive, ARCHIVE_ERRNO_FILE_FORMAT,
+		    "Truncated RAR5 entry data");
+		return ARCHIVE_FATAL;
+	}
+	if(ret < ARCHIVE_OK) {
 		return ret;
 	}
 
 	if(rar5->file.bytes_remaining == 0 &&
-			rar5->cstate.last_write_ptr == rar5->file.unpacked_size)
+			current_output_ptr(rar5) == rar5->file.unpacked_size)
 	{
 		/* If all bytes of current file were processed, run
 		 * finalization.

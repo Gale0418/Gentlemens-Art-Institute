@@ -2,6 +2,8 @@ use std::fs::File;
 use std::io::{BufReader, Read, Seek};
 use std::path::{Path, PathBuf};
 
+use crate::state::SourceRevision;
+
 #[derive(Debug, PartialEq)]
 pub enum ArchiveError {
     FileAccess(String),
@@ -91,6 +93,71 @@ fn supported_image_extension(path: &Path) -> bool {
         .is_some_and(|extension| crate::scanner::IMAGE_EXTENSIONS.contains(&extension.as_str()))
 }
 
+/// Run the RAR5 metadata fast path and retain the already-authorised
+/// descriptor for the authoritative fallback. QuickOpen only returns an
+/// `io::Error` for descriptor/positional-read failures; in that case a
+/// fallback is safe while the descriptor's identity is unchanged. Never
+/// reopen `path`, and include both errors if the fallback also fails.
+fn list_rar_entries_from_file(
+    file: File,
+    path: &Path,
+) -> Result<Vec<crate::archive_reader::ArchiveEntry>, ArchiveError> {
+    let revision = SourceRevision::from_std_metadata(
+        &file
+            .metadata()
+            .map_err(|error| ArchiveError::FileAccess(error.to_string()))?,
+    );
+    let quick_result = match file.try_clone() {
+        Ok(quick_file) => crate::rar_quick_open::list_entries_from_file(&quick_file, path),
+        Err(error) => Err(error),
+    };
+    finish_rar_quick_open(file, path, revision, quick_result)
+}
+
+fn finish_rar_quick_open(
+    file: File,
+    path: &Path,
+    revision: SourceRevision,
+    quick_result: std::io::Result<Option<Vec<crate::archive_reader::ArchiveEntry>>>,
+) -> Result<Vec<crate::archive_reader::ArchiveEntry>, ArchiveError> {
+    let quick_error = match quick_result {
+        Ok(Some(entries)) => return Ok(entries),
+        Ok(None) => None,
+        Err(error) => Some(error),
+    };
+
+    let current_revision = file
+        .metadata()
+        .map(|metadata| SourceRevision::from_std_metadata(&metadata))
+        .map_err(|error| {
+            ArchiveError::FileAccess(format!(
+                "RAR5 QuickOpen failed{}; cannot verify authorized source: {error}",
+                quick_error
+                    .as_ref()
+                    .map(|error| format!(": {error}"))
+                    .unwrap_or_default()
+            ))
+        })?;
+    if current_revision != revision {
+        return Err(ArchiveError::FileAccess(format!(
+            "RAR5 QuickOpen failed{}; authorized source changed before fallback",
+            quick_error
+                .as_ref()
+                .map(|error| format!(": {error}"))
+                .unwrap_or_default()
+        )));
+    }
+
+    crate::archive_reader::list_entries_from_file(file, path).map_err(|fallback_error| {
+        match quick_error {
+            Some(quick_error) => ArchiveError::InvalidArchive(format!(
+                "RAR5 QuickOpen failed: {quick_error}; fallback parser failed: {fallback_error}"
+            )),
+            None => ArchiveError::InvalidArchive(fallback_error.to_string()),
+        }
+    })
+}
+
 pub fn get_folder_images(folder_path: &Path) -> Vec<PathBuf> {
     let mut images = Vec::new();
     if let Ok(entries) = std::fs::read_dir(folder_path) {
@@ -169,10 +236,18 @@ fn get_archive_images_with_file(
         .to_ascii_lowercase();
     if matches!(extension.as_str(), "7z" | "cb7" | "rar" | "cbr") {
         let entries = match safe_file {
-            Some(file) => crate::archive_reader::list_entries_from_file(file, zip_path),
-            None => crate::archive_reader::list_entries(zip_path),
-        }
-        .map_err(|error| ArchiveError::InvalidArchive(error.to_string()))?;
+            Some(file) => {
+                let is_rar = matches!(extension.as_str(), "rar" | "cbr");
+                if is_rar {
+                    list_rar_entries_from_file(file, zip_path)
+                } else {
+                    crate::archive_reader::list_entries_from_file(file, zip_path)
+                        .map_err(|error| ArchiveError::InvalidArchive(error.to_string()))
+                }
+            }
+            None => crate::archive_reader::list_entries(zip_path)
+                .map_err(|error| ArchiveError::InvalidArchive(error.to_string())),
+        }?;
         let mut names = entries
             .into_iter()
             .filter(|entry| !entry.is_directory && entry.size > 0)
@@ -257,6 +332,107 @@ mod tests {
                 .unwrap_or_default()
                 .as_nanos()
         ))
+    }
+
+    fn temp_rar_path(name: &str) -> PathBuf {
+        std::env::temp_dir().join(format!(
+            "gai-{name}-{}-{}.rar",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap_or_default()
+                .as_nanos()
+        ))
+    }
+
+    fn decode_uu_fixture(input: &[u8]) -> Vec<u8> {
+        let mut output = Vec::new();
+        for line in input.split(|byte| *byte == b'\n') {
+            let line = line.strip_suffix(&[b'\r']).unwrap_or(line);
+            if line.is_empty() || line == b"end" || line == b"`" || line.starts_with(b"begin ") {
+                continue;
+            }
+            let expected = usize::from((line[0].wrapping_sub(0x20)) & 0x3f);
+            let encoded = &line[1..];
+            let mut decoded = Vec::with_capacity((encoded.len() / 4) * 3);
+            for chunk in encoded.chunks(4) {
+                let mut values = [0_u8; 4];
+                for (index, byte) in chunk.iter().enumerate() {
+                    values[index] = byte.wrapping_sub(0x20) & 0x3f;
+                }
+                decoded.extend([
+                    (values[0] << 2) | (values[1] >> 4),
+                    (values[1] << 4) | (values[2] >> 2),
+                    (values[2] << 6) | values[3],
+                ]);
+            }
+            output.extend_from_slice(&decoded[..expected.min(decoded.len())]);
+        }
+        output
+    }
+
+    #[test]
+    fn quick_open_io_error_falls_back_on_same_authorized_descriptor() {
+        let path = temp_rar_path("quick-open-io-fallback");
+        let bytes = decode_uu_fixture(include_bytes!(
+            "../vendor/libarchive2-sys/libarchive/libarchive/test/test_read_format_rar5_stored.rar.uu"
+        ));
+        std::fs::write(&path, bytes).unwrap();
+
+        let file = File::open(&path).unwrap();
+        let revision = SourceRevision::from_std_metadata(&file.metadata().unwrap());
+        let entries = finish_rar_quick_open(
+            file,
+            &path,
+            revision,
+            Err(std::io::Error::new(
+                std::io::ErrorKind::Interrupted,
+                "injected positional read failure",
+            )),
+        )
+        .unwrap();
+        assert_eq!(
+            entries
+                .iter()
+                .map(|entry| entry.name.as_str())
+                .collect::<Vec<_>>(),
+            ["helloworld.txt"]
+        );
+        std::fs::remove_file(path).unwrap();
+    }
+
+    #[test]
+    fn quick_open_error_does_not_fallback_after_source_revision_changes() {
+        let path = temp_zip_path("quick-open-source-changed");
+        let file = std::fs::File::create(&path).unwrap();
+        let mut writer = zip::ZipWriter::new(file);
+        writer
+            .start_file("page.jpg", zip::write::FileOptions::default())
+            .unwrap();
+        writer.write_all(b"image").unwrap();
+        writer.finish().unwrap();
+
+        let file = std::fs::OpenOptions::new()
+            .read(true)
+            .write(true)
+            .open(&path)
+            .unwrap();
+        let revision = SourceRevision::from_std_metadata(&file.metadata().unwrap());
+        file.set_len(revision.len + 1).unwrap();
+        let error = finish_rar_quick_open(
+            file,
+            &path,
+            revision,
+            Err(std::io::Error::new(
+                std::io::ErrorKind::Other,
+                "injected positional read failure",
+            )),
+        )
+        .unwrap_err();
+        assert!(
+            matches!(error, ArchiveError::FileAccess(message) if message.contains("injected positional read failure") && message.contains("source changed"))
+        );
+        std::fs::remove_file(path).unwrap();
     }
 
     #[test]

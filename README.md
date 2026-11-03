@@ -8,7 +8,7 @@
 
 已取得測試版時，先試讀內建原創風景，再加入自己的收藏。內建圖集供操作體驗；App 不提供漫畫下載或內容庫。NAS 離線時會保留已整理紀錄，原始頁面仍需來源可讀；進度保存在當前裝置，未提供跨裝置自動同步。
 
-**發布狀態（2026-11-03）：iOS 1.0.2 (63) 與 Mac 1.0.2 (59) 均為 `READY_FOR_DISTRIBUTION`。** iOS 1.0.3 (66) 已送交 Apple，最近回讀狀態為 `WAITING_FOR_REVIEW`，尚未上架；包含開書優先修正的 build 67 已上傳並通過處理，尚未替換送審。Mac 1.0.3 (62) 曾因輔助程式沙盒簽署遭 Apple 拒絕；修正後的通用版 build 64 已上傳並通過處理，尚未送審。Mac 本機 build 64 已確認原有書庫、千戀萬花封面與翻頁；iPad 已安裝 build 67，背景掃描期間快速開書及頁碼消失時的控制列動畫正在實機驗證。第59版商店圖組與 Gemini 繁中／英文／日文介紹的變更紀錄見 [第59版發行紀錄](docs/release/build59-store-refresh-2026-10-17.md)。完整實機 TAG、VoiceOver 及 StoreKit 交易矩陣仍未完成；上述測試不代表這些驗收已通過。
+**發布狀態（2026-11-03）：iOS 1.0.3 (66) 與 Mac 1.0.2 (59) 均為 `READY_FOR_DISTRIBUTION`。** iOS 1.0.3 (67) 已上傳並通過處理，但該版本已發行，後續修正需使用新的 iOS 版本號提交。Mac 1.0.3 (62) 曾因輔助程式沙盒簽署遭 Apple 拒絕；修正後的通用版 build 64 已上傳並通過處理，尚未送審。Mac 本機 build 64 已確認原有書庫、千戀萬花封面與翻頁；iPad 已安裝 build 67，實測翻頁後頁碼自動消失且狀態列未跳動，但背景掃描期間開啟指定未讀 RAR 約需 21.57 秒，正在修正並等待新版實機驗證。第59版商店圖組與 Gemini 繁中／英文／日文介紹的變更紀錄見 [第59版發行紀錄](docs/release/build59-store-refresh-2026-10-17.md)。完整實機 TAG、VoiceOver 及 StoreKit 交易矩陣仍未完成；上述測試不代表這些驗收已通過。
 
 [隱私政策](#隱私政策) · [支援與使用說明](SUPPORT.md)
 
@@ -27,7 +27,7 @@
 - SQLite catalog 是 metadata / location / progress 的主要本機 authority；來源離線不等於資料刪除。
 - 本機、iOS security-scoped folder 與單一 SMB/NAS 是獨立來源；其中一個來源離線不應清除其他來源或 catalog 紀錄。
 - 內建全年齡原創 demo 可在乾淨安裝、沒有 NAS／帳號／第三方下載的情況下直接驗證核心 reader。
-- 2026-11-02：商店 iOS 1.0.2 (63) 與 Mac 1.0.2 (59) 已 `READY_FOR_DISTRIBUTION`；iOS 1.0.3 (66) 已送審、等待 Apple 審查。Mac build 62 的上傳因輔助程式沙盒簽署遭 Apple 拒絕，修正後的 build 63 已建置完成；因後續開書效能回報，暫緩上傳並準備新版。iPad 開發版 1.0.3 (66) 已實機驗證橫向按鈕、漫畫翻頁與頁碼自動隱藏；完整 TAG、VoiceOver、StoreKit 交易矩陣仍未完成。
+- 歷史紀錄（2026-11-02，當時狀態）：商店 iOS 1.0.2 (63) 與 Mac 1.0.2 (59) 已 `READY_FOR_DISTRIBUTION`；iOS 1.0.3 (66) 已送審、等待 Apple 審查。Mac build 62 的上傳因輔助程式沙盒簽署遭 Apple 拒絕，修正後的 build 63 已建置完成；因後續開書效能回報，暫緩上傳並準備新版。iPad 開發版 1.0.3 (66) 已實機驗證橫向按鈕、漫畫翻頁與頁碼自動隱藏；完整 TAG、VoiceOver、StoreKit 交易矩陣仍未完成。
 - 歷史紀錄（2026-10-03）：Mac `1.0` 已 `READY_FOR_DISTRIBUTION`；iOS `1.0` 與 Mac `1.0.1` 的第57版已撤回，第58版兩平台已正式送審。本機 Mac／iPad 當時為第56版；TAG 探索的 Mac 證據見 [探索體驗報告](docs/audits/2026-10-03-discovery-experience.md)。
 - `src-tauri/vendor/wry/` 是**刻意保留的 iOS WebKit startup patch**，目前仍由 Cargo `[patch.crates-io]` 使用；不要因為它看起來像 vendor 目錄就清掉。
 
@@ -77,6 +77,8 @@ G.A.I 是讀取使用者自行提供內容的漫畫閱讀工具，不提供漫�
 
 前端只保留有界的鄰近頁工作集；Rust 壓縮頁快取依裝置記憶體、process 可用記憶體與 OS memory pressure 動態調整，並以實際封存檔 entry bytes 決定 nearest-first page window。背景 preload 單頁最多 64 MiB，與正式 protocol 的單頁 serving safety limit 一致。完整契約見 [`docs/E6-E8-DECISIONS.md`](docs/E6-E8-DECISIONS.md)。
 
+RAR5 若帶有完整且可驗證的 QuickOpen 索引，會核對索引與原始標頭後加速建立頁面清單；索引不完整、格式不支援或檢查未通過時，回退既有讀取器。實際開頁時間仍受儲存裝置、檔案提供者與壓縮方式影響。內建 libarchive 的 RAR5 結尾處理帶有上游修補及截斷資料保護；選用回歸測試的外部合成測試檔來源記錄於測試程式。
+
 ### Source lifecycle
 
 - 進入目錄時只即時掃描該層的漫畫檔與子資料夾；全域掃描、收藏與最近閱讀各自維持背景優先通道。子資料夾可先導航，點入後再掃下一層。
@@ -84,6 +86,7 @@ G.A.I 是讀取使用者自行提供內容的漫畫閱讀工具，不提供漫�
 - 未保存進度提示會列出可辨識的作品與頁碼；舊紀錄若缺少來源，只顯示可能的候選並標明尚未確認，不會自動套用到其他書庫。
 - 書架依可用寬度重新排列操作與篩選項；左右側欄同時展開時，按鈕文字不再因空間不足而逐字換行。
 - Local source ID 使用**使用者已配置的 root 字串**衍生，刻意保持來源拔除後仍可重現；不要在每次掃描時動態 canonicalize，否則同一 removable/NAS-backed source 可能在 online/offline 狀態得到不同 ID。若未來要改成 canonical identity，必須先把 resolved identity 持久化再做 migration。
+- 檔案修訂檢查使用大小、時間戳與可取得的檔案身分，不會為每次翻頁完整讀取大檔。若檔案系統只提供秒級時間戳，同一秒內對相同大小的檔案原位改寫，可能暫時無法辨識變更。
 - iOS external folder 使用 security-scoped bookmark；symlink 不可逃出使用者選擇的 root。
 - 專案一次只連線一組 SMB/NAS；不同主機、分享目錄與帳號使用各自的來源識別。舊版未記錄端點的 SMB 資料會保留，無法確認歸屬時不自動套用至新連線。
 - 外部來源授權清單損壞時先保留原有目錄資料；使用者重新選取資料夾並確認後才備份損壞清單、重建授權。其他來源需重新加入。

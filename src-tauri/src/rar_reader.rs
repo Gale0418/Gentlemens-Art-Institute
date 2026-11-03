@@ -705,6 +705,131 @@ mod tests {
         assert!(matches!(error, ArchiveError::ReadLimitExceeded { .. }));
     }
 
+    // Opt-in fixture: do not download automatically.  The synthetic archive was
+    // introduced by upstream commit 7c685cd, reduced by 9385e4b, and finalized
+    // in 6d0ee5a:
+    // https://github.com/libarchive/libarchive/commit/6d0ee5a868d4428e419a2ec3fb41bc24ae37a69d
+    // https://raw.githubusercontent.com/libarchive/libarchive/6d0ee5a868d4428e419a2ec3fb41bc24ae37a69d/libarchive/test/test_read_format_rar5_last_block.rar.uu
+    // Decoded RAR SHA-256: 6d4abc7d924c06ec1c8bcc1d6f9f0ebe27585f8e8d2f8f30d09844ba95a8cb0b
+    #[test]
+    #[ignore = "requires a locally acquired upstream RAR5 final-block fixture"]
+    fn rar5_final_block_fixture_reads_complete_entry_and_crc() {
+        let path = std::env::var_os("GAI_RAR5_FINAL_BLOCK_FIXTURE")
+            .map(std::path::PathBuf::from)
+            .filter(|path| !path.as_os_str().is_empty())
+            .unwrap_or_else(|| {
+                panic!(
+                    "GAI_RAR5_FINAL_BLOCK_FIXTURE must point to a locally acquired test_read_format_rar5_last_block.rar"
+                )
+            });
+        let bytes = read_entry(&path, "synthetic_payload.bin", 16_635)
+            .unwrap_or_else(|error| panic!("failed to read {path:?}: {error:?}"));
+        assert_eq!(bytes.len(), 16_635);
+        assert_eq!(rar_crc32(&bytes), 0x7a5e_9eaf);
+    }
+
+    // This test must run under an outer deadline: before the RAR5 truncation
+    // guard, libarchive can retry an ARCHIVE_OK/zero-byte read indefinitely.
+    #[test]
+    #[ignore = "requires a locally acquired upstream RAR5 final-block fixture"]
+    fn rar5_truncated_final_block_is_rejected() {
+        let source = std::env::var_os("GAI_RAR5_FINAL_BLOCK_FIXTURE")
+            .map(std::path::PathBuf::from)
+            .filter(|path| !path.as_os_str().is_empty())
+            .unwrap_or_else(|| {
+                panic!(
+                    "GAI_RAR5_FINAL_BLOCK_FIXTURE must point to a locally acquired test_read_format_rar5_last_block.rar"
+                )
+            });
+        let mut truncated = std::fs::read(&source)
+            .unwrap_or_else(|error| panic!("failed to read {source:?}: {error}"));
+        assert!(truncated.len() >= 16_500);
+        truncated.truncate(16_500);
+        let path = std::env::temp_dir().join(format!(
+            "gai-rar5-truncated-final-block-{}-{}.rar",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        std::fs::write(&path, truncated).unwrap();
+        let result = read_entry(&path, "synthetic_payload.bin", 16_635);
+        let _ = std::fs::remove_file(&path);
+
+        match result {
+            Err(ArchiveError::Corrupt(message)) => {
+                assert!(
+                    message.contains("Truncated RAR5 entry data"),
+                    "unexpected corruption error: {message}"
+                );
+            }
+            Err(error) => panic!("unexpected archive error: {error:?}"),
+            Ok(bytes) => panic!(
+                "truncated RAR5 entry was accepted as {} bytes",
+                bytes.len()
+            ),
+        }
+    }
+
+    #[test]
+    fn rar5_stored_fixture_reads_expected_entry() {
+        let encoded = include_str!(
+            "../vendor/libarchive2-sys/libarchive/libarchive/test/test_read_format_rar5_stored.rar.uu"
+        );
+        let path = std::env::temp_dir().join(format!(
+            "gai-rar5-stored-{}-{}.rar",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        std::fs::write(&path, decode_uu_fixture(encoded)).unwrap();
+
+        let result = read_entry(&path, "helloworld.txt", 64);
+        let _ = std::fs::remove_file(&path);
+        let bytes = result.expect("RAR5 stored fixture should be readable");
+        assert_eq!(bytes, b"hello libarchive test suite!\n");
+    }
+
+    #[test]
+    fn rar5_crc32_flag_with_zero_value_is_rejected() {
+        let payload = b"hello libarchive test suite!\n";
+        assert_ne!(rar_crc32(payload), 0);
+
+        let encoded = include_str!(
+            "../vendor/libarchive2-sys/libarchive/libarchive/test/test_read_format_rar5_stored.rar.uu"
+        );
+        let mut archive = decode_uu_fixture(encoded);
+        rewrite_rar5_file_crc_to_zero(&mut archive);
+        let path = std::env::temp_dir().join(format!(
+            "gai-rar5-zero-crc-{}-{}.rar",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        std::fs::write(&path, archive).unwrap();
+
+        let result = read_entry(&path, "helloworld.txt", payload.len());
+        let _ = std::fs::remove_file(&path);
+        match result {
+            Err(ArchiveError::Corrupt(message)) => {
+                assert!(
+                    message.contains("Checksum error: CRC32"),
+                    "unexpected corruption error: {message}"
+                );
+            }
+            Err(error) => panic!("unexpected archive error: {error:?}"),
+            Ok(bytes) => panic!(
+                "RAR5 entry with zero CRC was accepted as {} bytes",
+                bytes.len()
+            ),
+        }
+    }
+
     #[test]
     fn real_rar_fixture_is_walked_without_finding_unsupported_images() {
         let encoded = include_str!("../vendor/libarchive2-sys/libarchive/libarchive/test/test_read_format_rar5_multiple_files.rar.uu");
@@ -746,5 +871,58 @@ mod tests {
             output.extend_from_slice(&decoded[..expected.min(decoded.len())]);
         }
         output
+    }
+
+    fn rewrite_rar5_file_crc_to_zero(bytes: &mut [u8]) {
+        let mut block_start = 8;
+        while block_start + 5 <= bytes.len() {
+            let (header_size, size_len) =
+                read_rar5_varint(bytes, block_start + 4).expect("RAR5 block header size");
+            let body_start = block_start + 4 + size_len;
+            let header_end = body_start + header_size;
+            assert!(
+                header_end <= bytes.len(),
+                "RAR5 block header exceeds fixture"
+            );
+            let (header_type, type_len) =
+                read_rar5_varint(bytes, body_start).expect("RAR5 block type");
+            let (header_flags, flags_len) =
+                read_rar5_varint(bytes, body_start + type_len).expect("RAR5 block flags");
+            let mut cursor = body_start + type_len + flags_len;
+            if header_flags & 0x01 != 0 {
+                let (_, field_len) = read_rar5_varint(bytes, cursor).expect("RAR5 extra-data size");
+                cursor += field_len;
+            }
+            let data_size = if header_flags & 0x02 != 0 {
+                let (size, field_len) = read_rar5_varint(bytes, cursor).expect("RAR5 data size");
+                cursor += field_len;
+                size
+            } else {
+                0
+            };
+
+            if header_type == 2 {
+                let (file_flags, field_len) =
+                    read_rar5_varint(bytes, cursor).expect("RAR5 file flags");
+                cursor += field_len;
+                let (_, field_len) = read_rar5_varint(bytes, cursor).expect("RAR5 unpacked size");
+                cursor += field_len;
+                let (_, field_len) = read_rar5_varint(bytes, cursor).expect("RAR5 file attributes");
+                cursor += field_len;
+                if file_flags & 0x02 != 0 {
+                    cursor += 4;
+                }
+                if file_flags & 0x04 != 0 {
+                    assert!(cursor + 4 <= header_end, "RAR5 CRC exceeds file header");
+                    bytes[cursor..cursor + 4].fill(0);
+                    let header_crc = rar_crc32(&bytes[block_start + 4..header_end]);
+                    bytes[block_start..block_start + 4].copy_from_slice(&header_crc.to_le_bytes());
+                    return;
+                }
+            }
+
+            block_start = header_end + data_size;
+        }
+        panic!("stored RAR5 fixture has no FILE_CRC32 field");
     }
 }

@@ -1,7 +1,7 @@
 [package]
 name = "gai"
 default-run = "gai"
-version = "1.0.0"
+version = "1.0.4"
 description = "A Tauri App"
 authors = ["you"]
 license-file = "../LICENSE"

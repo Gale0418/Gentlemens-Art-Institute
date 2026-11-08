@@ -348,7 +348,7 @@ mod tests {
     fn decode_uu_fixture(input: &[u8]) -> Vec<u8> {
         let mut output = Vec::new();
         for line in input.split(|byte| *byte == b'\n') {
-            let line = line.strip_suffix(&[b'\r']).unwrap_or(line);
+            let line = line.strip_suffix(b"\r").unwrap_or(line);
             if line.is_empty() || line == b"end" || line == b"`" || line.starts_with(b"begin ") {
                 continue;
             }
@@ -423,10 +423,7 @@ mod tests {
             file,
             &path,
             revision,
-            Err(std::io::Error::new(
-                std::io::ErrorKind::Other,
-                "injected positional read failure",
-            )),
+            Err(std::io::Error::other("injected positional read failure")),
         )
         .unwrap_err();
         assert!(

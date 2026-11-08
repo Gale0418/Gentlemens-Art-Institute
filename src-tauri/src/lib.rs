@@ -58,6 +58,111 @@ fn checked_smb_download_size(
         .ok_or_else(|| "SMB_DOWNLOAD_SIZE_MISMATCH".into())
 }
 
+fn smb_recovery_content_matches(expected: [u8; 32], observed: [u8; 32]) -> bool {
+    expected == observed
+}
+
+fn smb_stat_stable_during_read(before: &smb2::FileInfo, after: &smb2::FileInfo) -> bool {
+    !before.is_directory
+        && !after.is_directory
+        && before.size == after.size
+        && before.created == after.created
+        && before.modified == after.modified
+}
+
+async fn smb_remote_content_hash(
+    config: &state::SmbConfig,
+    relative_path: &str,
+) -> Result<(u64, [u8; 32]), String> {
+    let relative = Path::new(relative_path);
+    if relative.as_os_str().is_empty()
+        || relative.is_absolute()
+        || relative.components().any(|component| {
+            matches!(
+                component,
+                std::path::Component::ParentDir
+                    | std::path::Component::RootDir
+                    | std::path::Component::Prefix(_)
+            )
+        })
+    {
+        return Err("SMB 漫畫路徑不安全，已拒絕驗證進度來源".into());
+    }
+    let addr = format!("{}:445", config.host);
+    let username = config.username.as_deref().unwrap_or("guest");
+    let password = config.password.as_deref().unwrap_or("");
+    let mut client = tokio::time::timeout(
+        std::time::Duration::from_secs(10),
+        smb2::connect(&addr, username, password),
+    )
+    .await
+    .map_err(|_| "SMB 進度來源連線逾時".to_string())?
+    .map_err(|error| format!("SMB 進度來源連線失敗: {error}"))?;
+    let mut tree = tokio::time::timeout(
+        std::time::Duration::from_secs(10),
+        client.connect_share(&config.share),
+    )
+    .await
+    .map_err(|_| "SMB 進度來源共用資料夾連線逾時".to_string())?
+    .map_err(|error| format!("SMB 進度來源共用資料夾連線失敗: {error}"))?;
+    let smb_path = relative_path.replace('/', "\\");
+    let before = tokio::time::timeout(
+        std::time::Duration::from_secs(30),
+        client.stat(&mut tree, &smb_path),
+    )
+    .await
+    .map_err(|_| "SMB 進度來源驗證逾時".to_string())?
+    .map_err(|error| format!("SMB 進度來源驗證失敗: {error}"))?;
+    if before.is_directory {
+        return Err("SMB 進度來源不是檔案".into());
+    }
+    let mut download = tokio::time::timeout(
+        std::time::Duration::from_secs(30),
+        client.download(&tree, &smb_path),
+    )
+    .await
+    .map_err(|_| "SMB 進度來源讀取逾時".to_string())?
+    .map_err(|error| format!("SMB 進度來源讀取失敗: {error:?}"))?;
+    let declared_bytes = download.size();
+    if declared_bytes == 0
+        || declared_bytes > archive_reader::MAX_ARCHIVE_BYTES
+        || declared_bytes != before.size
+    {
+        return Err("SMB 進度來源大小無效".into());
+    }
+    let mut received = 0_u64;
+    let mut hasher = blake3::Hasher::new();
+    loop {
+        let next = tokio::time::timeout(std::time::Duration::from_secs(30), download.next_chunk())
+            .await
+            .map_err(|_| "SMB 進度來源傳輸逾時".to_string())?;
+        let Some(chunk) = next else { break };
+        let bytes = chunk.map_err(|error| format!("SMB 進度來源傳輸失敗: {error:?}"))?;
+        received = checked_smb_download_size(
+            received,
+            bytes.len(),
+            declared_bytes,
+            archive_reader::MAX_ARCHIVE_BYTES,
+        )?;
+        hasher.update(&bytes);
+    }
+    if received != declared_bytes {
+        return Err("SMB 進度來源傳輸長度不符".into());
+    }
+    drop(download);
+    let after = tokio::time::timeout(
+        std::time::Duration::from_secs(30),
+        client.stat(&mut tree, &smb_path),
+    )
+    .await
+    .map_err(|_| "SMB 進度來源二次驗證逾時".to_string())?
+    .map_err(|error| format!("SMB 進度來源二次驗證失敗: {error}"))?;
+    if !smb_stat_stable_during_read(&before, &after) {
+        return Err("SMB 進度來源在驗證期間變更".into());
+    }
+    Ok((declared_bytes, *hasher.finalize().as_bytes()))
+}
+
 async fn smb_available_space(path: std::path::PathBuf) -> Result<u64, String> {
     tokio::task::spawn_blocking(move || fs4::available_space(path))
         .await
@@ -1320,6 +1425,23 @@ async fn scan_priority_library(
     scanner::scan_priority_library(state.inner().clone(), app_handle, favorite_ids).await
 }
 
+async fn optional_directory_source_revision(
+    root: &cap_std::fs::Dir,
+    relative: &Path,
+) -> Option<state::SourceRevision> {
+    let metadata_root = root.try_clone().ok()?;
+    let metadata_relative = relative.to_path_buf();
+    tauri::async_runtime::spawn_blocking(move || {
+        metadata_root
+            .metadata(&metadata_relative)
+            .ok()
+            .map(|metadata| state::SourceRevision::from_cap_metadata(&metadata))
+    })
+    .await
+    .ok()
+    .flatten()
+}
+
 #[tauri::command]
 async fn open_comic(
     id: String,
@@ -1507,6 +1629,7 @@ async fn open_comic(
     let full_path: PathBuf;
     let is_dir: bool;
     let mut opened_source_revision: Option<state::SourceRevision> = None;
+    let mut opened_smb_content_hash: Option<[u8; 32]> = None;
     // Every local, external, offline and SMB open keeps the capability root
     // used for discovery alive through page enumeration.  Later protocol
     // reads independently reacquire the same root and remain descriptor based.
@@ -1610,7 +1733,7 @@ async fn open_comic(
                     .unwrap_or("download"),
                 std::process::id()
             ));
-            let download_result: Result<(), String> = async {
+            let download_result: Result<[u8; 32], String> = async {
                 use tokio::io::AsyncWriteExt;
 
                 let mut download = tokio::time::timeout(
@@ -1627,6 +1750,7 @@ async fn open_comic(
                     smb_available_space(temp_dir.clone()).await?,
                 )?;
                 let mut received = 0_u64;
+                let mut hasher = blake3::Hasher::new();
                 let mut next_space_check = SMB_SPACE_CHECK_INTERVAL_BYTES;
                 let partial_file = temp_root
                     .open_with(
@@ -1652,6 +1776,7 @@ async fn open_comic(
                     let bytes = chunk.map_err(|error| format!("SMB 傳輸錯誤: {error:?}"))?;
                     let next_received =
                         checked_smb_download_size(received, bytes.len(), declared_bytes, budget)?;
+                    hasher.update(&bytes);
                     if next_received >= next_space_check {
                         let available = smb_available_space(temp_dir.clone()).await?;
                         if available.saturating_sub(SMB_DISK_RESERVE_BYTES) < bytes.len() as u64 {
@@ -1679,14 +1804,17 @@ async fn open_comic(
                     &partial_path,
                     relative,
                 )?;
-                Ok(())
+                Ok(*hasher.finalize().as_bytes())
             }
             .await;
             let _ = app_handle.emit("smb-download-end", serde_json::json!({"id": id}));
-            if let Err(error) = download_result {
-                let _ = temp_root.remove_file(&partial_path);
-                return Err(error);
-            }
+            opened_smb_content_hash = match download_result {
+                Ok(hash) => Some(hash),
+                Err(error) => {
+                    let _ = temp_root.remove_file(&partial_path);
+                    return Err(error);
+                }
+            };
             println!("✅ SMB 下載完成");
             authorized_root = Some(temp_root);
             authorized_relative = Some(relative.to_path_buf());
@@ -1807,6 +1935,7 @@ async fn open_comic(
         let relative = authorized_relative
             .as_deref()
             .ok_or_else(|| "漫畫缺少授權路徑".to_string())?;
+        opened_source_revision = optional_directory_source_revision(root, relative).await;
         let folder = root
             .open_dir(relative)
             .map_err(|error| format!("無法開啟漫畫資料夾: {error}"))?;
@@ -1869,34 +1998,84 @@ async fn open_comic(
 
     let title = comic_info.title.clone();
     let r#type = comic_info.r#type.clone();
-    let progress = comic_info.progress.clone();
+    let verified_page_count = opened_files.len();
 
-    let preload_generation = {
-        let _lifecycle = state.comic_lifecycle.lock().unwrap();
-        if !reader_generation_is_current(state.inner(), reader_generation) {
-            return Err("開啟漫畫已取消".into());
-        }
-        state
-            .opened_comic_files
-            .write()
-            .unwrap()
-            .insert(id.clone(), opened_files);
-        state.ram_cache_pool.lock().unwrap().clear();
-        state.ram_cache_revisions.lock().unwrap().clear();
-        let mut revisions = state.opened_comic_revisions.write().unwrap();
-        revisions.remove(&id);
-        if let Some(revision) = opened_source_revision {
-            revisions.insert(id.clone(), revision);
-        }
-        *state.active_comic_id.lock().unwrap() = Some(id.clone());
-        *state.active_comic_source_id.lock().unwrap() = Some(comic_info.source_id.clone());
-        *state.pending_open_id.lock().unwrap() = None;
-        *state.pending_open_source_id.lock().unwrap() = None;
-        state
-            .preload_generation
-            .fetch_add(1, std::sync::atomic::Ordering::SeqCst)
-            + 1
-    };
+    let progress_identity = format!("{}\0{}", comic_info.source_id, id);
+    let progress_state = state.inner().clone();
+    let progress_comic = comic_info.clone();
+    let (preload_generation, recovery_token, progress) = with_comic_progress_lifecycle_prepared(
+        state.inner(),
+        &progress_identity,
+        || async move {
+            open_comic_progress_snapshot(
+                &progress_state,
+                &progress_comic,
+                verified_page_count,
+                is_dir,
+            )
+            .await
+        },
+        |progress| {
+            if !reader_generation_is_current(state.inner(), reader_generation) {
+                return Err(String::from("開啟漫畫已取消"));
+            }
+            let recovery_token = state
+                .inner()
+                .remember_progress_recovery_evidence_with_smb_hash(
+                    &id,
+                    &comic_info.source_id,
+                    &comic_info.relative_path,
+                    verified_page_count,
+                    reader_generation,
+                    opened_source_revision.clone(),
+                    opened_smb_content_hash,
+                );
+            // A directory's metadata does not prove that its enumerated page
+            // set stayed unchanged, so only archive files receive cold proofs.
+            let recovery_token = if !is_dir {
+                recovery_token.and_then(|token| {
+                    let revision = opened_source_revision.as_ref()?;
+                    let store = state.inner().catalog.read().ok()?.clone()?;
+                    store
+                        .register_progress_recovery_proof(catalog::ProgressRecoveryProof {
+                            identifier: &id,
+                            source_id: &comic_info.source_id,
+                            relative_path: &comic_info.relative_path,
+                            token: &token,
+                            total_pages: verified_page_count,
+                            revision,
+                            smb_content_hash: opened_smb_content_hash,
+                        })
+                        .ok()?;
+                    Some(token)
+                })
+            } else {
+                None
+            };
+            state
+                .opened_comic_files
+                .write()
+                .unwrap()
+                .insert(id.clone(), opened_files);
+            state.ram_cache_pool.lock().unwrap().clear();
+            state.ram_cache_revisions.lock().unwrap().clear();
+            let mut revisions = state.opened_comic_revisions.write().unwrap();
+            revisions.remove(&id);
+            if let Some(revision) = opened_source_revision.as_ref() {
+                revisions.insert(id.clone(), revision.clone());
+            }
+            *state.active_comic_id.lock().unwrap() = Some(id.clone());
+            *state.active_comic_source_id.lock().unwrap() = Some(comic_info.source_id.clone());
+            *state.pending_open_id.lock().unwrap() = None;
+            *state.pending_open_source_id.lock().unwrap() = None;
+            let preload_generation = state
+                .preload_generation
+                .fetch_add(1, std::sync::atomic::Ordering::SeqCst)
+                + 1;
+            Ok((preload_generation, recovery_token, progress))
+        },
+    )
+    .await?;
     let state_clone = state.inner().clone();
     let id_clone = id.clone();
     let source_id_clone = comic_info.source_id.clone();
@@ -1912,6 +2091,25 @@ async fn open_comic(
         .await;
     });
 
+    let floor_state = state.inner().clone();
+    let floor_id = id.clone();
+    let floor_source_id = comic_info.source_id.clone();
+    let floor_relative_path = comic_info.relative_path.clone();
+    let sequence_floor = tokio::task::spawn_blocking(move || {
+        floor_state
+            .catalog
+            .read()
+            .ok()
+            .and_then(|store| store.clone())
+            .and_then(|store| {
+                store
+                    .progress_intent_floor(&floor_id, &floor_source_id, &floor_relative_path)
+                    .ok()
+            })
+    })
+    .await
+    .map_err(|error| format!("讀取閱讀意圖序號底線背景工作失敗：{error}"))?
+    .unwrap_or(0);
     Ok(serde_json::json!({
         "id": id,
         "sourceId": comic_info.source_id,
@@ -1920,6 +2118,8 @@ async fn open_comic(
         "isDir": is_dir,
         "pages": pages,
         "progress": progress,
+        "recoveryToken": recovery_token,
+        "sequenceFloor": sequence_floor,
         "preloadGeneration": preload_generation
     }))
 }
@@ -2173,6 +2373,7 @@ async fn set_config(
             .document_dir()
             .map_err(|error| error.to_string())?,
     );
+    let _source_authorization = state.source_authorization_lifecycle.write().await;
     let _scan_lifecycle = state.scan_lifecycle.lock().await;
     let current_scan_dir = state.scan_dir.read().unwrap().clone();
     if current_scan_dir == scan_dir {
@@ -2185,6 +2386,9 @@ async fn set_config(
         .await
         .map_err(|error| format!("漫畫目錄設定工作失敗：{error}"))??;
 
+    state
+        .source_authorization_generation
+        .fetch_add(1, std::sync::atomic::Ordering::AcqRel);
     *state.scan_dir.write().unwrap() = scan_dir.clone();
     state.comics.lock().await.clear();
     state.invalidate_reader_cache();
@@ -2211,7 +2415,11 @@ async fn set_smb_config(
         commerce::require_pro(&app_handle).await?;
     }
     let data = validate_smb_config(data)?;
+    let _source_authorization = state.source_authorization_lifecycle.write().await;
     let _scan_lifecycle = state.scan_lifecycle.lock().await;
+    state
+        .source_authorization_generation
+        .fetch_add(1, std::sync::atomic::Ordering::AcqRel);
     *state.smb_config.write().unwrap() = data;
     state.comics.lock().await.clear();
     state.invalidate_reader_cache();
@@ -2355,6 +2563,14 @@ struct SaveProgressRequest {
     /// newer page after it was delayed by the runtime.
     #[serde(default)]
     sequence: Option<u64>,
+    /// Stable user-intent order. Retries may get a fresh `sequence` while
+    /// retaining this value so an old journal cannot impersonate new work.
+    #[serde(default)]
+    intent_sequence: Option<u64>,
+    /// Native token returned by `open_comic`, persisted with the UI journal so
+    /// an old journal cannot borrow evidence from a later app runtime/open.
+    #[serde(default)]
+    recovery_token: Option<String>,
 }
 
 fn ai_status(
@@ -3346,6 +3562,7 @@ async fn update_bookmarks(
     // Serialize disk persistence with the matching in-memory update. Otherwise
     // an older request can finish writing after a newer request has applied.
     let _bookmark_lifecycle = state.bookmark_lifecycle.lock().await;
+    let _source_authorization = state.source_authorization_lifecycle.write().await;
     let data = if restore_from_saved.unwrap_or(false) {
         let settings_dir = app_handle
             .path()
@@ -3479,6 +3696,9 @@ async fn update_bookmarks(
                 || selected_source_ids.contains(&comic.source_id)
         });
         let removed_comics = comics.len() != previous_comic_count;
+        state
+            .source_authorization_generation
+            .fetch_add(1, std::sync::atomic::Ordering::AcqRel);
         *state.external_bookmarks.write().unwrap() = data;
         state
             .external_bookmarks_readable
@@ -3918,6 +4138,222 @@ fn authorized_page_comic_path(
     Ok(path)
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct RecoverySourceAuthorization {
+    generation: u64,
+    identity: String,
+}
+
+fn recovery_external_bookmark(state: &AppState, comic: &ComicItem) -> Result<String, String> {
+    if !state
+        .external_bookmarks_readable
+        .load(std::sync::atomic::Ordering::Acquire)
+    {
+        return Err("外部來源清單目前無法讀取，稍後可重試".into());
+    }
+    let bookmarks = state
+        .external_bookmarks
+        .read()
+        .map_err(|_| "外部來源清單鎖定失敗".to_string())?;
+    let mut matches = bookmarks
+        .iter()
+        .filter(|item| scanner::external_source_id(&item.bookmark) == comic.source_id);
+    let bookmark = matches
+        .next()
+        .map(|item| item.bookmark.clone())
+        .ok_or_else(|| "外部漫畫來源目前未授權，重新加入後可重試".to_string())?;
+    if matches.next().is_some()
+        || comic
+            .external_bookmark
+            .as_deref()
+            .is_some_and(|saved| saved != bookmark)
+    {
+        return Err("外部漫畫來源授權識別不唯一，稍後可重試".into());
+    }
+    Ok(bookmark)
+}
+
+fn current_recovery_source_identity(state: &AppState, comic: &ComicItem) -> Result<String, String> {
+    if state::is_smb_source_id(&comic.source_id) {
+        let config = state
+            .smb_config
+            .read()
+            .map_err(|_| "SMB 設定鎖定失敗".to_string())?
+            .clone()
+            .ok_or_else(|| "SMB 來源目前未授權，請重新連線後重試".to_string())?;
+        if !state::smb_source_matches_config(&comic.source_id, &config) {
+            return Err("SMB 來源目前未授權，請重新連線後重試".into());
+        }
+        return Ok(format!("smb:{}", comic.source_id));
+    }
+
+    if comic.source_id.starts_with("external:") {
+        let bookmark = recovery_external_bookmark(state, comic)?;
+        let path = comic
+            .source_path
+            .as_deref()
+            .map(Path::new)
+            .ok_or_else(|| "外部漫畫來源目前未啟用，重新掃描後可重試".to_string())?;
+        let active_root = state
+            .active_bookmarks
+            .lock()
+            .map_err(|_| "外部來源權限鎖定失敗".to_string())?
+            .get(&bookmark)
+            .cloned()
+            .ok_or_else(|| "外部漫畫來源目前未啟用，重新掃描後可重試".to_string())?;
+        // Catalog rows intentionally do not persist security-scoped bookmark
+        // values. Rehydrate only from the current authoritative bookmark list,
+        // then let the normal capability gate verify that path is beneath the
+        // active root. Never trust a journal or stale catalog bookmark value.
+        let mut authorized_comic = comic.clone();
+        authorized_comic.external_bookmark = Some(bookmark.clone());
+        protocol::external_bookmark_capability(&authorized_comic, path, state)
+            .map_err(|_| "外部漫畫來源目前未授權或未啟用，稍後可重試".to_string())?;
+        return Ok(format!("external:{bookmark}\0{active_root}"));
+    }
+
+    #[cfg(test)]
+    if state
+        .progress_recovery_test_sources
+        .lock()
+        .is_ok_and(|sources| sources.contains(&comic.source_id))
+    {
+        // Existing recovery unit fixtures use synthetic source IDs and paths;
+        // authorization behavior is exercised separately with real roots.
+        return Ok(format!("test-local:{}", comic.source_id));
+    }
+
+    let scan_dir = state
+        .scan_dir
+        .read()
+        .map_err(|_| "漫畫目錄設定鎖定失敗".to_string())?
+        .clone();
+    if scan_dir.is_empty()
+        || !protocol::local_source_matches_scan_dir(comic, &scan_dir)
+        || protocol::is_legacy_local_source_id(&comic.source_id)
+    {
+        return Err("漫畫來源目前不屬於已設定的掃描目錄，稍後可重試".into());
+    }
+    let relative = Path::new(&comic.relative_path);
+    if relative.as_os_str().is_empty()
+        || relative.is_absolute()
+        || relative
+            .components()
+            .any(|part| !matches!(part, std::path::Component::Normal(_)))
+    {
+        return Err("漫畫來源目前未授權，稍後可重試".into());
+    }
+    let expected = Path::new(&scan_dir).join(relative);
+    let actual = comic
+        .source_path
+        .as_deref()
+        .map(Path::new)
+        .ok_or_else(|| "漫畫來源目前未啟用，重新掃描後可重試".to_string())?;
+    if actual != expected {
+        return Err("漫畫來源目前不屬於已設定的掃描目錄，稍後可重試".into());
+    }
+    Ok(format!("local:{}", comic.source_id))
+}
+
+fn recovery_source_metadata(
+    state: &AppState,
+    comic: &ComicItem,
+) -> Result<std::fs::Metadata, String> {
+    #[cfg(test)]
+    if state
+        .progress_recovery_test_sources
+        .lock()
+        .is_ok_and(|sources| sources.contains(&comic.source_id))
+    {
+        let path = comic
+            .source_path
+            .as_deref()
+            .map(Path::new)
+            .ok_or_else(|| "來源位置缺少實際路徑，已保留待復原紀錄".to_string())?;
+        return std::fs::symlink_metadata(path)
+            .map_err(|_| "原漫畫位置目前無法驗證，已保留待復原紀錄".to_string());
+    }
+
+    let metadata = if comic.source_id.starts_with("external:") {
+        let bookmark = recovery_external_bookmark(state, comic)?;
+        let mut authorized_comic = comic.clone();
+        authorized_comic.external_bookmark = Some(bookmark);
+        let path = comic
+            .source_path
+            .as_deref()
+            .map(Path::new)
+            .ok_or_else(|| "外部漫畫來源目前未啟用，重新掃描後可重試".to_string())?;
+        let (root, relative) =
+            protocol::external_bookmark_capability(&authorized_comic, path, state)
+                .map_err(|_| "外部漫畫來源目前未授權或未啟用，稍後可重試".to_string())?;
+        protocol::symlink_metadata_from_capability(&root, &relative)
+    } else {
+        let scan_dir = state
+            .scan_dir
+            .read()
+            .map_err(|_| "漫畫目錄設定鎖定失敗".to_string())?
+            .clone();
+        if scan_dir.is_empty()
+            || !protocol::local_source_matches_scan_dir(comic, &scan_dir)
+            || protocol::is_legacy_local_source_id(&comic.source_id)
+        {
+            return Err("漫畫來源目前不屬於已設定的掃描目錄，稍後可重試".into());
+        }
+        let relative = Path::new(&comic.relative_path);
+        if relative.as_os_str().is_empty()
+            || relative.is_absolute()
+            || relative
+                .components()
+                .any(|part| !matches!(part, std::path::Component::Normal(_)))
+        {
+            return Err("漫畫來源目前未授權，稍後可重試".into());
+        }
+        let expected = Path::new(&scan_dir).join(relative);
+        if comic.source_path.as_deref().map(Path::new) != Some(expected.as_path()) {
+            return Err("漫畫來源目前不屬於已設定的掃描目錄，稍後可重試".into());
+        }
+        let root = cap_std::fs::Dir::open_ambient_dir(&scan_dir, cap_std::ambient_authority())
+            .map_err(|_| "漫畫來源目前無法安全開啟，稍後可重試".to_string())?;
+        protocol::symlink_metadata_from_capability(&root, relative)
+    }
+    .map_err(|_| "原漫畫位置目前無法在授權目錄內安全驗證，已保留待復原紀錄".to_string())?;
+    Ok(metadata)
+}
+
+async fn recovery_source_authorization_snapshot(
+    state: &Arc<AppState>,
+    comic: &ComicItem,
+) -> Result<RecoverySourceAuthorization, String> {
+    let _lease = state
+        .source_authorization_lifecycle
+        .clone()
+        .read_owned()
+        .await;
+    let identity = current_recovery_source_identity(state, comic)?;
+    Ok(RecoverySourceAuthorization {
+        generation: state
+            .source_authorization_generation
+            .load(std::sync::atomic::Ordering::Acquire),
+        identity,
+    })
+}
+
+fn verify_recovery_source_authorization(
+    state: &AppState,
+    comic: &ComicItem,
+    expected: &RecoverySourceAuthorization,
+) -> Result<(), String> {
+    let generation = state
+        .source_authorization_generation
+        .load(std::sync::atomic::Ordering::Acquire);
+    if generation != expected.generation
+        || current_recovery_source_identity(state, comic)? != expected.identity
+    {
+        return Err("漫畫來源授權在復原驗證期間已變更，稍後可重試".into());
+    }
+    Ok(())
+}
+
 fn save_imported_photo_to_root(
     scan_dir: &Path,
     filename: &str,
@@ -4103,6 +4539,96 @@ async fn comic_progress_lock(state: &AppState, comic_id: &str) -> Arc<tokio::syn
         .clone()
 }
 
+/// Serialize a reader publication with progress writes for that exact
+/// source/id. Lock order matches save_progress: per-comic progress lock, then
+/// comic_lifecycle. The closure must only perform synchronous state changes.
+#[cfg(test)]
+async fn with_comic_progress_lifecycle<T, F>(
+    state: &Arc<AppState>,
+    progress_identity: &str,
+    publish: F,
+) -> T
+where
+    F: FnOnce() -> T,
+{
+    let progress_lock = comic_progress_lock(state, progress_identity).await;
+    let _progress_lifecycle = progress_lock.lock().await;
+    let _reader_lifecycle = state.comic_lifecycle.lock().unwrap();
+    publish()
+}
+
+/// Prepare a source-scoped progress snapshot while holding the same per-book
+/// lifecycle used by SQLite saves, then publish it under the synchronous reader
+/// lifecycle gate. The std mutex is acquired only after the final await.
+async fn with_comic_progress_lifecycle_prepared<T, R, Prepare, Fut, Publish>(
+    state: &Arc<AppState>,
+    progress_identity: &str,
+    prepare: Prepare,
+    publish: Publish,
+) -> Result<R, String>
+where
+    Prepare: FnOnce() -> Fut,
+    Fut: std::future::Future<Output = Result<T, String>>,
+    Publish: FnOnce(T) -> Result<R, String>,
+{
+    let progress_lock = comic_progress_lock(state, progress_identity).await;
+    let _progress_lifecycle = progress_lock.lock().await;
+    let prepared = prepare().await?;
+    let _reader_lifecycle = state.comic_lifecycle.lock().unwrap();
+    publish(prepared)
+}
+
+/// Read the progress for the exact location selected by `open_comic`.
+/// Newly discovered, not-yet-indexed entries may use their exact in-memory
+/// snapshot; catalog read failures and ambiguous in-memory matches stay errors.
+async fn open_comic_progress_snapshot(
+    state: &Arc<AppState>,
+    comic: &ComicItem,
+    verified_pages: usize,
+    is_directory: bool,
+) -> Result<Progress, String> {
+    let id = comic.id.as_str();
+    let source_id = comic.source_id.as_str();
+    let relative_path = comic.relative_path.as_str();
+    let store = state
+        .catalog
+        .read()
+        .map_err(|_| "漫畫目錄鎖定失敗".to_string())?
+        .clone();
+    if let Some(store) = store {
+        let register_comic = comic.clone();
+        return tokio::task::spawn_blocking(move || {
+            if let Some(item) = store.get_runtime_item_for_source_path(
+                &register_comic.id,
+                &register_comic.source_id,
+                &register_comic.relative_path,
+            )? {
+                if item.source_id != register_comic.source_id
+                    || item.relative_path != register_comic.relative_path
+                {
+                    return Err("目錄中的漫畫進度來源位置與目前漫畫不符".into());
+                }
+                return Ok(item.progress);
+            }
+            store.register_opened_location(&register_comic, verified_pages, is_directory)
+        })
+        .await
+        .map_err(|error| format!("登記或讀取已驗證漫畫背景工作失敗：{error}"))?;
+    }
+
+    let comics = state.comics.lock().await;
+    let mut exact = comics.iter().filter(|comic| {
+        comic.id == id && comic.source_id == source_id && comic.relative_path == relative_path
+    });
+    let Some(item) = exact.next() else {
+        return Err("找不到指定來源位置的漫畫進度".into());
+    };
+    if exact.next().is_some() {
+        return Err("指定來源位置的漫畫進度不唯一".into());
+    }
+    Ok(item.progress.clone())
+}
+
 async fn progress_sequence_is_current(
     state: &AppState,
     comic_id: &str,
@@ -4111,6 +4637,7 @@ async fn progress_sequence_is_current(
     let Some(sequence) = sequence else {
         return Ok(());
     };
+    catalog::validate_intent_sequence(sequence)?;
     let sequences = state.progress_sequences.lock().await;
     if sequences
         .get(comic_id)
@@ -4129,6 +4656,417 @@ async fn commit_progress_sequence(state: &AppState, comic_id: &str, sequence: Op
             .await
             .insert(comic_id.to_string(), sequence);
     }
+}
+
+/// Run the authoritative SQLite write in a detached task that owns the
+/// per-comic lifecycle lock. Dropping the command future must not leave a
+/// successful database write without its matching in-memory sequence fence.
+async fn persist_progress_and_commit_sequence<F>(
+    state: Arc<AppState>,
+    progress_identity: String,
+    sequence: Option<u64>,
+    progress_lifecycle: tokio::sync::OwnedMutexGuard<()>,
+    persist: F,
+) -> Result<tokio::sync::OwnedMutexGuard<()>, String>
+where
+    F: FnOnce() -> Result<(), String> + Send + 'static,
+{
+    tokio::spawn(async move {
+        let result = tokio::task::spawn_blocking(persist)
+            .await
+            .map_err(|error| format!("穩定進度儲存工作失敗: {error}"))?;
+        if result.is_ok() {
+            commit_progress_sequence(&state, &progress_identity, sequence).await;
+        }
+        result.map(|()| progress_lifecycle)
+    })
+    .await
+    .map_err(|error| format!("進度儲存工作失敗: {error}"))?
+}
+
+fn progress_recovery_token_is_current(
+    state: &AppState,
+    id: &str,
+    source_id: &str,
+    request_token: &str,
+) -> bool {
+    state.progress_recovery_token(id, source_id).as_deref() == Some(request_token)
+}
+
+async fn recover_reading_progress_inner(
+    state: &Arc<AppState>,
+    data: SaveProgressRequest,
+) -> Result<(), String> {
+    recover_reading_progress_inner_with_smb_hash(state, data, |config, relative_path| {
+        Box::pin(smb_remote_content_hash(config, relative_path))
+    })
+    .await
+}
+
+async fn recover_reading_progress_inner_with_smb_hash<F>(
+    state: &Arc<AppState>,
+    data: SaveProgressRequest,
+    hash_smb_content: F,
+) -> Result<(), String>
+where
+    F: for<'a> Fn(
+        &'a state::SmbConfig,
+        &'a str,
+    ) -> std::pin::Pin<
+        Box<dyn std::future::Future<Output = Result<(u64, [u8; 32]), String>> + Send + 'a>,
+    >,
+{
+    let id = data.id.trim().to_string();
+    if id.is_empty() || id.len() > 4096 {
+        return Err("閱讀進度漫畫識別碼格式不正確".into());
+    }
+    let source_id = data
+        .source_id
+        .as_deref()
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .ok_or_else(|| "手動復原進度必須指定 sourceId".to_string())?;
+    if source_id != data.source_id.as_deref().unwrap_or_default() {
+        return Err("閱讀進度來源識別碼格式不正確".into());
+    }
+    if photo_library::is_photo_album_id(&id) {
+        return Err("照片相簿不支援漫畫閱讀進度復原".into());
+    }
+    let sequence = data
+        .sequence
+        .ok_or_else(|| "手動復原進度缺少序號，已保留待復原紀錄".to_string())?;
+    let intent_sequence = data
+        .intent_sequence
+        .ok_or_else(|| "手動復原進度缺少原始閱讀意圖序號，已保留待復原紀錄".to_string())?;
+    catalog::validate_intent_sequence(intent_sequence)?;
+    let recovery_token = data
+        .recovery_token
+        .as_deref()
+        .filter(|token| !token.is_empty() && token.len() <= 64)
+        .ok_or_else(|| "待復原紀錄缺少原生開書 token，已保留待復原紀錄".to_string())?;
+    let progress_identity = format!("{source_id}\0{id}");
+    let progress_lock = comic_progress_lock(state, &progress_identity).await;
+    let mut progress_lifecycle = Some(progress_lock.clone().lock_owned().await);
+    let sequence_snapshot = state
+        .progress_sequences
+        .lock()
+        .await
+        .get(&progress_identity)
+        .copied();
+    progress_sequence_is_current(state, &progress_identity, Some(sequence)).await?;
+
+    let store = state
+        .catalog
+        .read()
+        .map_err(|_| "漫畫目錄鎖定失敗".to_string())?
+        .clone()
+        .ok_or_else(|| "漫畫目錄尚未初始化，已保留待復原紀錄".to_string())?;
+    let query_store = store.clone();
+    let lookup_id = id.clone();
+    let lookup_source = source_id.to_string();
+    let mut matches = tokio::task::spawn_blocking(move || {
+        query_store.get_runtime_items_for_source(&lookup_id, &lookup_source)
+    })
+    .await
+    .map_err(|error| format!("讀取來源漫畫位置背景工作失敗：{error}"))??;
+    if matches.len() != 1 {
+        return Err(if matches.is_empty() {
+            "來源漫畫尚未進入目錄，已保留待復原紀錄".into()
+        } else {
+            "來源漫畫位置不唯一，已保留待復原紀錄".into()
+        });
+    }
+    let comic = matches.pop().unwrap();
+    if comic.id != id || comic.source_id != source_id {
+        return Err("來源漫畫識別不一致，已保留待復原紀錄".into());
+    }
+    let source_authorization = recovery_source_authorization_snapshot(state, &comic).await?;
+    let memory_evidence = state.progress_recovery_evidence(&id, source_id, &comic.relative_path);
+    let evidence_was_in_memory = memory_evidence.is_some();
+    let evidence = if let Some(evidence) = memory_evidence {
+        Some(evidence)
+    } else {
+        let lookup_store = store.clone();
+        let lookup_id = id.clone();
+        let lookup_source = source_id.to_string();
+        let lookup_path = comic.relative_path.clone();
+        let lookup_token = recovery_token.to_string();
+        tokio::task::spawn_blocking(move || {
+            lookup_store.load_progress_recovery_evidence(
+                &lookup_id,
+                &lookup_source,
+                &lookup_path,
+                &lookup_token,
+            )
+        })
+        .await
+        .map_err(|error| format!("讀取原生開書憑證背景工作失敗：{error}"))??
+    };
+    let evidence_snapshot = evidence.clone();
+    let trusted_total = if let Some(evidence) = evidence {
+        if evidence.total_pages == 0
+            || evidence.source_id != source_id
+            || evidence.token != recovery_token
+        {
+            return Err("READING_PROGRESS_RECOVERY_MANUAL_CHECK: 原生開書憑證不符".into());
+        }
+        let revision = evidence.revision.ok_or_else(|| {
+            "READING_PROGRESS_RECOVERY_MANUAL_CHECK: 原生開書身分證據不存在".to_string()
+        })?;
+        if state::is_smb_source_id(source_id) {
+            let expected_hash = evidence.smb_content_hash.ok_or_else(|| {
+                "READING_PROGRESS_RECOVERY_MANUAL_CHECK: SMB 原生內容憑證不存在".to_string()
+            })?;
+            let smb_config = state
+                .smb_config
+                .read()
+                .map_err(|_| "SMB 設定鎖定失敗".to_string())?
+                .clone()
+                .ok_or_else(|| "未設定 SMB 連線，已保留待復原紀錄".to_string())?;
+            if !state::smb_source_matches_config(source_id, &smb_config) {
+                return Err("SMB 來源端點已變更，已保留待復原紀錄".into());
+            }
+            // SMB hashing may wait on up to the full bounded archive transfer.
+            // Release the per-book publication gate so close/reopen can proceed,
+            // then reacquire it and prove the entire recovery snapshot is still
+            // current before allowing the eventual SQLite write.
+            drop(progress_lifecycle.take());
+            let (observed_bytes, observed_hash) =
+                hash_smb_content(&smb_config, &comic.relative_path).await?;
+            progress_lifecycle = Some(progress_lock.clone().lock_owned().await);
+
+            let current_sequence = state
+                .progress_sequences
+                .lock()
+                .await
+                .get(&progress_identity)
+                .copied();
+            if current_sequence != sequence_snapshot {
+                return Err(
+                    "READING_PROGRESS_RECOVERY_MANUAL_CHECK: 等待來源驗證期間閱讀進度已改變".into(),
+                );
+            }
+            progress_sequence_is_current(state, &progress_identity, Some(sequence)).await?;
+            if evidence_was_in_memory
+                && state.progress_recovery_evidence(&id, source_id, &comic.relative_path)
+                    != evidence_snapshot
+            {
+                return Err(
+                    "READING_PROGRESS_RECOVERY_MANUAL_CHECK: 等待來源驗證期間開書憑證已改變".into(),
+                );
+            }
+
+            let verify_store = store.clone();
+            let verify_id = id.clone();
+            let verify_source = source_id.to_string();
+            let mut current_matches = tokio::task::spawn_blocking(move || {
+                verify_store.get_runtime_items_for_source(&verify_id, &verify_source)
+            })
+            .await
+            .map_err(|error| format!("重新確認來源漫畫背景工作失敗：{error}"))??;
+            if current_matches.len() != 1 {
+                return Err(
+                    "READING_PROGRESS_RECOVERY_MANUAL_CHECK: 等待來源驗證期間漫畫位置已改變".into(),
+                );
+            }
+            let current_comic = current_matches.pop().unwrap();
+            if current_comic.id != id
+                || current_comic.source_id != source_id
+                || current_comic.relative_path != comic.relative_path
+                || current_comic.progress.current_page != comic.progress.current_page
+                || current_comic.progress.total_pages != comic.progress.total_pages
+                || current_comic.progress.updated_at != comic.progress.updated_at
+            {
+                return Err(
+                    "READING_PROGRESS_RECOVERY_MANUAL_CHECK: 等待來源驗證期間漫畫位置已改變".into(),
+                );
+            }
+
+            let current_smb_config = state
+                .smb_config
+                .read()
+                .map_err(|_| "SMB 設定鎖定失敗".to_string())?
+                .clone()
+                .ok_or_else(|| "SMB 設定已移除，已保留待復原紀錄".to_string())?;
+            if current_smb_config.host != smb_config.host
+                || current_smb_config.share != smb_config.share
+                || current_smb_config.username != smb_config.username
+                || current_smb_config.password != smb_config.password
+                || !state::smb_source_matches_config(source_id, &current_smb_config)
+            {
+                return Err("SMB 設定於來源驗證期間已變更，已保留待復原紀錄".into());
+            }
+            if observed_bytes != revision.len
+                || !smb_recovery_content_matches(expected_hash, observed_hash)
+            {
+                return Err("SMB 原漫畫內容已變更，已保留待復原紀錄".into());
+            }
+        } else {
+            if evidence.smb_content_hash.is_some() {
+                return Err("進度來源版本證據類型不符，已保留待復原紀錄".into());
+            }
+            let metadata_comic = comic.clone();
+            let metadata_state = state.clone();
+            let metadata = tokio::task::spawn_blocking(move || {
+                recovery_source_metadata(&metadata_state, &metadata_comic)
+            })
+            .await
+            .map_err(|error| format!("原漫畫位置驗證背景工作失敗：{error}"))??;
+            if (!metadata.is_file() && !metadata.is_dir())
+                || metadata.file_type().is_symlink()
+                || state::SourceRevision::from_std_metadata(&metadata) != revision
+            {
+                return Err("原漫畫位置已變更，已保留待復原紀錄".into());
+            }
+        }
+        evidence.total_pages
+    } else {
+        return Err("READING_PROGRESS_RECOVERY_MANUAL_CHECK: 原生開書頁數證據不存在".into());
+    };
+    let requested_total = usize::try_from(data.total_pages)
+        .map_err(|_| "待復原總頁數超出平台上限，已保留待復原紀錄")?;
+    let current_page = usize::try_from(data.current_page)
+        .map_err(|_| "待復原頁碼超出平台上限，已保留待復原紀錄")?;
+    if requested_total != trusted_total || requested_total == 0 || current_page >= trusted_total {
+        return Err("待復原頁數與可信漫畫頁數不符，已保留待復原紀錄".into());
+    }
+    let (current_page, total_pages, percent) =
+        normalize_progress_values(current_page as u64, trusted_total as u64)?;
+    let progress = Progress {
+        current_page,
+        total_pages,
+        percent,
+        updated_at: Some(chrono::Utc::now().to_rfc3339()),
+    };
+    let save_store = store.clone();
+    let save_id = id.clone();
+    let save_source = source_id.to_string();
+    let save_relative_path = comic.relative_path.clone();
+    let save_progress = progress.clone();
+    let proof_revision = evidence_snapshot
+        .as_ref()
+        .and_then(|evidence| evidence.revision.clone())
+        .ok_or_else(|| {
+            "READING_PROGRESS_RECOVERY_MANUAL_CHECK: 原生開書身分證據不存在".to_string()
+        })?;
+    let proof_hash = evidence_snapshot
+        .as_ref()
+        .and_then(|evidence| evidence.smb_content_hash);
+    let save_token = recovery_token.to_string();
+    let source_authorization_lease = state
+        .source_authorization_lifecycle
+        .clone()
+        .read_owned()
+        .await;
+    verify_recovery_source_authorization(state, &comic, &source_authorization)?;
+    let progress_lifecycle = progress_lifecycle
+        .take()
+        .ok_or_else(|| "閱讀進度復原生命週期鎖定遺失".to_string())?;
+    {
+        // This is the recovery's reader-intent linearization point. A same-book
+        // open already in flight must win even before it publishes new evidence;
+        // an open starting afterwards waits to publish behind our progress lock.
+        let _lifecycle = state.comic_lifecycle.lock().unwrap();
+        let pending_id = state.pending_open_id.lock().unwrap();
+        let pending_source = state.pending_open_source_id.lock().unwrap();
+        if pending_id.as_deref() == Some(id.as_str())
+            && (pending_source.is_none() || pending_source.as_deref() == Some(source_id))
+        {
+            return Err("READING_PROGRESS_RECOVERY_MANUAL_CHECK: 此漫畫正在重新開啟".into());
+        }
+    }
+    let _progress_lifecycle = persist_progress_and_commit_sequence(
+        state.clone(),
+        progress_identity.clone(),
+        Some(sequence),
+        progress_lifecycle,
+        move || {
+            let _source_authorization_lease = source_authorization_lease;
+            save_store
+                .recover_progress_for_source_location(catalog::ProgressRecoveryCommit {
+                    identifier: &save_id,
+                    source_id: &save_source,
+                    relative_path: &save_relative_path,
+                    token: &save_token,
+                    revision: &proof_revision,
+                    smb_content_hash: proof_hash,
+                    total_pages: trusted_total,
+                    current_page,
+                    intent_sequence,
+                    progress: &save_progress,
+                })
+                .map_err(|error| error.to_string())
+        },
+    )
+    .await?;
+
+    let committed_progress = {
+        let read_store = store.clone();
+        let read_id = id.clone();
+        let read_source = source_id.to_string();
+        let read_path = comic.relative_path.clone();
+        tokio::task::spawn_blocking(move || {
+            read_store.progress_for_source_location(&read_id, &read_source, &read_path)
+        })
+        .await
+        .map_err(|error| format!("讀取已提交進度背景工作失敗：{error}"))??
+        .ok_or_else(|| "已提交閱讀進度不存在".to_string())?
+    };
+
+    // Publish to memory only after SQLite confirms the exact source-scoped
+    // location write. Never create a transient in-memory orphan.
+    {
+        let mut comics = state.comics.lock().await;
+        let matching = comics
+            .iter_mut()
+            .filter(|item| {
+                item.id == id
+                    && item.source_id == source_id
+                    && item.relative_path == comic.relative_path
+            })
+            .collect::<Vec<_>>();
+        if matching.len() == 1 {
+            let comic = matching.into_iter().next().unwrap();
+            comic.progress = committed_progress.clone();
+            comic.page_count = committed_progress.total_pages;
+        }
+    }
+
+    let scan_dir = state.scan_dir.read().unwrap().clone();
+    if source_id.starts_with("local:")
+        && !scan_dir.is_empty()
+        && source_id == scanner::local_source_id(Path::new(&scan_dir))
+    {
+        let _file_guard = state.progress_file_lock.lock().await;
+        let dir = PathBuf::from(scan_dir);
+        let sidecar_id = id.clone();
+        let sidecar_progress = committed_progress.clone();
+        if let Err(error) = tokio::task::spawn_blocking(move || {
+            write_progress_file(&dir, &sidecar_id, sidecar_progress)
+        })
+        .await
+        .map_err(|error| format!("進度相容檔背景工作失敗：{error}"))?
+        {
+            eprintln!("⚠️ SQLite 進度已復原，但相容 sidecar 寫入失敗：{error}");
+        }
+    }
+    Ok(())
+}
+
+#[tauri::command]
+async fn recover_reading_progress(
+    app_handle: AppHandle,
+    data: SaveProgressRequest,
+    state: State<'_, Arc<AppState>>,
+) -> Result<(), String> {
+    if data
+        .source_id
+        .as_deref()
+        .is_some_and(state::is_smb_source_id)
+    {
+        commerce::require_pro(&app_handle).await?;
+    }
+    recover_reading_progress_inner(state.inner(), data).await
 }
 
 #[tauri::command]
@@ -4172,9 +5110,19 @@ async fn save_progress(
         }
         active_source_id
     };
+    if let Some(request_token) = data.recovery_token.as_deref() {
+        if !progress_recovery_token_is_current(
+            state.inner(),
+            &id,
+            &captured_source_id,
+            request_token,
+        ) {
+            return Err("閱讀進度開書 token 已過期".into());
+        }
+    }
     let progress_identity = format!("{captured_source_id}\0{id}");
     let progress_lock = comic_progress_lock(state.inner(), &progress_identity).await;
-    let _progress_lifecycle = progress_lock.lock().await;
+    let progress_lifecycle = progress_lock.lock_owned().await;
     progress_sequence_is_current(state.inner(), &progress_identity, data.sequence).await?;
     // Keep the source selected by this lifecycle snapshot for the rest of
     // the write. Without this binding, B can reopen the same runtime ID
@@ -4191,6 +5139,19 @@ async fn save_progress(
             .and_then(|_| state.active_comic_source_id.lock().unwrap().clone());
         if active_source_id.as_deref() != Some(captured_source_id.as_str()) {
             return Err("閱讀進度來源已不是目前開啟的漫畫".into());
+        }
+        // A same-source reopen can replace the page-count/revision evidence
+        // while this request waits on its per-source lock. Recheck while
+        // holding comic_lifecycle so the token snapshot is atomic with reopen.
+        if let Some(request_token) = data.recovery_token.as_deref() {
+            if !progress_recovery_token_is_current(
+                state.inner(),
+                &id,
+                &captured_source_id,
+                request_token,
+            ) {
+                return Err("閱讀進度開書 token 已過期".into());
+            }
         }
         let opened_total_pages = state
             .opened_comic_files
@@ -4273,15 +5234,27 @@ async fn save_progress(
     let identifier = id.clone();
     let source_id_for_save = requested_source_id.clone();
     let sqlite_progress = progress.clone();
-    tokio::task::spawn_blocking(move || {
-        if let Some(source_id) = source_id_for_save.as_deref() {
-            store.save_progress_for_source(&identifier, source_id, &sqlite_progress)
-        } else {
-            store.save_progress(&identifier, &sqlite_progress)
-        }
-    })
-    .await
-    .map_err(|error| format!("穩定進度儲存工作失敗: {error}"))??;
+    let intent_sequence = data.intent_sequence;
+    let _progress_lifecycle = persist_progress_and_commit_sequence(
+        state.inner().clone(),
+        progress_identity.clone(),
+        data.sequence,
+        progress_lifecycle,
+        move || {
+            if let Some(source_id) = source_id_for_save.as_deref() {
+                store.save_progress_for_source_with_intent(
+                    &identifier,
+                    source_id,
+                    &sqlite_progress,
+                    intent_sequence,
+                )
+            } else {
+                store.save_progress(&identifier, &sqlite_progress)
+            }
+            .map_err(|error| error.to_string())
+        },
+    )
+    .await?;
 
     // SQLite is authoritative. Only publish to the in-memory catalogue after
     // persistence succeeds, otherwise a failed write would display fake
@@ -4317,7 +5290,6 @@ async fn save_progress(
             eprintln!("⚠️ SQLite 進度已儲存，但相容 sidecar 寫入失敗：{error}");
         }
     }
-    commit_progress_sequence(state.inner(), &progress_identity, data.sequence).await;
     Ok(())
 }
 
@@ -4446,6 +5418,7 @@ pub fn run() {
             close_comic,
             update_reader_cache_window,
             save_progress,
+            recover_reading_progress,
             get_config,
             get_memory_status,
             set_config,
@@ -4876,6 +5849,1792 @@ mod tests {
             source_id: "local:test".into(),
             source_path: Some("/tmp/book.zip".into()),
         }
+    }
+
+    fn progress_recovery_request(
+        id: &str,
+        source_id: &str,
+        current_page: u64,
+        total_pages: u64,
+        sequence: u64,
+        recovery_token: &str,
+    ) -> SaveProgressRequest {
+        SaveProgressRequest {
+            id: id.into(),
+            source_id: Some(source_id.into()),
+            current_page,
+            total_pages,
+            sequence: Some(sequence),
+            intent_sequence: Some(sequence),
+            recovery_token: Some(recovery_token.into()),
+        }
+    }
+
+    async fn progress_recovery_state(comics: &[ComicItem]) -> (Arc<AppState>, std::path::PathBuf) {
+        let root =
+            std::env::temp_dir().join(format!("gai-progress-recovery-{}", uuid::Uuid::new_v4()));
+        fs::create_dir_all(&root).unwrap();
+        let store = catalog::CatalogStore::new(root.join("catalog.sqlite3")).unwrap();
+        store.sync_library(comics).unwrap();
+        let state = Arc::new(AppState::new());
+        *state.catalog.write().unwrap() = Some(store);
+        *state.comics.lock().await = comics.to_vec();
+        state.progress_recovery_test_sources.lock().unwrap().extend(
+            comics
+                .iter()
+                .filter(|comic| comic.source_id.starts_with("local:"))
+                .map(|comic| comic.source_id.clone()),
+        );
+        (state, root)
+    }
+
+    #[tokio::test]
+    async fn recovery_rejects_root_change_during_validation_but_allows_later_reauthorization() {
+        let root_a =
+            std::env::temp_dir().join(format!("gai-recovery-auth-a-{}", uuid::Uuid::new_v4()));
+        let root_b =
+            std::env::temp_dir().join(format!("gai-recovery-auth-b-{}", uuid::Uuid::new_v4()));
+        fs::create_dir_all(&root_a).unwrap();
+        fs::create_dir_all(&root_b).unwrap();
+        let archive = root_a.join("book.zip");
+        fs::write(&archive, b"archive").unwrap();
+        let mut comic = capability_comic("book", "Book");
+        comic.relative_path = "book.zip".into();
+        comic.source_id = scanner::local_source_id(&root_a);
+        comic.source_path = Some(archive.to_string_lossy().into_owned());
+        let state = Arc::new(AppState::new());
+        *state.scan_dir.write().unwrap() = root_a.to_string_lossy().into_owned();
+        let initial = recovery_source_authorization_snapshot(&state, &comic)
+            .await
+            .unwrap();
+
+        // A committed-but-stale catalog row may survive a source transition;
+        // its persisted page and intent fence must stay untouched on rejection.
+        let catalog_root =
+            std::env::temp_dir().join(format!("gai-recovery-auth-db-{}", uuid::Uuid::new_v4()));
+        let store = catalog::CatalogStore::new(catalog_root.join("catalog.sqlite3")).unwrap();
+        store.sync_library(&[comic.clone()]).unwrap();
+        let baseline = store
+            .progress_for_source_location("book", &comic.source_id, "book.zip")
+            .unwrap();
+        let fence = store
+            .progress_intent_floor("book", &comic.source_id, "book.zip")
+            .unwrap();
+        *state.catalog.write().unwrap() = Some(store.clone());
+
+        {
+            let _lease = state.source_authorization_lifecycle.write().await;
+            *state.scan_dir.write().unwrap() = root_b.to_string_lossy().into_owned();
+            state
+                .source_authorization_generation
+                .fetch_add(1, std::sync::atomic::Ordering::AcqRel);
+        }
+        let final_lease = state
+            .source_authorization_lifecycle
+            .clone()
+            .read_owned()
+            .await;
+        let rejected = verify_recovery_source_authorization(&state, &comic, &initial);
+        drop(final_lease);
+        assert!(rejected.is_err());
+        assert!(!rejected.unwrap_err().contains("MANUAL_CHECK"));
+        let after = store
+            .progress_for_source_location("book", &comic.source_id, "book.zip")
+            .unwrap();
+        let progress_key = |value: &Option<Progress>| {
+            value
+                .as_ref()
+                .map(|item| (item.current_page, item.total_pages, item.updated_at.clone()))
+        };
+        assert_eq!(progress_key(&after), progress_key(&baseline));
+        assert_eq!(
+            store
+                .progress_intent_floor("book", &comic.source_id, "book.zip")
+                .unwrap(),
+            fence
+        );
+
+        // Returning to the same configured root permits a later safe retry of
+        // the unchanged native proof; no online flag is part of authorization.
+        {
+            let _lease = state.source_authorization_lifecycle.write().await;
+            *state.scan_dir.write().unwrap() = root_a.to_string_lossy().into_owned();
+            state
+                .source_authorization_generation
+                .fetch_add(1, std::sync::atomic::Ordering::AcqRel);
+        }
+        let reauthorized = recovery_source_authorization_snapshot(&state, &comic)
+            .await
+            .unwrap();
+        let retry_lease = state
+            .source_authorization_lifecycle
+            .clone()
+            .read_owned()
+            .await;
+        assert!(verify_recovery_source_authorization(&state, &comic, &reauthorized).is_ok());
+        drop(retry_lease);
+        fs::remove_dir_all(root_a).unwrap();
+        fs::remove_dir_all(root_b).unwrap();
+        fs::remove_dir_all(catalog_root).unwrap();
+    }
+
+    #[tokio::test]
+    async fn full_recovery_command_rejects_a_persisted_proof_after_local_root_switch() {
+        let root_a = std::env::temp_dir().join(format!(
+            "gai-recovery-command-root-a-{}",
+            uuid::Uuid::new_v4()
+        ));
+        let root_b = std::env::temp_dir().join(format!(
+            "gai-recovery-command-root-b-{}",
+            uuid::Uuid::new_v4()
+        ));
+        let catalog_root = std::env::temp_dir().join(format!(
+            "gai-recovery-command-catalog-{}",
+            uuid::Uuid::new_v4()
+        ));
+        fs::create_dir_all(&root_a).unwrap();
+        fs::create_dir_all(&root_b).unwrap();
+        fs::create_dir_all(&catalog_root).unwrap();
+        let archive = root_a.join("book.cbz");
+        fs::write(&archive, b"unchanged verified local archive").unwrap();
+        let revision = state::SourceRevision::from_std_metadata(&fs::metadata(&archive).unwrap());
+
+        let mut comic = capability_comic("book", "Book");
+        comic.source_id = scanner::local_source_id(&root_a);
+        comic.relative_path = "book.cbz".into();
+        comic.source_path = Some(archive.to_string_lossy().into_owned());
+        comic.page_count = 7;
+        comic.progress = Progress {
+            current_page: 0,
+            total_pages: 7,
+            percent: 0.0,
+            updated_at: None,
+        };
+
+        let store = catalog::CatalogStore::new(catalog_root.join("catalog.sqlite3")).unwrap();
+        store.sync_library(&[comic.clone()]).unwrap();
+        let proof_state = AppState::new();
+        let token = proof_state
+            .remember_progress_recovery_evidence(
+                "book",
+                &comic.source_id,
+                "book.cbz",
+                7,
+                1,
+                Some(revision.clone()),
+            )
+            .unwrap();
+        store
+            .register_progress_recovery_proof(catalog::ProgressRecoveryProof {
+                identifier: "book",
+                source_id: &comic.source_id,
+                relative_path: "book.cbz",
+                token: &token,
+                total_pages: 7,
+                revision: &revision,
+                smb_content_hash: None,
+            })
+            .unwrap();
+
+        // A cold state has no in-memory evidence or test-only source grant;
+        // recovery must load the durable proof and validate the configured root.
+        let cold_a = Arc::new(AppState::new());
+        *cold_a.scan_dir.write().unwrap() = root_a.to_string_lossy().into_owned();
+        *cold_a.catalog.write().unwrap() = Some(store.clone());
+        *cold_a.comics.lock().await = vec![comic.clone()];
+        assert!(cold_a
+            .progress_recovery_test_sources
+            .lock()
+            .unwrap()
+            .is_empty());
+        recover_reading_progress_inner(
+            &cold_a,
+            progress_recovery_request("book", &comic.source_id, 2, 7, 1, &token),
+        )
+        .await
+        .unwrap();
+
+        let committed_progress = store
+            .progress_for_source_location("book", &comic.source_id, "book.cbz")
+            .unwrap()
+            .unwrap();
+        assert_eq!(committed_progress.current_page, 2);
+        let committed_fence = store
+            .progress_intent_floor("book", &comic.source_id, "book.cbz")
+            .unwrap();
+        assert_eq!(committed_fence, 1);
+
+        // The catalog row and A's source bytes remain intact, but B is now the
+        // only configured local root. A second real recovery command must fail
+        // before it can advance either the persisted page or intent fence.
+        let cold_b = Arc::new(AppState::new());
+        *cold_b.scan_dir.write().unwrap() = root_b.to_string_lossy().into_owned();
+        *cold_b.catalog.write().unwrap() = Some(store.clone());
+        *cold_b.comics.lock().await = vec![comic.clone()];
+        assert!(cold_b
+            .progress_recovery_test_sources
+            .lock()
+            .unwrap()
+            .is_empty());
+        let rejected = recover_reading_progress_inner(
+            &cold_b,
+            progress_recovery_request("book", &comic.source_id, 4, 7, 2, &token),
+        )
+        .await;
+        assert!(rejected.is_err());
+        let after = store
+            .progress_for_source_location("book", &comic.source_id, "book.cbz")
+            .unwrap()
+            .unwrap();
+        assert_eq!(after.current_page, committed_progress.current_page);
+        assert_eq!(after.total_pages, committed_progress.total_pages);
+        assert_eq!(after.updated_at, committed_progress.updated_at);
+        assert_eq!(
+            store
+                .progress_intent_floor("book", &comic.source_id, "book.cbz")
+                .unwrap(),
+            committed_fence
+        );
+
+        fs::remove_dir_all(root_a).unwrap();
+        fs::remove_dir_all(root_b).unwrap();
+        fs::remove_dir_all(catalog_root).unwrap();
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn full_recovery_rejects_parent_symlinks_for_local_and_external_roots() {
+        use std::os::unix::fs::symlink;
+
+        let mut observations = Vec::new();
+        for external in [false, true] {
+            let case_root = std::env::temp_dir().join(format!(
+                "gai-recovery-parent-symlink-{}-{}",
+                if external { "external" } else { "local" },
+                uuid::Uuid::new_v4()
+            ));
+            let authorized_root = case_root.join("authorized");
+            let outside_root = case_root.join("outside");
+            let catalog_root = case_root.join("catalog");
+            fs::create_dir_all(authorized_root.join("sub")).unwrap();
+            fs::create_dir_all(&outside_root).unwrap();
+            fs::create_dir_all(&catalog_root).unwrap();
+            let archive = authorized_root.join("sub/book.cbz");
+            fs::write(&archive, b"same inode outside the authorized root").unwrap();
+            let revision =
+                state::SourceRevision::from_std_metadata(&fs::metadata(&archive).unwrap());
+            let bookmark = format!("parent-symlink-{}", uuid::Uuid::new_v4());
+            let mut comic = capability_comic("book", "Book");
+            comic.r#type = if external {
+                "external-archive".into()
+            } else {
+                "archive".into()
+            };
+            comic.relative_path = "sub/book.cbz".into();
+            comic.source_id = if external {
+                scanner::external_source_id(&bookmark)
+            } else {
+                scanner::local_source_id(&authorized_root)
+            };
+            comic.source_path = Some(archive.to_string_lossy().into_owned());
+            comic.external_bookmark = external.then(|| bookmark.clone());
+            comic.page_count = 7;
+            comic.progress = Progress {
+                current_page: 0,
+                total_pages: 7,
+                percent: 0.0,
+                updated_at: None,
+            };
+            let store = catalog::CatalogStore::new(catalog_root.join("catalog.sqlite3")).unwrap();
+            store.sync_library(&[comic.clone()]).unwrap();
+            let proof_state = AppState::new();
+            let token = proof_state
+                .remember_progress_recovery_evidence(
+                    "book",
+                    &comic.source_id,
+                    &comic.relative_path,
+                    7,
+                    1,
+                    Some(revision.clone()),
+                )
+                .unwrap();
+            store
+                .register_progress_recovery_proof(catalog::ProgressRecoveryProof {
+                    identifier: "book",
+                    source_id: &comic.source_id,
+                    relative_path: &comic.relative_path,
+                    token: &token,
+                    total_pages: 7,
+                    revision: &revision,
+                    smb_content_hash: None,
+                })
+                .unwrap();
+            let baseline = store
+                .progress_for_source_location("book", &comic.source_id, &comic.relative_path)
+                .unwrap();
+            let baseline_fence = store
+                .progress_intent_floor("book", &comic.source_id, &comic.relative_path)
+                .unwrap();
+
+            // Preserve the opened archive inode and its revision while the
+            // authorized path now traverses a symlinked parent directory.
+            let moved_subdirectory = outside_root.join("sub");
+            fs::rename(authorized_root.join("sub"), &moved_subdirectory).unwrap();
+            symlink(&moved_subdirectory, authorized_root.join("sub")).unwrap();
+
+            let cold = Arc::new(AppState::new());
+            *cold.catalog.write().unwrap() = Some(store.clone());
+            *cold.comics.lock().await = vec![comic.clone()];
+            if external {
+                *cold.external_bookmarks.write().unwrap() = vec![state::ExternalBookmark {
+                    bookmark: bookmark.clone(),
+                    name: "外部授權".into(),
+                }];
+                cold.active_bookmarks
+                    .lock()
+                    .unwrap()
+                    .insert(bookmark, authorized_root.to_string_lossy().into_owned());
+            } else {
+                *cold.scan_dir.write().unwrap() = authorized_root.to_string_lossy().into_owned();
+            }
+            assert!(cold
+                .progress_recovery_test_sources
+                .lock()
+                .unwrap()
+                .is_empty());
+
+            let result = recover_reading_progress_inner(
+                &cold,
+                progress_recovery_request("book", &comic.source_id, 2, 7, 1, &token),
+            )
+            .await;
+            let saved = store
+                .progress_for_source_location("book", &comic.source_id, &comic.relative_path)
+                .unwrap();
+            let fence = store
+                .progress_intent_floor("book", &comic.source_id, &comic.relative_path)
+                .unwrap();
+            let progress_key = |progress: &Option<Progress>| {
+                progress.as_ref().map(|item| {
+                    (
+                        item.current_page,
+                        item.total_pages,
+                        item.percent,
+                        item.updated_at.clone(),
+                    )
+                })
+            };
+            observations.push((
+                if external { "external" } else { "local" },
+                result.is_err(),
+                progress_key(&saved) == progress_key(&baseline),
+                fence == baseline_fence,
+            ));
+            fs::remove_dir_all(case_root).unwrap();
+        }
+        assert_eq!(
+            observations,
+            vec![("local", true, true, true), ("external", true, true, true)],
+            "each parent-symlink recovery must reject without changing page or fence"
+        );
+    }
+
+    #[tokio::test]
+    async fn removed_bookmark_denies_retained_catalog_row_and_reauthorized_offline_source_works() {
+        let root =
+            std::env::temp_dir().join(format!("gai-recovery-bookmark-{}", uuid::Uuid::new_v4()));
+        fs::create_dir_all(&root).unwrap();
+        let archive = root.join("book.zip");
+        fs::write(&archive, b"archive").unwrap();
+        let bookmark = "persistent-grant";
+        let mut comic = capability_comic("book", "Book");
+        comic.r#type = "offline".into();
+        comic.relative_path = "book.zip".into();
+        comic.source_id = scanner::external_source_id(bookmark);
+        comic.external_bookmark = Some(bookmark.into());
+        comic.source_path = Some(archive.to_string_lossy().into_owned());
+        let catalog_root =
+            std::env::temp_dir().join(format!("gai-recovery-bookmark-db-{}", uuid::Uuid::new_v4()));
+        let store = catalog::CatalogStore::new(catalog_root.join("catalog.sqlite3")).unwrap();
+        store.sync_library(&[comic.clone()]).unwrap();
+        let state = Arc::new(AppState::new());
+        *state.catalog.write().unwrap() = Some(store.clone());
+        state
+            .active_bookmarks
+            .lock()
+            .unwrap()
+            .insert(bookmark.into(), root.to_string_lossy().into_owned());
+        // Simulate failed catalog cleanup after bookmark removal: the old row
+        // remains queryable but the authoritative list revokes its capability.
+        assert!(store
+            .get_runtime_item_for_source("book", &comic.source_id)
+            .unwrap()
+            .is_some());
+        let error = current_recovery_source_identity(&state, &comic).unwrap_err();
+        assert!(!error.contains("MANUAL_CHECK"));
+
+        *state.external_bookmarks.write().unwrap() = vec![state::ExternalBookmark {
+            bookmark: bookmark.into(),
+            name: "NAS".into(),
+        }];
+        assert!(current_recovery_source_identity(&state, &comic).is_ok());
+        // `offline` is deliberately accepted only with the current bookmark
+        // list and active root; its catalog online bit is not authorization.
+        fs::remove_dir_all(root).unwrap();
+        fs::remove_dir_all(catalog_root).unwrap();
+    }
+
+    #[tokio::test]
+    async fn catalog_backed_external_recovery_uses_current_authoritative_bookmark() {
+        let root = std::env::temp_dir().join(format!(
+            "gai-catalog-external-recovery-{}",
+            uuid::Uuid::new_v4()
+        ));
+        let catalog_root = std::env::temp_dir().join(format!(
+            "gai-catalog-external-recovery-db-{}",
+            uuid::Uuid::new_v4()
+        ));
+        fs::create_dir_all(&root).unwrap();
+        fs::create_dir_all(&catalog_root).unwrap();
+        let archive = root.join("book.cbz");
+        fs::write(&archive, b"authorized external archive").unwrap();
+        let revision = state::SourceRevision::from_std_metadata(&fs::metadata(&archive).unwrap());
+        let bookmark = "external-proof-grant";
+        let mut comic = capability_comic("book", "Book");
+        comic.r#type = "external-archive".into();
+        comic.relative_path = "book.cbz".into();
+        comic.source_id = scanner::external_source_id(bookmark);
+        comic.source_path = Some(archive.to_string_lossy().into_owned());
+        comic.external_bookmark = Some(bookmark.into());
+        comic.page_count = 7;
+        comic.progress = Progress {
+            current_page: 0,
+            total_pages: 7,
+            percent: 0.0,
+            updated_at: None,
+        };
+        let store = catalog::CatalogStore::new(catalog_root.join("catalog.sqlite3")).unwrap();
+        store.sync_library(&[comic.clone()]).unwrap();
+
+        let proof_state = AppState::new();
+        let token = proof_state
+            .remember_progress_recovery_evidence(
+                "book",
+                &comic.source_id,
+                "book.cbz",
+                7,
+                1,
+                Some(revision.clone()),
+            )
+            .unwrap();
+        store
+            .register_progress_recovery_proof(catalog::ProgressRecoveryProof {
+                identifier: "book",
+                source_id: &comic.source_id,
+                relative_path: "book.cbz",
+                token: &token,
+                total_pages: 7,
+                revision: &revision,
+                smb_content_hash: None,
+            })
+            .unwrap();
+
+        let make_cold_state = |authorized: bool| {
+            let state = Arc::new(AppState::new());
+            *state.catalog.write().unwrap() = Some(store.clone());
+            state
+                .active_bookmarks
+                .lock()
+                .unwrap()
+                .insert(bookmark.into(), root.to_string_lossy().into_owned());
+            if authorized {
+                *state.external_bookmarks.write().unwrap() = vec![state::ExternalBookmark {
+                    bookmark: bookmark.into(),
+                    name: "授權來源".into(),
+                }];
+            }
+            state
+        };
+
+        // The catalog query reconstructs the row without its security-scoped
+        // bookmark value. Current authoritative state must rehydrate it.
+        let cold_authorized = make_cold_state(true);
+        let catalog_row = store
+            .get_runtime_item_for_source("book", &comic.source_id)
+            .unwrap()
+            .unwrap();
+        assert!(catalog_row.external_bookmark.is_none());
+        assert!(cold_authorized
+            .progress_recovery_test_sources
+            .lock()
+            .unwrap()
+            .is_empty());
+        recover_reading_progress_inner(
+            &cold_authorized,
+            progress_recovery_request("book", &comic.source_id, 2, 7, 1, &token),
+        )
+        .await
+        .unwrap();
+        let saved = store
+            .progress_for_source_location("book", &comic.source_id, "book.cbz")
+            .unwrap()
+            .unwrap();
+        let saved_fence = store
+            .progress_intent_floor("book", &comic.source_id, "book.cbz")
+            .unwrap();
+        assert_eq!(saved.current_page, 2);
+        assert_eq!(saved_fence, 1);
+
+        // Simulate cleanup failure: the catalog row and active handle remain,
+        // while removal from the authoritative list revokes this capability.
+        let cold_revoked = make_cold_state(false);
+        let rejected = recover_reading_progress_inner(
+            &cold_revoked,
+            progress_recovery_request("book", &comic.source_id, 4, 7, 2, &token),
+        )
+        .await;
+        assert!(rejected.is_err());
+        let after_revoke = store
+            .progress_for_source_location("book", &comic.source_id, "book.cbz")
+            .unwrap()
+            .unwrap();
+        assert_eq!(after_revoke.current_page, saved.current_page);
+        assert_eq!(after_revoke.total_pages, saved.total_pages);
+        assert_eq!(after_revoke.updated_at, saved.updated_at);
+        assert_eq!(
+            store
+                .progress_intent_floor("book", &comic.source_id, "book.cbz")
+                .unwrap(),
+            saved_fence
+        );
+
+        // Regranting the same opaque bookmark permits a later cold retry with
+        // the unchanged durable proof and freshly advanced user intent.
+        let cold_regranted = make_cold_state(true);
+        recover_reading_progress_inner(
+            &cold_regranted,
+            progress_recovery_request("book", &comic.source_id, 4, 7, 2, &token),
+        )
+        .await
+        .unwrap();
+        assert_eq!(
+            store
+                .progress_for_source_location("book", &comic.source_id, "book.cbz")
+                .unwrap()
+                .unwrap()
+                .current_page,
+            4
+        );
+        assert_eq!(
+            store
+                .progress_intent_floor("book", &comic.source_id, "book.cbz")
+                .unwrap(),
+            2
+        );
+
+        fs::remove_dir_all(root).unwrap();
+        fs::remove_dir_all(catalog_root).unwrap();
+    }
+
+    #[tokio::test]
+    async fn recovery_commit_holds_source_lease_until_database_fence_commits() {
+        let root_a =
+            std::env::temp_dir().join(format!("gai-recovery-lease-a-{}", uuid::Uuid::new_v4()));
+        let root_b =
+            std::env::temp_dir().join(format!("gai-recovery-lease-b-{}", uuid::Uuid::new_v4()));
+        fs::create_dir_all(&root_a).unwrap();
+        fs::create_dir_all(&root_b).unwrap();
+        let archive = root_a.join("book.zip");
+        fs::write(&archive, b"archive").unwrap();
+        let revision = state::SourceRevision::from_std_metadata(&fs::metadata(&archive).unwrap());
+        let mut comic = capability_comic("book", "Book");
+        comic.relative_path = "book.zip".into();
+        comic.source_id = scanner::local_source_id(&root_a);
+        comic.source_path = Some(archive.to_string_lossy().into_owned());
+        let catalog_root =
+            std::env::temp_dir().join(format!("gai-recovery-lease-db-{}", uuid::Uuid::new_v4()));
+        let store = catalog::CatalogStore::new(catalog_root.join("catalog.sqlite3")).unwrap();
+        store.sync_library(&[comic.clone()]).unwrap();
+        let token = "authorized-commit-proof";
+        store
+            .register_progress_recovery_proof(catalog::ProgressRecoveryProof {
+                identifier: "book",
+                source_id: &comic.source_id,
+                relative_path: "book.zip",
+                token,
+                total_pages: 1,
+                revision: &revision,
+                smb_content_hash: None,
+            })
+            .unwrap();
+        let state = Arc::new(AppState::new());
+        *state.scan_dir.write().unwrap() = root_a.to_string_lossy().into_owned();
+        let snapshot = recovery_source_authorization_snapshot(&state, &comic)
+            .await
+            .unwrap();
+        let final_lease = state
+            .source_authorization_lifecycle
+            .clone()
+            .read_owned()
+            .await;
+        verify_recovery_source_authorization(&state, &comic, &snapshot).unwrap();
+
+        let state_for_transition = Arc::clone(&state);
+        let next_root = root_b.to_string_lossy().into_owned();
+        let (attempted_tx, attempted_rx) = tokio::sync::oneshot::channel();
+        let (changed_tx, mut changed_rx) = tokio::sync::oneshot::channel();
+        let transition = tokio::spawn(async move {
+            attempted_tx.send(()).unwrap();
+            let _write = state_for_transition
+                .source_authorization_lifecycle
+                .clone()
+                .write_owned()
+                .await;
+            *state_for_transition.scan_dir.write().unwrap() = next_root;
+            state_for_transition
+                .source_authorization_generation
+                .fetch_add(1, std::sync::atomic::Ordering::AcqRel);
+            changed_tx.send(()).unwrap();
+        });
+        attempted_rx.await.unwrap();
+        tokio::task::yield_now().await;
+        assert!(matches!(
+            changed_rx.try_recv(),
+            Err(tokio::sync::oneshot::error::TryRecvError::Empty)
+        ));
+
+        let commit_store = store.clone();
+        let commit_revision = revision.clone();
+        let commit_source_id = comic.source_id.clone();
+        tokio::task::spawn_blocking(move || {
+            let _authorization_lease = final_lease;
+            let progress = Progress {
+                current_page: 0,
+                total_pages: 1,
+                percent: 0.0,
+                updated_at: Some("committed".into()),
+            };
+            commit_store.recover_progress_for_source_location(catalog::ProgressRecoveryCommit {
+                identifier: "book",
+                source_id: &commit_source_id,
+                relative_path: "book.zip",
+                token,
+                revision: &commit_revision,
+                smb_content_hash: None,
+                total_pages: 1,
+                current_page: 0,
+                intent_sequence: 1,
+                progress: &progress,
+            })
+        })
+        .await
+        .unwrap()
+        .unwrap();
+        changed_rx.await.unwrap();
+        transition.await.unwrap();
+        assert_eq!(
+            store
+                .progress_intent_floor("book", &comic.source_id, "book.zip")
+                .unwrap(),
+            1
+        );
+        assert_eq!(
+            store
+                .progress_for_source_location("book", &comic.source_id, "book.zip")
+                .unwrap()
+                .unwrap()
+                .updated_at
+                .as_deref(),
+            Some("committed")
+        );
+        fs::remove_dir_all(root_a).unwrap();
+        fs::remove_dir_all(root_b).unwrap();
+        fs::remove_dir_all(catalog_root).unwrap();
+    }
+
+    #[test]
+    fn progress_recovery_evidence_is_optional_when_revision_is_unavailable() {
+        let state = AppState::new();
+        assert!(state
+            .remember_progress_recovery_evidence(
+                "book",
+                "external:bookmarks",
+                "book.cbz",
+                12,
+                1,
+                None,
+            )
+            .is_none());
+        assert!(state
+            .progress_recovery_evidence("book", "external:bookmarks", "book.cbz")
+            .is_none());
+    }
+
+    #[test]
+    fn smb_progress_evidence_rotates_token_when_content_changes() {
+        let source_root = std::env::temp_dir().join(format!(
+            "gai-smb-progress-evidence-{}",
+            uuid::Uuid::new_v4()
+        ));
+        fs::create_dir_all(&source_root).unwrap();
+        let archive = source_root.join("book.cbz");
+        fs::write(&archive, b"verified original bytes").unwrap();
+        let revision = state::SourceRevision::from_std_metadata(&fs::metadata(&archive).unwrap());
+        let state = AppState::new();
+        let first_hash = *blake3::hash(b"verified original bytes").as_bytes();
+        let replacement_hash = *blake3::hash(b"replacement bytes").as_bytes();
+        let first_token = state
+            .remember_progress_recovery_evidence_with_smb_hash(
+                "book",
+                "smb:v1:test",
+                "book.cbz",
+                7,
+                1,
+                Some(revision.clone()),
+                Some(first_hash),
+            )
+            .unwrap();
+        let same_token = state
+            .remember_progress_recovery_evidence_with_smb_hash(
+                "book",
+                "smb:v1:test",
+                "book.cbz",
+                7,
+                2,
+                Some(revision.clone()),
+                Some(first_hash),
+            )
+            .unwrap();
+        let replacement_token = state
+            .remember_progress_recovery_evidence_with_smb_hash(
+                "book",
+                "smb:v1:test",
+                "book.cbz",
+                7,
+                3,
+                Some(revision.clone()),
+                Some(replacement_hash),
+            )
+            .unwrap();
+        assert_eq!(first_token, same_token);
+        assert_ne!(first_token, replacement_token);
+        fs::remove_dir_all(source_root).unwrap();
+    }
+
+    #[test]
+    fn smb_recovery_rejects_replaced_content_and_unstable_remote_metadata() {
+        let root = std::env::temp_dir().join(format!(
+            "gai-smb-progress-replaced-{}",
+            uuid::Uuid::new_v4()
+        ));
+        fs::create_dir_all(&root).unwrap();
+        let archive = root.join("book.cbz");
+        fs::write(&archive, b"original archive bytes").unwrap();
+        let expected = *blake3::hash(&fs::read(&archive).unwrap()).as_bytes();
+        assert!(smb_recovery_content_matches(expected, expected));
+        fs::write(&archive, b"replacement archive bytes").unwrap();
+        let replacement = *blake3::hash(&fs::read(&archive).unwrap()).as_bytes();
+        assert!(!smb_recovery_content_matches(expected, replacement));
+
+        let timestamp = smb2::pack::FileTime::from_system_time(std::time::UNIX_EPOCH);
+        let before = smb2::FileInfo {
+            size: 22,
+            is_directory: false,
+            created: timestamp,
+            modified: timestamp,
+            accessed: timestamp,
+        };
+        assert!(smb_stat_stable_during_read(&before, &before));
+        let mut after = before.clone();
+        after.modified = smb2::pack::FileTime::from_system_time(
+            std::time::UNIX_EPOCH + std::time::Duration::from_secs(1),
+        );
+        assert!(!smb_stat_stable_during_read(&before, &after));
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[tokio::test]
+    async fn direct_smb_progress_recovery_fails_closed_without_content_evidence() {
+        let root = std::env::temp_dir().join(format!(
+            "gai-smb-progress-missing-digest-{}",
+            uuid::Uuid::new_v4()
+        ));
+        fs::create_dir_all(&root).unwrap();
+        let archive = root.join("book.cbz");
+        fs::write(&archive, b"archive").unwrap();
+        let revision = state::SourceRevision::from_std_metadata(&fs::metadata(&archive).unwrap());
+        let mut comic = capability_comic("book", "Book");
+        comic.source_id = "smb:v1:test".into();
+        comic.relative_path = "book.cbz".into();
+        comic.source_path = None;
+        let (state, catalog_root) = progress_recovery_state(&[comic]).await;
+        let token = state
+            .remember_progress_recovery_evidence(
+                "book",
+                "smb:v1:test",
+                "book.cbz",
+                7,
+                1,
+                Some(revision),
+            )
+            .unwrap();
+
+        let error = recover_reading_progress_inner(
+            &state,
+            progress_recovery_request("book", "smb:v1:test", 0, 7, 1, &token),
+        )
+        .await
+        .unwrap_err();
+        assert!(error.contains("SMB"));
+        fs::remove_dir_all(catalog_root).unwrap();
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[tokio::test]
+    async fn smb_progress_recovery_releases_publication_lock_and_rechecks_snapshot() {
+        let smb_config = state::SmbConfig {
+            host: "example.invalid".into(),
+            share: "comics".into(),
+            username: Some("reader".into()),
+            password: Some("secret".into()),
+        };
+        let smb_source = state::smb_source_id(&smb_config);
+        let mut comic = capability_comic("book", "Book");
+        comic.source_id = smb_source.clone();
+        comic.relative_path = "book.cbz".into();
+        comic.source_path = None;
+        comic.progress = Progress {
+            current_page: 1,
+            total_pages: 7,
+            percent: 14.3,
+            updated_at: Some(chrono::Utc::now().to_rfc3339()),
+        };
+        let (state, catalog_root) = progress_recovery_state(&[comic]).await;
+        *state.smb_config.write().unwrap() = Some(smb_config);
+        let content_hash = *blake3::hash(b"smb archive bytes").as_bytes();
+        let revision = state::SourceRevision {
+            len: b"smb archive bytes".len() as u64,
+            modified: Some((1, 0)),
+            ctime: None,
+            file_id: None,
+        };
+        let old_token = state
+            .remember_progress_recovery_evidence_with_smb_hash(
+                "book",
+                &smb_source,
+                "book.cbz",
+                7,
+                10,
+                Some(revision.clone()),
+                Some(content_hash),
+            )
+            .unwrap();
+        let (started_tx, started_rx) = tokio::sync::oneshot::channel();
+        let (continue_tx, continue_rx) = tokio::sync::oneshot::channel();
+        let started_tx = std::sync::Mutex::new(Some(started_tx));
+        let continue_rx = std::sync::Mutex::new(Some(continue_rx));
+        let hash = content_hash;
+        let recovery_source = smb_source.clone();
+        let recovery_state = state.clone();
+        let recovery_token = old_token.clone();
+        let recovery = tokio::spawn(async move {
+            recover_reading_progress_inner_with_smb_hash(
+                &recovery_state,
+                progress_recovery_request("book", &recovery_source, 5, 7, 1, &recovery_token),
+                move |_, _| {
+                    let started_tx = started_tx.lock().unwrap().take();
+                    let continue_rx = continue_rx.lock().unwrap().take().unwrap();
+                    Box::pin(async move {
+                        if let Some(started_tx) = started_tx {
+                            let _ = started_tx.send(());
+                        }
+                        continue_rx.await.map_err(|error| error.to_string())?;
+                        Ok((b"smb archive bytes".len() as u64, hash))
+                    })
+                },
+            )
+            .await
+        });
+
+        started_rx.await.unwrap();
+        let identity = format!("{smb_source}\0book");
+        let publication_state = state.clone();
+        let publication_revision = revision.clone();
+        let publication_source = smb_source.clone();
+        let publication_identity = identity.clone();
+        let publication = tokio::spawn(async move {
+            with_comic_progress_lifecycle(&publication_state, &publication_identity, || {
+                publication_state.remember_progress_recovery_evidence_with_smb_hash(
+                    "book",
+                    &publication_source,
+                    "book.cbz",
+                    7,
+                    11,
+                    Some(publication_revision),
+                    Some(hash),
+                )
+            })
+            .await
+        });
+        let reopened_token = tokio::time::timeout(std::time::Duration::from_secs(1), publication)
+            .await
+            .expect("SMB hashing must not hold the open publication lock")
+            .unwrap()
+            .unwrap();
+        assert_eq!(reopened_token, old_token);
+        assert_eq!(
+            state
+                .progress_recovery_evidence("book", &smb_source, "book.cbz")
+                .unwrap()
+                .generation,
+            11
+        );
+
+        continue_tx.send(()).unwrap();
+        let error = recovery.await.unwrap().unwrap_err();
+        assert!(error.contains("READING_PROGRESS_RECOVERY_MANUAL_CHECK"));
+        assert_eq!(
+            state
+                .catalog
+                .read()
+                .unwrap()
+                .clone()
+                .unwrap()
+                .get_runtime_item_for_source("book", &smb_source)
+                .unwrap()
+                .unwrap()
+                .progress
+                .current_page,
+            1
+        );
+        assert_eq!(state.progress_sequences.lock().await.get(&identity), None);
+        fs::remove_dir_all(catalog_root).unwrap();
+    }
+
+    #[tokio::test]
+    async fn smb_progress_recovery_rejects_intervening_intents_and_legacy_writes() {
+        for mutation in 0..3 {
+            let smb_config = state::SmbConfig {
+                host: "example.invalid".into(),
+                share: "comics".into(),
+                username: Some("reader".into()),
+                password: Some("secret".into()),
+            };
+            let smb_source = state::smb_source_id(&smb_config);
+            let mut comic = capability_comic("book", "Book");
+            comic.source_id = smb_source.clone();
+            comic.relative_path = "book.cbz".into();
+            comic.source_path = None;
+            comic.progress = Progress {
+                current_page: 1,
+                total_pages: 7,
+                percent: 14.3,
+                updated_at: Some(chrono::Utc::now().to_rfc3339()),
+            };
+            let (state, catalog_root) = progress_recovery_state(&[comic]).await;
+            *state.smb_config.write().unwrap() = Some(smb_config);
+            let content_hash = *blake3::hash(b"smb archive bytes").as_bytes();
+            let revision = state::SourceRevision {
+                len: b"smb archive bytes".len() as u64,
+                modified: Some((1, 0)),
+                ctime: None,
+                file_id: None,
+            };
+            let token = state
+                .remember_progress_recovery_evidence_with_smb_hash(
+                    "book",
+                    &smb_source,
+                    "book.cbz",
+                    7,
+                    10,
+                    Some(revision),
+                    Some(content_hash),
+                )
+                .unwrap();
+            let (started_tx, started_rx) = tokio::sync::oneshot::channel();
+            let (continue_tx, continue_rx) = tokio::sync::oneshot::channel();
+            let started_tx = std::sync::Mutex::new(Some(started_tx));
+            let continue_rx = std::sync::Mutex::new(Some(continue_rx));
+            let recovery_source = smb_source.clone();
+            let recovery_state = state.clone();
+            let recovery = tokio::spawn(async move {
+                recover_reading_progress_inner_with_smb_hash(
+                    &recovery_state,
+                    progress_recovery_request("book", &recovery_source, 5, 7, 1, &token),
+                    move |_, _| {
+                        let started_tx = started_tx.lock().unwrap().take();
+                        let continue_rx = continue_rx.lock().unwrap().take().unwrap();
+                        Box::pin(async move {
+                            if let Some(started_tx) = started_tx {
+                                let _ = started_tx.send(());
+                            }
+                            continue_rx.await.map_err(|error| error.to_string())?;
+                            Ok((b"smb archive bytes".len() as u64, content_hash))
+                        })
+                    },
+                )
+                .await
+            });
+
+            started_rx.await.unwrap();
+            let identity = format!("{smb_source}\0book");
+            match mutation {
+                0 => commit_progress_sequence(&state, &identity, Some(2)).await,
+                1 => {
+                    begin_pending_open(&state, "book", Some(smb_source.clone()));
+                }
+                _ => {
+                    // Legacy/native callers may omit sequence; SQLite must still
+                    // fence an intervening successful write during the unlocked I/O.
+                    state
+                        .catalog
+                        .read()
+                        .unwrap()
+                        .clone()
+                        .unwrap()
+                        .save_progress_for_source(
+                            "book",
+                            &smb_source,
+                            &Progress {
+                                current_page: 4,
+                                total_pages: 7,
+                                percent: 57.1,
+                                updated_at: Some(chrono::Utc::now().to_rfc3339()),
+                            },
+                        )
+                        .unwrap();
+                }
+            }
+            continue_tx.send(()).unwrap();
+            let error = recovery.await.unwrap().unwrap_err();
+            assert!(error.contains("READING_PROGRESS_RECOVERY_MANUAL_CHECK"));
+            assert_eq!(
+                state
+                    .catalog
+                    .read()
+                    .unwrap()
+                    .clone()
+                    .unwrap()
+                    .get_runtime_item_for_source("book", &smb_source)
+                    .unwrap()
+                    .unwrap()
+                    .progress
+                    .current_page,
+                if mutation == 2 { 4 } else { 1 }
+            );
+            assert_eq!(
+                state.progress_sequences.lock().await.get(&identity),
+                if mutation == 0 { Some(&2) } else { None }
+            );
+            fs::remove_dir_all(catalog_root).unwrap();
+        }
+    }
+
+    #[tokio::test]
+    async fn missing_folder_revision_is_an_optional_probe() {
+        let root = std::env::temp_dir().join(format!(
+            "gai-folder-revision-probe-{}",
+            uuid::Uuid::new_v4()
+        ));
+        fs::create_dir_all(&root).unwrap();
+        let authorized =
+            cap_std::fs::Dir::open_ambient_dir(&root, cap_std::ambient_authority()).unwrap();
+        assert!(
+            optional_directory_source_revision(&authorized, Path::new("missing-folder"))
+                .await
+                .is_none()
+        );
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[tokio::test]
+    async fn manual_progress_recovery_persists_after_reader_close_with_exact_evidence() {
+        let source_root = std::env::temp_dir().join(format!(
+            "gai-progress-recovery-source-{}",
+            uuid::Uuid::new_v4()
+        ));
+        fs::create_dir_all(&source_root).unwrap();
+        let archive = source_root.join("book.cbz");
+        fs::write(&archive, b"archive").unwrap();
+        let revision = state::SourceRevision::from_std_metadata(&fs::metadata(&archive).unwrap());
+        let mut comic = capability_comic("book", "Book");
+        comic.source_id = "local:recovery".into();
+        comic.relative_path = "book.cbz".into();
+        comic.source_path = Some(archive.to_string_lossy().into_owned());
+        comic.progress.total_pages = 0;
+        comic.progress.current_page = 0;
+        let (state, root) = progress_recovery_state(&[comic.clone()]).await;
+        let token = state
+            .remember_progress_recovery_evidence(
+                "book",
+                "local:recovery",
+                "book.cbz",
+                7,
+                3,
+                Some(revision.clone()),
+            )
+            .unwrap();
+        state
+            .catalog
+            .read()
+            .unwrap()
+            .as_ref()
+            .unwrap()
+            .register_progress_recovery_proof(catalog::ProgressRecoveryProof {
+                identifier: "book",
+                source_id: "local:recovery",
+                relative_path: "book.cbz",
+                token: &token,
+                total_pages: 7,
+                revision: &revision,
+                smb_content_hash: None,
+            })
+            .unwrap();
+
+        recover_reading_progress_inner(
+            &state,
+            progress_recovery_request("book", "local:recovery", 5, 7, 1, &token),
+        )
+        .await
+        .unwrap();
+
+        let store = state.catalog.read().unwrap().clone().unwrap();
+        let saved = store
+            .get_runtime_item_for_source("book", "local:recovery")
+            .unwrap()
+            .unwrap();
+        assert_eq!(saved.progress.current_page, 5);
+        assert_eq!(saved.progress.total_pages, 7);
+        let memory = state.comics.lock().await;
+        assert_eq!(memory[0].progress.current_page, 5);
+        assert_eq!(memory[0].progress.total_pages, 7);
+        drop(memory);
+        fs::remove_dir_all(root).unwrap();
+        fs::remove_dir_all(source_root).unwrap();
+    }
+
+    #[tokio::test]
+    async fn manual_progress_recovery_fails_closed_without_exact_trusted_bounds() {
+        let source_root = std::env::temp_dir().join(format!(
+            "gai-progress-recovery-bounds-{}",
+            uuid::Uuid::new_v4()
+        ));
+        fs::create_dir_all(&source_root).unwrap();
+        let archive = source_root.join("book.cbz");
+        fs::write(&archive, b"archive").unwrap();
+        let revision = state::SourceRevision::from_std_metadata(&fs::metadata(&archive).unwrap());
+        let mut comic = capability_comic("book", "Book");
+        comic.source_id = "local:recovery".into();
+        comic.relative_path = "book.cbz".into();
+        comic.source_path = Some(archive.to_string_lossy().into_owned());
+        comic.progress.total_pages = 0;
+        let (state, root) = progress_recovery_state(&[comic.clone()]).await;
+        let missing_evidence = recover_reading_progress_inner(
+            &state,
+            progress_recovery_request("book", "local:recovery", 0, 7, 1, "missing-token"),
+        )
+        .await;
+        assert!(missing_evidence.is_err());
+
+        let token = state
+            .remember_progress_recovery_evidence(
+                "book",
+                "local:recovery",
+                "book.cbz",
+                7,
+                3,
+                Some(revision),
+            )
+            .unwrap();
+        let mut legacy_request =
+            progress_recovery_request("book", "local:recovery", 0, 7, 1, &token);
+        legacy_request.recovery_token = None;
+        assert!(recover_reading_progress_inner(&state, legacy_request)
+            .await
+            .is_err());
+        assert!(recover_reading_progress_inner(
+            &state,
+            progress_recovery_request("book", "local:recovery", 0, 6, 1, &token),
+        )
+        .await
+        .is_err());
+        assert!(recover_reading_progress_inner(
+            &state,
+            progress_recovery_request("book", "local:recovery", 7, 7, 1, &token),
+        )
+        .await
+        .is_err());
+        assert!(recover_reading_progress_inner(
+            &state,
+            progress_recovery_request("book", "local:wrong-source", 0, 7, 1, &token),
+        )
+        .await
+        .is_err());
+        assert!(recover_reading_progress_inner(
+            &state,
+            progress_recovery_request("photo-album:test", "local:recovery", 0, 7, 1, &token),
+        )
+        .await
+        .is_err());
+        fs::remove_dir_all(root).unwrap();
+        fs::remove_dir_all(source_root).unwrap();
+    }
+
+    #[tokio::test]
+    async fn manual_progress_recovery_rejects_ambiguous_catalog_locations() {
+        let mut first = capability_comic("book", "Book A");
+        first.source_id = "local:recovery".into();
+        first.relative_path = "a/book.cbz".into();
+        let mut second = first.clone();
+        second.relative_path = "b/book.cbz".into();
+        second.title = "Book B".into();
+        let (state, root) = progress_recovery_state(&[first, second]).await;
+
+        assert!(recover_reading_progress_inner(
+            &state,
+            progress_recovery_request("book", "local:recovery", 0, 7, 1, "missing-token"),
+        )
+        .await
+        .is_err());
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[tokio::test]
+    async fn manual_progress_recovery_rejects_replaced_archive_and_stale_sequence() {
+        let root = std::env::temp_dir().join(format!(
+            "gai-progress-recovery-revision-{}",
+            uuid::Uuid::new_v4()
+        ));
+        fs::create_dir_all(&root).unwrap();
+        let archive = root.join("book.cbz");
+        fs::write(&archive, b"first archive").unwrap();
+        let revision = state::SourceRevision::from_std_metadata(&fs::metadata(&archive).unwrap());
+        let mut comic = capability_comic("book", "Book");
+        comic.source_id = "local:recovery".into();
+        comic.relative_path = "book.cbz".into();
+        comic.source_path = Some(archive.to_string_lossy().into_owned());
+        comic.progress.total_pages = 0;
+        let (state, catalog_root) = progress_recovery_state(&[comic]).await;
+        let token = state
+            .remember_progress_recovery_evidence(
+                "book",
+                "local:recovery",
+                "book.cbz",
+                7,
+                3,
+                Some(revision),
+            )
+            .unwrap();
+        fs::write(&archive, b"replacement archive with different identity").unwrap();
+        assert!(recover_reading_progress_inner(
+            &state,
+            progress_recovery_request("book", "local:recovery", 0, 7, 1, &token),
+        )
+        .await
+        .is_err());
+
+        // A newer sequence committed through the same per-source lock fences
+        // an older recovery even when the file evidence remains valid.
+        commit_progress_sequence(&state, "local:recovery\0book", Some(4)).await;
+        assert!(recover_reading_progress_inner(
+            &state,
+            progress_recovery_request("book", "local:recovery", 0, 7, 3, &token),
+        )
+        .await
+        .is_err());
+        fs::remove_dir_all(root).unwrap();
+        fs::remove_dir_all(catalog_root).unwrap();
+    }
+
+    #[tokio::test]
+    async fn reopening_same_location_with_a_different_page_count_invalidates_old_evidence() {
+        let source_root = std::env::temp_dir().join(format!(
+            "gai-progress-recovery-reopen-{}",
+            uuid::Uuid::new_v4()
+        ));
+        fs::create_dir_all(&source_root).unwrap();
+        let archive = source_root.join("book.cbz");
+        fs::write(&archive, b"archive").unwrap();
+        let revision = state::SourceRevision::from_std_metadata(&fs::metadata(&archive).unwrap());
+        let mut comic = capability_comic("book", "Book");
+        comic.source_id = "local:recovery".into();
+        comic.relative_path = "book.cbz".into();
+        comic.source_path = Some(archive.to_string_lossy().into_owned());
+        comic.progress.total_pages = 0;
+        let (state, catalog_root) = progress_recovery_state(&[comic]).await;
+        let old_token = state
+            .remember_progress_recovery_evidence(
+                "book",
+                "local:recovery",
+                "book.cbz",
+                7,
+                3,
+                Some(revision.clone()),
+            )
+            .unwrap();
+        state
+            .catalog
+            .read()
+            .unwrap()
+            .as_ref()
+            .unwrap()
+            .register_progress_recovery_proof(catalog::ProgressRecoveryProof {
+                identifier: "book",
+                source_id: "local:recovery",
+                relative_path: "book.cbz",
+                token: &old_token,
+                total_pages: 7,
+                revision: &revision,
+                smb_content_hash: None,
+            })
+            .unwrap();
+        let new_token = state
+            .remember_progress_recovery_evidence(
+                "book",
+                "local:recovery",
+                "book.cbz",
+                8,
+                4,
+                Some(revision.clone()),
+            )
+            .unwrap();
+        state
+            .catalog
+            .read()
+            .unwrap()
+            .as_ref()
+            .unwrap()
+            .register_progress_recovery_proof(catalog::ProgressRecoveryProof {
+                identifier: "book",
+                source_id: "local:recovery",
+                relative_path: "book.cbz",
+                token: &new_token,
+                total_pages: 8,
+                revision: &revision,
+                smb_content_hash: None,
+            })
+            .unwrap();
+
+        assert!(recover_reading_progress_inner(
+            &state,
+            progress_recovery_request("book", "local:recovery", 0, 7, 1, &old_token),
+        )
+        .await
+        .is_err());
+        assert!(recover_reading_progress_inner(
+            &state,
+            progress_recovery_request("book", "local:recovery", 0, 8, 1, &old_token),
+        )
+        .await
+        .is_err());
+        recover_reading_progress_inner(
+            &state,
+            progress_recovery_request("book", "local:recovery", 0, 8, 1, &new_token),
+        )
+        .await
+        .unwrap();
+        fs::remove_dir_all(catalog_root).unwrap();
+        fs::remove_dir_all(source_root).unwrap();
+    }
+
+    #[tokio::test]
+    async fn open_publication_waits_for_cancelled_sqlite_progress_write() {
+        let source_root =
+            std::env::temp_dir().join(format!("gai-progress-token-race-{}", uuid::Uuid::new_v4()));
+        fs::create_dir_all(&source_root).unwrap();
+        let archive = source_root.join("book.cbz");
+        fs::write(&archive, b"archive").unwrap();
+        let revision = state::SourceRevision::from_std_metadata(&fs::metadata(&archive).unwrap());
+        let mut comic = capability_comic("book", "Book");
+        comic.source_id = "local:recovery".into();
+        comic.relative_path = "book.cbz".into();
+        comic.source_path = Some(archive.to_string_lossy().into_owned());
+        let (state, catalog_root) = progress_recovery_state(&[comic]).await;
+        let old_token = state
+            .remember_progress_recovery_evidence(
+                "book",
+                "local:recovery",
+                "book.cbz",
+                7,
+                3,
+                Some(revision.clone()),
+            )
+            .unwrap();
+        let identity = "local:recovery\0book";
+        let progress_lock = comic_progress_lock(&state, identity).await;
+        let lifecycle = progress_lock.clone().lock_owned().await;
+        let (started_tx, started_rx) = tokio::sync::oneshot::channel();
+        let (continue_tx, continue_rx) = std::sync::mpsc::channel();
+        let store = state.catalog.read().unwrap().clone().unwrap();
+        let command_state = state.clone();
+        let command = tokio::spawn(async move {
+            let _lifecycle = persist_progress_and_commit_sequence(
+                command_state,
+                identity.to_string(),
+                Some(12),
+                lifecycle,
+                move || {
+                    let _ = started_tx.send(());
+                    continue_rx.recv().unwrap();
+                    store
+                        .save_progress_for_source(
+                            "book",
+                            "local:recovery",
+                            &Progress {
+                                current_page: 5,
+                                total_pages: 7,
+                                percent: 71.4,
+                                updated_at: Some(chrono::Utc::now().to_rfc3339()),
+                            },
+                        )
+                        .map_err(|error| error.to_string())
+                },
+            )
+            .await
+            .unwrap();
+        });
+
+        // Cancel the command waiter while the real catalog write is paused.
+        // The same publication gate used by open_comic must wait for SQLite
+        // and its sequence fence before replacing the recovery token.
+        started_rx.await.unwrap();
+        command.abort();
+        let open_state = state.clone();
+        let open_revision = revision.clone();
+        let open = tokio::spawn(async move {
+            with_comic_progress_lifecycle(&open_state, identity, || {
+                open_state.remember_progress_recovery_evidence(
+                    "book",
+                    "local:recovery",
+                    "book.cbz",
+                    8,
+                    4,
+                    Some(open_revision),
+                )
+            })
+            .await
+        });
+        tokio::task::yield_now().await;
+        continue_tx.send(()).unwrap();
+
+        let new_token = open.await.unwrap().unwrap();
+        assert_ne!(old_token, new_token);
+        let saved = state
+            .catalog
+            .read()
+            .unwrap()
+            .clone()
+            .unwrap()
+            .get_runtime_item_for_source("book", "local:recovery")
+            .unwrap()
+            .unwrap();
+        assert_eq!(saved.progress.current_page, 5);
+        assert_eq!(saved.progress.total_pages, 7);
+        assert_eq!(
+            state.progress_sequences.lock().await.get(identity),
+            Some(&12)
+        );
+        fs::remove_dir_all(catalog_root).unwrap();
+        fs::remove_dir_all(source_root).unwrap();
+    }
+
+    #[tokio::test]
+    async fn open_progress_snapshot_waits_for_exact_sqlite_progress_write() {
+        let mut comic = capability_comic("book", "Book");
+        comic.source_id = "local:recovery".into();
+        comic.relative_path = "book.cbz".into();
+        comic.source_path = Some("/tmp/book.cbz".into());
+        comic.progress = Progress {
+            current_page: 1,
+            total_pages: 7,
+            percent: 14.3,
+            updated_at: None,
+        };
+        let opened_comic = comic.clone();
+        let (state, catalog_root) = progress_recovery_state(&[comic]).await;
+        let store = state.catalog.read().unwrap().clone().unwrap();
+        let identity = "local:recovery\0book";
+        let progress_lock = comic_progress_lock(&state, identity).await;
+        let lifecycle = progress_lock.clone().lock_owned().await;
+        let (write_started_tx, write_started_rx) = tokio::sync::oneshot::channel();
+        let (write_continue_tx, write_continue_rx) = std::sync::mpsc::channel();
+        let write_state = state.clone();
+        let write = tokio::spawn(async move {
+            let _lifecycle = persist_progress_and_commit_sequence(
+                write_state,
+                identity.to_string(),
+                Some(2),
+                lifecycle,
+                move || {
+                    let _ = write_started_tx.send(());
+                    write_continue_rx.recv().unwrap();
+                    store.save_progress_for_source_location(
+                        "book",
+                        "local:recovery",
+                        "book.cbz",
+                        &Progress {
+                            current_page: 5,
+                            total_pages: 7,
+                            percent: 71.4,
+                            updated_at: Some("2026-11-08T00:00:00Z".into()),
+                        },
+                    )
+                },
+            )
+            .await
+            .unwrap();
+        });
+        write_started_rx.await.unwrap();
+
+        let (open_requested_tx, open_requested_rx) = tokio::sync::oneshot::channel();
+        let (snapshot_started_tx, mut snapshot_started_rx) = tokio::sync::oneshot::channel();
+        let open_state = state.clone();
+        let snapshot_state = open_state.clone();
+        let snapshot_comic = opened_comic;
+        let open_identity = identity.to_string();
+        let open = tokio::spawn(async move {
+            let _ = open_requested_tx.send(());
+            with_comic_progress_lifecycle_prepared(
+                &open_state,
+                &open_identity,
+                || async move {
+                    let _ = snapshot_started_tx.send(());
+                    open_comic_progress_snapshot(&snapshot_state, &snapshot_comic, 7, false).await
+                },
+                Ok,
+            )
+            .await
+        });
+        open_requested_rx.await.unwrap();
+        tokio::task::yield_now().await;
+        assert!(matches!(
+            snapshot_started_rx.try_recv(),
+            Err(tokio::sync::oneshot::error::TryRecvError::Empty)
+        ));
+
+        write_continue_tx.send(()).unwrap();
+        write.await.unwrap();
+        snapshot_started_rx.await.unwrap();
+        let opened_progress = open.await.unwrap().unwrap();
+        assert_eq!(opened_progress.current_page, 5);
+        assert_eq!(opened_progress.total_pages, 7);
+        fs::remove_dir_all(catalog_root).unwrap();
+    }
+
+    #[tokio::test]
+    async fn open_progress_snapshot_falls_back_to_exact_unindexed_location() {
+        let mut exact = capability_comic("book", "Book");
+        exact.source_id = "local:new-root".into();
+        exact.relative_path = "new/book.cbz".into();
+        exact.progress = Progress {
+            current_page: 4,
+            total_pages: 9,
+            percent: 44.4,
+            updated_at: None,
+        };
+        let mut decoy = exact.clone();
+        decoy.source_id = "external:other".into();
+        decoy.relative_path = "elsewhere/book.cbz".into();
+        decoy.progress.current_page = 8;
+        let state = Arc::new(AppState::new());
+        *state.comics.lock().await = vec![decoy, exact.clone()];
+
+        let progress = open_comic_progress_snapshot(&state, &exact, 9, false)
+            .await
+            .unwrap();
+        assert_eq!(progress.current_page, 4);
+        assert_eq!(progress.total_pages, 9);
+    }
+
+    #[tokio::test]
+    async fn opened_state_only_location_registers_without_retiring_catalog_and_saves() {
+        let mut keep_a = capability_comic("keep-a", "Retained A");
+        keep_a.source_id = "external:keep-a".into();
+        keep_a.relative_path = "A/retained.cbz".into();
+        let mut keep_b = capability_comic("keep-b", "Retained B");
+        keep_b.source_id = "external:keep-b".into();
+        keep_b.relative_path = "B/retained.cbz".into();
+        let (state, catalog_root) =
+            progress_recovery_state(&[keep_a.clone(), keep_b.clone()]).await;
+
+        let mut opened = capability_comic("new-runtime", "03 new book");
+        opened.source_id = "local:new-root".into();
+        opened.relative_path = "03/new-book.cbz".into();
+        opened.source_path = Some("/authorized/root/03/new-book.cbz".into());
+        opened.progress = Progress {
+            current_page: 0,
+            total_pages: 3,
+            percent: 0.0,
+            updated_at: None,
+        };
+        state.comics.lock().await.push(opened.clone());
+        let store = state.catalog.read().unwrap().clone().unwrap();
+        let existing_ids = vec![keep_a.id.clone(), keep_b.id.clone()];
+        assert_eq!(
+            store.get_runtime_items_by_ids(&existing_ids).unwrap().len(),
+            2
+        );
+        let retained_snapshots = [keep_a.clone(), keep_b.clone()]
+            .into_iter()
+            .map(|retained| {
+                let metadata = store.get_metadata(&retained.id).unwrap();
+                let location = store
+                    .get_location_for_source(
+                        &retained.id,
+                        &retained.source_id,
+                        &retained.relative_path,
+                    )
+                    .unwrap();
+                (retained, metadata, location)
+            })
+            .collect::<Vec<_>>();
+
+        let initial = open_comic_progress_snapshot(&state, &opened, 3, false)
+            .await
+            .unwrap();
+        assert_eq!(initial.current_page, 0);
+        store
+            .save_progress_for_source_location(
+                &opened.id,
+                &opened.source_id,
+                &opened.relative_path,
+                &Progress {
+                    current_page: 1,
+                    total_pages: 3,
+                    percent: 33.3,
+                    updated_at: Some("2026-11-08T00:00:00Z".into()),
+                },
+            )
+            .unwrap();
+
+        let reopened = open_comic_progress_snapshot(&state, &opened, 3, false)
+            .await
+            .unwrap();
+        assert_eq!(reopened.current_page, 1);
+        assert_eq!(reopened.total_pages, 3);
+
+        let all_ids = vec![keep_a.id.clone(), keep_b.id.clone(), opened.id.clone()];
+        assert_eq!(store.get_runtime_items_by_ids(&all_ids).unwrap().len(), 3);
+        for (retained, metadata_before, location_before) in retained_snapshots {
+            let existing = store
+                .get_runtime_item_for_source_path(
+                    &retained.id,
+                    &retained.source_id,
+                    &retained.relative_path,
+                )
+                .unwrap()
+                .expect("其他來源位置應保留");
+            assert_eq!(existing.title, metadata_before.title);
+            let metadata_after = store.get_metadata(&retained.id).unwrap();
+            assert_eq!(metadata_after.comic_id, metadata_before.comic_id);
+            assert_eq!(metadata_after.title, metadata_before.title);
+            assert_eq!(metadata_after.series, metadata_before.series);
+            assert_eq!(metadata_after.creators, metadata_before.creators);
+            assert_eq!(metadata_after.tags, metadata_before.tags);
+            let location = store
+                .get_location_for_source(&retained.id, &retained.source_id, &retained.relative_path)
+                .unwrap();
+            assert_eq!(location.id, location_before.id);
+            assert_eq!(location.comic_id, location_before.comic_id);
+            assert_eq!(location.online, location_before.online);
+        }
+        fs::remove_dir_all(catalog_root).unwrap();
+    }
+
+    #[tokio::test]
+    async fn restarted_runtime_cannot_reuse_a_previous_journal_token() {
+        let source_root = std::env::temp_dir().join(format!(
+            "gai-progress-recovery-restart-{}",
+            uuid::Uuid::new_v4()
+        ));
+        fs::create_dir_all(&source_root).unwrap();
+        let archive = source_root.join("book.cbz");
+        fs::write(&archive, b"archive").unwrap();
+        let revision = state::SourceRevision::from_std_metadata(&fs::metadata(&archive).unwrap());
+        let mut comic = capability_comic("book", "Book");
+        comic.source_id = "local:recovery".into();
+        comic.relative_path = "book.cbz".into();
+        comic.source_path = Some(archive.to_string_lossy().into_owned());
+        comic.progress.total_pages = 0;
+        let (old_state, catalog_root) = progress_recovery_state(&[comic.clone()]).await;
+        let old_token = old_state
+            .remember_progress_recovery_evidence(
+                "book",
+                "local:recovery",
+                "book.cbz",
+                7,
+                3,
+                Some(revision.clone()),
+            )
+            .unwrap();
+        old_state
+            .catalog
+            .read()
+            .unwrap()
+            .as_ref()
+            .unwrap()
+            .register_progress_recovery_proof(catalog::ProgressRecoveryProof {
+                identifier: "book",
+                source_id: "local:recovery",
+                relative_path: "book.cbz",
+                token: &old_token,
+                total_pages: 7,
+                revision: &revision,
+                smb_content_hash: None,
+            })
+            .unwrap();
+
+        // Reuse the persistent catalog but create fresh native runtime state.
+        let new_state = Arc::new(AppState::new());
+        *new_state.catalog.write().unwrap() = old_state.catalog.read().unwrap().clone();
+        *new_state.comics.lock().await = vec![comic];
+        new_state
+            .progress_recovery_test_sources
+            .lock()
+            .unwrap()
+            .insert("local:recovery".into());
+        let new_token = new_state
+            .remember_progress_recovery_evidence(
+                "book",
+                "local:recovery",
+                "book.cbz",
+                7,
+                1,
+                Some(revision.clone()),
+            )
+            .unwrap();
+        new_state
+            .catalog
+            .read()
+            .unwrap()
+            .as_ref()
+            .unwrap()
+            .register_progress_recovery_proof(catalog::ProgressRecoveryProof {
+                identifier: "book",
+                source_id: "local:recovery",
+                relative_path: "book.cbz",
+                token: &new_token,
+                total_pages: 7,
+                revision: &revision,
+                smb_content_hash: None,
+            })
+            .unwrap();
+        assert_ne!(old_token, new_token);
+
+        assert!(recover_reading_progress_inner(
+            &new_state,
+            progress_recovery_request("book", "local:recovery", 0, 7, 1, &old_token),
+        )
+        .await
+        .is_err());
+        recover_reading_progress_inner(
+            &new_state,
+            progress_recovery_request("book", "local:recovery", 0, 7, 1, &new_token),
+        )
+        .await
+        .unwrap();
+        fs::remove_dir_all(catalog_root).unwrap();
+        fs::remove_dir_all(source_root).unwrap();
     }
 
     #[test]
@@ -5650,6 +8409,25 @@ mod tests {
     #[tokio::test]
     async fn progress_sequence_rejects_older_request_after_newer_commit() {
         let state = AppState::new();
+        let max_safe = catalog::MAX_SAFE_INTENT_SEQUENCE;
+        progress_sequence_is_current(&state, "safe-comic", Some(max_safe))
+            .await
+            .unwrap();
+        commit_progress_sequence(&state, "safe-comic", Some(max_safe)).await;
+        let unsafe_error = progress_sequence_is_current(&state, "safe-comic", Some(max_safe + 1))
+            .await
+            .unwrap_err();
+        assert!(unsafe_error.contains("安全整數"));
+        assert_eq!(
+            state
+                .progress_sequences
+                .lock()
+                .await
+                .get("safe-comic")
+                .copied(),
+            Some(max_safe)
+        );
+
         progress_sequence_is_current(&state, "comic", Some(2))
             .await
             .unwrap();

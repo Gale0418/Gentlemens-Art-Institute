@@ -11,13 +11,31 @@ use tokio::sync::Mutex;
 /// records the status-change time (`ctime`) as a second signal; other
 /// platforms leave it absent.  These are metadata signals, not a content
 /// hash, so they cannot promise collision-free invalidation.
-#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub struct SourceRevision {
     pub len: u64,
     pub modified: Option<(u64, u32)>,
     pub ctime: Option<(i64, i64)>,
     pub file_id: Option<(u64, u64)>,
 }
+
+/// Page count observed only after `open_comic` successfully enumerated a
+/// source location. Kept in memory so a source-scoped progress journal can be
+/// retried after the reader closes without trusting its submitted page count.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ProgressRecoveryEvidence {
+    pub source_id: String,
+    pub relative_path: String,
+    pub total_pages: usize,
+    pub generation: u64,
+    pub revision: Option<SourceRevision>,
+    /// Content identity for direct SMB sources, whose temporary cache file is
+    /// removed on close and whose ComicItem has no local source_path.
+    pub smb_content_hash: Option<[u8; 32]>,
+    pub token: String,
+}
+
+const PROGRESS_RECOVERY_EVIDENCE_LIMIT: usize = 128;
 
 pub(crate) const COVER_CACHE_MAX_BYTES: usize = 24 * 1024 * 1024;
 pub(crate) const COVER_CACHE_MAX_ENTRY_BYTES: usize = 4 * 1024 * 1024;
@@ -561,6 +579,12 @@ pub struct AppState {
     pub saved_scan_generation: std::sync::atomic::AtomicU64,
     pub saved_scan_closed_generation: std::sync::atomic::AtomicU64,
     pub scan_lifecycle: Mutex<()>,
+    /// Read leases keep recovery's final SQLite commit ordered before source
+    /// authorization changes; writers are held only across setting updates.
+    pub source_authorization_lifecycle: Arc<tokio::sync::RwLock<()>>,
+    pub source_authorization_generation: AtomicU64,
+    #[cfg(test)]
+    pub progress_recovery_test_sources: std::sync::Mutex<std::collections::HashSet<String>>,
     /// Ensures only one full-library scan supervisor owns the blocking scan
     /// worker. New requests set `scan_supervisor_requested` and are coalesced
     /// after the current synchronous provider call returns.
@@ -575,6 +599,10 @@ pub struct AppState {
     pub(crate) cover_cache: StdMutex<CoverCache>,
     pub opened_comic_files: std::sync::RwLock<HashMap<String, Vec<String>>>,
     pub opened_comic_revisions: std::sync::RwLock<HashMap<String, SourceRevision>>,
+    /// Bounded, source/location-scoped page counts from successful opens.
+    /// Unlike the active reader index, these survive `close_comic` during the
+    /// current process so a journal retry can validate its total page count.
+    pub progress_recovery_evidence: std::sync::Mutex<HashMap<String, ProgressRecoveryEvidence>>,
     pub smb_config: std::sync::RwLock<Option<SmbConfig>>,
     pub external_bookmarks: std::sync::RwLock<Vec<ExternalBookmark>>,
     pub external_bookmarks_readable: std::sync::atomic::AtomicBool,
@@ -657,6 +685,10 @@ impl AppState {
             saved_scan_generation: std::sync::atomic::AtomicU64::new(0),
             saved_scan_closed_generation: std::sync::atomic::AtomicU64::new(0),
             scan_lifecycle: Mutex::new(()),
+            source_authorization_lifecycle: Arc::new(tokio::sync::RwLock::new(())),
+            source_authorization_generation: AtomicU64::new(0),
+            #[cfg(test)]
+            progress_recovery_test_sources: std::sync::Mutex::new(std::collections::HashSet::new()),
             scan_supervisor_gate: Mutex::new(()),
             scan_supervisor_running: AtomicBool::new(false),
             scan_supervisor_requested: AtomicBool::new(false),
@@ -668,6 +700,7 @@ impl AppState {
             cover_cache: StdMutex::new(CoverCache::default()),
             opened_comic_files: std::sync::RwLock::new(HashMap::new()),
             opened_comic_revisions: std::sync::RwLock::new(HashMap::new()),
+            progress_recovery_evidence: std::sync::Mutex::new(HashMap::new()),
             smb_config: std::sync::RwLock::new(None),
             external_bookmarks: std::sync::RwLock::new(Vec::new()),
             external_bookmarks_readable: std::sync::atomic::AtomicBool::new(true),
@@ -887,10 +920,127 @@ impl AppState {
         self.cover_cache.lock().unwrap().clear();
         self.opened_comic_files.write().unwrap().clear();
         self.opened_comic_revisions.write().unwrap().clear();
+        self.progress_recovery_evidence.lock().unwrap().clear();
         *self.active_comic_id.lock().unwrap() = None;
         *self.active_comic_source_id.lock().unwrap() = None;
         *self.pending_open_id.lock().unwrap() = None;
         *self.pending_open_source_id.lock().unwrap() = None;
+    }
+
+    pub fn remember_progress_recovery_evidence(
+        &self,
+        id: &str,
+        source_id: &str,
+        relative_path: &str,
+        total_pages: usize,
+        generation: u64,
+        revision: Option<SourceRevision>,
+    ) -> Option<String> {
+        self.remember_progress_recovery_evidence_with_smb_hash(
+            id,
+            source_id,
+            relative_path,
+            total_pages,
+            generation,
+            revision,
+            None,
+        )
+    }
+
+    // Preserve the source-qualified compatibility API; the extra digest is
+    // optional evidence for SMB rather than another identity namespace.
+    #[allow(clippy::too_many_arguments)]
+    pub fn remember_progress_recovery_evidence_with_smb_hash(
+        &self,
+        id: &str,
+        source_id: &str,
+        relative_path: &str,
+        total_pages: usize,
+        generation: u64,
+        revision: Option<SourceRevision>,
+        smb_content_hash: Option<[u8; 32]>,
+    ) -> Option<String> {
+        if total_pages == 0
+            || id.is_empty()
+            || source_id.is_empty()
+            || relative_path.is_empty()
+            || revision.is_none()
+        {
+            return None;
+        }
+        // Each SMB download has a new local inode and timestamps. Recovery
+        // identity uses the remote bytes' digest and length; protocol reads
+        // keep their separate full temporary-file revision unchanged.
+        let revision = revision.map(|revision| {
+            if smb_content_hash.is_some() {
+                SourceRevision {
+                    len: revision.len,
+                    modified: None,
+                    ctime: None,
+                    file_id: None,
+                }
+            } else {
+                revision
+            }
+        });
+        let key = format!("{source_id}\0{id}");
+        let mut evidence = self.progress_recovery_evidence.lock().unwrap();
+        if let Some(existing) = evidence.get_mut(&key) {
+            if existing.relative_path == relative_path
+                && existing.total_pages == total_pages
+                && existing.revision == revision
+                && existing.smb_content_hash == smb_content_hash
+            {
+                existing.generation = generation;
+                return Some(existing.token.clone());
+            }
+        }
+        if !evidence.contains_key(&key) && evidence.len() >= PROGRESS_RECOVERY_EVIDENCE_LIMIT {
+            if let Some(oldest_key) = evidence
+                .iter()
+                .min_by_key(|(_, item)| item.generation)
+                .map(|(key, _)| key.clone())
+            {
+                evidence.remove(&oldest_key);
+            }
+        }
+        let token = uuid::Uuid::new_v4().to_string();
+        evidence.insert(
+            key,
+            ProgressRecoveryEvidence {
+                source_id: source_id.to_owned(),
+                relative_path: relative_path.to_owned(),
+                total_pages,
+                generation,
+                revision,
+                smb_content_hash,
+                token: token.clone(),
+            },
+        );
+        Some(token)
+    }
+
+    pub fn progress_recovery_evidence(
+        &self,
+        id: &str,
+        source_id: &str,
+        relative_path: &str,
+    ) -> Option<ProgressRecoveryEvidence> {
+        self.progress_recovery_evidence
+            .lock()
+            .ok()?
+            .get(&format!("{source_id}\0{id}"))
+            .filter(|item| item.source_id == source_id && item.relative_path == relative_path)
+            .cloned()
+    }
+
+    pub fn progress_recovery_token(&self, id: &str, source_id: &str) -> Option<String> {
+        self.progress_recovery_evidence
+            .lock()
+            .ok()?
+            .get(&format!("{source_id}\0{id}"))
+            .filter(|item| item.source_id == source_id && item.total_pages > 0)
+            .map(|item| item.token.clone())
     }
 
     pub fn refresh_cache_budget(&self) -> usize {
@@ -1367,10 +1517,7 @@ mod tests {
         );
         assert!(cache.insert(new.clone(), b"new".to_vec(), "image/png"));
         assert!(cache.get(&old).is_none());
-        assert_eq!(
-            cache.get(&new).map(|(bytes, mime)| (bytes, mime)),
-            Some((b"new".to_vec(), "image/png"))
-        );
+        assert_eq!(cache.get(&new), Some((b"new".to_vec(), "image/png")));
         assert_eq!(cache.total_bytes(), 3);
         assert_eq!(cache.len(), 1);
     }
@@ -1445,5 +1592,91 @@ mod tests {
         assert_eq!(state.reader_priority(), ReaderPriority::Active);
         *state.pending_open_id.lock().unwrap() = Some("opening".into());
         assert_eq!(state.reader_priority(), ReaderPriority::Opening);
+    }
+
+    #[test]
+    fn smb_recovery_identity_survives_new_download_but_tracks_content_changes() {
+        let state = AppState::new();
+        let first_download = SourceRevision {
+            len: 100,
+            modified: Some((10, 0)),
+            ctime: Some((10, 0)),
+            file_id: Some((1, 10)),
+        };
+        let second_download = SourceRevision {
+            len: 100,
+            modified: Some((20, 0)),
+            ctime: Some((20, 0)),
+            file_id: Some((1, 20)),
+        };
+        let remember = |revision, generation, hash| {
+            state.remember_progress_recovery_evidence_with_smb_hash(
+                "book",
+                "smb:test",
+                "book.cbz",
+                2,
+                generation,
+                Some(revision),
+                Some(hash),
+            )
+        };
+        let token = remember(first_download, 1, [1; 32]).unwrap();
+        assert_eq!(
+            remember(second_download.clone(), 2, [1; 32]),
+            Some(token.clone())
+        );
+        let evidence = state
+            .progress_recovery_evidence("book", "smb:test", "book.cbz")
+            .unwrap();
+        assert_eq!(evidence.generation, 2);
+        assert_eq!(
+            evidence.revision,
+            Some(SourceRevision {
+                len: 100,
+                modified: None,
+                ctime: None,
+                file_id: None,
+            })
+        );
+        assert_ne!(remember(second_download, 3, [2; 32]), Some(token));
+    }
+
+    #[test]
+    fn local_recovery_identity_keeps_full_file_revision() {
+        let state = AppState::new();
+        let first = SourceRevision {
+            len: 100,
+            modified: Some((10, 0)),
+            ctime: Some((10, 0)),
+            file_id: Some((1, 10)),
+        };
+        let mut replacement = first.clone();
+        replacement.file_id = Some((1, 20));
+        let first_token = state.remember_progress_recovery_evidence(
+            "book",
+            "local",
+            "book.cbz",
+            2,
+            1,
+            Some(first.clone()),
+        );
+        assert_eq!(
+            state
+                .progress_recovery_evidence("book", "local", "book.cbz")
+                .unwrap()
+                .revision,
+            Some(first)
+        );
+        assert_ne!(
+            first_token,
+            state.remember_progress_recovery_evidence(
+                "book",
+                "local",
+                "book.cbz",
+                2,
+                2,
+                Some(replacement),
+            )
+        );
     }
 }

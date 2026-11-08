@@ -161,14 +161,21 @@ let lastPriorityLibraryScanKey = '';
 // Native command 排程不保證呼叫者的完成順序；把每筆進度快照排成單一
 // promise chain，避免快速翻頁時較舊頁碼晚於新頁碼落庫。
 let readingProgressSaveQueue = Promise.resolve();
+let readingProgressRecoverySaveQueue = Promise.resolve();
 const READING_PROGRESS_FAILURES_KEY = 'gai:readingProgressFailures';
 const READING_PROGRESS_AUTO_RETRY_DELAYS_MS = [250, 750];
+const READING_PROGRESS_SAVE_TIMEOUT_MS = 8000;
 let readingProgressFailuresLoaded = false;
 let readingProgressFailures = new Map();
 let readingProgressFailuresStorageReliable = true;
 let latestQueuedReadingProgressById = new Map();
 const discardedReadingProgressIntents = new Map();
+const discardedReadingProgressFailureIntents = new Map();
 let readingProgressRetryPromise = null;
+let readingProgressAutoRetryScope = '';
+let readingProgressAutoRetryAttemptedEpoch = false;
+let readingProgressAutoRetryBootAttempted = false;
+let readingProgressPendingCompletedEpoch = null;
 // Rust 會在 WebView reload 後保留本次 app runtime 已提交的序號；將
 // 最後發出的序號留在 tab session，讓立即 reload 也不會退回較舊值。
 const READING_PROGRESS_SEQUENCE_KEY = 'gai:readingProgressSequence';
@@ -190,6 +197,18 @@ function nextReadingProgressSaveSequence() {
     // Native queue remains ordered even if tab storage is unavailable.
   }
   return readingProgressSaveSequence;
+}
+
+function adoptReadingProgressSequenceFloor(sequenceFloor) {
+  if (!Number.isSafeInteger(sequenceFloor) || sequenceFloor < 0) return false;
+  if (sequenceFloor <= readingProgressSaveSequence) return true;
+  readingProgressSaveSequence = sequenceFloor;
+  try {
+    sessionStorage.setItem(READING_PROGRESS_SEQUENCE_KEY, String(readingProgressSaveSequence));
+  } catch (error) {
+    // The native floor still protects persistence if session storage is unavailable.
+  }
+  return true;
 }
 
 function nextReadingProgressSaveSequenceAfter(previousSequence) {
@@ -221,12 +240,34 @@ function normalizeReadingProgressSnapshot(snapshot) {
   if (typeof snapshot.sourceId === 'string' && snapshot.sourceId.trim()) {
     normalized.sourceId = snapshot.sourceId.trim();
   }
+  if (typeof snapshot.recoveryToken === 'string' && snapshot.recoveryToken.length <= 128
+    && snapshot.recoveryToken.trim()) {
+    normalized.recoveryToken = snapshot.recoveryToken.trim();
+  }
+  if (snapshot.recoveryStatus === 'manual-check') normalized.recoveryStatus = 'manual-check';
   return normalized;
 }
 
 function readingProgressKey(snapshot) {
   const sourceId = typeof snapshot?.sourceId === 'string' ? snapshot.sourceId.trim() : '';
   return `${sourceId}\u0000${snapshot?.id || ''}`;
+}
+
+function readingProgressFailureKey(snapshot) {
+  return JSON.stringify([readingProgressKey(snapshot), snapshot?.recoveryToken || '']);
+}
+
+function readingProgressNeedsManualCheck(snapshot) {
+  return snapshot?.recoveryStatus === 'manual-check';
+}
+
+function readingProgressSnapshotCanRetry(snapshot) {
+  return !readingProgressNeedsManualCheck(snapshot)
+    && typeof snapshot?.sourceId === 'string'
+    && Boolean(snapshot.sourceId.trim())
+    && (snapshot.id?.startsWith('photos:')
+      || typeof eAPI.recoverReadingProgress !== 'function'
+      || Boolean(snapshot.recoveryToken));
 }
 
 function readingProgressIntentSequence(snapshot) {
@@ -246,7 +287,7 @@ function readReadingProgressFailures() {
     entries.forEach(entry => {
       const normalized = normalizeReadingProgressSnapshot(entry);
       if (!normalized) return;
-      const key = readingProgressKey(normalized);
+      const key = readingProgressFailureKey(normalized);
       const previous = readingProgressFailures.get(key);
       if (!previous || normalized.sequence >= previous.sequence) {
         readingProgressFailures.set(key, normalized);
@@ -261,7 +302,7 @@ function readReadingProgressFailures() {
 function writeReadingProgressFailures() {
   const entries = Array.from(readReadingProgressFailures().values())
     .sort((a, b) => b.sequence - a.sequence);
-  readingProgressFailures = new Map(entries.map(entry => [readingProgressKey(entry), entry]));
+  readingProgressFailures = new Map(entries.map(entry => [readingProgressFailureKey(entry), entry]));
   try {
     localStorage.setItem(READING_PROGRESS_FAILURES_KEY, JSON.stringify(entries));
     readingProgressFailuresStorageReliable = true;
@@ -459,9 +500,26 @@ function readingProgressDetail(snapshot, context = {}) {
   });
 }
 
-function renderReadingProgressRecovery() {
+function renderReadingProgressRecovery(resultMessage = '') {
   const failures = Array.from(readReadingProgressFailures().values());
+  const retryPromise = readingProgressRetryPromise;
+  const retryInProgress = Boolean(retryPromise);
+  const retryCount = Number(retryPromise?.pendingCount) || 0;
   if (typeof document === 'undefined') return;
+  let liveStatus = document.getElementById('reading-progress-recovery-live');
+  if (!liveStatus && (retryInProgress || resultMessage) && document.createElement) {
+    liveStatus = document.createElement('div');
+    liveStatus.id = 'reading-progress-recovery-live';
+    liveStatus.className = 'visually-hidden';
+    liveStatus.setAttribute('role', 'status');
+    liveStatus.setAttribute('aria-live', 'polite');
+    liveStatus.setAttribute('aria-atomic', 'true');
+    const liveStatusHost = document.body || elements.contentArea;
+    if (liveStatusHost?.appendChild) liveStatusHost.appendChild(liveStatus);
+    else liveStatusHost?.append?.(liveStatus);
+  }
+  if (liveStatus && retryInProgress) liveStatus.textContent = '';
+  else if (liveStatus && resultMessage) liveStatus.textContent = resultMessage;
   let panel = document.getElementById('reading-progress-recovery');
   if (!panel && failures.length && document.createElement) {
     panel = document.createElement('div');
@@ -473,10 +531,12 @@ function renderReadingProgressRecovery() {
     messageBox.className = 'reading-progress-recovery-viewport';
     const message = document.createElement('span');
     message.className = 'reading-progress-recovery-message';
-    messageBox.append(message);
+    const entries = document.createElement('div');
+    entries.className = 'reading-progress-recovery-entries';
+    messageBox.append(message, entries);
     const retry = document.createElement('button');
     retry.type = 'button';
-    retry.className = 'reader-image-error';
+    retry.className = 'reader-image-error reading-progress-retry';
     retry.addEventListener('click', () => retryFailedReadingProgressSnapshots());
     const discard = document.createElement('button');
     discard.type = 'button';
@@ -490,10 +550,14 @@ function renderReadingProgressRecovery() {
   panel.hidden = failures.length === 0;
   panel.style.display = failures.length ? 'flex' : 'none';
   const message = panel.querySelector?.('.reading-progress-recovery-message');
-  const retry = panel.querySelector?.('button');
+  const entries = panel.querySelector?.('.reading-progress-recovery-entries');
+  const retry = panel.querySelector?.('.reading-progress-retry');
   const discard = panel.querySelector?.('.reading-progress-discard');
   if (message) {
-    const pendingText = readerText('有 {count} 本漫畫的閱讀進度尚未保存。', { count: failures.length });
+    const pendingText = resultMessage || readerText('有 {count} 本漫畫的閱讀進度尚未保存。', { count: failures.length });
+    const retryText = retryInProgress
+      ? ` ${readerText('正在重試保存 {count} 筆閱讀進度…', { count: retryCount })}`
+      : '';
     const storageText = readingProgressFailuresStorageReliable
       ? ''
       : ` ${readerText('此 App session 可重試，尚未可靠備份。')}`;
@@ -502,6 +566,13 @@ function renderReadingProgressRecovery() {
       : '';
     const legacyText = failures.some(snapshot => !snapshot.sourceId)
       ? ` ${readerText('部分舊進度無法確認來源，無法自動重試。')}`
+      : '';
+    const missingTokenText = typeof eAPI.recoverReadingProgress === 'function'
+      && failures.some(snapshot => snapshot.sourceId && !snapshot.id.startsWith('photos:') && !snapshot.recoveryToken)
+      ? ` ${readerText('部分舊進度缺少驗證資訊，請核對作品後依顯示頁碼手動恢復。')}`
+      : '';
+    const invalidEvidenceText = failures.some(readingProgressNeedsManualCheck)
+      ? ` ${readerText('部分進度的原生驗證資訊已失效，請核對作品後依顯示頁碼手動恢復。')}`
       : '';
     const comicIndex = new Map();
     if (typeof state !== 'undefined' && Array.isArray(state.comics)) {
@@ -516,13 +587,38 @@ function renderReadingProgressRecovery() {
       comicIndex,
       sourceNames: readingProgressExternalSourceNames(),
     };
-    const details = failures.map(snapshot => readingProgressDetail(snapshot, recoveryContext)).filter(Boolean);
-    const nextMessageText = [pendingText + storageText + scanningText + legacyText, ...details].join('\n');
+    const nextMessageText = pendingText + retryText + storageText + scanningText + legacyText + missingTokenText + invalidEvidenceText;
     if (message.textContent !== nextMessageText) message.textContent = nextMessageText;
+    const entryVersion = JSON.stringify(failures.map(snapshot => [
+      readingProgressFailureKey(snapshot), snapshot.sequence, snapshot.currentPage,
+      snapshot.totalPages, readingProgressDetail(snapshot, recoveryContext),
+    ]));
+    if (entries && panel.readingProgressEntryVersion !== entryVersion) {
+      panel.readingProgressEntryVersion = entryVersion;
+      if (entries.replaceChildren) entries.replaceChildren();
+      else while (entries.firstChild) entries.removeChild(entries.firstChild);
+      failures.forEach(snapshot => {
+        const detail = readingProgressDetail(snapshot, recoveryContext);
+        if (!detail) return;
+        const row = document.createElement('div');
+        row.className = 'reading-progress-recovery-entry';
+        const label = document.createElement('span');
+        label.textContent = detail;
+        const clear = document.createElement('button');
+        clear.type = 'button';
+        clear.className = 'reading-progress-clear-entry';
+        clear.textContent = readerText('清除此筆未保存進度');
+        clear.setAttribute('aria-label', `${clear.textContent}: ${detail}`);
+        clear.addEventListener('click', () => clearReadingProgressFailureEntry(snapshot));
+        row.append(label, clear);
+        entries.append(row);
+      });
+    }
   }
   if (retry) {
-    retry.disabled = !failures.some(snapshot => typeof snapshot.sourceId === 'string' && snapshot.sourceId.trim());
-    retry.textContent = readerText('重試保存閱讀進度');
+    retry.disabled = retryInProgress || !failures.some(readingProgressSnapshotCanRetry);
+    retry.setAttribute('aria-busy', String(retryInProgress));
+    retry.textContent = readerText(retryInProgress ? '正在重試保存…' : '重試保存閱讀進度');
   }
   if (discard) discard.textContent = readerText('放棄未保存進度');
 }
@@ -547,14 +643,55 @@ function discardFailedReadingProgressSnapshots() {
   renderReadingProgressRecovery();
 }
 
+function clearReadingProgressFailureEntry(snapshot) {
+  const normalized = normalizeReadingProgressSnapshot(snapshot);
+  if (!normalized) return false;
+  const failures = readReadingProgressFailures();
+  const failureKey = readingProgressFailureKey(normalized);
+  const current = failures.get(failureKey);
+  if (!current || current.sequence !== normalized.sequence
+    || current.currentPage !== normalized.currentPage || current.totalPages !== normalized.totalPages) return false;
+  const detail = readingProgressDetail(normalized);
+  if (!window.confirm(`${detail}\n\n${readerText('要清除此筆未保存進度嗎？請先核對作品並依顯示頁碼手動恢復。確認後只會移除此筆紀錄；其他待處理紀錄與已保存內容不受影響。')}`)) return false;
+  const restoreRecoveryFocus = typeof document !== 'undefined'
+    && document.activeElement?.classList?.contains('reading-progress-clear-entry');
+  const remaining = Array.from(failures.values())
+    .filter(entry => readingProgressFailureKey(entry) !== failureKey)
+    .sort((a, b) => b.sequence - a.sequence);
+  try {
+    localStorage.setItem(READING_PROGRESS_FAILURES_KEY, JSON.stringify(remaining));
+  } catch (error) {
+    readingProgressFailuresStorageReliable = false;
+    window.alert(readerText('無法清除此筆未保存進度，紀錄仍保留在目前工作階段。請確認裝置儲存空間後再試。'));
+    return false;
+  }
+  if (typeof discardedReadingProgressFailureIntents !== 'undefined') {
+    const previous = discardedReadingProgressFailureIntents.get(failureKey) ?? -1;
+    discardedReadingProgressFailureIntents.set(failureKey, Math.max(previous, normalized.sequence));
+  }
+  failures.delete(failureKey);
+  readingProgressFailuresStorageReliable = true;
+  renderReadingProgressRecovery();
+  if (restoreRecoveryFocus) {
+    const next = document.getElementById('reading-progress-recovery')
+      ?.querySelector('.reading-progress-clear-entry');
+    (failures.size && next ? next : elements.searchInput)?.focus?.();
+  }
+  return true;
+}
+
 function rememberFailedReadingProgressSnapshot(snapshot, intentSequence = readingProgressIntentSequence(snapshot)) {
   const normalized = normalizeReadingProgressSnapshot(snapshot);
   if (!normalized) return;
+  if (Number.isSafeInteger(intentSequence) && intentSequence >= 0) normalized.sequence = intentSequence;
   const key = readingProgressKey(normalized);
   if ((discardedReadingProgressIntents.get(key) ?? -1) >= intentSequence) return;
   const failures = readReadingProgressFailures();
-  const previous = failures.get(key);
-  if (!previous || normalized.sequence >= previous.sequence) failures.set(key, normalized);
+  const failureKey = readingProgressFailureKey(normalized);
+  if (typeof discardedReadingProgressFailureIntents !== 'undefined'
+    && (discardedReadingProgressFailureIntents.get(failureKey) ?? -1) >= intentSequence) return;
+  const previous = failures.get(failureKey);
+  if (!previous || normalized.sequence >= previous.sequence) failures.set(failureKey, normalized);
   writeReadingProgressFailures();
   renderReadingProgressRecovery();
 }
@@ -562,40 +699,106 @@ function rememberFailedReadingProgressSnapshot(snapshot, intentSequence = readin
 function clearReadingProgressFailure(snapshot, intentSequence = readingProgressIntentSequence(snapshot)) {
   const normalized = normalizeReadingProgressSnapshot(snapshot);
   if (!normalized) return;
-  const key = readingProgressKey(normalized);
   const failures = readReadingProgressFailures();
-  const current = failures.get(key);
-  const latestQueued = latestQueuedReadingProgressById.get(key);
+  const failureKey = readingProgressFailureKey(normalized);
+  const current = failures.get(failureKey);
+  const latestQueued = latestQueuedReadingProgressById.get(failureKey);
   if (latestQueued && readingProgressIntentSequence(latestQueued) > intentSequence) return;
-  if (current && current.sequence <= normalized.sequence) {
-    failures.delete(key);
+  if (current && current.sequence <= intentSequence) {
+    failures.delete(failureKey);
     writeReadingProgressFailures();
+    if (!readingProgressFailuresStorageReliable) {
+      // 原生已成功，但本機清除失敗時仍保留可見紀錄，避免重開 App 後無聲消失。
+      readReadingProgressFailures().set(failureKey, current);
+      writeReadingProgressFailures();
+      renderReadingProgressRecovery();
+      return false;
+    }
     renderReadingProgressRecovery();
+    return true;
   }
+  return !current;
 }
 
 function waitForReadingProgressRetry(delayMs) {
   return new Promise(resolve => setTimeout(resolve, delayMs));
 }
 
-async function persistReadingProgressSnapshot(snapshot, intentSequence = readingProgressIntentSequence(snapshot)) {
+async function waitForReadingProgressSave(snapshot, recovery = false, onLateSuccess = null) {
+  let timer;
+  let timedOut = false;
+  try {
+    const save = recovery && !snapshot.id.startsWith('photos:')
+      && typeof eAPI.recoverReadingProgress === 'function'
+      ? eAPI.recoverReadingProgress.bind(eAPI)
+      : eAPI.saveProgress.bind(eAPI);
+    return await Promise.race([
+      Promise.resolve(save(snapshot)).then(() => {
+        if (timedOut && onLateSuccess) onLateSuccess();
+        return { timedOut: false };
+      }),
+      new Promise(resolve => {
+        timer = setTimeout(() => {
+          timedOut = true;
+          resolve({ timedOut: true });
+        }, READING_PROGRESS_SAVE_TIMEOUT_MS);
+      }),
+    ]);
+  } finally {
+    clearTimeout(timer);
+  }
+}
+
+async function persistReadingProgressSnapshot(snapshot, intentSequence = readingProgressIntentSequence(snapshot), recovery = false) {
+  if (snapshot?.recoveryStatus === 'manual-check') return false;
+  snapshot = { ...snapshot, intentSequence };
   const key = readingProgressKey(snapshot);
+  const queueKey = readingProgressFailureKey(snapshot);
   for (let attempt = 0; attempt <= READING_PROGRESS_AUTO_RETRY_DELAYS_MS.length; attempt += 1) {
     if ((discardedReadingProgressIntents.get(key) ?? -1) >= intentSequence) return false;
+    if (typeof discardedReadingProgressFailureIntents !== 'undefined'
+      && (discardedReadingProgressFailureIntents.get(queueKey) ?? -1) >= intentSequence) return false;
     try {
       // Legacy APIs may return undefined or false; rejection remains the failure signal.
-      await eAPI.saveProgress(snapshot);
+      let confirmedAfterTimeout = false;
+      const { timedOut } = await waitForReadingProgressSave(snapshot, recovery, () => {
+        confirmedAfterTimeout = true;
+        clearReadingProgressFailure(snapshot, intentSequence);
+        const latestQueued = latestQueuedReadingProgressById.get(queueKey);
+        if (latestQueued && readingProgressIntentSequence(latestQueued) === intentSequence
+          && latestQueued.sequence === snapshot.sequence) {
+          latestQueuedReadingProgressById.delete(queueKey);
+        }
+      });
+      if (timedOut) {
+        if (confirmedAfterTimeout) return true;
+        // The native request may still finish. Keep the snapshot recoverable,
+        // but do not leave closing the reader blocked behind it indefinitely.
+        const latestQueued = latestQueuedReadingProgressById.get(queueKey);
+        if (!latestQueued || readingProgressIntentSequence(latestQueued) <= intentSequence) {
+          rememberFailedReadingProgressSnapshot(snapshot, intentSequence);
+        }
+        console.error('保存進度逾時；已保留進度供重試。');
+        return false;
+      }
       clearReadingProgressFailure(snapshot, intentSequence);
-      const latestQueued = latestQueuedReadingProgressById.get(key);
+      const latestQueued = latestQueuedReadingProgressById.get(queueKey);
       if (latestQueued
         && readingProgressIntentSequence(latestQueued) === intentSequence
         && latestQueued.sequence === snapshot.sequence) {
-        latestQueuedReadingProgressById.delete(key);
+        latestQueuedReadingProgressById.delete(queueKey);
       }
       return true;
     } catch (error) {
+      const errorMessage = typeof error === 'string' ? error
+        : typeof error?.message === 'string' ? error.message
+          : String(error ?? '');
+      if (recovery && errorMessage.includes('READING_PROGRESS_RECOVERY_MANUAL_CHECK:')) {
+        rememberFailedReadingProgressSnapshot({ ...snapshot, recoveryStatus: 'manual-check' }, intentSequence);
+        return false;
+      }
       if (attempt >= READING_PROGRESS_AUTO_RETRY_DELAYS_MS.length) {
-        const latestQueued = latestQueuedReadingProgressById.get(key);
+        const latestQueued = latestQueuedReadingProgressById.get(queueKey);
         if (!latestQueued || readingProgressIntentSequence(latestQueued) <= intentSequence) {
           rememberFailedReadingProgressSnapshot(snapshot, intentSequence);
         }
@@ -610,31 +813,118 @@ async function persistReadingProgressSnapshot(snapshot, intentSequence = reading
 
 function retryFailedReadingProgressSnapshots() {
   if (readingProgressRetryPromise) return readingProgressRetryPromise;
+  const pending = Array.from(readReadingProgressFailures().values())
+    .sort((a, b) => a.sequence - b.sequence)
+    .flatMap(snapshot => {
+      // A source-less legacy journal is intentionally retained for explicit
+      // discard only; applying it to a newly opened comic would be guessing.
+      if (typeof snapshot.sourceId !== 'string' || !snapshot.sourceId.trim()) return [];
+      if (readingProgressNeedsManualCheck(snapshot)) return [];
+      const currentComic = typeof state !== 'undefined' ? state.currentComic : null;
+      if (currentComic
+        && currentComic.id === snapshot.id
+        && String(currentComic.sourceId ?? currentComic.source_id ?? '').trim() === snapshot.sourceId) return [];
+      if (!snapshot.id.startsWith('photos:') && typeof eAPI.recoverReadingProgress === 'function'
+        && !snapshot.recoveryToken) return [];
+      const latestQueued = latestQueuedReadingProgressById.get(readingProgressFailureKey(snapshot));
+      if (latestQueued && readingProgressIntentSequence(latestQueued) >= readingProgressIntentSequence(snapshot)) return [];
+      const sequence = nextReadingProgressSaveSequenceAfter(snapshot.sequence);
+      return [{ ...snapshot, sequence, intentSequence: snapshot.sequence }];
+    });
+  if (!pending.length) {
+    renderReadingProgressRecovery();
+    return Promise.resolve(readReadingProgressFailures().size === 0);
+  }
   const retryOperation = (async () => {
-    const pending = Array.from(readReadingProgressFailures().values())
-      .sort((a, b) => a.sequence - b.sequence)
-      .flatMap(snapshot => {
-        // A source-less legacy journal is intentionally retained for explicit
-        // discard only; applying it to a newly opened comic would be guessing.
-        if (typeof snapshot.sourceId !== 'string' || !snapshot.sourceId.trim()) return [];
-        const latestQueued = latestQueuedReadingProgressById.get(readingProgressKey(snapshot));
-        if (latestQueued && readingProgressIntentSequence(latestQueued) > snapshot.sequence) return [];
-        const sequence = nextReadingProgressSaveSequenceAfter(snapshot.sequence);
-        return [{ ...snapshot, sequence, intentSequence: snapshot.sequence }];
-      });
-    if (!pending.length) {
-      renderReadingProgressRecovery();
-      return readReadingProgressFailures().size === 0;
-    }
-    for (const snapshot of pending) await enqueueReadingProgressSnapshot(snapshot);
+    for (const snapshot of pending) await enqueueReadingProgressSnapshot(snapshot, { recovery: true });
     renderReadingProgressRecovery();
     return readReadingProgressFailures().size === 0;
   })();
-  const retryPromise = retryOperation.finally(() => {
-    if (readingProgressRetryPromise === retryPromise) readingProgressRetryPromise = null;
+  let retryPromise;
+  retryPromise = retryOperation.finally(() => {
+    if (readingProgressRetryPromise === retryPromise) {
+      readingProgressRetryPromise = null;
+      const failures = readReadingProgressFailures();
+      const resultMessage = typeof readerText === 'function'
+        ? failures.size
+          ? readerText('重試後仍有 {count} 筆閱讀進度尚未保存。', { count: failures.size })
+          : readerText('未保存閱讀進度已全部保存。')
+        : '';
+      renderReadingProgressRecovery(resultMessage);
+      if (typeof flushPendingCompletedReadingProgressRetry === 'function') {
+        flushPendingCompletedReadingProgressRetry();
+      }
+    }
   });
+  retryPromise.pendingCount = pending.length;
   readingProgressRetryPromise = retryPromise;
-  return readingProgressRetryPromise;
+  renderReadingProgressRecovery();
+  return retryPromise;
+}
+
+function autoRetryReadingProgressAfterLibraryCommit(sourceId = '', bootCommit = false) {
+  const status = state.scanStatus;
+  const rawGeneration = status?.generation;
+  const generation = Number(rawGeneration);
+  const phase = String(status?.phase || '').toLowerCase();
+  if (!status || typeof status.isScanning !== 'boolean' || status.pollError || status.error
+    || phase === 'error'
+    || typeof rawGeneration !== 'number' || !Number.isSafeInteger(generation) || generation < 0) return false;
+
+  const source = String(sourceId || status.sourceId || status.source || '').trim();
+  if (!source) return false;
+  const scope = `${source}\u0000${generation}`;
+  if (scope !== readingProgressAutoRetryScope) {
+    readingProgressAutoRetryScope = scope;
+    readingProgressAutoRetryAttemptedEpoch = false;
+    readingProgressPendingCompletedEpoch = null;
+  }
+  if (bootCommit && !readingProgressAutoRetryBootAttempted) {
+    readingProgressAutoRetryBootAttempted = true;
+    if (readReadingProgressFailures().size) retryFailedReadingProgressSnapshots();
+    return true;
+  }
+  if (status.isScanning !== false || !status.completedAt || generation <= 0) return false;
+  if (readingProgressAutoRetryAttemptedEpoch) return false;
+  if (readingProgressPendingCompletedEpoch?.scope === scope) return false;
+  if (!readReadingProgressFailures().size) {
+    readingProgressAutoRetryAttemptedEpoch = true;
+    return true;
+  }
+  if (readingProgressRetryPromise) {
+    readingProgressPendingCompletedEpoch = { scope, source, generation };
+  } else {
+    readingProgressAutoRetryAttemptedEpoch = true;
+    retryFailedReadingProgressSnapshots();
+  }
+  return true;
+}
+
+function flushPendingCompletedReadingProgressRetry() {
+  const pending = readingProgressPendingCompletedEpoch;
+  if (!pending) return false;
+  const status = state.scanStatus;
+  const phase = String(status?.phase || '').toLowerCase();
+  const rawGeneration = status?.generation;
+  const generation = Number(rawGeneration);
+  if (readingProgressAutoRetryScope !== pending.scope
+    || typeof rawGeneration !== 'number'
+    || !Number.isSafeInteger(generation)
+    || generation !== pending.generation
+    || status?.isScanning !== false
+    || !status?.completedAt
+    || status?.pollError || status?.error || phase === 'error') {
+    readingProgressPendingCompletedEpoch = null;
+    return false;
+  }
+  readingProgressPendingCompletedEpoch = null;
+  if (!readReadingProgressFailures().size) {
+    readingProgressAutoRetryAttemptedEpoch = true;
+    return false;
+  }
+  readingProgressAutoRetryAttemptedEpoch = true;
+  retryFailedReadingProgressSnapshots();
+  return true;
 }
 // 外部資料夾清單是全量寫入；所有 UI intent 必須在同一條 queue 內重讀
 // localStorage，避免兩個舊 snapshot 互相覆蓋。
@@ -3767,6 +4057,10 @@ function isComicOffline(comic) {
   return Boolean(comic && (comic.offline || comic.type === 'offline'));
 }
 
+function isComicOfflineForSearch(comic, metadata) {
+  return isComicOffline(comic) || (!comic?.type && Boolean(metadata?.offline));
+}
+
 function updateLibraryStartPanel() {
   if (!elements.libraryStartPanel) return;
   const hasFormalComic = state.comics.some(comic => comic && !isBuiltInDemoComic(comic));
@@ -3999,6 +4293,11 @@ async function performLibraryFetch({ background = false } = {}) {
     renderReadingProgressRecovery();
     restoreLibraryRefreshFocus();
     updateStats();
+    const bootCommit = !readingProgressAutoRetryBootAttempted;
+    autoRetryReadingProgressAfterLibraryCommit(
+      libraryConfig?.isLocalLibrary ? 'photos:library' : (libraryConfig?.scanDir || ''),
+      bootCommit,
+    );
     if (scanStillRunning && !silentRefresh) {
       updateLoaderScanProgress(latestScanStatus);
     } else if (!silentRefresh && !state.scanStatus?.pollError && state.scanStatus?.phase !== 'error') {
@@ -5248,13 +5547,16 @@ function getDiscoveryCandidates() {
   const query = elements.searchInput.value.toLowerCase().trim();
   const path = normalizeDirectoryPath(state.currentPath);
   return getLibraryFilteredComics().filter(comic => {
-    if (!comic.id || comic.isDirectory || isComicOffline(comic)) return false;
-    if (query) return !state.catalogSearchItems.get(getCatalogSearchKey(
-      comic.id,
-      getComicSourceId(comic),
-      comic.relativePath ?? comic.relative_path,
-    ))?.offline
-      && comicMatchesLibrarySearch(comic, query);
+    if (!comic.id || comic.isDirectory) return false;
+    if (query) {
+      const metadata = state.catalogSearchItems.get(getCatalogSearchKey(
+        comic.id,
+        getComicSourceId(comic),
+        comic.relativePath ?? comic.relative_path,
+      ));
+      return !isComicOfflineForSearch(comic, metadata) && comicMatchesLibrarySearch(comic, query);
+    }
+    if (isComicOffline(comic)) return false;
     const relativePath = normalizeDirectoryPath(comic.relativePath);
     return !path || relativePath === path || relativePath.startsWith(path + '/');
   });
@@ -5489,7 +5791,7 @@ function getDirectoryItems() {
         getComicSourceId(c),
         c.relativePath ?? c.relative_path,
       ));
-      return { ...c, title: metadata?.title || c.title, series: metadata?.series || c.series, metadataTags: metadata?.tags || [], offline: metadata?.offline || false, isDirectory: false };
+      return { ...c, title: metadata?.title || c.title, series: metadata?.series || c.series, metadataTags: metadata?.tags || [], offline: isComicOfflineForSearch(c, metadata), isDirectory: false };
     }).sort(compareShelfItems);
   }
 
@@ -6319,6 +6621,7 @@ async function openReader(comicOrId, { returnToComicFolder = false } = {}) {
       ? builtInDemoReaderData(shelfComic)
       : await eAPI.openComic(comicId, shelfComic?.sourceId || shelfComic?.source_id);
     if (operation !== state.readerOperation) return;
+    adoptReadingProgressSequenceFloor(data?.sequenceFloor);
 
     // The native open result is authoritative.  The shelf source is only a
     // same-item fallback for older bridges that have not started returning
@@ -6335,9 +6638,12 @@ async function openReader(comicOrId, { returnToComicFolder = false } = {}) {
     }
 
     const failedProgress = sourceId
-      ? readReadingProgressFailures().get(readingProgressKey({ id: data.id, sourceId }))
+      ? readReadingProgressFailures().get(readingProgressFailureKey({ id: data.id, sourceId, recoveryToken: data.recoveryToken }))
       : null;
-    if (failedProgress && failedProgress.id === data.id && failedProgress.sourceId === sourceId) {
+    const canUseFailedProgress = failedProgress && (data.id.startsWith('photos:')
+      || typeof eAPI.recoverReadingProgress !== 'function'
+      || (failedProgress.recoveryToken && failedProgress.recoveryToken === data.recoveryToken));
+    if (canUseFailedProgress && failedProgress.id === data.id && failedProgress.sourceId === sourceId) {
       // A journaled local save is newer intent, but remains visibly pending until native accepts it.
       data = {
         ...data,
@@ -6467,40 +6773,80 @@ function createReadingProgressSnapshot(comic = state.currentComic, pageIndex = s
   return {
     id: comic.id,
     ...(sourceId ? { sourceId } : {}),
+    ...(typeof comic.recoveryToken === 'string' && comic.recoveryToken.trim()
+      ? { recoveryToken: comic.recoveryToken.trim() } : {}),
     currentPage: readyPage,
     totalPages,
     sequence: nextReadingProgressSaveSequence(),
   };
 }
 
-function enqueueReadingProgressSnapshot(snapshot) {
+function enqueueReadingProgressSnapshot(snapshot, { recovery = false } = {}) {
   if (!snapshot) return readingProgressSaveQueue;
   const normalized = normalizeReadingProgressSnapshot(snapshot);
   if (!normalized) return readingProgressSaveQueue;
   const intentSequence = readingProgressIntentSequence(snapshot);
-  const key = readingProgressKey(normalized);
+  const key = readingProgressFailureKey(normalized);
+  const nativeRecovery = recovery && !normalized.id.startsWith('photos:')
+    && typeof eAPI.recoverReadingProgress === 'function';
+  // Durable native recovery has its own serial lane so a slow network/hash
+  // check cannot hold ordinary page saves or the reader close flush behind it.
+  // Photo and legacy saveProgress fallbacks remain on the normal ordered lane.
+  const useRecoveryQueue = nativeRecovery && typeof readingProgressRecoverySaveQueue !== 'undefined';
+  const queue = useRecoveryQueue ? readingProgressRecoverySaveQueue : readingProgressSaveQueue;
   const latestQueued = latestQueuedReadingProgressById.get(key);
   if (latestQueued
     && (readingProgressIntentSequence(latestQueued) > intentSequence
       || (readingProgressIntentSequence(latestQueued) === intentSequence
-        && latestQueued.sequence >= normalized.sequence))) return readingProgressSaveQueue;
+        && latestQueued.sequence >= normalized.sequence))) return queue;
   latestQueuedReadingProgressById.set(key, { ...normalized, intentSequence });
-  readingProgressSaveQueue = readingProgressSaveQueue
+  const nextQueue = queue
     .catch(() => {})
     .then(() => {
       const latestAtExecution = latestQueuedReadingProgressById.get(key);
-      if (intentSequence < normalized.sequence && latestAtExecution
+      if (latestAtExecution
         && (readingProgressIntentSequence(latestAtExecution) > intentSequence
           || (readingProgressIntentSequence(latestAtExecution) === intentSequence
             && latestAtExecution.sequence > normalized.sequence))) return true;
-      return persistReadingProgressSnapshot(normalized, intentSequence);
+      return persistReadingProgressSnapshot(normalized, intentSequence, recovery).finally(() => {
+        const latest = latestQueuedReadingProgressById.get(key);
+        if (latest
+          && readingProgressIntentSequence(latest) === intentSequence
+          && latest.sequence === normalized.sequence) {
+          latestQueuedReadingProgressById.delete(key);
+        }
+      });
     });
-  return readingProgressSaveQueue;
+  if (useRecoveryQueue) readingProgressRecoverySaveQueue = nextQueue;
+  else readingProgressSaveQueue = nextQueue;
+  return nextQueue;
+}
+
+async function flushReadingProgressBeforeClose(queue, snapshot) {
+  let timer;
+  try {
+    const completed = await Promise.race([
+      queue.then(() => true),
+      new Promise(resolve => {
+        timer = setTimeout(() => resolve(false), READING_PROGRESS_SAVE_TIMEOUT_MS);
+      }),
+    ]);
+    if (!completed && snapshot) {
+      const latest = latestQueuedReadingProgressById.get(readingProgressFailureKey(snapshot));
+      if (latest && readingProgressIntentSequence(latest) === readingProgressIntentSequence(snapshot)
+        && latest.sequence === snapshot.sequence) {
+        rememberFailedReadingProgressSnapshot(snapshot);
+      }
+    }
+  } finally {
+    clearTimeout(timer);
+  }
 }
 
 // 關閉閱讀器
 async function closeReader({ switchingComic = false } = {}) {
   const closingComic = state.currentComic;
+  const closingPendingOpen = Boolean(state.pendingComicId);
   // scroll RAF 可能尚未執行；先同步套用最後一次條漫位置，再建立不可變快照。
   if (closingComic && state.readingMode === 'webtoon' && state.webtoonScrollFrame) {
     if (typeof cancelAnimationFrame === 'function') cancelAnimationFrame(state.webtoonScrollFrame);
@@ -6555,6 +6901,7 @@ async function closeReader({ switchingComic = false } = {}) {
   }
   elements.readerOverlay.style.display = 'none';
   elements.readerOverlay.setAttribute('aria-hidden', 'true');
+  if (closingPendingOpen) hideLoader();
   clearReaderPageNotice();
   elements.readerOverlay.classList.remove('reader-idle');
   dismissReaderDiscoveryHint();
@@ -6567,12 +6914,12 @@ async function closeReader({ switchingComic = false } = {}) {
   if (closingId && !isBuiltInDemoComic(closingComic) && window.electronAPI && window.electronAPI.closeComic) {
     state.readerClosePromise = state.readerClosePromise
       .catch(() => {})
-      .then(() => progressQueueToFlush)
+      .then(() => flushReadingProgressBeforeClose(progressQueueToFlush, closingProgress))
       .then(() => window.electronAPI.closeComic(closingId, closingSourceId))
       .catch(err => { console.error('關閉漫畫清理失敗:', err); });
     await state.readerClosePromise;
   } else {
-    await progressQueueToFlush;
+    await flushReadingProgressBeforeClose(progressQueueToFlush, closingProgress);
   }
 
   // A normal reader close returns control to the shelf. Resume any queued

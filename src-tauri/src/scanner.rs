@@ -189,14 +189,8 @@ fn publish_partial_library(
 }
 
 fn should_yield_to_reader(priority: ReaderPriority, visible_generation: Option<u64>) -> bool {
-    match (priority, visible_generation) {
-        (ReaderPriority::Opening, _) => true,
-        // The visible lane is the second priority: it may keep discovering
-        // the directory the user is looking at while an existing reader is
-        // active, but the full-library lane must yield to that reader.
-        (ReaderPriority::Active, None) => true,
-        _ => false,
-    }
+    let _ = visible_generation;
+    matches!(priority, ReaderPriority::Opening)
 }
 
 fn yield_to_reader_if_needed(state: &AppState, my_gen: u64, visible_generation: Option<u64>) {
@@ -212,6 +206,11 @@ fn yield_to_reader_if_needed(state: &AppState, my_gen: u64, visible_generation: 
         {
             return;
         }
+        std::thread::sleep(READER_SCAN_WAIT);
+    }
+    // Keep making bounded progress while reading. Only opening a book pauses
+    // discovery; an active reader reduces the full-library lane's I/O rate.
+    if visible_generation.is_none() && state.reader_priority() == ReaderPriority::Active {
         std::thread::sleep(READER_SCAN_WAIT);
     }
 }
@@ -764,6 +763,7 @@ async fn schedule_catalog_sync(
     let discovery_only = cfg!(target_os = "ios") && source_id.starts_with("external:");
     let progress_state = state.clone();
     let current_state = state.clone();
+    let priority_state = state.clone();
     let progress_handle = app_handle.clone();
     let result = tokio::task::spawn_blocking(move || {
         if current_state.scan_generation.load(Ordering::Acquire) != generation {
@@ -772,7 +772,7 @@ async fn schedule_catalog_sync(
         if comics.is_empty() {
             return store.mark_source_offline(&source_id).map(|_| 0);
         }
-        store.sync_library_with_progress(
+        store.sync_library_with_reader_priority(
             &comics,
             discovery_only,
             |done, total| {
@@ -795,6 +795,7 @@ async fn schedule_catalog_sync(
                 let _ = progress_handle.emit("scan-progress", status);
             },
             || current_state.scan_generation.load(Ordering::Acquire) == generation,
+            || priority_state.reader_priority(),
         )
     })
     .await;
@@ -1187,7 +1188,7 @@ enum RecentSavedPreparation {
     Deferred,
     Stale,
     NoItem,
-    Item(ComicItem),
+    Item(Box<ComicItem>),
 }
 
 fn visible_source_lanes(
@@ -1499,7 +1500,7 @@ pub async fn scan_priority_library(
                 match store_for_prepare.get_recent_reading_runtime_item() {
                     Ok(Some(item)) => {
                         prepare_saved_item(item, &state_for_prepare, &handle_for_prepare)
-                            .map(RecentSavedPreparation::Item)
+                            .map(|item| RecentSavedPreparation::Item(Box::new(item)))
                             .unwrap_or(RecentSavedPreparation::NoItem)
                     }
                     Ok(None) => RecentSavedPreparation::NoItem,
@@ -1520,7 +1521,7 @@ pub async fn scan_priority_library(
                 }
             };
             match prepared {
-                RecentSavedPreparation::Item(item) => break Some(item),
+                RecentSavedPreparation::Item(item) => break Some(*item),
                 RecentSavedPreparation::Deferred => continue,
                 RecentSavedPreparation::Stale => return,
                 // An empty result or a preparation failure is terminal; it
@@ -1663,6 +1664,12 @@ pub async fn scan_visible_directory(
     if root.is_empty() {
         return Ok(());
     }
+    // An unscoped request can visit both local and SMB lanes, but each
+    // published directory snapshot belongs to the lane's resolved source.
+    let local_visible_source = bookmark
+        .as_deref()
+        .map(external_source_id)
+        .unwrap_or_else(|| local_source_id(Path::new(&root)));
 
     // Do not spawn the SMB lane until all local/security-scoped preflight has
     // succeeded. Otherwise an early local error (for example a revoked iOS
@@ -1807,7 +1814,7 @@ pub async fn scan_visible_directory(
                 generation,
                 visible_generation,
                 &visible_path,
-                source_id.as_deref(),
+                Some(&local_visible_source),
                 &directories,
             ) {
                 break;
@@ -2474,10 +2481,10 @@ mod tests {
     }
 
     #[test]
-    fn reader_priority_yields_only_the_background_lane() {
+    fn reader_priority_pauses_opening_but_keeps_background_reading_progress() {
         assert!(should_yield_to_reader(ReaderPriority::Opening, None));
         assert!(should_yield_to_reader(ReaderPriority::Opening, Some(1)));
-        assert!(should_yield_to_reader(ReaderPriority::Active, None));
+        assert!(!should_yield_to_reader(ReaderPriority::Active, None));
         assert!(!should_yield_to_reader(ReaderPriority::Active, Some(1)));
         assert!(!should_yield_to_reader(ReaderPriority::Idle, None));
         assert!(!should_yield_to_reader(ReaderPriority::Idle, Some(1)));
@@ -2583,10 +2590,10 @@ mod tests {
         assert!(finished_rx.recv_timeout(Duration::from_millis(20)).is_err());
         // The sleep happens after reader_priority releases this lock.
         assert!(state.comic_lifecycle.try_lock().is_ok());
-        *state.active_comic_id.lock().unwrap() = None;
         finished_rx
             .recv_timeout(Duration::from_secs(1))
-            .expect("reader close did not release scan wait");
+            .expect("background scan must continue while the reader stays active");
+        assert!(state.active_comic_id.lock().unwrap().is_some());
         waiter.join().unwrap();
 
         *state.active_comic_id.lock().unwrap() = Some("reading".into());

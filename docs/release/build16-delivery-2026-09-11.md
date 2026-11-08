@@ -9,7 +9,7 @@
 
 ## 實機交付
 
-- macOS build16 App：`/Users/chiudavid/Desktop/紳士藝術研究所 Gentlemen's Art Institute.app`。
+- macOS build16 App：`$HOME/Desktop/紳士藝術研究所 Gentlemen's Art Institute.app`。
 - Mac 實測：重新由系統資料夾選擇器授權 `Downloads` 後，書架顯示「圖片資料夾：Downloads」、`1084 頁`，進入閱讀器顯示 `第 1 / 1084 頁` 並成功載入圖片。
 - iPad：iPad Air（第 5 代），透過 `localNetwork` 安裝；`com.windsheep.gai` 安裝、版本回讀 `1.0.0`／bundle version `16`，launch 成功。
 - IPA：`output/release/2026-09-11-build16/GAI-1.0.0-build16-development.ipa`。

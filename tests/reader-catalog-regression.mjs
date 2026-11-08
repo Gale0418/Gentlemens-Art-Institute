@@ -1,5 +1,6 @@
 import assert from 'node:assert/strict';
 import fs from 'node:fs';
+import vm from 'node:vm';
 
 const app = fs.readFileSync(new URL('../public/app.js', import.meta.url), 'utf8');
 const style = fs.readFileSync(new URL('../public/style.css', import.meta.url), 'utf8');
@@ -45,5 +46,103 @@ assert.doesNotMatch(app, /state\.currentComicPages\.slice\(windowStart, windowEn
 assert.match(style, /\.catalog-virtual-spacer\s*\{/);
 assert.match(style, /\.reader-catalog-grid\s*\{[\s\S]{0,500}contain:\s*layout paint style/);
 assert.match(style, /\.reader-catalog-grid\[data-catalog-start-column\]/);
+
+function extractFunction(source, name) {
+  const start = source.indexOf(`function ${name}(`);
+  assert.ok(start >= 0, `missing function ${name}`);
+  const open = source.indexOf('{', start);
+  let depth = 0;
+  for (let index = open; index < source.length; index += 1) {
+    if (source[index] === '{') depth += 1;
+    if (source[index] === '}') depth -= 1;
+    if (depth === 0) return source.slice(start, index + 1);
+  }
+  throw new Error(`unterminated function ${name}`);
+}
+
+// Exercise the real search, shelf and discovery functions with unchanged cached
+// metadata while runtime availability changes after a successful rediscovery.
+{
+  const functions = [
+    extractFunction(app, 'isBuiltInDemoComic'),
+    extractFunction(app, 'isComicOffline'),
+    extractFunction(app, 'isComicOfflineForSearch'),
+    extractFunction(app, 'getProgressInfo'),
+    extractFunction(app, 'normalizeDirectorySourceId'),
+    extractFunction(app, 'getComicSourceId'),
+    extractFunction(app, 'getComicSourceKey'),
+    extractFunction(app, 'getCatalogSearchKey'),
+    extractFunction(app, 'normalizeDirectoryPath'),
+    extractFunction(app, 'compareShelfItems'),
+    extractFunction(app, 'getLibraryFilteredComics'),
+    extractFunction(app, 'comicMatchesLibrarySearch'),
+    extractFunction(app, 'getDiscoveryCandidates'),
+    extractFunction(app, 'getDirectoryItems'),
+  ].join('\n');
+  const context = vm.createContext({
+    BUILT_IN_DEMO_SOURCE_ID: 'builtin:demo',
+    comicTitleCollator: new Intl.Collator(undefined, { numeric: true, sensitivity: 'base' }),
+    isFavoriteId: () => false,
+    isPhotoAlbum: () => false,
+  });
+  vm.runInContext(`${functions}\nglobalThis.api = { getDirectoryItems, getDiscoveryCandidates };`, context);
+
+  const rediscovered = {
+    id: 'shared-id', sourceId: 'source-a', relativePath: 'LOVELY01.cbz',
+    title: 'LOVELY01', type: 'offline',
+  };
+  const otherSourceOffline = {
+    id: 'shared-id', sourceId: 'source-b', relativePath: 'LOVELY01.cbz',
+    title: 'LOVELY01', type: 'archive', offline: true,
+  };
+  const offlineType = {
+    id: 'offline-type', sourceId: 'source-c', relativePath: 'LOVELY02.cbz',
+    title: 'LOVELY02', type: 'offline',
+  };
+  const offlineFlag = {
+    id: 'offline-flag', sourceId: 'source-d', relativePath: 'LOVELY03.cbz',
+    title: 'LOVELY03', type: 'archive', offline: true,
+  };
+  const missingRuntimeType = {
+    id: 'missing-type', sourceId: 'source-e', relativePath: 'LOVELY04.cbz',
+    title: 'LOVELY04',
+  };
+  const searchKey = (comic) => JSON.stringify([comic.sourceId, comic.id, comic.relativePath]);
+  const cachedItems = new Map([
+    [searchKey(rediscovered), { title: 'Source A metadata', offline: true }],
+    [searchKey(otherSourceOffline), { title: 'Source B metadata', offline: false }],
+    [searchKey(missingRuntimeType), { title: 'LOVELY04', offline: true }],
+  ]);
+  context.state = {
+    comics: [rediscovered, otherSourceOffline, offlineType, offlineFlag, missingRuntimeType],
+    currentSourceId: '',
+    currentPath: '',
+    activeSeries: 'all',
+    activeFilter: 'all',
+    catalogSearchItems: cachedItems,
+    catalogSearchIds: null,
+  };
+  context.elements = { searchInput: { value: 'lovely' } };
+
+  assert.deepEqual(context.api.getDiscoveryCandidates().map(item => item.sourceId), [],
+    'offline runtime sources stay out of discovery before rediscovery');
+  rediscovered.type = 'archive';
+  const shelf = context.api.getDirectoryItems();
+  assert.equal(shelf.find(item => item.sourceId === 'source-a')?.offline, false,
+    'rediscovered archive availability wins over stale metadata.offline');
+  assert.equal(shelf.find(item => item.sourceId === 'source-a')?.title, 'Source A metadata',
+    'availability fix keeps source-qualified metadata display');
+  assert.equal(shelf.find(item => item.sourceId === 'source-b')?.offline, true,
+    'same-id offline source keeps its runtime availability');
+  assert.equal(shelf.find(item => item.sourceId === 'source-b')?.title, 'Source B metadata',
+    'same id and path retain source-qualified metadata');
+  assert.deepEqual(context.api.getDiscoveryCandidates().map(item => item.sourceId), ['source-a'],
+    'rediscovered archive enters discovery while offline runtime sources remain blocked');
+  assert.equal(shelf.find(item => item.sourceId === 'source-e')?.offline, true,
+    'missing runtime type stays fail-closed when its source-qualified metadata is offline');
+  assert.ok(shelf.some(item => item.sourceId === 'source-c')
+    && shelf.some(item => item.sourceId === 'source-d'),
+  'offline runtime cards remain searchable and can show their unavailable state');
+}
 
 console.log('reader catalog virtualization regression checks passed');

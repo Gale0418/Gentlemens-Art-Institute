@@ -3,15 +3,13 @@ use crate::catalog::CatalogQuery;
 use crate::catalog::{CatalogStore, ComicLocationView, FileOperationRecord};
 use crate::state::{self, SmbConfig};
 use base64::{engine::general_purpose, Engine as _};
-use cap_fs_ext::DirExt;
 #[cfg(windows)]
-use cap_fs_ext::{OpenOptionsFollowExt, OpenOptionsMaybeDirExt};
+use cap_fs_ext::OpenOptionsMaybeDirExt;
+use cap_fs_ext::{DirExt, OpenOptionsFollowExt};
 #[cfg(windows)]
 use cap_std::fs::OpenOptionsExt;
 use serde::{Deserialize, Serialize};
 use std::path::{Component, Path, PathBuf};
-#[cfg(test)]
-use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Duration;
 #[cfg(windows)]
 use std::{
@@ -30,7 +28,144 @@ const SMB_CONNECT_TIMEOUT: Duration = Duration::from_secs(10);
 const SMB_IO_TIMEOUT: Duration = Duration::from_secs(30);
 
 #[cfg(test)]
-static UNDO_TEST_FORCE_ROLLBACK_COLLISION: AtomicBool = AtomicBool::new(false);
+std::thread_local! {
+    static UNDO_TEST_FORCE_ROLLBACK_COLLISION: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+    static LOCAL_TEST_REPLACE_SOURCE_BEFORE_RENAME: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+    static LOCAL_TEST_FORCE_IDENTITY_ROLLBACK_COLLISION: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+}
+
+#[derive(Debug)]
+struct LocalFileIdentity {
+    volume: u64,
+    file: u64,
+    // Keep the inode/file ID allocated through fingerprinting and rename.
+    _handle: std::fs::File,
+}
+
+impl PartialEq for LocalFileIdentity {
+    fn eq(&self, other: &Self) -> bool {
+        self.volume == other.volume && self.file == other.file
+    }
+}
+impl Eq for LocalFileIdentity {}
+
+#[derive(Debug)]
+struct VerifiedRenameError {
+    message: String,
+    rollback_failed: bool,
+}
+
+fn local_file_identity(dir: &cap_std::fs::Dir, name: &Path) -> Result<LocalFileIdentity, String> {
+    let mut options = cap_std::fs::OpenOptions::new();
+    options.read(true).follow(cap_fs_ext::FollowSymlinks::No);
+    #[cfg(windows)]
+    options.maybe_dir(true);
+    let file = dir
+        .open_with(name, &options)
+        .map_err(|error| format!("無法以 nofollow handle 開啟檔案：{error}"))?
+        .into_std();
+    let metadata = file
+        .metadata()
+        .map_err(|error| format!("無法讀取檔案 handle 身分：{error}"))?;
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::MetadataExt;
+        Ok(LocalFileIdentity {
+            volume: metadata.dev(),
+            file: metadata.ino(),
+            _handle: file,
+        })
+    }
+    #[cfg(windows)]
+    {
+        use std::os::windows::fs::MetadataExt;
+        let volume = metadata
+            .volume_serial_number()
+            .ok_or("Windows 無法取得檔案 volume serial number".to_string())?;
+        let file_index = metadata
+            .file_index()
+            .ok_or("Windows 無法取得檔案 file index".to_string())?;
+        Ok(LocalFileIdentity {
+            volume: u64::from(volume),
+            file: file_index,
+            _handle: file,
+        })
+    }
+    #[cfg(not(any(unix, windows)))]
+    {
+        let _ = metadata;
+        Err("此平台無法安全取得本機檔案身分".into())
+    }
+}
+
+// rename_noreplace is intentionally not described as compare-and-rename: no
+// supported platform here can atomically bind a path rename to this identity.
+// The post-rename check detects a leaf swap in the gap and tries a no-clobber
+// rollback. A rollback collision is surfaced for the caller to reconcile.
+fn rename_local_verified(
+    from_dir: &cap_std::fs::Dir,
+    from: &Path,
+    to_dir: &cap_std::fs::Dir,
+    to: &Path,
+    expected: &LocalFileIdentity,
+) -> Result<(), VerifiedRenameError> {
+    let before_rename =
+        local_file_identity(from_dir, from).map_err(|message| VerifiedRenameError {
+            message,
+            rollback_failed: false,
+        })?;
+    if &before_rename != expected {
+        return Err(VerifiedRenameError {
+            message: "檔案位置在 fingerprint 驗證後已被替換，已停止操作".into(),
+            rollback_failed: false,
+        });
+    }
+    #[cfg(test)]
+    if LOCAL_TEST_REPLACE_SOURCE_BEFORE_RENAME.with(|flag| flag.replace(false)) {
+        from_dir
+            .remove_file(from)
+            .map_err(|error| VerifiedRenameError {
+                message: format!("測試 leaf replacement 移除來源失敗：{error}"),
+                rollback_failed: false,
+            })?;
+        from_dir
+            .write(from, b"replacement leaf")
+            .map_err(|error| VerifiedRenameError {
+                message: format!("測試 leaf replacement 寫入來源失敗：{error}"),
+                rollback_failed: false,
+            })?;
+    }
+    rename_noreplace(from_dir, from, to_dir, to).map_err(|error| VerifiedRenameError {
+        message: format!("no-clobber rename 失敗：{error}"),
+        rollback_failed: false,
+    })?;
+    #[cfg(test)]
+    if LOCAL_TEST_FORCE_IDENTITY_ROLLBACK_COLLISION.with(|flag| flag.replace(false)) {
+        from_dir
+            .write(from, b"rollback collision")
+            .map_err(|error| VerifiedRenameError {
+                message: format!("測試 rollback collision 建立失敗：{error}"),
+                rollback_failed: true,
+            })?;
+    }
+    let actual = local_file_identity(to_dir, to);
+    if actual.as_ref().is_ok_and(|actual| actual == expected) {
+        return Ok(());
+    }
+    let detail = actual
+        .err()
+        .unwrap_or_else(|| "目的地檔案身分與操作前不符".into());
+    match rename_noreplace(to_dir, to, from_dir, from) {
+        Ok(()) => Err(VerifiedRenameError {
+            message: format!("檔案位置在操作期間被替換，已 no-clobber 回復來源：{detail}"),
+            rollback_failed: false,
+        }),
+        Err(error) => Err(VerifiedRenameError {
+            message: format!("檔案位置在操作期間被替換，且 no-clobber 回滾失敗，需要人工檢查：{detail}; rollback: {error}"),
+            rollback_failed: true,
+        }),
+    }
+}
 
 #[cfg(any(target_os = "macos", target_os = "ios", target_os = "linux"))]
 fn rename_noreplace(
@@ -321,6 +456,54 @@ fn smb_location_revision(source_id: &str, relative_path: &str, size: u64, mtime:
     )
 }
 
+fn smb_undo_source_matches_expected_revision(
+    source_id: &str,
+    original_relative_path: &str,
+    expected_revision: &str,
+    before_rename: &smb2::FileInfo,
+    after_error: &smb2::FileInfo,
+) -> bool {
+    // SMB exposes no stable file ID here. Reuse the journaled revision and
+    // require stable, nonzero creation metadata as extra evidence; this only
+    // restores retry eligibility, and the next undo must recheck its expected
+    // revision and empty destination. It is not an identity guarantee against
+    // an adversarial replacement that copies all reported timestamps/size.
+    let created = before_rename.created;
+    created != smb2::pack::FileTime::ZERO
+        && after_error.created == created
+        && after_error.is_directory == before_rename.is_directory
+        && smb_location_revision(
+            source_id,
+            original_relative_path,
+            after_error.size,
+            after_error.modified.0,
+        ) == expected_revision
+}
+
+fn smb_undo_failure_allows_retry(
+    rename_error: &str,
+    after: Result<Option<smb2::FileInfo>, String>,
+    before: Result<Option<smb2::FileInfo>, String>,
+    source_id: &str,
+    original_relative_path: &str,
+    expected_revision: &str,
+    before_rename: &smb2::FileInfo,
+) -> bool {
+    if rename_error.contains("逾時") {
+        return false;
+    }
+    match (after, before) {
+        (Ok(Some(after_info)), Ok(None)) => smb_undo_source_matches_expected_revision(
+            source_id,
+            original_relative_path,
+            expected_revision,
+            before_rename,
+            &after_info,
+        ),
+        _ => false,
+    }
+}
+
 fn smb_runtime_id(source_id: &str, relative_path: &str) -> String {
     general_purpose::URL_SAFE_NO_PAD
         .encode(format!("gai-smb-v1\0{source_id}\0./{relative_path}").as_bytes())
@@ -486,7 +669,13 @@ fn local_root(location: &ComicLocationView) -> Result<PathBuf, String> {
         .decode(encoded)
         .map_err(|_| "本機書庫識別已損壞")?;
     let root = PathBuf::from(String::from_utf8(bytes).map_err(|_| "本機書庫路徑編碼無效")?);
-    root.canonicalize()
+    // Resolve platform aliases in the parent, but never resolve the configured
+    // root leaf. open_local_root must reject a root replaced with a symlink.
+    let parent = root.parent().ok_or("漫畫書庫沒有可用父資料夾")?;
+    let name = root.file_name().ok_or("漫畫書庫名稱無效")?;
+    parent
+        .canonicalize()
+        .map(|parent| parent.join(name))
         .map_err(|error| format!("漫畫書庫目前無法存取：{error}"))
 }
 
@@ -594,16 +783,11 @@ fn mutate_local(
     request: FileMutationRequest,
 ) -> Result<FileMutationResult, String> {
     let root = local_root(&location)?;
-    let source = PathBuf::from(location.actual_path.as_deref().ok_or("漫畫沒有本機位置")?)
-        .canonicalize()
-        .map_err(|error| format!("漫畫位置無效：{error}"))?;
-    if !source.starts_with(&root) {
-        return Err("漫畫位置超出已授權書庫".into());
-    }
-    let source_relative = source
-        .strip_prefix(&root)
-        .map_err(|_| "漫畫位置無法轉為書庫相對路徑")?
-        .to_path_buf();
+    // Use the source-qualified catalog path instead of canonicalizing
+    // `actual_path`: canonicalizing the leaf would follow a symlink inserted
+    // after scanning before the no-follow checks below could reject it.
+    location.actual_path.as_deref().ok_or("漫畫沒有本機位置")?;
+    let source_relative = PathBuf::from(&location.relative_path);
     validate_local_relative(&source_relative, false)?;
     let root_dir = open_local_root(&root)?;
     let (source_dir, source_name) = open_local_parent(&root_dir, &source_relative, false)?;
@@ -616,6 +800,7 @@ fn mutate_local(
     if location.fingerprint_collision {
         return Err("漫畫檔案版本與其他項目碰撞，已停止操作".into());
     }
+    let pinned_identity = local_file_identity(&source_dir, &source_name)?;
     let expected = request
         .expected_fingerprint
         .as_deref()
@@ -635,6 +820,9 @@ fn mutate_local(
     };
     if current != expected {
         return Err("漫畫位置已在掃描後變更，請重新整理再操作".into());
+    }
+    if local_file_identity(&source_dir, &source_name)? != pinned_identity {
+        return Err("漫畫位置在版本驗證期間已被替換，請重新整理再操作".into());
     }
     let provisional_id = uuid::Uuid::new_v4().to_string();
     let after_relative = destination_for(&location, &request, &provisional_id)?;
@@ -666,6 +854,7 @@ fn mutate_local(
         root_dir,
         source_dir,
         source_name,
+        pinned_identity,
         after_relative,
     )
 }
@@ -679,6 +868,7 @@ fn execute_local_move(
     root: cap_std::fs::Dir,
     source_dir: cap_std::fs::Dir,
     source_name: PathBuf,
+    pinned_identity: LocalFileIdentity,
     after_relative: PathBuf,
 ) -> Result<FileMutationResult, String> {
     let source_metadata = match source_dir.symlink_metadata(&source_name) {
@@ -736,15 +926,20 @@ fn execute_local_move(
         }
         return Err(error);
     }
-    if let Err(error) = rename_noreplace(
+    if let Err(error) = rename_local_verified(
         &source_dir,
         &source_name,
         &destination_dir,
         &destination_name,
+        &pinned_identity,
     ) {
-        let message = format!("檔案移動失敗：{error}");
-        let _ = store.fail_file_operation(&operation.id, &message);
-        if operation.action == "trash" {
+        let message = format!("檔案移動失敗：{}", error.message);
+        if error.rollback_failed {
+            let _ = store.mark_file_operation_needs_reconcile(&operation.id, &message);
+        } else {
+            let _ = store.fail_file_operation(&operation.id, &message);
+        }
+        if operation.action == "trash" && !error.rollback_failed {
             let _ = destination_dir.remove_open_dir();
         }
         return Err(message);
@@ -834,20 +1029,35 @@ fn undo_local(store: &CatalogStore, record: &FileOperationRecord) -> Result<(), 
         .expected_fingerprint
         .as_deref()
         .ok_or("操作缺少檔案版本前置條件，已停止還原")?;
+    let pinned_identity = local_file_identity(&source_dir, &source_name)?;
     let current = local_undo_fingerprint(&source_dir, &source_name, record, expected)?;
     if current != expected {
         return Err("隔離／移動後的檔案版本已變更，已停止還原".into());
     }
+    if local_file_identity(&source_dir, &source_name)? != pinned_identity {
+        return Err("隔離／移動後的檔案在版本驗證期間已被替換，已停止還原".into());
+    }
 
-    rename_noreplace(
+    store.begin_file_operation_undo(&record.id)?;
+    if let Err(error) = rename_local_verified(
         &source_dir,
         &source_name,
         &destination_dir,
         &destination_name,
-    )
-    .map_err(|error| format!("檔案還原失敗：{error}"))?;
+        &pinned_identity,
+    ) {
+        let message = format!("檔案還原失敗：{}", error.message);
+        if error.rollback_failed {
+            let _ = store.mark_file_operation_needs_reconcile(&record.id, &message);
+        } else if let Err(cancel_error) = store.cancel_file_operation_undo(&record.id) {
+            let failure = format!("{message}; undo journal rollback failed: {cancel_error}");
+            let _ = store.mark_file_operation_needs_reconcile(&record.id, &failure);
+            return Err(failure);
+        }
+        return Err(message);
+    }
     #[cfg(test)]
-    if UNDO_TEST_FORCE_ROLLBACK_COLLISION.swap(false, Ordering::SeqCst) {
+    if UNDO_TEST_FORCE_ROLLBACK_COLLISION.with(|flag| flag.replace(false)) {
         source_dir
             .write(&source_name, b"rollback collision")
             .map_err(|error| format!("測試 rollback collision 建立失敗：{error}"))?;
@@ -862,7 +1072,19 @@ fn undo_local(store: &CatalogStore, record: &FileOperationRecord) -> Result<(), 
             &source_name,
         );
         return match rollback {
-            Ok(()) => Err(format!("目錄還原失敗，檔案已退回原隔離／移動位置：{error}")),
+            Ok(()) => {
+                let cancel = store.cancel_file_operation_undo(&record.id);
+                match cancel {
+                    Ok(()) => Err(format!("目錄還原失敗，檔案已退回原隔離／移動位置：{error}")),
+                    Err(cancel_error) => {
+                        let failure = format!(
+                            "目錄還原失敗，檔案已退回但 journal 無法恢復：{error}; {cancel_error}"
+                        );
+                        let _ = store.mark_file_operation_needs_reconcile(&record.id, &failure);
+                        Err(failure)
+                    }
+                }
+            }
             Err(rollback_error) => {
                 let failure = format!(
                     "目錄還原失敗，且檔案退回也失敗（需要人工檢查）：{error}; rollback: {rollback_error}"
@@ -1184,7 +1406,52 @@ async fn undo_smb(
     {
         return Err("NAS 原位置已有其他項目，已停止還原".into());
     }
-    smb_rename(&mut client, &mut tree, &after, &before).await?;
+    catalog_call(store, {
+        let operation_id = record.id.clone();
+        move |store| store.begin_file_operation_undo(&operation_id)
+    })
+    .await?;
+    if let Err(error) = smb_rename(&mut client, &mut tree, &after, &before).await {
+        // A retry is safe only when post-error stats show the expected source
+        // revision still at `after` and the undo destination remains absent.
+        // Any timeout/stat error or changed metadata remains ambiguous.
+        let retryable = if error.contains("逾時") {
+            false
+        } else {
+            let after_state = smb_stat_optional(&mut client, &mut tree, &after).await;
+            let before_state = smb_stat_optional(&mut client, &mut tree, &before).await;
+            smb_undo_failure_allows_retry(
+                &error,
+                after_state,
+                before_state,
+                &record.source_id,
+                &record.before_relative_path,
+                expected,
+                &info,
+            )
+        };
+        if retryable {
+            let operation_id = record.id.clone();
+            if catalog_call(store, move |store| {
+                store.cancel_file_operation_undo(&operation_id)
+            })
+            .await
+            .is_ok()
+            {
+                return Err(format!(
+                    "NAS 還原失敗；目前目的地仍是原版本且原位置為空，可重試：{error}"
+                ));
+            }
+        }
+        let failure = format!("NAS 還原結果不確定，已停止自動處理：{error}");
+        let operation_id = record.id.clone();
+        let message = failure.clone();
+        let _ = catalog_call(store, move |store| {
+            store.mark_file_operation_needs_reconcile(&operation_id, &message)
+        })
+        .await;
+        return Err(failure);
+    }
     let runtime_id = smb_runtime_id(&record.source_id, &record.before_relative_path);
     let operation_id = record.id.clone();
     let completed = catalog_call(store, move |store| {
@@ -1194,9 +1461,29 @@ async fn undo_smb(
     if let Err(error) = completed {
         let rollback = smb_rename(&mut client, &mut tree, &before, &after).await;
         return match rollback {
-            Ok(()) => Err(format!(
-                "目錄還原失敗，NAS 檔案已退回隔離／移動位置：{error}"
-            )),
+            Ok(()) => {
+                let operation_id = record.id.clone();
+                match catalog_call(store, move |store| {
+                    store.cancel_file_operation_undo(&operation_id)
+                })
+                .await
+                {
+                    Ok(()) => Err(format!(
+                        "目錄還原失敗，NAS 檔案已退回隔離／移動位置：{error}"
+                    )),
+                    Err(cancel_error) => {
+                        let failure =
+                            format!("NAS 檔案已退回，但 journal 無法恢復：{error}; {cancel_error}");
+                        let operation_id = record.id.clone();
+                        let message = failure.clone();
+                        let _ = catalog_call(store, move |store| {
+                            store.mark_file_operation_needs_reconcile(&operation_id, &message)
+                        })
+                        .await;
+                        Err(failure)
+                    }
+                }
+            }
             Err(rollback_error) => {
                 let failure = format!(
                     "目錄還原失敗，且 NAS 檔案退回也失敗（需要人工檢查）：{error}; rollback: {rollback_error}"
@@ -1223,6 +1510,141 @@ async fn undo_smb(
 mod tests {
     use super::*;
     use crate::state::{ComicItem, Progress};
+
+    fn smb_test_file_info(size: u64, created: u64, modified: u64) -> smb2::FileInfo {
+        smb2::FileInfo {
+            size,
+            is_directory: false,
+            created: smb2::pack::FileTime(created),
+            modified: smb2::pack::FileTime(modified),
+            accessed: smb2::pack::FileTime::ZERO,
+        }
+    }
+
+    #[test]
+    fn smb_undo_failed_rename_retry_requires_revision_and_creation_evidence() {
+        let source_id = "smb:server/share";
+        let original_path = "series/book.cbz";
+        let expected = smb_location_revision(source_id, original_path, 42, 100);
+        let original = smb_test_file_info(42, 50, 100);
+
+        assert!(smb_undo_failure_allows_retry(
+            "SMB 檔案移動失敗：access denied",
+            Ok(Some(smb_test_file_info(42, 50, 100))),
+            Ok(None),
+            source_id,
+            original_path,
+            &expected,
+            &original,
+        ));
+        assert!(!smb_undo_failure_allows_retry(
+            "SMB 檔案移動失敗：destination exists",
+            Ok(Some(smb_test_file_info(42, 50, 100))),
+            Ok(Some(smb_test_file_info(42, 50, 100))),
+            source_id,
+            original_path,
+            &expected,
+            &original,
+        ));
+        assert!(!smb_undo_failure_allows_retry(
+            "SMB 檔案移動失敗：access denied",
+            Ok(Some(smb_test_file_info(42, 51, 100))),
+            Ok(None),
+            source_id,
+            original_path,
+            &expected,
+            &original,
+        ));
+        assert!(!smb_undo_failure_allows_retry(
+            "SMB 檔案移動失敗：access denied",
+            Ok(Some(smb_test_file_info(41, 50, 100))),
+            Ok(None),
+            source_id,
+            original_path,
+            &expected,
+            &original,
+        ));
+        assert!(!smb_undo_failure_allows_retry(
+            "SMB 檔案移動失敗：access denied",
+            Ok(Some(smb_test_file_info(42, 0, 100))),
+            Ok(None),
+            source_id,
+            original_path,
+            &expected,
+            &smb_test_file_info(42, 0, 100),
+        ));
+        assert!(!smb_undo_failure_allows_retry(
+            "SMB 檔案移動失敗：access denied",
+            Err("stat timeout".into()),
+            Ok(None),
+            source_id,
+            original_path,
+            &expected,
+            &original,
+        ));
+        assert!(!smb_undo_failure_allows_retry(
+            "SMB 檔案移動逾時（30 秒）",
+            Ok(Some(smb_test_file_info(42, 50, 100))),
+            Ok(None),
+            source_id,
+            original_path,
+            &expected,
+            &original,
+        ));
+    }
+
+    #[test]
+    fn local_verified_rename_detects_leaf_replacement_and_fails_closed_on_rollback_collision() {
+        let base =
+            std::env::temp_dir().join(format!("gai-verified-rename-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&base).unwrap();
+        let root = cap_std::fs::Dir::open_ambient_dir(&base, cap_std::ambient_authority()).unwrap();
+
+        root.write("source", b"original leaf").unwrap();
+        let expected = local_file_identity(&root, Path::new("source")).unwrap();
+        LOCAL_TEST_REPLACE_SOURCE_BEFORE_RENAME.with(|flag| flag.set(true));
+        let error = rename_local_verified(
+            &root,
+            Path::new("source"),
+            &root,
+            Path::new("destination"),
+            &expected,
+        )
+        .unwrap_err();
+        assert!(!error.rollback_failed);
+        assert!(error.message.contains("已 no-clobber 回復來源"));
+        assert_eq!(
+            std::fs::read(base.join("source")).unwrap(),
+            b"replacement leaf"
+        );
+        assert!(!base.join("destination").exists());
+
+        root.write("source", b"original leaf").unwrap();
+        let expected = local_file_identity(&root, Path::new("source")).unwrap();
+        LOCAL_TEST_REPLACE_SOURCE_BEFORE_RENAME.with(|flag| flag.set(true));
+        LOCAL_TEST_FORCE_IDENTITY_ROLLBACK_COLLISION.with(|flag| flag.set(true));
+        let error = rename_local_verified(
+            &root,
+            Path::new("source"),
+            &root,
+            Path::new("destination"),
+            &expected,
+        )
+        .unwrap_err();
+        assert!(error.rollback_failed);
+        assert!(error.message.contains("回滾失敗"));
+        assert_eq!(
+            std::fs::read(base.join("source")).unwrap(),
+            b"rollback collision"
+        );
+        assert_eq!(
+            std::fs::read(base.join("destination")).unwrap(),
+            b"replacement leaf"
+        );
+
+        drop(root);
+        let _ = std::fs::remove_dir_all(&base);
+    }
 
     #[test]
     fn relative_destination_rejects_escape_reserved_and_windows_separator() {
@@ -1671,7 +2093,7 @@ mod tests {
         store
             .test_set_location_relative_path(double_fault_operation.location_id, "catalog-diverged")
             .unwrap();
-        UNDO_TEST_FORCE_ROLLBACK_COLLISION.store(true, Ordering::SeqCst);
+        UNDO_TEST_FORCE_ROLLBACK_COLLISION.with(|flag| flag.set(true));
         let error = undo_local(&store, &double_fault_operation).unwrap_err();
         assert!(error.contains("需要人工檢查"));
         assert_eq!(
@@ -1682,6 +2104,228 @@ mod tests {
             "needs_reconcile"
         );
         std::fs::remove_file(root.join("double-fault")).unwrap();
+
+        drop(store);
+        let _ = std::fs::remove_dir_all(&base);
+    }
+
+    #[test]
+    fn local_undo_journal_recovers_both_sides_of_the_filesystem_commit() {
+        let base = std::env::temp_dir().join(format!(
+            "gai-file-op-undo-recovery-{}",
+            uuid::Uuid::new_v4()
+        ));
+        let root = base.join("library");
+        std::fs::create_dir_all(&root).unwrap();
+        let original = root.join("book.cbz");
+        std::fs::write(&original, b"synthetic archive bytes").unwrap();
+        let runtime_id = general_purpose::URL_SAFE_NO_PAD.encode(b"book.cbz");
+        let item = ComicItem {
+            id: runtime_id.clone(),
+            r#type: "archive".into(),
+            relative_path: "book.cbz".into(),
+            ext: ".cbz".into(),
+            title: "book".into(),
+            series: "synthetic".into(),
+            updated_at: "2026-11-08T00:00:00Z".into(),
+            page_count: 1,
+            progress: Progress {
+                current_page: 0,
+                total_pages: 1,
+                percent: 0.0,
+                updated_at: None,
+            },
+            source_id: crate::scanner::local_source_id(&root),
+            source_path: Some(original.to_string_lossy().into_owned()),
+            external_bookmark: None,
+        };
+        let database = base.join("catalog.sqlite3");
+        let store = CatalogStore::new(database.clone()).unwrap();
+        store.sync_library(&[item]).unwrap();
+        let location = store.get_location(&runtime_id).unwrap();
+        let expected = registered_fingerprint(&location);
+        let mutation = mutate_local(
+            &store,
+            location,
+            FileMutationRequest {
+                comic_id: runtime_id.clone(),
+                source_id: None,
+                relative_path: None,
+                action: "rename".into(),
+                destination_relative_path: Some("renamed.cbz".into()),
+                expected_fingerprint: expected,
+            },
+        )
+        .unwrap();
+
+        // Simulate a crash after the undo rename but before its SQLite commit.
+        let record = store.file_operation_for_undo(&mutation.undo_token).unwrap();
+        store.begin_file_operation_undo(&record.id).unwrap();
+        let canonical_root = root.canonicalize().unwrap();
+        let root_dir = open_local_root(&canonical_root).unwrap();
+        let (after_dir, after_name) =
+            open_local_parent(&root_dir, Path::new("renamed.cbz"), false).unwrap();
+        let (before_dir, before_name) =
+            open_local_parent(&root_dir, Path::new("book.cbz"), false).unwrap();
+        rename_noreplace(&after_dir, &after_name, &before_dir, &before_name).unwrap();
+        drop(store);
+
+        let store = CatalogStore::new(database.clone()).unwrap();
+        let recovered = store.reconcile_file_operations().unwrap();
+        assert_eq!(recovered.completed, 1);
+        assert_eq!(recovered.needs_attention, 0);
+        assert_eq!(
+            store
+                .file_operation_for_undo(&mutation.undo_token)
+                .unwrap()
+                .status,
+            "undone"
+        );
+        assert_eq!(
+            store.get_location(&runtime_id).unwrap().relative_path,
+            "book.cbz"
+        );
+        assert_eq!(
+            std::fs::read(&original).unwrap(),
+            b"synthetic archive bytes"
+        );
+
+        // If a crash happens after journaling but before rename, recovery
+        // restores succeeded status so the user can retry the undo.
+        let location = store.get_location(&runtime_id).unwrap();
+        let expected = registered_fingerprint(&location);
+        let second = mutate_local(
+            &store,
+            location,
+            FileMutationRequest {
+                comic_id: runtime_id.clone(),
+                source_id: None,
+                relative_path: None,
+                action: "rename".into(),
+                destination_relative_path: Some("renamed-again.cbz".into()),
+                expected_fingerprint: expected,
+            },
+        )
+        .unwrap();
+        let second_record = store.file_operation_for_undo(&second.undo_token).unwrap();
+        store.begin_file_operation_undo(&second_record.id).unwrap();
+        drop(store);
+
+        let store = CatalogStore::new(database.clone()).unwrap();
+        let recovered = store.reconcile_file_operations().unwrap();
+        assert_eq!(recovered.rolled_back, 1);
+        let second_record = store.file_operation_for_undo(&second.undo_token).unwrap();
+        assert_eq!(second_record.status, "succeeded");
+        undo_local(&store, &second_record).unwrap();
+        assert_eq!(
+            std::fs::read(&original).unwrap(),
+            b"synthetic archive bytes"
+        );
+
+        drop(store);
+        let _ = std::fs::remove_dir_all(&base);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn local_mutation_rejects_leaf_symlink_added_after_scan() {
+        use std::os::unix::fs::symlink;
+
+        let base =
+            std::env::temp_dir().join(format!("gai-file-op-leaf-symlink-{}", uuid::Uuid::new_v4()));
+        let root = base.join("library");
+        std::fs::create_dir_all(&root).unwrap();
+        let alias = root.join("book.cbz");
+        let target = root.join("target.cbz");
+        std::fs::write(&alias, b"same synthetic archive bytes").unwrap();
+        std::fs::write(&target, b"same synthetic archive bytes").unwrap();
+        let runtime_id = general_purpose::URL_SAFE_NO_PAD.encode(b"book.cbz");
+        let store = CatalogStore::new(base.join("catalog.sqlite3")).unwrap();
+        store
+            .sync_library(&[ComicItem {
+                id: runtime_id.clone(),
+                r#type: "archive".into(),
+                relative_path: "book.cbz".into(),
+                ext: ".cbz".into(),
+                title: "book".into(),
+                series: "synthetic".into(),
+                updated_at: "2026-11-08T00:00:00Z".into(),
+                page_count: 1,
+                progress: Progress {
+                    current_page: 0,
+                    total_pages: 1,
+                    percent: 0.0,
+                    updated_at: None,
+                },
+                source_id: crate::scanner::local_source_id(&root),
+                source_path: Some(alias.to_string_lossy().into_owned()),
+                external_bookmark: None,
+            }])
+            .unwrap();
+        let location = store.get_location(&runtime_id).unwrap();
+        let expected = registered_fingerprint(&location);
+        std::fs::remove_file(&alias).unwrap();
+        symlink(&target, &alias).unwrap();
+
+        let error = mutate_local(
+            &store,
+            location,
+            FileMutationRequest {
+                comic_id: runtime_id.clone(),
+                source_id: None,
+                relative_path: None,
+                action: "rename".into(),
+                destination_relative_path: Some("renamed.cbz".into()),
+                expected_fingerprint: expected,
+            },
+        )
+        .unwrap_err();
+        assert!(error.contains("符號連結"));
+        assert!(std::fs::symlink_metadata(&alias)
+            .unwrap()
+            .file_type()
+            .is_symlink());
+        assert_eq!(
+            std::fs::read(&target).unwrap(),
+            b"same synthetic archive bytes"
+        );
+        assert!(!root.join("renamed.cbz").exists());
+
+        // A configured root replaced by a symlink must also be rejected,
+        // including when the replacement has an identical sampled fingerprint.
+        std::fs::remove_file(&alias).unwrap();
+        std::fs::copy(&target, &alias).unwrap();
+        let moved_root = base.join("original-library");
+        std::fs::rename(&root, &moved_root).unwrap();
+        let replacement_root = base.join("replacement-library");
+        std::fs::create_dir(&replacement_root).unwrap();
+        std::fs::write(
+            replacement_root.join("book.cbz"),
+            b"same synthetic archive bytes",
+        )
+        .unwrap();
+        symlink(&replacement_root, &root).unwrap();
+        let location = store.get_location(&runtime_id).unwrap();
+        let expected = registered_fingerprint(&location);
+        assert!(mutate_local(
+            &store,
+            location,
+            FileMutationRequest {
+                comic_id: runtime_id,
+                source_id: None,
+                relative_path: None,
+                action: "rename".into(),
+                destination_relative_path: Some("renamed.cbz".into()),
+                expected_fingerprint: expected,
+            }
+        )
+        .is_err());
+        assert!(moved_root.join("book.cbz").exists());
+        assert_eq!(
+            std::fs::read(replacement_root.join("book.cbz")).unwrap(),
+            b"same synthetic archive bytes"
+        );
+        assert!(!replacement_root.join("renamed.cbz").exists());
 
         drop(store);
         let _ = std::fs::remove_dir_all(&base);

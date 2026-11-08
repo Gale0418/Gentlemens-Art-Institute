@@ -245,6 +245,7 @@ function localizedNativeError(error) {
  */
 
 const authoritativeProgressById = new Map();
+const progressSaveSequenceById = new Map();
 
 function progressIdentityKey(id, sourceId) {
   const source = typeof sourceId === 'string' ? sourceId.trim() : '';
@@ -313,6 +314,19 @@ function normalizeProgressPayload(data) {
     }
     normalized.sequence = data.sequence;
   }
+  if (Object.prototype.hasOwnProperty.call(data, 'intentSequence')) {
+    if (!Number.isSafeInteger(data.intentSequence) || data.intentSequence < 0) {
+      throw new Error(bridgeText("閱讀進度序號格式不正確。"));
+    }
+    normalized.intentSequence = data.intentSequence;
+  }
+  if (Object.prototype.hasOwnProperty.call(data, 'recoveryToken')) {
+    if (typeof data.recoveryToken !== 'string' || !data.recoveryToken.trim()
+      || data.recoveryToken.length > 128) {
+      throw new Error(bridgeText("閱讀進度資料格式不正確。"));
+    }
+    normalized.recoveryToken = data.recoveryToken.trim();
+  }
   return normalized;
 }
 
@@ -379,6 +393,16 @@ function rememberSavedProgress(data) {
   const normalized = normalizeProgressPayload(data);
   const key = progressIdentityKey(normalized.id, normalized.sourceId);
   if (!key) return normalized;
+  const previousSequence = progressSaveSequenceById.get(key);
+  if (Number.isSafeInteger(normalized.sequence) && Number.isSafeInteger(previousSequence)
+    && normalized.sequence < previousSequence) return normalized;
+  if (Number.isSafeInteger(normalized.sequence)) {
+    progressSaveSequenceById.delete(key);
+    progressSaveSequenceById.set(key, normalized.sequence);
+    if (progressSaveSequenceById.size > 10000) {
+      progressSaveSequenceById.delete(progressSaveSequenceById.keys().next().value);
+    }
+  }
   authoritativeProgressById.delete(key);
   authoritativeProgressById.set(key, {
     ...(normalized.sourceId ? { sourceId: normalized.sourceId } : {}),
@@ -550,6 +574,12 @@ if (window.__TAURI__) {
     saveProgress: async (data) => {
       const normalized = normalizeProgressPayload(data);
       const result = await invoke('save_progress', { data: normalized });
+      rememberSavedProgress(normalized);
+      return result;
+    },
+    recoverReadingProgress: async (data) => {
+      const normalized = normalizeProgressPayload(data);
+      const result = await invoke('recover_reading_progress', { data: normalized });
       rememberSavedProgress(normalized);
       return result;
     },

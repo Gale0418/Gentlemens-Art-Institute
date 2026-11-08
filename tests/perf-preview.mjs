@@ -35,6 +35,8 @@ const FIXTURE_BOOTSTRAP = String.raw`
 
   const FIXTURE_COUNT = 5000;
   const ACCEPTANCE_MS = 5000;
+  // rAF 停滯時仍以 wall clock 收尾，讓驗收可失敗並重試。
+  const ACCEPTANCE_TIMEOUT_MS = ACCEPTANCE_MS + 3000;
   const fixtureComics = Array.from({ length: FIXTURE_COUNT }, (_, offset) => {
     const number = offset + 1;
     const id = 'fixture-' + String(number).padStart(5, '0');
@@ -231,6 +233,16 @@ const FIXTURE_BOOTSTRAP = String.raw`
     return sorted[Math.min(sorted.length - 1, Math.ceil(sorted.length * ratio) - 1)];
   }
 
+  function acceptancePassed({ scanTrue, scanFalse, libraryChanged, listenerStats, frameSamples, failureReason }) {
+    if (failureReason || !frameSamples.length) return false;
+    const p95 = percentile(frameSamples, 0.95);
+    const max = Math.max(...frameSamples);
+    return scanTrue > 0 && scanFalse > 0 && libraryChanged >= 3
+      && listenerStats.libraryChanged > 0
+      && listenerStats.scanProgress > 0
+      && p95 <= 34 && max <= 100;
+  }
+
   function installOverlay() {
     if (document.getElementById('gai-fixture-overlay')) return;
 
@@ -268,6 +280,8 @@ const FIXTURE_BOOTSTRAP = String.raw`
     const result = document.getElementById('gai-fixture-result');
     let running = false;
     let rafId = 0;
+    let finishTimer = 0;
+    let acceptanceWatchdog = 0;
     let mutationObserver = null;
     let longTaskObserver = null;
     let acceptanceStartedAt = 0;
@@ -278,6 +292,7 @@ const FIXTURE_BOOTSTRAP = String.raw`
     let gridReplacementNodes = 0;
     let startedStats = { ...eventStats };
     let startedListenerStats = fixture.getListenerStats();
+    let failureReason = '';
 
     function setModeText(mode) {
       result.textContent = mode === 'fixture'
@@ -286,7 +301,14 @@ const FIXTURE_BOOTSTRAP = String.raw`
     }
 
     function finishAcceptance() {
+      if (!running) return;
       running = false;
+      if (rafId) cancelAnimationFrame(rafId);
+      rafId = 0;
+      if (finishTimer) clearTimeout(finishTimer);
+      finishTimer = 0;
+      if (acceptanceWatchdog) clearTimeout(acceptanceWatchdog);
+      acceptanceWatchdog = 0;
       fixture.stopAcceptance();
       if (mutationObserver) mutationObserver.disconnect();
       if (longTaskObserver) longTaskObserver.disconnect();
@@ -298,17 +320,16 @@ const FIXTURE_BOOTSTRAP = String.raw`
       const scanFalse = eventStats.scanFalse - startedStats.scanFalse;
       const libraryChanged = eventStats.libraryChanged - startedStats.libraryChanged;
       const listenerStats = fixture.getListenerStats();
-      const p95 = percentile(frameSamples, 0.95);
-      const max = frameSamples.length ? Math.max(...frameSamples) : 0;
-      const passed = scanTrue > 0 && scanFalse > 0 && libraryChanged >= 3
-        && startedListenerStats.libraryChanged > 0
-        && startedListenerStats.scanProgress > 0
-        && p95 <= 34 && max <= 100;
+      const hasFrameSamples = frameSamples.length > 0;
+      const p95 = hasFrameSamples ? percentile(frameSamples, 0.95) : null;
+      const max = hasFrameSamples ? Math.max(...frameSamples) : null;
+      const passed = acceptancePassed({ scanTrue, scanFalse, libraryChanged, listenerStats: startedListenerStats, frameSamples, failureReason });
       const content = document.querySelector('.content-area');
       if (content) content.scrollTop = 0;
 
       result.textContent = [
         '結果：' + (passed ? 'PASS（捲動幀時間門檻）' : 'FAIL（事件、重繪或幀時間未達門檻）'),
+        failureReason,
         'fixture非實機（synthetic data，未讀取正式 DB／NAS）',
         '資料：' + FIXTURE_COUNT + ' 本，同一平面目錄；renderer 初始顯示上限 200 cards，接近尾端會逐批載入',
         '變更模式：' + fixture.changeMode + '（sparse 預設；dense 僅供明確壓測）',
@@ -317,7 +338,7 @@ const FIXTURE_BOOTSTRAP = String.raw`
         '事件 listener：library-changed ' + listenerStats.libraryChanged + '；scan-progress ' + listenerStats.scanProgress,
         'DOM：comic-grid childList 替換 ' + gridChildListMutations + ' 次；節點變動 ' + gridReplacementNodes + ' 個節點',
         'Long Task：' + (longTasks.length ? longTasks.length + ' 次，最長 ' + Math.round(Math.max(...longTasks)) + ' ms' : '未觀察到（瀏覽器未提供或本次沒有）'),
-        'Frame：p95 ' + p95.toFixed(1) + ' ms；max ' + max.toFixed(1) + ' ms',
+        'Frame：p95 ' + (p95 === null ? 'N/A' : p95.toFixed(1) + ' ms') + '；max ' + (max === null ? 'N/A' : max.toFixed(1) + ' ms'),
       ].join('\n');
     }
 
@@ -339,7 +360,7 @@ const FIXTURE_BOOTSTRAP = String.raw`
       if (elapsed >= ACCEPTANCE_MS) {
         cancelAnimationFrame(rafId);
         rafId = 0;
-        setTimeout(finishAcceptance, 350);
+        finishTimer = setTimeout(finishAcceptance, 350);
         return;
       }
       rafId = requestAnimationFrame(sampleFrame);
@@ -367,7 +388,13 @@ const FIXTURE_BOOTSTRAP = String.raw`
       gridReplacementNodes = 0;
       acceptanceStartedAt = 0;
       framePrevious = 0;
+      failureReason = '';
       result.textContent = '驗收執行中：正在上下捲動 content-area，請稍候約 5 秒…';
+
+      acceptanceWatchdog = setTimeout(() => {
+        failureReason = '逾時：requestAnimationFrame 未能完成採樣，已清理資源；可重新執行。';
+        finishAcceptance();
+      }, ACCEPTANCE_TIMEOUT_MS);
 
       mutationObserver = new MutationObserver((records) => {
         if (!running) return;
@@ -400,7 +427,6 @@ const FIXTURE_BOOTSTRAP = String.raw`
     runButton.addEventListener('click', runAcceptance);
     toggleButton.addEventListener('click', () => {
       if (running) {
-        if (rafId) cancelAnimationFrame(rafId);
         finishAcceptance();
       }
       const mode = fixture.toggleMode();

@@ -1,0 +1,65 @@
+{
+  "recordedAt": "2026-11-08T22:47:07.664793+08:00",
+  "base": "f323e6508cabaa6826c667a9fdd1802d7e1455de",
+  "version": "1.0.4",
+  "build": 69,
+  "parentSnapshot": "source-v6",
+  "parentManifestSha256": "564236aabb20167429fdb5382a1125694243b989519201cedbbea967bc884020",
+  "reconstruction": {
+    "mode": "base-git-tree-plus-listed-overlay",
+    "baseRevision": "f323e6508cabaa6826c667a9fdd1802d7e1455de",
+    "baseArchiveSha256": "2b57a7edc6a800f4006cfcfcb654ab3ebbbc0a588b5db5a5eefbdd9a85ffbb28",
+    "baseArchiveBytes": 97945600,
+    "instructions": [
+      "git archive the exact base revision into a clean checkout",
+      "overlay every listed file, verifying SHA-256",
+      "Unlisted tracked files come from the exact base; this overlay is not a standalone checkout"
+    ],
+    "unchangedRequiredInputs": {
+      "scripts/sync-ios-icons.mjs": "57525a61088f00938afdecb91501706e1f6e69e51c626c541d076b31f31e2958",
+      "scripts/sync-ios-localizations.mjs": "b0bdc8fc5679ecd5383fd1863672e1362f88982cef4bc4974aa392878efbb7a3",
+      "scripts/sync-ios-privacy.mjs": "cbee1929d6a732666aed8a2adc54f01c58fd842311d24e2c84beff1469ba6f02",
+      "scripts/with-private-cargo-cache.mjs": "1bb8bef8014df1a21f01ee3aba112635d5e62d0b05d4af41342e2a120f095197",
+      "src-tauri/src/photo_library.rs": "6633e8d9f27d962ce2b9aa4bd8c300aadee7d662b047cf5eb1514b41beac0c2c"
+    }
+  },
+  "files": {
+    "package-lock.json": "7735ac2932e364a499a32ad06244bea716f62207dfe3dce0f80cc90a59dc1f20",
+    "package.json": "82b6054533b01e01e929adfe976131b9f1022f420f7eded9494a05ddbc2079d6",
+    "public/app.js": "fda9e3761d799a91fbb68b90006eff1f4e64e88f1934010b9ef8a3a31409a805",
+    "public/locales/feature-messages.js": "3e64c250986da9abceb76e6117308c7855be3c55aab7519f2bf1d86abeb64d7c",
+    "public/style.css": "b7dde420aecbc5e108341dcc279594cb6df49ea00587982dd4fe53792fa32384",
+    "public/tauri-api.js": "db62fc7882e686919354648c79a8631aded635cad57c8707ae3fcbf1b432b3db",
+    "src-tauri/Cargo.lock": "904eee86b5f712a1cf364e1b56556d13f0e5c236940253cf54986eeebf6e5f42",
+    "src-tauri/Cargo.toml": "07e7a51c41b456e26d7af9476b2b5f88c0a8a6d52a2e584962b8983b2557ec47",
+    "src-tauri/gen/apple/app_iOS/Info.plist": "70c17ecfc4b1dc77bfe69fe3ef77d687750465544e31113c8696a5cafb7ddffd",
+    "src-tauri/gen/apple/project.yml": "f96113809713c29e0dfbfdde3ddada601c219131d40ad7e9e2d33862f6c98e0b",
+    "src-tauri/src/cache.rs": "d52c3cd5cd1264ae30e3d5c255bc6b52d0d1af624e383a0d7738be011c701ac3",
+    "src-tauri/src/cache_policy.rs": "2dd650e156a9a963d53f2233b88eba5f6f5035500a4cf9480cef4463b21fc9e2",
+    "src-tauri/src/catalog.rs": "c9bb4fb8951f88c37431ab9ff51bae7010fe02e022b5d6f7ed8539478108392d",
+    "src-tauri/src/file_ops.rs": "8b8528e49152200b62218b647d2df2c474773b606eee5b4b1b462b0650060b7e",
+    "src-tauri/src/lib.rs": "2b98265fabcab70362e38cbba92b2825e2bde986a5ab1c233c2ce926911a119e",
+    "src-tauri/src/protocol.rs": "422a293afb0686b2e2a98b63ec15aa4271afbf09d2a25d6ee4540d7a7265d978",
+    "src-tauri/src/rar_reader.rs": "a49367abcb3fb12155b0d81ea66d6548d4dac7f60d8e9b757927d259175b3790",
+    "src-tauri/src/scanner.rs": "0e853475a39e75c84f5e9509e132835ebb467856278bffcda907033343181b70",
+    "src-tauri/src/smb_scanner.rs": "b75e7c785aafc7ae8368d3a5f03a07534d610370e84743a3875a36613f7ac636",
+    "src-tauri/src/state.rs": "605bd8b14c96710afc90c32e24b5c09f4d3b9349ad991b63c544e94b06291958",
+    "src-tauri/src/utils.rs": "0cbd49e2e7421bae82e3ce185bbbc7e55c31c86bf943cb714abffa416f04e234",
+    "src-tauri/tauri-plugin-ios-folder/ios/Sources/PhotoLibraryPlugin.swift": "cfda164efa2f05ec34e0eabfe7f3e04aeaee761b598ffd8d26ac768fb9e66677",
+    "src-tauri/tauri.conf.json": "7b404fbd43a55fdcbf55652188b3ebe149627bdfe44017a64ca16db1536f796f",
+    "src-tauri/vendor/zip/Cargo.toml": "e22049852af5daf2a73c825ac46764eb16fc822a8a98914e2de02bec4f7c2185",
+    "src-tauri/vendor/zip/Cargo.toml.orig": "bf26a341776c17cae811e3c4af97d132424eb7678fa733fcea5439cbc243e9b2",
+    "src-tauri/vendor/zip/tests/data/zstd_raw_block.zip": "aead3b3e410fa344aa671bc06a3359fb1a8333f7bff5ffd95342bea4aafccf2a",
+    "src-tauri/vendor/zip/tests/zstd.rs": "4ea57d1bb8ec239c04440f9b28b61b12e1912bd1e7aa3ff9f4783b18b25a4dc1",
+    "tests/perf-preview-regression.mjs": "415f39ad05f874f6faa04a0ebce1d7e67560018509e6eeb699dde1145013feb9",
+    "tests/perf-preview.mjs": "708505ad7114e714f8c4e3f364276e97201e9f8f101613a3678191a62885f6fb",
+    "tests/photo-privacy-regression.mjs": "bfc1428b69626dc8f3e20f4ff0e071e3fcb7cb15596bdb48b4a0fdf8641ff547",
+    "tests/reader-auto-retry-regression.mjs": "110ed883134aacbee26f67e368ec155499ed08d50dc586ff86702bc5d39a745a",
+    "tests/reader-catalog-regression.mjs": "68dfea0421d457912aaac04a51c4679e7c7cfe8be1bdddb66a4522a01598d875",
+    "tests/reader-failure-regression.mjs": "56d86356c4eaf903d4e85dc8bd3f955a26f3c8396fc1a7df02d3d95296fb5233",
+    "tests/webtoon-navigation.mjs": "08fb54f008203e0b57c8f8506e9714aded6532ca3fa820a738cdd9c2b46ccf5e"
+  },
+  "deltaFromParent": [
+    "public/style.css"
+  ]
+}

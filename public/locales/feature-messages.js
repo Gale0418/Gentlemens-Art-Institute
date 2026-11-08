@@ -7,9 +7,45 @@ window.GAIL10n.register({
     "en": "Retry saving reading progress",
     "ja": "読書進捗の保存を再試行"
   },
+  "正在重試保存…": {
+    "en": "Retrying save…",
+    "ja": "保存を再試行中…"
+  },
+  "正在重試保存 {count} 筆閱讀進度…": {
+    "en": "Retrying unsaved reading progress ({count})…",
+    "ja": "読書進捗 {count} 件の保存を再試行中…"
+  },
+  "重試後仍有 {count} 筆閱讀進度尚未保存。": {
+    "en": "Reading progress still unsaved after retry ({count}).",
+    "ja": "再試行後も読書進捗 {count} 件が保存されていません。"
+  },
+  "未保存閱讀進度已全部保存。": {
+    "en": "All unsaved reading progress has been saved.",
+    "ja": "未保存の読書進捗はすべて保存されました。"
+  },
   "放棄未保存進度": {
     "en": "Discard unsaved progress",
     "ja": "未保存の進捗を破棄"
+  },
+  "清除此筆未保存進度": {
+    "en": "Clear this unsaved entry",
+    "ja": "この未保存記録を消去"
+  },
+  "要清除此筆未保存進度嗎？請先核對作品並依顯示頁碼手動恢復。確認後只會移除此筆紀錄；其他待處理紀錄與已保存內容不受影響。": {
+    "en": "Clear only this unsaved progress entry? First check the comic and restore the displayed page manually. If confirmed, only this entry will be removed; other pending entries and saved content will not be affected.",
+    "ja": "この未保存の読書記録だけを消去しますか？先に作品を確認し、表示されたページまで手動で戻してください。確認するとこの記録だけが削除され、他の未処理記録と保存済みの内容には影響しません。"
+  },
+  "無法清除此筆未保存進度，紀錄仍保留在目前工作階段。請確認裝置儲存空間後再試。": {
+    "en": "Could not clear this unsaved progress entry. It remains available in this session. Check your device storage and try again.",
+    "ja": "この未保存の読書記録を消去できませんでした。記録は現在のセッションに保持されています。端末の空き容量を確認してから再試行してください。"
+  },
+  "部分舊進度缺少驗證資訊，請核對作品後依顯示頁碼手動恢復。": {
+    "en": "Some older progress cannot be verified. Check the comic and restore the displayed page manually.",
+    "ja": "一部の古い進捗は確認できません。作品を確認し、表示されたページに手動で戻してください。"
+  },
+  "部分進度的原生驗證資訊已失效，請核對作品後依顯示頁碼手動恢復。": {
+    "en": "Some progress can no longer be verified by the app. Check each comic and restore the displayed page manually.",
+    "ja": "一部の進捗はアプリで確認できなくなりました。作品を確認し、表示されたページに手動で戻してください。"
   },
   "要放棄全部 {count} 筆未保存的閱讀進度嗎？\n這些進度將無法重試；已保存的進度和漫畫檔案不會刪除。": {
     "en": "Discard all {count} unsaved reading progress entries?\nYou cannot retry these entries. Saved progress and comic files will not be deleted.",

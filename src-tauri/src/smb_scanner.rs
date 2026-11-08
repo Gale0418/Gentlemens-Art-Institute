@@ -46,9 +46,22 @@ async fn wait_for_reader_priority(
             return false;
         }
         let priority = state.reader_priority();
-        let should_wait = matches!(priority, ReaderPriority::Opening)
-            || (visible_generation.is_none() && matches!(priority, ReaderPriority::Active));
+        let should_wait = matches!(priority, ReaderPriority::Opening);
         if !should_wait {
+            if visible_generation.is_none() && matches!(priority, ReaderPriority::Active) {
+                tokio::time::sleep(SMB_READER_WAIT).await;
+                // Recheck cancellation and opening intent after the throttle.
+                if generation
+                    != state
+                        .scan_generation
+                        .load(std::sync::atomic::Ordering::Acquire)
+                {
+                    return false;
+                }
+                if matches!(state.reader_priority(), ReaderPriority::Opening) {
+                    continue;
+                }
+            }
             return true;
         }
         tokio::time::sleep(SMB_READER_WAIT).await;
@@ -743,8 +756,11 @@ mod tests {
         let waiter = tokio::spawn(async move { wait_for_reader_priority(&waiting, 1, None).await });
         tokio::time::sleep(Duration::from_millis(10)).await;
         assert!(state.comic_lifecycle.try_lock().is_ok());
-        *state.active_comic_id.lock().unwrap() = None;
-        assert!(waiter.await.unwrap());
+        assert!(tokio::time::timeout(Duration::from_secs(1), waiter)
+            .await
+            .unwrap()
+            .unwrap());
+        assert!(state.active_comic_id.lock().unwrap().is_some());
 
         *state.active_comic_id.lock().unwrap() = Some("reading".into());
         let cancelling = state.clone();

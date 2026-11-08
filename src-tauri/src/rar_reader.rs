@@ -765,10 +765,7 @@ mod tests {
                 );
             }
             Err(error) => panic!("unexpected archive error: {error:?}"),
-            Ok(bytes) => panic!(
-                "truncated RAR5 entry was accepted as {} bytes",
-                bytes.len()
-            ),
+            Ok(bytes) => panic!("truncated RAR5 entry was accepted as {} bytes", bytes.len()),
         }
     }
 

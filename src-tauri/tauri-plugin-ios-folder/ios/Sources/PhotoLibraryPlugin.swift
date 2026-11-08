@@ -825,15 +825,13 @@ private final class PhotoLibraryBridge {
     if status == .authorized && albumID == "photo-library" {
       return asset
     }
-    guard status == .authorized,
-          let collection = PHAssetCollection.fetchAssetCollections(withLocalIdentifiers: [albumID], options: nil).firstObject else {
+    guard status == .authorized else {
       return nil
     }
-    let assets = PHAsset.fetchAssets(in: collection, options: imageFetchOptions())
-    for index in 0..<assets.count {
-      let candidate = assets.object(at: index)
-      if candidate.localIdentifier == assetID {
-        return candidate
+    let collections = PHAssetCollection.fetchAssetCollectionsContaining(asset, with: .album, options: nil)
+    for index in 0..<collections.count {
+      if collections.object(at: index).localIdentifier == albumID {
+        return asset
       }
     }
     return nil

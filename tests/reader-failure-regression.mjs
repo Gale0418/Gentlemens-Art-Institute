@@ -9,8 +9,8 @@ const readerMessagesSource = fs.readFileSync(new URL('../public/locales/reader-m
 const featureMessagesSource = fs.readFileSync(new URL('../public/locales/feature-messages.js', import.meta.url), 'utf8');
 
 function extractFunction(source, name) {
-  const asyncStart = source.indexOf(`async function ${name}`);
-  const start = asyncStart >= 0 ? asyncStart : source.indexOf(`function ${name}`);
+  const asyncStart = source.indexOf(`async function ${name}(`);
+  const start = asyncStart >= 0 ? asyncStart : source.indexOf(`function ${name}(`);
   assert.ok(start >= 0, `missing function ${name}`);
   const open = source.indexOf(') {', start) + 2;
   assert.ok(open >= 2, `missing function body ${name}`);
@@ -34,19 +34,42 @@ function extractSection(source, startMarker, endMarker) {
 // the immutable snapshot before native closeComic is allowed to run.
 {
   const functions = [
+    extractFunction(appSource, 'adoptReadingProgressSequenceFloor'),
     extractFunction(appSource, 'createReadingProgressSnapshot'),
     extractFunction(appSource, 'normalizeReadingProgressSnapshot'),
     extractFunction(appSource, 'readingProgressKey'),
+    extractFunction(appSource, 'readingProgressFailureKey'),
     extractFunction(appSource, 'readingProgressIntentSequence'),
+    extractFunction(appSource, 'readingProgressNeedsManualCheck'),
+    extractFunction(appSource, 'readReadingProgressFailures'),
+    extractFunction(appSource, 'writeReadingProgressFailures'),
+    extractFunction(appSource, 'rememberFailedReadingProgressSnapshot'),
+    extractFunction(appSource, 'waitForReadingProgressSave'),
+    extractFunction(appSource, 'persistReadingProgressSnapshot'),
+    extractFunction(appSource, 'clearReadingProgressFailure'),
     extractFunction(appSource, 'enqueueReadingProgressSnapshot'),
+    extractFunction(appSource, 'flushReadingProgressBeforeClose'),
     extractFunction(appSource, 'clearReaderPageNotice'),
     extractFunction(appSource, 'closeReader'),
   ].join('\n');
   let sequence = 0;
   let releaseSave;
+  let releaseLateSave;
   const saveGate = new Promise(resolve => { releaseSave = resolve; });
   const saved = [];
   const closes = [];
+  const failed = new Map();
+  const timers = new Map();
+  let timerId = 0;
+  const setTimer = (callback, delay) => {
+    const id = ++timerId;
+    timers.set(id, { callback, delay });
+    return id;
+  };
+  const clearTimer = id => timers.delete(id);
+  let loaderVisible = false;
+  const alerts = [];
+  let resolveLateOpen;
   const state = {
     comics: [{ id: 'comic-b', title: 'Book B', relativePath: 'book-b.cbz', sourceId: 'local:test' }],
     currentComic: { id: 'comic-a', sourceId: 'local:test' },
@@ -91,11 +114,27 @@ function extractSection(source, startMarker, endMarker) {
   };
   let closeError = true;
   const context = {
+    READING_PROGRESS_FAILURES_KEY: 'gai:readingProgressFailures',
+    READING_PROGRESS_SEQUENCE_KEY: 'gai:readingProgressSequence',
+    readingProgressSaveSequence: 0,
+    sessionStorage: { setItem() {} },
+    readingProgressFailuresLoaded: true,
+    readingProgressFailures: failed,
+    readingProgressFailuresStorageReliable: true,
+    localStorage: { setItem() {} },
     state,
     elements,
     readingProgressSaveQueue: Promise.resolve(),
     latestQueuedReadingProgressById: new Map(),
+    discardedReadingProgressIntents: new Map(),
     nextReadingProgressSaveSequence: () => ++sequence,
+    READING_PROGRESS_AUTO_RETRY_DELAYS_MS: [],
+    READING_PROGRESS_SAVE_TIMEOUT_MS: 8000,
+    waitForReadingProgressRetry: async () => {},
+    renderReadingProgressRecovery() {},
+    setTimeout: setTimer,
+    clearTimeout: clearTimer,
+    console: { error() {} },
     isBuiltInDemoComic: () => false,
     updateWebtoonScrollState: () => {
       state.currentPageIndex = 2;
@@ -116,7 +155,7 @@ function extractSection(source, startMarker, endMarker) {
     resumeCatalogAppendRenderIfReady() {},
     scheduleLibraryRefresh() {},
     scheduleCoverLoadDrain() {},
-    clearTimeout,
+    clearTimeout: clearTimer,
     cancelAnimationFrame() {},
     document: { fullscreenElement: null, body: { style: {} } },
     window: {
@@ -132,36 +171,39 @@ function extractSection(source, startMarker, endMarker) {
         saved.push(snapshot);
         return saveGate;
       },
-      openComic: async id => ({
-        id,
-        sourceId: 'local:test',
-        title: 'Book B',
-        pages: ['b'],
-        progress: { currentPage: 0 },
-        isDir: false,
-        filenames: [],
-      }),
+      recoverReadingProgress: async () => {},
+      openComic: async id => id === 'comic-late'
+        ? new Promise(resolve => { resolveLateOpen = resolve; })
+        : ({
+          id,
+          sourceId: 'local:test',
+          title: 'Book B',
+          pages: Array.from({ length: 8 }, (_, index) => `b-${index}`),
+          progress: { currentPage: 0 },
+          recoveryToken: 'token-comic-b',
+          isDir: false,
+          filenames: [],
+        }),
     },
-    persistReadingProgressSnapshot: snapshot => context.eAPI.saveProgress(snapshot),
     isComicOffline: () => false,
     captureLibraryViewContext: () => null,
-    readReadingProgressFailures: () => new Map(),
     readerText: text => text,
+    alert: message => alerts.push(message),
     updateReaderUiControls() {},
     applyFitMode() {},
     showReaderDiscoveryHint() {},
     triggerControlsActive() {},
     focusReaderEntry() {},
     renderPages() {},
-    showLoader() {},
-    hideLoader() {},
+    showLoader() { loaderVisible = true; },
+    hideLoader() { loaderVisible = false; },
     hideReaderContextMenu() {},
     setAutoPageExplanation() {},
     setAiPagePanelVisible() {},
     restoreReaderFocus() {},
     scheduleLibraryRefresh() {},
   };
-  vm.runInNewContext(`${extractFunction(appSource, 'getComicSourceId')}\n${extractFunction(appSource, 'setSelectedComic')}\n${functions}\n${extractFunction(appSource, 'openReader')}\nglobalThis.closeReader = closeReader;\nglobalThis.openReader = openReader;`, context);
+  vm.runInNewContext(`${extractFunction(appSource, 'getComicSourceId')}\n${extractFunction(appSource, 'getSelectedComic')}\n${extractFunction(appSource, 'setSelectedComic')}\n${functions}\n${extractFunction(appSource, 'openReader')}\nglobalThis.closeReader = closeReader;\nglobalThis.openReader = openReader;\nglobalThis.persistReadingProgressSnapshot = persistReadingProgressSnapshot;\nglobalThis.readingProgressFailureKey = readingProgressFailureKey;\nglobalThis.rememberFailure = rememberFailedReadingProgressSnapshot;`, context);
   const closing = context.closeReader();
   await Promise.resolve();
   await Promise.resolve();
@@ -179,6 +221,113 @@ function extractSection(source, startMarker, endMarker) {
   );
   assert.equal(context.state.currentComic?.id, 'comic-b',
     'the next comic still becomes the active reader after close recovery');
+  assert.deepEqual(alerts, [], 'a successful reopen does not show the reader failure alert');
+
+  // Closing while openComic is still pending must release the global loader.
+  // A native open that returns after cancellation must not revive the old reader.
+  await context.closeReader();
+  const lateOpen = context.openReader('comic-late');
+  for (let tick = 0; tick < 10; tick += 1) await Promise.resolve();
+  assert.equal(context.state.pendingComicId, 'comic-late');
+  assert.equal(loaderVisible, true, 'pending reader shows the loader');
+  await context.closeReader();
+  assert.equal(context.state.pendingComicId, null);
+  assert.equal(loaderVisible, false, 'closing a pending reader hides its loader');
+  resolveLateOpen({
+    id: 'comic-late', sourceId: 'local:test', title: 'Late Book', pages: ['late'],
+    progress: { currentPage: 0 }, isDir: false, filenames: [],
+  });
+  await lateOpen;
+  assert.equal(context.state.currentComic, null, 'a late cancelled open cannot become active');
+  assert.equal(elements.readerOverlay.style.display, 'none', 'a late cancelled open cannot restore the overlay');
+  await context.openReader('comic-after-cancel');
+  assert.equal(context.state.currentComic?.id, 'comic-after-cancel', 'a fresh reader can open after cancellation');
+
+  const noTokenJournal = {
+    id: 'comic-b', sourceId: 'local:test', currentPage: 4, totalPages: 8, sequence: 80,
+  };
+  context.rememberFailure(noTokenJournal);
+  await context.closeReader();
+  await context.openReader({ id: 'comic-b', sourceId: 'local:test' });
+  assert.equal(context.state.currentComic.recoveryToken, 'token-comic-b');
+  assert.equal(context.state.currentComic.progress.currentPage, 0,
+    'a tokenless old journal cannot change a newly opened reader progress');
+
+  const sameTokenJournal = {
+    ...noTokenJournal, currentPage: 2, sequence: 81, recoveryToken: 'token-comic-b',
+  };
+  await context.closeReader();
+  context.rememberFailure(sameTokenJournal);
+  assert.equal(context.readReadingProgressFailures().has(context.readingProgressFailureKey(sameTokenJournal)), true,
+    'actual remember helper stores the matching token version');
+  assert.equal(context.readingProgressFailures.has(context.readingProgressFailureKey(sameTokenJournal)), true,
+    'the same-token journal is stored under its exact version key');
+  await context.openReader({ id: 'comic-b', sourceId: 'local:test' });
+  assert.equal(context.state.currentComic.progress.currentPage, 2,
+    'a journal with the matching native open token restores its pending page');
+
+  // A hung native save must not let a queue of stale snapshots multiply the
+  // close delay, and a late success racing timeout handling must not leave a
+  // stale recovery journal behind.
+  context.state.currentComic = { id: 'timeout-comic', sourceId: 'local:test' };
+  context.state.currentComicPages = ['0', '1', '2', '3'];
+  context.state.currentPageIndex = 3;
+  context.state.readingMode = 'single';
+  context.state.readerLoadTrackingActive = false;
+  sequence = 100;
+  context.eAPI.saveProgress = snapshot => {
+    saved.push(snapshot);
+    return new Promise(resolve => { releaseLateSave = resolve; });
+  };
+  context.enqueueReadingProgressSnapshot({
+    id: 'timeout-comic', sourceId: 'local:test', currentPage: 1, totalPages: 4, sequence: 50,
+  });
+  context.enqueueReadingProgressSnapshot({
+    id: 'timeout-comic', sourceId: 'local:test', currentPage: 2, totalPages: 4, sequence: 51,
+  });
+  const progressClose = context.closeReader();
+  for (let tick = 0; tick < 20; tick += 1) await Promise.resolve();
+  assert.equal(saved.at(-1)?.currentPage, 3, 'the queued saves coalesce to the final page intent');
+  assert.ok(timers.size >= 2, 'save and whole-close deadlines are both armed');
+  const expired = Array.from(timers.values());
+  timers.clear();
+  // Resolve the native request after its save deadline but before yielding to
+  // the timeout continuation. This reproduces the re-journal race.
+  // close's overall deadline is armed first; save's own deadline is second.
+  expired[1].callback();
+  releaseLateSave();
+  expired[0].callback();
+  await progressClose;
+  assert.equal(closes.at(-1)?.id, 'timeout-comic', 'native close proceeds after the shared deadline');
+  await new Promise(resolve => setImmediate(resolve));
+  assert.equal(!Array.from(context.readingProgressFailures.values()).some(item => item.id === 'timeout-comic'), true,
+    'a native success racing the timeout continuation does not leave a stale journal');
+
+  // If a newer intent is already journaled/queued, an older timed-out reply
+  // must leave that newer recovery snapshot intact.
+  const newer = {
+    id: 'timeout-comic', sourceId: 'local:test', currentPage: 4, totalPages: 4, sequence: 102,
+  };
+  context.readingProgressFailures.set(context.readingProgressFailureKey(newer), newer);
+  context.latestQueuedReadingProgressById.set(context.readingProgressFailureKey(newer), newer);
+  context.state.currentComic = { id: 'timeout-comic', sourceId: 'local:test' };
+  context.state.currentComicPages = ['0', '1', '2', '3'];
+  context.state.currentPageIndex = 3;
+  context.eAPI.saveProgress = () => new Promise(resolve => { releaseLateSave = resolve; });
+  const oldRetry = context.persistReadingProgressSnapshot({
+    id: 'timeout-comic', sourceId: 'local:test', currentPage: 2, totalPages: 4, sequence: 101,
+  }, 101);
+  for (let tick = 0; tick < 10; tick += 1) await Promise.resolve();
+  for (const timer of Array.from(timers.values())) timer.callback();
+  timers.clear();
+  await oldRetry;
+  releaseLateSave();
+  await new Promise(resolve => setImmediate(resolve));
+  assert.equal(Array.from(context.readingProgressFailures.values()).find(item => item.id === 'timeout-comic')?.sequence, 102,
+    'a late older success preserves the newer journal snapshot');
+  await context.openReader('comic-after-timeout');
+  assert.equal(context.state.currentComic?.id, 'comic-after-timeout',
+    'a new comic can open after progress save timeout');
 }
 
 // A failed reader open must release modal/scroll state, clear stale page DOM,
@@ -463,11 +612,37 @@ globalThis.createWebtoonPageImage = createWebtoonPageImage;`, context);
     id: 'x', currentPage: 0, totalPages: 1,
   }));
   assert.equal(context.normalizeProgressPayload({ id: 'x', currentPage: 0, totalPages: 1, sequence: 0 }).sequence, 0);
+  assert.equal(context.normalizeProgressPayload({
+    id: 'x', currentPage: 0, totalPages: 1, recoveryToken: 'token-123',
+  }).recoveryToken, 'token-123', 'the IPC bridge preserves the native recovery token');
   assert.equal(context.normalizeProgressPayload({ id: 'x', sourceId: 'local:A', currentPage: 0, totalPages: 1 }).sourceId, 'local:A');
   await assert.rejects(Promise.resolve().then(() => context.normalizeProgressPayload({ id: 'x', sourceId: '', currentPage: 0, totalPages: 1 })));
   await assert.rejects(Promise.resolve().then(() => context.normalizeProgressPayload({ id: 'x', currentPage: 0, totalPages: 1, sequence: -1 })));
   await assert.rejects(Promise.resolve().then(() => context.normalizeProgressPayload({ id: 'x', currentPage: 0, totalPages: 1, sequence: 1.5 })));
   await assert.rejects(Promise.resolve().then(() => context.normalizeProgressPayload({ id: 'x', currentPage: 0, totalPages: 1, sequence: Number.MAX_SAFE_INTEGER + 1 })));
+  await assert.rejects(Promise.resolve().then(() => context.normalizeProgressPayload({
+    id: 'x', currentPage: 0, totalPages: 1, recoveryToken: ' '.repeat(129),
+  })));
+}
+
+// Fresh snapshots carry the native open token into the durable journal.
+{
+  const context = {
+    state: {
+      currentComic: { id: 'token-snapshot', sourceId: 'local:test', recoveryToken: 'native-token' },
+      currentPageIndex: 2,
+      currentComicPages: ['a', 'b', 'c'],
+      readerLoadTrackingActive: false,
+    },
+    nextReadingProgressSaveSequence: () => 19,
+    isBuiltInDemoComic: () => false,
+  };
+  vm.runInNewContext(`${extractFunction(appSource, 'createReadingProgressSnapshot')}
+    globalThis.createSnapshot = createReadingProgressSnapshot;`, context);
+  assert.deepEqual(JSON.parse(JSON.stringify(context.createSnapshot())), {
+    id: 'token-snapshot', sourceId: 'local:test', recoveryToken: 'native-token',
+    currentPage: 2, totalPages: 3, sequence: 19,
+  }, 'a reading progress snapshot includes the recovery token from openComic');
 }
 
 // Authoritative progress overlays are source-scoped as well; a save from one
@@ -485,6 +660,7 @@ globalThis.createWebtoonPageImage = createWebtoonPageImage;`, context);
   ].join('\n');
   const context = {
     authoritativeProgressById: new Map(),
+    progressSaveSequenceById: new Map(),
     bridgeText: text => text,
     Date,
   };
@@ -503,6 +679,15 @@ globalThis.createWebtoonPageImage = createWebtoonPageImage;`, context);
   assert.equal(context.readerOverlay('same-runtime-id', {
     sourceId: 'local:B', pages: ['a'], progress: { currentPage: 2 },
   }).progress.currentPage, 2, 'reader source B does not receive source A overlay');
+
+  context.remember({ id: 'ordered-save', sourceId: 'local:A', currentPage: 8, totalPages: 10, sequence: 20 });
+  context.remember({ id: 'ordered-save', sourceId: 'local:A', currentPage: 2, totalPages: 10, sequence: 19 });
+  const ordered = context.overlay([{
+    id: 'ordered-save', sourceId: 'local:A',
+    progress: { currentPage: 0, totalPages: 10, updatedAt: '2020-01-01T00:00:00Z' },
+  }]);
+  assert.equal(ordered[0].progress.currentPage, 8,
+    'a late older save response cannot overwrite a newer authoritative page');
 }
 
 // Progress recovery identity is source-scoped. Two source lanes may expose the
@@ -512,11 +697,14 @@ globalThis.createWebtoonPageImage = createWebtoonPageImage;`, context);
   const functions = [
     extractFunction(appSource, 'normalizeReadingProgressSnapshot'),
     extractFunction(appSource, 'readingProgressKey'),
+    extractFunction(appSource, 'readingProgressFailureKey'),
     extractFunction(appSource, 'readingProgressIntentSequence'),
+    extractFunction(appSource, 'readingProgressNeedsManualCheck'),
     extractFunction(appSource, 'readReadingProgressFailures'),
     extractFunction(appSource, 'writeReadingProgressFailures'),
     extractFunction(appSource, 'rememberFailedReadingProgressSnapshot'),
     extractFunction(appSource, 'clearReadingProgressFailure'),
+    extractFunction(appSource, 'waitForReadingProgressSave'),
     extractFunction(appSource, 'nextReadingProgressSaveSequenceAfter'),
     extractFunction(appSource, 'persistReadingProgressSnapshot'),
     extractFunction(appSource, 'enqueueReadingProgressSnapshot'),
@@ -524,10 +712,12 @@ globalThis.createWebtoonPageImage = createWebtoonPageImage;`, context);
   ].join('\n');
   const storage = new Map();
   const saved = [];
+  const recovered = [];
   let sequence = 100;
   const context = {
     READING_PROGRESS_FAILURES_KEY: 'gai:readingProgressFailures',
     READING_PROGRESS_SEQUENCE_KEY: 'gai:readingProgressSequence',
+    READING_PROGRESS_SAVE_TIMEOUT_MS: 8000,
     READING_PROGRESS_AUTO_RETRY_DELAYS_MS: [],
     readingProgressFailuresLoaded: true,
     readingProgressFailures: new Map(),
@@ -537,6 +727,7 @@ globalThis.createWebtoonPageImage = createWebtoonPageImage;`, context);
     readingProgressRetryPromise: null,
     readingProgressSaveSequence: sequence,
     readingProgressSaveQueue: Promise.resolve(),
+    state: { currentComic: null },
     localStorage: {
       getItem: key => storage.get(key) || null,
       setItem: (key, value) => storage.set(key, value),
@@ -547,23 +738,32 @@ globalThis.createWebtoonPageImage = createWebtoonPageImage;`, context);
     nextReadingProgressSaveSequence: () => ++sequence,
     eAPI: {
       saveProgress: async snapshot => { saved.push(snapshot); },
+      recoverReadingProgress: async snapshot => { recovered.push(snapshot); },
     },
     console: { error() {} },
+    setTimeout,
+    clearTimeout,
   };
   vm.runInNewContext(`${functions}
     globalThis.remember = rememberFailedReadingProgressSnapshot;
-    globalThis.retry = retryFailedReadingProgressSnapshots;`, context);
+    globalThis.retry = retryFailedReadingProgressSnapshots;
+    globalThis.readingProgressFailureKey = readingProgressFailureKey;`, context);
 
   const localA = { id: 'same-runtime-id', sourceId: 'local:A', currentPage: 4, totalPages: 10, sequence: 101 };
   const localB = { id: 'same-runtime-id', sourceId: 'local:B', currentPage: 7, totalPages: 10, sequence: 102 };
+  localA.recoveryToken = 'token-A';
+  localB.recoveryToken = 'token-B';
   context.remember(localA);
   context.remember(localB);
   assert.equal(context.readingProgressFailures.size, 2, 'same runtime id from two sources keeps two journal entries');
   assert.deepEqual(JSON.parse(storage.get('gai:readingProgressFailures')), [localB, localA],
     'source identity is persisted with each pending snapshot');
   await context.retry();
-  assert.deepEqual(saved.map(snapshot => snapshot.sourceId), ['local:A', 'local:B'],
-    'manual retry preserves source identity for each same-id snapshot');
+  assert.deepEqual(saved, [], 'journal recovery does not use the active-reader-only save command');
+  assert.deepEqual(recovered.map(snapshot => snapshot.sourceId), ['local:A', 'local:B'],
+    'manual retry uses the recovery API and preserves source identity for each same-id snapshot');
+  assert.deepEqual(recovered.map(snapshot => snapshot.recoveryToken), ['token-A', 'token-B'],
+    'manual retry preserves native recovery tokens through the queue and bridge call');
   assert.equal(context.readingProgressFailures.size, 0, 'successful source-scoped retries clear both entries');
 
   const legacy = { id: 'same-runtime-id', currentPage: 2, totalPages: 10, sequence: 103 };
@@ -574,6 +774,44 @@ globalThis.createWebtoonPageImage = createWebtoonPageImage;`, context);
   assert.equal(context.readingProgressFailures.size, 1, 'legacy journal remains recoverable until explicit discard');
   assert.deepEqual(JSON.parse(storage.get('gai:readingProgressFailures')), [legacy],
     'legacy journal is not silently deleted during source migration');
+
+  const oldNoToken = {
+    id: 'same-version-id', sourceId: 'local:C', currentPage: 1, totalPages: 10, sequence: 104,
+  };
+  const currentVersion = {
+    ...oldNoToken, currentPage: 6, sequence: 105, recoveryToken: 'token-current',
+  };
+  context.remember(oldNoToken);
+  context.remember(currentVersion);
+  assert.equal(context.readingProgressFailures.size, 3,
+    'same source/id keeps both the old tokenless and current-token journal entries');
+  assert.deepEqual(JSON.parse(storage.get('gai:readingProgressFailures')), [currentVersion, oldNoToken, legacy],
+    'journal persistence keeps distinct recovery versions without overwriting the old entry');
+  await context.retry();
+  assert.deepEqual(recovered.map(snapshot => snapshot.recoveryToken), ['token-A', 'token-B', 'token-current'],
+    'retry sends only the current token version to native recovery');
+  assert.equal(context.readingProgressFailures.has(context.readingProgressFailureKey(oldNoToken)), true,
+    'successful current-token recovery does not clear the old tokenless journal');
+  assert.equal(context.readingProgressFailures.has(context.readingProgressFailureKey(currentVersion)), false,
+    'successful recovery clears only the matching token journal');
+
+  const photo = {
+    id: 'photos:album-a', sourceId: 'photos:library', currentPage: 3, totalPages: 12, sequence: 104,
+  };
+  context.state.currentComic = { id: photo.id, sourceId: photo.sourceId };
+  context.eAPI.saveProgress = async snapshot => {
+    assert.equal(context.state.currentComic?.id, snapshot.id,
+      'photo progress retry uses saveProgress while the matching reader is active');
+    saved.push(snapshot);
+  };
+  context.remember(photo);
+  await context.retry();
+  assert.deepEqual(saved, [], 'retry skips a photo album that is already open to avoid racing newer reading progress');
+  assert.equal(recovered.length, 3, 'photo recovery does not use the source-scoped recovery API');
+  assert.equal(context.readingProgressFailures.has(context.readingProgressFailureKey(photo)), true,
+    'skipping the active photo keeps its journal for a later safe retry');
+  assert.deepEqual(JSON.parse(storage.get('gai:readingProgressFailures')), [oldNoToken, photo, legacy],
+    'active and intentionally retained legacy entries stay in the journal');
 }
 
 // A partial photo batch refreshes the shelf and retries only files that did
@@ -653,7 +891,7 @@ globalThis.createWebtoonPageImage = createWebtoonPageImage;`, context);
 
 assert.match(appSource, /Promise\.allSettled\(decodeEntries/);
 assert.match(appSource, /state\.readerReadyPages\.has\(activeIndex\)/);
-assert.match(appSource, /\.then\(\(\) => progressQueueToFlush\)/);
+assert.match(appSource, /flushReadingProgressBeforeClose\(progressQueueToFlush, closingProgress\)/);
 
 // A cache-window call must belong to the same reader operation, render, page,
 // and timer request after its native await. Reopening the same comic must not
@@ -730,7 +968,7 @@ assert.match(appSource, /\.then\(\(\) => progressQueueToFlush\)/);
   let discardCalls = 0;
   const contentArea = { prepend: node => { panel = node; } };
   const workspace = { prepend: () => { throw new Error('recovery must not become a workspace grid item'); } };
-  const failures = new Map([['comic-a', { sourceId: 'local:test' }]]);
+  const failures = new Map([['comic-a', { id: 'comic-a', sourceId: 'local:test' }]]);
   const document = {
     getElementById: () => panel,
     createElement: tag => ({
@@ -745,9 +983,10 @@ assert.match(appSource, /\.then\(\(\) => progressQueueToFlush\)/);
       setAttribute() {},
       addEventListener: function (_event, callback) { this.click = callback; },
       append: function (...children) { this.children.push(...children); },
+      replaceChildren: function (...children) { this.children = children; },
       querySelector: function (selector) {
         for (const child of this.children) {
-          if (selector === 'button' ? child.tag === 'button' : child.className === selector.slice(1)) return child;
+          if (selector === 'button' ? child.tag === 'button' : child.className?.split(' ').includes(selector.slice(1))) return child;
           const nested = child.querySelector(selector);
           if (nested) return nested;
         }
@@ -760,11 +999,16 @@ assert.match(appSource, /\.then\(\(\) => progressQueueToFlush\)/);
     elements: { contentArea, libraryWorkspace: workspace },
     readReadingProgressFailures: () => failures,
     readingProgressFailuresStorageReliable: true,
-    readerText: (text, values) => text.replace('{count}', values?.count),
+    readingProgressRetryPromise: null,
+    eAPI: { recoverReadingProgress() {} },
+    readerText: (text, values = {}) => text.replace(/\{([a-zA-Z]+)\}/g, (token, key) => values[key] ?? token),
     retryFailedReadingProgressSnapshots: () => { retryCalls += 1; },
     discardFailedReadingProgressSnapshots: () => { discardCalls += 1; },
+    clearReadingProgressFailureEntry(snapshot) { context.clearCalls = (context.clearCalls || []).concat(snapshot); },
   };
   const recoveryFunctions = [
+    'readingProgressKey',
+    'readingProgressFailureKey',
     'sanitizeReadingProgressDisplayText',
     'decodeReadingProgressIdFilename',
     'readingProgressComicCandidates',
@@ -778,11 +1022,15 @@ assert.match(appSource, /\.then\(\(\) => progressQueueToFlush\)/);
     'readingProgressCandidateDisplay',
     'readingProgressCandidateSourceContext',
     'readingProgressDetail',
+    'readingProgressNeedsManualCheck',
+    'readingProgressSnapshotCanRetry',
     'renderReadingProgressRecovery',
   ].map(name => extractFunction(appSource, name)).join('\n');
   vm.runInNewContext(`${recoveryFunctions}\nglobalThis.render = renderReadingProgressRecovery;`, context);
   context.render();
-  assert.equal(panel.querySelector('.reading-progress-recovery-message').textContent, '有 1 本漫畫的閱讀進度尚未保存。');
+  assert.match(panel.querySelector('.reading-progress-recovery-message').textContent, /有 1 本漫畫的閱讀進度尚未保存。/);
+  assert.match(panel.querySelector('.reading-progress-recovery-message').textContent, /缺少驗證資訊/,
+    'tokenless old journals explain that automatic recovery is unavailable');
   assert.equal(panel.hidden, false);
   context.state = { scanStatus: { isScanning: true }, comics: [] };
   context.render();
@@ -791,13 +1039,43 @@ assert.match(appSource, /\.then\(\(\) => progressQueueToFlush\)/);
   assert.equal(retryCalls, 1, 'recovery action still retries saving');
   panel.children[2].click();
   assert.equal(discardCalls, 1, 'recovery exposes a discard action');
-  failures.set('comic-a', {});
+  failures.set('comic-a', { id: 'comic-a' });
   context.render();
   assert.equal(panel.children[1].disabled, true, 'a source-less legacy entry cannot be retried automatically');
   assert.match(panel.querySelector('.reading-progress-recovery-message').textContent, /無法確認來源/);
   failures.clear();
+  const manual = {
+    id: 'comic-expired', sourceId: 'local:test', recoveryToken: 'old-token',
+    currentPage: 8, totalPages: 24, sequence: 12, recoveryStatus: 'manual-check',
+  };
+  const retryable = {
+    id: 'comic-online', sourceId: 'smb:v1:nas', recoveryToken: 'active-token',
+    currentPage: 2, totalPages: 10, sequence: 13,
+  };
+  failures.set('expired', manual);
+  failures.set('retryable', retryable);
+  context.state = { scanStatus: { isScanning: false }, comics: [] };
+  context.render();
+  assert.equal(panel.children[1].disabled, false,
+    'a manual-check entry does not disable retry for another recoverable item');
+  assert.match(panel.querySelector('.reading-progress-recovery-message').textContent, /原生驗證資訊已失效/);
+  assert.match(panel.querySelector('.reading-progress-recovery-entries').children[0].children[0].textContent, /第 9 \/ 24 頁/);
+  const manualEntryButton = panel.querySelector('.reading-progress-clear-entry');
+  assert.ok(manualEntryButton, 'each pending item exposes an individual clear action');
+  context.state.scanStatus.isScanning = true;
+  context.render();
+  assert.equal(panel.querySelector('.reading-progress-clear-entry'), manualEntryButton,
+    'scan progress updates preserve recovery button nodes and keyboard focus');
+  manualEntryButton.click();
+  assert.equal(context.clearCalls[0], manual, 'individual clear action is bound to its displayed snapshot');
+  failures.delete('retryable');
+  context.render();
+  assert.equal(panel.children[1].disabled, true, 'all manual-check entries leave the retry button disabled');
+  failures.clear();
   context.render();
   assert.equal(panel.hidden, true, 'recovery disappears once all failures are cleared');
+  assert.match(featureMessagesSource, /"部分進度的原生驗證資訊已失效[^\n]+\n\s+"en": "Some progress can no longer be verified/);
+  assert.match(featureMessagesSource, /"ja": "一部の進捗はアプリで確認できなくなりました/);
 }
 
 // Recovery details identify exact source matches without persisting private
@@ -920,7 +1198,7 @@ assert.match(appSource, /\.then\(\(\) => progressQueueToFlush\)/);
   const context = {
     READING_PROGRESS_FAILURES_KEY: 'gai:readingProgressFailures',
     READING_PROGRESS_AUTO_RETRY_DELAYS_MS: [],
-    readingProgressFailures: new Map([[old.id, old]]),
+    readingProgressFailures: new Map([[JSON.stringify(['\u0000deleted-comic', '']), old]]),
     readingProgressFailuresStorageReliable: true,
     discardedReadingProgressIntents: new Map(),
     latestQueuedReadingProgressById: new Map(),
@@ -930,11 +1208,19 @@ assert.match(appSource, /\.then\(\(\) => progressQueueToFlush\)/);
     window: { confirm: () => confirmed, alert: () => { alertCount += 1; } },
     localStorage: { setItem(key, value) { if (storageBlocked) throw new Error('storage blocked'); saved.set(key, value); } },
     eAPI: { saveProgress: () => new Promise((_, reject) => { rejectSave = reject; }) },
+    waitForReadingProgressSave: async (snapshot, recovery = false) => {
+      const save = recovery && !snapshot.id.startsWith('photos:')
+        && typeof context.eAPI.recoverReadingProgress === 'function'
+        ? context.eAPI.recoverReadingProgress
+        : context.eAPI.saveProgress;
+      await save(snapshot);
+      return { timedOut: false };
+    },
     console: { error() {} },
   };
   const functions = [
     'normalizeReadingProgressSnapshot', 'readingProgressIntentSequence', 'writeReadingProgressFailures',
-    'readingProgressKey', 'discardFailedReadingProgressSnapshots', 'rememberFailedReadingProgressSnapshot', 'persistReadingProgressSnapshot',
+    'readingProgressKey', 'readingProgressFailureKey', 'discardFailedReadingProgressSnapshots', 'rememberFailedReadingProgressSnapshot', 'persistReadingProgressSnapshot',
   ].map(name => extractFunction(appSource, name)).join('\n');
   vm.runInNewContext(`${functions}\nglobalThis.discard = discardFailedReadingProgressSnapshots;\nglobalThis.persist = persistReadingProgressSnapshot;\nglobalThis.remember = rememberFailedReadingProgressSnapshot;`, context);
   context.discard();
@@ -964,7 +1250,9 @@ assert.match(appSource, /\.then\(\(\) => progressQueueToFlush\)/);
   const functions = [
     extractFunction(appSource, 'normalizeReadingProgressSnapshot'),
     extractFunction(appSource, 'readingProgressKey'),
+    extractFunction(appSource, 'readingProgressFailureKey'),
     extractFunction(appSource, 'readingProgressIntentSequence'),
+    extractFunction(appSource, 'readingProgressNeedsManualCheck'),
     extractFunction(appSource, 'readReadingProgressFailures'),
     extractFunction(appSource, 'writeReadingProgressFailures'),
     extractFunction(appSource, 'rememberFailedReadingProgressSnapshot'),
@@ -1011,15 +1299,24 @@ assert.match(appSource, /\.then\(\(\) => progressQueueToFlush\)/);
         return false;
       },
     },
+    waitForReadingProgressSave: async (snapshot, recovery = false) => {
+      const save = recovery && !snapshot.id.startsWith('photos:')
+        && typeof context.eAPI.recoverReadingProgress === 'function'
+        ? context.eAPI.recoverReadingProgress
+        : context.eAPI.saveProgress;
+      await save(snapshot);
+      return { timedOut: false };
+    },
     console: { error() {} },
   };
-  vm.runInNewContext(`${functions}\nglobalThis.enqueueReadingProgressSnapshot = enqueueReadingProgressSnapshot;\nglobalThis.retryFailedReadingProgressSnapshots = retryFailedReadingProgressSnapshots;\nglobalThis.persistReadingProgressSnapshot = persistReadingProgressSnapshot;\nglobalThis.rememberFailedReadingProgressSnapshot = rememberFailedReadingProgressSnapshot;\nglobalThis.writeReadingProgressFailures = writeReadingProgressFailures;`, context);
+  vm.runInNewContext(`${functions}\nglobalThis.enqueueReadingProgressSnapshot = enqueueReadingProgressSnapshot;\nglobalThis.retryFailedReadingProgressSnapshots = retryFailedReadingProgressSnapshots;\nglobalThis.persistReadingProgressSnapshot = persistReadingProgressSnapshot;\nglobalThis.rememberFailedReadingProgressSnapshot = rememberFailedReadingProgressSnapshot;\nglobalThis.writeReadingProgressFailures = writeReadingProgressFailures;\nglobalThis.readingProgressFailureKey = readingProgressFailureKey;`, context);
 
   const failed = { id: 'comic-progress', sourceId: 'local:test', currentPage: 7, totalPages: 20, sequence: 41 };
+  failed.recoveryToken = 'token-progress';
   await context.enqueueReadingProgressSnapshot(failed);
   assert.equal(attempts, 3, 'progress save uses bounded automatic retry');
   const journalAfterFailure = JSON.parse(storage.get('gai:readingProgressFailures'));
-  assert.deepEqual(journalAfterFailure, [failed], 'failed snapshot is durable and contains only progress identity fields');
+  assert.deepEqual(journalAfterFailure, [failed], 'failed snapshot durably retains its recovery token');
   assert.ok(recoveryRenders > 0, 'a failed snapshot keeps the visible recovery path active');
 
   shouldSucceed = true;
@@ -1040,7 +1337,7 @@ assert.match(appSource, /\.then\(\(\) => progressQueueToFlush\)/);
   assert.equal(JSON.parse(storage.get('gai:readingProgressFailures')).length, 25, 'all pending comics remain in the durable journal');
 
   const deferred = { id: 'comic-deferred', sourceId: 'local:test', currentPage: 4, totalPages: 8, sequence: 200 };
-  context.readingProgressFailures = new Map([[`${deferred.sourceId}\u0000${deferred.id}`, deferred]]);
+  context.readingProgressFailures = new Map([[context.readingProgressFailureKey(deferred), deferred]]);
   context.readingProgressFailuresLoaded = true;
   context.latestQueuedReadingProgressById = new Map();
   context.writeReadingProgressFailures();
@@ -1067,13 +1364,113 @@ assert.match(appSource, /\.then\(\(\) => progressQueueToFlush\)/);
   assert.deepEqual(JSON.parse(storage.get('gai:readingProgressFailures')), [], 'newer native success clears older failure');
 }
 
+// Expired/mismatched native reader evidence is terminal for that exact
+// recovery token. Keep the page journal visible for manual recovery, skip it
+// on later retries, and continue retrying other books in the same batch.
+{
+  const functions = [
+    extractFunction(appSource, 'normalizeReadingProgressSnapshot'),
+    extractFunction(appSource, 'readingProgressKey'),
+    extractFunction(appSource, 'readingProgressFailureKey'),
+    extractFunction(appSource, 'readingProgressIntentSequence'),
+    extractFunction(appSource, 'readingProgressNeedsManualCheck'),
+    extractFunction(appSource, 'readingProgressSnapshotCanRetry'),
+    extractFunction(appSource, 'readReadingProgressFailures'),
+    extractFunction(appSource, 'writeReadingProgressFailures'),
+    extractFunction(appSource, 'rememberFailedReadingProgressSnapshot'),
+    extractFunction(appSource, 'clearReadingProgressFailure'),
+    extractFunction(appSource, 'nextReadingProgressSaveSequenceAfter'),
+    extractFunction(appSource, 'persistReadingProgressSnapshot'),
+    extractFunction(appSource, 'enqueueReadingProgressSnapshot'),
+    extractFunction(appSource, 'retryFailedReadingProgressSnapshots'),
+  ].join('\n');
+  const storage = new Map();
+  let sequence = 30;
+  let manualAttempts = 0;
+  let transientAttempts = 0;
+  let transientReady = false;
+  const context = {
+    READING_PROGRESS_FAILURES_KEY: 'gai:readingProgressFailures',
+    READING_PROGRESS_SEQUENCE_KEY: 'gai:readingProgressSequence',
+    READING_PROGRESS_AUTO_RETRY_DELAYS_MS: [0],
+    readingProgressFailuresLoaded: false,
+    readingProgressFailures: new Map(),
+    readingProgressFailuresStorageReliable: true,
+    latestQueuedReadingProgressById: new Map(),
+    discardedReadingProgressIntents: new Map(),
+    readingProgressRetryPromise: null,
+    readingProgressSaveSequence: 30,
+    readingProgressSaveQueue: Promise.resolve(),
+    localStorage: {
+      getItem: key => storage.get(key) || null,
+      setItem: (key, value) => storage.set(key, value),
+    },
+    sessionStorage: { setItem: (key, value) => storage.set(key, value) },
+    document: undefined,
+    renderReadingProgressRecovery() {},
+    waitForReadingProgressRetry: async () => {},
+    nextReadingProgressSaveSequence: () => ++sequence,
+    eAPI: {
+      recoverReadingProgress: async snapshot => {
+        if (snapshot.id === 'expired-book') {
+          manualAttempts += 1;
+          throw new Error('READING_PROGRESS_RECOVERY_MANUAL_CHECK: stale token');
+        }
+        transientAttempts += 1;
+        if (!transientReady) throw new Error('SMB connection timeout');
+      },
+    },
+    waitForReadingProgressSave: async (snapshot, recovery = false) => {
+      const save = recovery ? context.eAPI.recoverReadingProgress : context.eAPI.saveProgress;
+      await save(snapshot);
+      return { timedOut: false };
+    },
+    console: { error() {} },
+  };
+  vm.runInNewContext(`${functions}\nglobalThis.retry = retryFailedReadingProgressSnapshots;\nglobalThis.remember = rememberFailedReadingProgressSnapshot;\nglobalThis.failures = readReadingProgressFailures;`, context);
+
+  const expired = {
+    id: 'expired-book', sourceId: 'local:library', recoveryToken: 'old-native-token',
+    currentPage: 8, totalPages: 24, sequence: 31,
+  };
+  const transient = {
+    id: 'nas-book', sourceId: 'smb:v1:nas', recoveryToken: 'active-native-token',
+    currentPage: 3, totalPages: 12, sequence: 32,
+  };
+  context.remember(expired);
+  context.remember(transient);
+
+  assert.equal(await context.retry(), false, 'manual-check item keeps the aggregate recovery action pending');
+  assert.equal(manualAttempts, 1, 'native evidence failure is classified without repeated attempts');
+  assert.equal(transientAttempts, 2, 'transient NAS failure still receives bounded retries');
+  assert.equal(context.failures().get(context.readingProgressFailureKey(expired)).recoveryStatus, 'manual-check');
+  assert.equal(context.failures().get(context.readingProgressFailureKey(transient)).recoveryStatus, undefined,
+    'ordinary connection errors stay retryable');
+  assert.deepEqual(JSON.parse(storage.get('gai:readingProgressFailures')).map(entry => [entry.id, entry.currentPage]), [
+    ['nas-book', 3], ['expired-book', 8],
+  ], 'both page numbers stay in the durable journal');
+  assert.equal(context.readingProgressSnapshotCanRetry(
+    context.failures().get(context.readingProgressFailureKey(expired))), false);
+  assert.equal(context.readingProgressSnapshotCanRetry(transient), true);
+
+  transientReady = true;
+  assert.equal(await context.retry(), false, 'only the manual-check journal remains after transient recovery succeeds');
+  assert.equal(manualAttempts, 1, 'later retry skips the permanently invalid token');
+  assert.equal(transientAttempts, 3, 'later retry continues for the recoverable entry');
+  assert.equal(context.failures().size, 1);
+  assert.equal(context.failures().get(context.readingProgressFailureKey(expired)).recoveryStatus, 'manual-check');
+  assert.deepEqual(JSON.parse(storage.get('gai:readingProgressFailures')).map(entry => entry.id), ['expired-book']);
+}
+
 // Deferred queue regression: a newer native intent must win over an older
 // journal retry whether it was queued first or appears before retry execution.
 {
   const functions = [
     extractFunction(appSource, 'normalizeReadingProgressSnapshot'),
     extractFunction(appSource, 'readingProgressKey'),
+    extractFunction(appSource, 'readingProgressFailureKey'),
     extractFunction(appSource, 'readingProgressIntentSequence'),
+    extractFunction(appSource, 'readingProgressNeedsManualCheck'),
     extractFunction(appSource, 'readReadingProgressFailures'),
     extractFunction(appSource, 'writeReadingProgressFailures'),
     extractFunction(appSource, 'rememberFailedReadingProgressSnapshot'),
@@ -1116,14 +1513,23 @@ assert.match(appSource, /\.then\(\(\) => progressQueueToFlush\)/);
         return false;
       },
     },
+    waitForReadingProgressSave: async (snapshot, recovery = false) => {
+      const save = recovery && !snapshot.id.startsWith('photos:')
+        && typeof context.eAPI.recoverReadingProgress === 'function'
+        ? context.eAPI.recoverReadingProgress
+        : context.eAPI.saveProgress;
+      await save(snapshot);
+      return { timedOut: false };
+    },
     console: { error() {} },
   };
   vm.runInNewContext(`${functions}
     globalThis.enqueueReadingProgressSnapshot = enqueueReadingProgressSnapshot;
-    globalThis.retryFailedReadingProgressSnapshots = retryFailedReadingProgressSnapshots;`, context);
+    globalThis.retryFailedReadingProgressSnapshots = retryFailedReadingProgressSnapshots;
+    globalThis.readingProgressFailureKey = readingProgressFailureKey;`, context);
 
   const oldJournal = { id: 'comic-deferred-order', sourceId: 'local:test', currentPage: 1, totalPages: 20, sequence: 100 };
-  context.readingProgressFailures = new Map([[`${oldJournal.sourceId}\u0000${oldJournal.id}`, oldJournal]]);
+  context.readingProgressFailures = new Map([[context.readingProgressFailureKey(oldJournal), oldJournal]]);
   context.writeReadingProgressFailures();
   const newerQueued = context.enqueueReadingProgressSnapshot({
     id: oldJournal.id, sourceId: oldJournal.sourceId, currentPage: 9, totalPages: 20, sequence: 200,
@@ -1137,7 +1543,7 @@ assert.match(appSource, /\.then\(\(\) => progressQueueToFlush\)/);
   assert.deepEqual(JSON.parse(storage.get('gai:readingProgressFailures')), [], 'newer native success clears the old journal');
 
   calls.length = 0;
-  context.readingProgressFailures = new Map([[`${oldJournal.sourceId}\u0000${oldJournal.id}`, oldJournal]]);
+  context.readingProgressFailures = new Map([[context.readingProgressFailureKey(oldJournal), oldJournal]]);
   context.writeReadingProgressFailures();
   context.latestQueuedReadingProgressById = new Map();
   let releaseQueue;
@@ -1154,7 +1560,7 @@ assert.match(appSource, /\.then\(\(\) => progressQueueToFlush\)/);
   assert.deepEqual(JSON.parse(storage.get('gai:readingProgressFailures')), [], 'newer intent success removes the retry journal');
 
   calls.length = 0;
-  context.readingProgressFailures = new Map([[`${oldJournal.sourceId}\u0000${oldJournal.id}`, oldJournal]]);
+  context.readingProgressFailures = new Map([[context.readingProgressFailureKey(oldJournal), oldJournal]]);
   context.writeReadingProgressFailures();
   context.latestQueuedReadingProgressById = new Map();
   let releaseDuplicate;
@@ -1170,5 +1576,81 @@ assert.match(appSource, /\.then\(\(\) => progressQueueToFlush\)/);
   releaseDuplicate();
   await firstRetry;
   assert.equal(calls.length, 1, 'rapid retry clicks make one native retry call');
+
+  // Queue coalescing and recovery serialization are token-scoped too. A
+  // current open must not absorb a retry belonging to an older open token.
+  const oldVersion = { ...oldJournal, recoveryToken: 'token-old', sequence: 400 };
+  context.readingProgressFailures = new Map([[context.readingProgressFailureKey(oldVersion), oldVersion]]);
+  context.writeReadingProgressFailures();
+  context.latestQueuedReadingProgressById = new Map();
+  const recoveryCalls = [];
+  let releaseCurrentVersion;
+  const currentVersionGate = new Promise(resolve => { releaseCurrentVersion = resolve; });
+  context.eAPI.saveProgress = async snapshot => {
+    calls.push(snapshot);
+    await currentVersionGate;
+  };
+  context.eAPI.recoverReadingProgress = async snapshot => { recoveryCalls.push(snapshot); };
+  calls.length = 0;
+  const currentVersionQueued = context.enqueueReadingProgressSnapshot({
+    ...oldVersion, recoveryToken: 'token-new', currentPage: 8, sequence: 500,
+  });
+  await new Promise(resolve => setImmediate(resolve));
+  const oldVersionRetry = context.retryFailedReadingProgressSnapshots();
+  await new Promise(resolve => setImmediate(resolve));
+  assert.equal(context.latestQueuedReadingProgressById.size, 2,
+    'same comic with different open tokens occupies separate queued versions');
+  assert.deepEqual(calls.map(snapshot => snapshot.recoveryToken), ['token-new'],
+    'the current token save runs without coalescing the old version retry');
+  releaseCurrentVersion();
+  await Promise.all([currentVersionQueued, oldVersionRetry]);
+  assert.deepEqual(recoveryCalls.map(snapshot => snapshot.recoveryToken), ['token-old'],
+    'the old journal retry keeps its own recovery token through the bridge call');
+  assert.deepEqual(JSON.parse(storage.get('gai:readingProgressFailures')), [],
+    'the exact old-version retry clears only its journal after native success');
+}
+// Individual confirmation preserves other tokens, handles storage failure,
+// and fences a late failure from resurrecting a removed entry.
+{
+  const entries = new Map();
+  let stored;
+  let confirm = false;
+  let failStorage = false;
+  const context = {
+    READING_PROGRESS_FAILURES_KEY: 'journal',
+    readingProgressDetail: () => 'Book A, page 6 / 10',
+    discardedReadingProgressIntents: new Map(),
+    discardedReadingProgressFailureIntents: new Map(),
+    readingProgressFailuresStorageReliable: true,
+    readReadingProgressFailures: () => entries,
+    renderReadingProgressRecovery() {},
+    writeReadingProgressFailures() {},
+    readerText: text => text,
+    localStorage: { setItem(_key, value) { if (failStorage) throw new Error('storage'); stored = value; } },
+    window: { confirm: text => { assert.match(text, /Book A, page 6 \/ 10/); return confirm; }, alert() {} },
+  };
+  const names = ['normalizeReadingProgressSnapshot', 'readingProgressKey', 'readingProgressFailureKey',
+    'readingProgressIntentSequence', 'clearReadingProgressFailureEntry', 'rememberFailedReadingProgressSnapshot'];
+  vm.runInNewContext(names.map(name => extractFunction(appSource, name)).join('\n'), context);
+  const first = { id: 'same', sourceId: 'local:test', currentPage: 5, totalPages: 10, sequence: 1, recoveryToken: 'old' };
+  const other = { ...first, sequence: 2, recoveryToken: 'new' };
+  entries.set(context.readingProgressFailureKey(first), first);
+  entries.set(context.readingProgressFailureKey(other), other);
+  assert.equal(context.clearReadingProgressFailureEntry(first), false);
+  assert.equal(entries.size, 2, 'cancel preserves both entries');
+  confirm = true;
+  failStorage = true;
+  assert.equal(context.clearReadingProgressFailureEntry(first), false);
+  assert.equal(entries.size, 2, 'failed durable removal retains session entries');
+  failStorage = false;
+  assert.equal(context.clearReadingProgressFailureEntry(first), true);
+  assert.deepEqual(JSON.parse(stored), [other]);
+  assert.equal(entries.size, 1);
+  context.rememberFailedReadingProgressSnapshot(first);
+  assert.equal(entries.size, 1, 'late old failure cannot resurrect a confirmed removal');
+  const newer = { ...other, sequence: 3, currentPage: 7 };
+  entries.set(context.readingProgressFailureKey(other), newer);
+  assert.equal(context.clearReadingProgressFailureEntry(other), false, 'stale UI cannot clear newer progress');
+  assert.equal(entries.get(context.readingProgressFailureKey(other)), newer);
 }
 console.log('PASS: close flush/queue, decode failure retry/load save, sequence compatibility, and partial import retry');

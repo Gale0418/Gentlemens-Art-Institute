@@ -155,17 +155,32 @@ fn unique_preload_comic(
     Some(first.clone())
 }
 
-fn source_revision_is_current(state: &AppState, id: &str, source_id: &str, expected: &str) -> bool {
-    state
-        .comics
-        .try_lock()
-        .ok()
-        .and_then(|comics| {
+/// Wait for scanner publication outside `comic_lifecycle`, then hold a stable
+/// comic snapshot while validating and publishing a preload batch.
+fn lock_comics_for_preload<F: FnOnce()>(
+    state: &AppState,
+    on_contention: F,
+) -> tokio::sync::MutexGuard<'_, Vec<crate::state::ComicItem>> {
+    match state.comics.try_lock() {
+        Ok(comics) => {
+            drop(on_contention);
             comics
-                .iter()
-                .find(|comic| comic.id == id && comic.source_id == source_id)
-                .cloned()
-        })
+        }
+        Err(_) => {
+            on_contention();
+            state.comics.blocking_lock()
+        }
+    }
+}
+
+fn source_revision_is_current(
+    comics: &[crate::state::ComicItem],
+    state: &AppState,
+    id: &str,
+    source_id: &str,
+    expected: &str,
+) -> bool {
+    unique_preload_comic(comics, id, source_id)
         .is_some_and(|comic| comic_source_revision(state, &comic) == expected)
 }
 
@@ -424,13 +439,24 @@ async fn preload_comic_window_with_item(
             let can_cache_whole_book = selection.whole_book && preload_count == entry_names.len();
 
             let (mut cached_bytes, mut loaded_count): (usize, usize) = {
+                // Wait for scanner publication before entering the synchronous
+                // lifecycle lock. Keep this snapshot stable through validation
+                // and cache initialization so the selected source cannot change
+                // between the revision check and publication.
+                let comics = lock_comics_for_preload(&state, || {});
                 let _lifecycle = state.comic_lifecycle.lock().unwrap();
                 if state
                     .preload_generation
                     .load(std::sync::atomic::Ordering::Acquire)
                     != generation
                     || !state.active_reader_matches_locked(&id, &source_id)
-                    || !source_revision_is_current(&state, &id, &source_id, &source_revision)
+                    || !source_revision_is_current(
+                        &comics,
+                        &state,
+                        &id,
+                        &source_id,
+                        &source_revision,
+                    )
                 {
                     return Ok(None);
                 }
@@ -477,13 +503,22 @@ async fn preload_comic_window_with_item(
                 let id_clone = id.clone();
                 let mut committed_count = 0usize;
                 {
+                    // As above, acquire the async directory mutex before the
+                    // lifecycle mutex; no await occurs while lifecycle is held.
+                    let comics = lock_comics_for_preload(&state, || {});
                     let _lifecycle = state.comic_lifecycle.lock().unwrap();
                     if state
                         .preload_generation
                         .load(std::sync::atomic::Ordering::Acquire)
                         != generation
                         || !state.active_reader_matches_locked(&id, &source_id)
-                        || !source_revision_is_current(&state, &id, &source_id, &source_revision)
+                        || !source_revision_is_current(
+                            &comics,
+                            &state,
+                            &id,
+                            &source_id,
+                            &source_revision,
+                        )
                     {
                         return false;
                     }
@@ -690,9 +725,10 @@ async fn preload_comic_window_with_item(
 #[cfg(test)]
 mod tests {
     use super::{
-        preload_batch_would_exceed, read_preload_page, resolve_preload_path, unique_preload_comic,
-        whole_book_cache_matches_index, MAX_PRELOAD_BATCH_BYTES, MAX_PRELOAD_BATCH_PAGES,
-        MAX_PRELOAD_PAGE_BYTES, PRELOAD_READ_CHUNK_BYTES, PRELOAD_WORKER_LIMIT,
+        comic_source_revision, preload_batch_would_exceed, read_preload_page, resolve_preload_path,
+        source_revision_is_current, unique_preload_comic, whole_book_cache_matches_index,
+        MAX_PRELOAD_BATCH_BYTES, MAX_PRELOAD_BATCH_PAGES, MAX_PRELOAD_PAGE_BYTES,
+        PRELOAD_READ_CHUNK_BYTES, PRELOAD_WORKER_LIMIT,
     };
     use crate::state::{AppState, SourceRevision};
     use std::collections::HashMap;
@@ -838,6 +874,92 @@ mod tests {
                 .source_id,
             "local:new"
         );
+    }
+
+    #[test]
+    fn preload_revision_validation_uses_the_same_online_selection_as_lookup() {
+        let state = AppState::new();
+        let mut offline = crate::state::ComicItem {
+            id: "same".into(),
+            r#type: "offline".into(),
+            relative_path: "old.cbz".into(),
+            ext: ".cbz".into(),
+            title: "old".into(),
+            series: String::new(),
+            updated_at: String::new(),
+            page_count: 1,
+            progress: crate::state::Progress {
+                current_page: 0,
+                total_pages: 1,
+                percent: 0.0,
+                updated_at: None,
+            },
+            source_id: "local:a".into(),
+            source_path: None,
+            external_bookmark: None,
+        };
+        let mut online = offline.clone();
+        offline.source_id = "local:new".into();
+        online.source_id = "local:new".into();
+        online.r#type = "archive".into();
+        online.relative_path = "new.cbz".into();
+
+        let selected_revision = comic_source_revision(&state, &online);
+        let retired_revision = comic_source_revision(&state, &offline);
+        assert!(source_revision_is_current(
+            &[offline.clone(), online.clone()],
+            &state,
+            "same",
+            "local:new",
+            &selected_revision,
+        ));
+        assert!(!source_revision_is_current(
+            &[offline, online],
+            &state,
+            "same",
+            "local:new",
+            &retired_revision,
+        ));
+    }
+
+    #[tokio::test]
+    async fn preload_revision_validation_waits_for_comics_lock_before_checking() {
+        let state = std::sync::Arc::new(AppState::new());
+        let mut comic = crate::state::ComicItem {
+            id: "same".into(),
+            r#type: "archive".into(),
+            relative_path: "book.cbz".into(),
+            ext: ".cbz".into(),
+            title: "book".into(),
+            series: String::new(),
+            updated_at: String::new(),
+            page_count: 1,
+            progress: crate::state::Progress {
+                current_page: 0,
+                total_pages: 1,
+                percent: 0.0,
+                updated_at: None,
+            },
+            source_id: "local:a".into(),
+            source_path: None,
+            external_bookmark: None,
+        };
+        let expected = comic_source_revision(&state, &comic);
+        comic.title = "updated title".into(); // title is not part of source identity.
+        *state.comics.lock().await = vec![comic];
+        let held_comics = state.comics.lock().await;
+        let blocking_state = state.clone();
+        let (attempt_tx, attempt_rx) = std::sync::mpsc::channel();
+        let check = tokio::task::spawn_blocking(move || {
+            let comics = super::lock_comics_for_preload(&blocking_state, || {
+                attempt_tx.send(()).unwrap();
+            });
+            source_revision_is_current(&comics, &blocking_state, "same", "local:a", &expected)
+        });
+        // The hook proves the preload lock attempt observed contention.
+        attempt_rx.recv().unwrap();
+        drop(held_comics);
+        assert!(check.await.unwrap());
     }
 
     #[test]

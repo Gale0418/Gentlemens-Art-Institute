@@ -210,7 +210,15 @@ Tauri 會編譯 Rust static library、呼叫 Xcode project，再產生 signed ap
 
 上面的 `debugging` 是實機開發驗收匯出，不是 App Store 發行包。簽章 team 可透過 `APPLE_DEVELOPMENT_TEAM` 指定已驗證的團隊。iOS build 版本使用 `tauri.conf.json` 的 `bundle.iOS.bundleVersion`（每次交付需遞增）；Tauri 專案設定須保持三段式 SemVer `1.0.0`。不要再加 `--build-number`，本專案實測它會把 build 拼成四段。每次匯出都需從 IPA 的 Info.plist 回讀版本。
 
-### 4.4.1 App Store 顯示版號 `1.0`
+第69版 source-v7 的公開指紋見 [build69-source-manifest.json](docs/release/build69-source-manifest.json)；source-v6／source-v7 的建置、安裝、功能驗收與未完成項目見 [第69版建置驗證紀錄](docs/release/build69-validation.md)。請依紀錄區分各次安裝版本，不把 v6 的驗收誤記為 v7 實機結果。
+
+### 4.4.1 Xcode 顯示 SDK 但實體裝置為 ineligible
+
+`xcodebuild -showsdks` 有列出 iOS SDK，不代表這個 Xcode 已安裝目前所需的 iOS platform support，也不能單靠 SDK 清單判定實體裝置可作為建置目的地。若 Xcode 顯示裝置但標為 `ineligible`，先在 **Xcode > Settings > Components** 檢查並安裝該 Xcode 版本實際需要的平台元件；完成後重新開啟 Xcode 並確認目的地狀態。這次介面曾顯示可取得 **iOS 26.5.1 與 iOS 26.5 Simulator**，這只是當時可見的元件選項，不是所有 Xcode 或裝置都相同的固定版本要求。
+
+安裝元件後仍需重新檢查 Xcode 版本、所選 scheme／destination、裝置系統版本及簽署設定；只安裝 simulator runtime 不保證能解除實體裝置的 `ineligible` 狀態。Apple 說明：[下載與安裝其他 Xcode 元件](https://developer.apple.com/documentation/xcode/downloading-and-installing-additional-xcode-components)。
+
+### 4.4.2 App Store 顯示版號 `1.0`
 
 App Store Connect 的首次發行版本是 `1.0`。Tauri 不接受兩段式 `version`，因此 App Store 發行包要在 Tauri 匯出後把 `CFBundleShortVersionString` 設為 `1.0`，再用**同一個發行 profile 的 entitlements**重簽，不能只修改 IPA 內的 plist 而沿用舊簽章。使用 [`scripts/repackage-ios-app-store-version.py`](scripts/repackage-ios-app-store-version.py)：
 

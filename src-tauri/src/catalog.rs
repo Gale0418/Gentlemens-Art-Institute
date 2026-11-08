@@ -1,7 +1,7 @@
 use crate::metadata::{
     self, NormalizedMetadata, ParsedMetadataSource, ParserDiagnostic, ScopedTag,
 };
-use crate::state::ComicItem;
+use crate::state::{ComicItem, ReaderPriority};
 use base64::{engine::general_purpose, Engine as _};
 use cap_fs_ext::DirExt;
 use rayon::prelude::*;
@@ -11,10 +11,90 @@ use serde_json::{json, Value};
 use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 use std::fs::File;
 use std::io::{Read, Seek, SeekFrom};
-use std::path::{Path, PathBuf};
-use std::sync::{Arc, OnceLock};
+use std::path::{Component, Path, PathBuf};
+use std::sync::{Arc, Condvar, Mutex, OnceLock};
 use std::time::Duration;
 use unicode_normalization::UnicodeNormalization;
+
+fn wait_for_catalog_scan_turn<C, P>(is_current: &C, priority: &P) -> Result<(), String>
+where
+    C: Fn() -> bool + Sync,
+    P: Fn() -> ReaderPriority,
+{
+    while priority() == ReaderPriority::Opening {
+        ensure_sync_current(is_current)?;
+        std::thread::sleep(Duration::from_millis(50));
+    }
+    ensure_sync_current(is_current)
+}
+
+struct MetadataIoGate {
+    occupied: Mutex<bool>,
+    available: Condvar,
+}
+
+impl MetadataIoGate {
+    fn new() -> Arc<Self> {
+        Arc::new(Self {
+            occupied: Mutex::new(false),
+            available: Condvar::new(),
+        })
+    }
+}
+
+struct MetadataIoPermit(Arc<MetadataIoGate>);
+
+impl Drop for MetadataIoPermit {
+    fn drop(&mut self) {
+        if let Ok(mut occupied) = self.0.occupied.lock() {
+            *occupied = false;
+            self.0.available.notify_one();
+        }
+    }
+}
+
+fn acquire_active_metadata_permit<C, P>(
+    gate: &Arc<MetadataIoGate>,
+    is_current: &C,
+    priority: &P,
+) -> Result<Option<MetadataIoPermit>, String>
+where
+    C: Fn() -> bool + Sync,
+    P: Fn() -> ReaderPriority + Sync,
+{
+    loop {
+        wait_for_catalog_scan_turn(is_current, priority)?;
+        if priority() != ReaderPriority::Active {
+            return Ok(None);
+        }
+
+        let mut occupied = gate
+            .occupied
+            .lock()
+            .map_err(|_| "metadata I/O gate 鎖定失敗".to_string())?;
+        if !*occupied {
+            *occupied = true;
+            drop(occupied);
+            let permit = MetadataIoPermit(Arc::clone(gate));
+            // Priority may change while this worker was acquiring the permit.
+            // Never hold the gate while waiting through Opening.
+            match priority() {
+                ReaderPriority::Active => return Ok(Some(permit)),
+                ReaderPriority::Idle => return Ok(None),
+                ReaderPriority::Opening => {
+                    drop(permit);
+                    wait_for_catalog_scan_turn(is_current, priority)?;
+                }
+            }
+        } else {
+            let (occupied, _) = gate
+                .available
+                .wait_timeout(occupied, Duration::from_millis(50))
+                .map_err(|_| "metadata I/O gate 等待失敗".to_string())?;
+            drop(occupied);
+        }
+    }
+}
 
 const FINGERPRINT_VERSION: &str = "blake3-sampled-v1";
 const FILE_SIGNATURE_VERSION: &str = "file-signature-v2";
@@ -70,6 +150,55 @@ fn visible_location_predicate(alias: &str) -> String {
            OR replace({alias}.relative_path,char(92),'/') = './.gai-quarantine'
            OR replace({alias}.relative_path,char(92),'/') LIKE './.gai-quarantine/%')"
     )
+}
+
+fn primary_location_order(alias: &str) -> String {
+    format!(
+        "{alias}.online DESC,{alias}.last_seen_at DESC,{alias}.source_id ASC,{alias}.relative_path ASC,{alias}.id ASC"
+    )
+}
+
+/// Capture the location fields that feed the FTS path and folder-tag
+/// projection. Only the supplied comics are ranked, using the same ordering
+/// as `build_search_view`.
+fn primary_location_keys_for_comics(
+    connection: &Connection,
+    comic_ids: &BTreeSet<String>,
+) -> Result<HashMap<String, (String, String)>, String> {
+    if comic_ids.is_empty() {
+        return Ok(HashMap::new());
+    }
+    let comic_ids = serde_json::to_string(comic_ids).map_err(|error| error.to_string())?;
+    let visible_location = visible_location_predicate("l");
+    let primary_order = primary_location_order("l");
+    let mut statement = connection
+        .prepare(&format!(
+            "WITH affected AS (
+               SELECT value AS comic_id FROM json_each(?1)
+             ), ranked AS (
+               SELECT l.comic_id,l.source_id,l.relative_path,
+                      ROW_NUMBER() OVER (
+                        PARTITION BY l.comic_id
+                        ORDER BY {primary_order}
+                      ) AS location_rank
+               FROM comic_locations l
+               JOIN affected a ON a.comic_id=l.comic_id
+               WHERE {visible_location}
+             )
+             SELECT comic_id,source_id,relative_path
+             FROM ranked WHERE location_rank=1"
+        ))
+        .map_err(|error| error.to_string())?;
+    let rows = statement
+        .query_map([comic_ids], |row| {
+            Ok((
+                row.get::<_, String>(0)?,
+                (row.get::<_, String>(1)?, row.get::<_, String>(2)?),
+            ))
+        })
+        .map_err(|error| error.to_string())?;
+    rows.collect::<Result<HashMap<_, _>, _>>()
+        .map_err(|error| error.to_string())
 }
 
 pub(crate) fn is_quarantine_relative_path(relative_path: &str) -> bool {
@@ -298,6 +427,8 @@ pub struct FileOperationRecord {
     pub after_actual_path: Option<String>,
     pub expected_fingerprint: Option<String>,
     pub status: String,
+    #[serde(skip)]
+    pub(crate) undo_pending: bool,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
@@ -372,6 +503,53 @@ pub struct TagStateUpdate {
 pub struct TagMutationResult {
     pub affected_works: usize,
     pub undo_token: String,
+}
+
+/// Trusted native evidence captured by a successful `open_comic` publication.
+pub struct ProgressRecoveryProof<'a> {
+    pub identifier: &'a str,
+    pub source_id: &'a str,
+    pub relative_path: &'a str,
+    pub token: &'a str,
+    pub total_pages: usize,
+    pub revision: &'a crate::state::SourceRevision,
+    pub smb_content_hash: Option<[u8; 32]>,
+}
+
+/// A recovery request after filesystem identity verification has completed.
+pub struct ProgressRecoveryCommit<'a> {
+    pub identifier: &'a str,
+    pub source_id: &'a str,
+    pub relative_path: &'a str,
+    pub token: &'a str,
+    pub revision: &'a crate::state::SourceRevision,
+    pub smb_content_hash: Option<[u8; 32]>,
+    pub total_pages: usize,
+    pub current_page: usize,
+    pub intent_sequence: u64,
+    pub progress: &'a crate::state::Progress,
+}
+
+pub const MAX_SAFE_INTENT_SEQUENCE: u64 = 9_007_199_254_740_991;
+
+pub(crate) fn validate_intent_sequence(sequence: u64) -> Result<(), String> {
+    if sequence > MAX_SAFE_INTENT_SEQUENCE {
+        return Err("閱讀意圖序號超出安全整數上限".into());
+    }
+    Ok(())
+}
+
+struct PersistedProgressRecoveryProof {
+    comic_id: String,
+    source_id: String,
+    relative_path: String,
+    total_pages: i64,
+    revision_json: String,
+    smb_content_hash: Option<Vec<u8>>,
+    baseline_page: i64,
+    baseline_total: i64,
+    baseline_updated_at: Option<String>,
+    intent_sequence: i64,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -508,12 +686,30 @@ impl CatalogStore {
         &self,
         comics: &[ComicItem],
         discovery_only: bool,
-        mut progress: F,
+        progress: F,
         is_current: C,
     ) -> Result<usize, String>
     where
         F: FnMut(usize, usize),
         C: Fn() -> bool + Sync,
+    {
+        self.sync_library_with_reader_priority(comics, discovery_only, progress, is_current, || {
+            ReaderPriority::Idle
+        })
+    }
+
+    pub fn sync_library_with_reader_priority<F, C, P>(
+        &self,
+        comics: &[ComicItem],
+        discovery_only: bool,
+        mut progress: F,
+        is_current: C,
+        reader_priority: P,
+    ) -> Result<usize, String>
+    where
+        F: FnMut(usize, usize),
+        C: Fn() -> bool + Sync,
+        P: Fn() -> ReaderPriority + Sync,
     {
         let total = comics.len();
         progress(0, total);
@@ -543,16 +739,24 @@ impl CatalogStore {
                     .map_err(|error| error.to_string())?,
             )
         };
+        // One gate per serialized source sync is enough: the catalog scan
+        // lane owns a single sync at a time, and its Rayon workers share this
+        // one-permit limiter when the reader becomes active.
+        let metadata_gate = MetadataIoGate::new();
         let mut affected_total = BTreeSet::new();
         let mut done = 0;
-        let batches = comics.chunks(64).collect::<Vec<_>>();
-
-        for (batch_index, batch) in batches.iter().enumerate() {
+        while done < total {
+            wait_for_catalog_scan_turn(&is_current, &reader_priority)?;
+            let reading = reader_priority() == ReaderPriority::Active;
+            // Limit SQLite writer ownership and metadata concurrency while a
+            // reader is active. No transaction is held during the throttle.
+            let batch = &comics[done..(done + if reading { 8 } else { 64 }).min(total)];
             ensure_sync_current(&is_current)?;
             let prepared = if discovery_only {
                 batch
                     .iter()
                     .map(|comic| {
+                        wait_for_catalog_scan_turn(&is_current, &reader_priority)?;
                         let key = (comic.source_id.clone(), comic.relative_path.clone());
                         let previous = known.get(&key);
                         let signature = previous.map(|item| (item.size, item.mtime.clone()));
@@ -570,92 +774,104 @@ impl CatalogStore {
                             diagnostics: vec![],
                             failures: vec![],
                         });
-                        (
+                        Ok((
                             comic.clone(),
                             signature,
                             fingerprint,
                             fingerprint_version,
                             comic.relative_path.clone(),
                             parse,
-                        )
+                        ))
                     })
-                    .collect::<Vec<_>>()
+                    .collect::<Result<Vec<_>, String>>()?
             } else {
-                pool.as_ref()
-                    .expect("normal sync has a metadata pool")
-                    .install(|| {
-                        batch
-                            .par_iter()
-                            .map(|comic| {
-                                let path = comic.source_path.as_deref().map(Path::new);
-                                let signature = path.and_then(file_signature);
-                                let key = (comic.source_id.clone(), comic.relative_path.clone());
-                                let previous = known.get(&key);
-                                let signature_is_complete = signature
-                                    .as_ref()
-                                    .is_some_and(|value| value.0.is_some() && value.1.is_some());
-                                let unchanged = signature_is_complete
-                                    && previous.is_some_and(|item| {
-                                        item.fingerprint_version.as_deref()
-                                            == Some(FINGERPRINT_VERSION)
-                                            && item.size
-                                                == signature.as_ref().and_then(|value| value.0)
-                                            && item.mtime
-                                                == signature
-                                                    .as_ref()
-                                                    .and_then(|value| value.1.clone())
-                                    });
-                                let fingerprint = if unchanged {
-                                    previous.and_then(|item| item.fingerprint.clone())
-                                } else {
-                                    path.and_then(|item| sampled_fingerprint(item).ok())
-                                };
-                                let fingerprint_version = if unchanged {
-                                    previous.and_then(|item| item.fingerprint_version.clone())
-                                } else {
-                                    fingerprint
-                                        .as_ref()
-                                        .map(|_| FINGERPRINT_VERSION.to_string())
-                                };
-                                let parse = if unchanged {
-                                    None
-                                } else {
-                                    Some(
-                                        path.filter(|item| item.exists())
-                                            .map(metadata::parse_metadata_for_path)
-                                            .unwrap_or_else(|| metadata::ParseOutcome {
-                                                sources: vec![
-                                                    metadata::filename_metadata_for_path(
-                                                        Path::new(&comic.relative_path),
-                                                    ),
-                                                ],
-                                                diagnostics: vec![],
-                                                failures: vec![],
-                                            }),
-                                    )
-                                };
-                                let scope_path = path
-                                    .filter(|item| item.exists())
-                                    .map(|item| item.to_string_lossy().into_owned())
-                                    .unwrap_or_else(|| comic.relative_path.clone());
-                                (
-                                    comic.clone(),
-                                    signature,
-                                    fingerprint,
-                                    fingerprint_version,
-                                    scope_path,
-                                    parse,
-                                )
-                            })
-                            .collect::<Vec<_>>()
-                    })
+                let prepare = |comic: &ComicItem| {
+                    // Re-check at every metadata work boundary. An Idle batch
+                    // can outlive a reader-priority transition; work not yet
+                    // entered into filesystem I/O must then use the shared
+                    // single-lane gate. Already-running OS I/O is not preempted.
+                    let _active_permit = acquire_active_metadata_permit(
+                        &metadata_gate,
+                        &is_current,
+                        &reader_priority,
+                    )?;
+                    let path = comic.source_path.as_deref().map(Path::new);
+                    let signature = path.and_then(file_signature);
+                    let key = (comic.source_id.clone(), comic.relative_path.clone());
+                    let previous = known.get(&key);
+                    let signature_is_complete = signature
+                        .as_ref()
+                        .is_some_and(|value| value.0.is_some() && value.1.is_some());
+                    let unchanged = signature_is_complete
+                        && previous.is_some_and(|item| {
+                            item.fingerprint_version.as_deref() == Some(FINGERPRINT_VERSION)
+                                && item.size == signature.as_ref().and_then(|value| value.0)
+                                && item.mtime
+                                    == signature.as_ref().and_then(|value| value.1.clone())
+                        });
+                    let fingerprint = if unchanged {
+                        previous.and_then(|item| item.fingerprint.clone())
+                    } else {
+                        path.and_then(|item| sampled_fingerprint(item).ok())
+                    };
+                    let fingerprint_version = if unchanged {
+                        previous.and_then(|item| item.fingerprint_version.clone())
+                    } else {
+                        fingerprint
+                            .as_ref()
+                            .map(|_| FINGERPRINT_VERSION.to_string())
+                    };
+                    let parse = if unchanged {
+                        None
+                    } else {
+                        Some(
+                            path.filter(|item| item.exists())
+                                .map(metadata::parse_metadata_for_path)
+                                .unwrap_or_else(|| metadata::ParseOutcome {
+                                    sources: vec![metadata::filename_metadata_for_path(Path::new(
+                                        &comic.relative_path,
+                                    ))],
+                                    diagnostics: vec![],
+                                    failures: vec![],
+                                }),
+                        )
+                    };
+                    let scope_path = path
+                        .filter(|item| item.exists())
+                        .map(|item| item.to_string_lossy().into_owned())
+                        .unwrap_or_else(|| comic.relative_path.clone());
+                    Ok((
+                        comic.clone(),
+                        signature,
+                        fingerprint,
+                        fingerprint_version,
+                        scope_path,
+                        parse,
+                    ))
+                };
+                let result: Result<Vec<_>, String> = if reading {
+                    batch.iter().map(prepare).collect()
+                } else {
+                    pool.as_ref()
+                        .expect("normal sync has a metadata pool")
+                        .install(|| batch.par_iter().map(prepare).collect())
+                };
+                result?
             };
             ensure_sync_current(&is_current)?;
+            // Metadata work may finish while a reader is Opening. Recheck
+            // before taking the catalog connection/transaction; never sleep
+            // while holding either SQLite writer ownership or the connection
+            // mutex. This is cooperative scheduling, not OS-I/O preemption.
+            wait_for_catalog_scan_turn(&is_current, &reader_priority)?;
+            ensure_sync_current(&is_current)?;
 
-            let is_last = batch_index + 1 == batches.len();
+            let is_last = done + batch.len() == total;
             let affected_batch = self.with_connection(|connection| {
                 ensure_sync_current(&is_current)?;
-                let tx = connection.transaction().map_err(|error| error.to_string())?;
+                let tx = connection
+                    .transaction_with_behavior(TransactionBehavior::Immediate)
+                    .map_err(|error| error.to_string())?;
                 let mut affected = BTreeSet::new();
                 for (comic, signature, fingerprint, fingerprint_version, scope_path, parse) in prepared {
                     let (comic_id, fingerprint_collision) = upsert_location(
@@ -686,7 +902,6 @@ impl CatalogStore {
                     }
                     resolve_effective_metadata(&tx, &comic_id)?;
                 }
-                refresh_fts_batch(&tx, &affected)?;
                 for comic_id in &affected {
                     tx.execute(
                         "UPDATE comics SET offline = CASE WHEN EXISTS (SELECT 1 FROM comic_locations l WHERE l.comic_id = comics.id AND l.online = 1) THEN 0 ELSE 1 END WHERE id = ?1",
@@ -695,13 +910,18 @@ impl CatalogStore {
                     .map_err(|error| error.to_string())?;
                 }
                 if is_last {
-                    retire_unseen_sources(&tx, &source_ids, &current_locations)?;
+                    affected.extend(retire_unseen_sources(
+                        &tx,
+                        &source_ids,
+                        &current_locations,
+                    )?);
                     tx.execute(
                         "UPDATE comics SET offline = CASE WHEN EXISTS (SELECT 1 FROM comic_locations l WHERE l.comic_id = comics.id AND l.online = 1) THEN 0 ELSE 1 END",
                         [],
                     )
                     .map_err(|error| error.to_string())?;
                 }
+                refresh_fts_batch(&tx, &affected)?;
                 // A cancellation observed here drops the transaction and leaves the
                 // already committed batches plus previously unconfirmed books intact.
                 ensure_sync_current(&is_current)?;
@@ -711,6 +931,9 @@ impl CatalogStore {
             affected_total.extend(affected_batch);
             done += batch.len();
             progress(done, total);
+            if reader_priority() == ReaderPriority::Active {
+                std::thread::sleep(Duration::from_millis(50));
+            }
         }
 
         // Empty scans have no current source to retire. Keep existing catalog rows
@@ -872,6 +1095,7 @@ impl CatalogStore {
             after_actual_path: after_actual_path.map(str::to_owned),
             expected_fingerprint: location.fingerprint.clone(),
             status: "pending".into(),
+            undo_pending: false,
         };
         self.with_connection(|connection| {
             connection.execute(
@@ -892,7 +1116,9 @@ impl CatalogStore {
         online: bool,
     ) -> Result<(), String> {
         self.with_connection(|connection| {
-            let tx = connection.transaction().map_err(|error| error.to_string())?;
+            let tx = connection
+                .transaction_with_behavior(TransactionBehavior::Immediate)
+                .map_err(|error| error.to_string())?;
             let record = load_file_operation(&tx, operation_id, false)?;
             if record.status != "pending" { return Err("檔案操作狀態已改變".into()); }
             tx.execute(
@@ -988,21 +1214,57 @@ impl CatalogStore {
         self.with_connection(|connection| load_file_operation(connection, token, true))
     }
 
+    /// 記錄 undo 意圖後才允許呼叫端改動檔案系統，讓啟動復原能辨認方向。
+    pub fn begin_file_operation_undo(&self, operation_id: &str) -> Result<(), String> {
+        self.with_connection(|connection| {
+            let changed = connection
+                .execute(
+                    "UPDATE file_operations SET status='pending',error_message='undo_pending' WHERE id=?1 AND status='succeeded'",
+                    [operation_id],
+                )
+                .map_err(|error| error.to_string())?;
+            if changed != 1 {
+                return Err("此檔案操作目前不可撤銷".into());
+            }
+            Ok(())
+        })
+    }
+
+    /// 檔案系統步驟失敗且未發生時，保留原有 undo 能力供使用者重試。
+    pub fn cancel_file_operation_undo(&self, operation_id: &str) -> Result<(), String> {
+        self.with_connection(|connection| {
+            let changed = connection
+                .execute(
+                    "UPDATE file_operations SET status='succeeded',error_message=NULL WHERE id=?1 AND status='pending' AND error_message='undo_pending'",
+                    [operation_id],
+                )
+                .map_err(|error| error.to_string())?;
+            if changed != 1 {
+                return Err("檔案還原紀錄已改變，需人工確認".into());
+            }
+            Ok(())
+        })
+    }
+
     pub fn complete_file_operation_undo(
         &self,
         operation_id: &str,
         runtime_id: Option<&str>,
     ) -> Result<(), String> {
         self.with_connection(|connection| {
-            let tx = connection.transaction().map_err(|error| error.to_string())?;
+            let tx = connection
+                .transaction_with_behavior(TransactionBehavior::Immediate)
+                .map_err(|error| error.to_string())?;
             let record = load_file_operation(&tx, operation_id, false)?;
-            if record.status != "succeeded" { return Err("此檔案操作目前不可撤銷".into()); }
+            if record.status != "pending" || !record.undo_pending {
+                return Err("檔案還原紀錄未處於可完成的狀態".into());
+            }
             let changed = tx.execute(
                 "UPDATE comic_locations SET runtime_id=COALESCE(?2,runtime_id),relative_path=?3,actual_path=?4,online=1,last_seen_at=CURRENT_TIMESTAMP WHERE id=?1 AND relative_path=COALESCE(?5,relative_path)",
                 params![record.location_id, runtime_id, record.before_relative_path, record.before_actual_path, record.after_relative_path],
             ).map_err(|error| error.to_string())?;
             if changed != 1 { return Err("漫畫位置在操作後又被修改，已停止撤銷以避免覆寫".into()); }
-            tx.execute("UPDATE file_operations SET status='undone',undone_at=CURRENT_TIMESTAMP WHERE id=?1 AND status='succeeded'", [operation_id]).map_err(|error| error.to_string())?;
+            tx.execute("UPDATE file_operations SET status='undone',error_message=NULL,undone_at=CURRENT_TIMESTAMP WHERE id=?1 AND status='pending' AND error_message='undo_pending'", [operation_id]).map_err(|error| error.to_string())?;
             tx.execute("UPDATE comics SET offline=0 WHERE id=?1", [&record.comic_id]).map_err(|error| error.to_string())?;
             refresh_fts(&tx, &record.comic_id)?;
             tx.commit().map_err(|error| error.to_string())
@@ -1011,10 +1273,10 @@ impl CatalogStore {
 
     pub fn reconcile_file_operations(&self) -> Result<FileReconcileResult, String> {
         let pending = self.with_connection(|connection| {
-            let mut statement = connection.prepare("SELECT id,undo_token,comic_id,location_id,action,source_id,before_relative_path,before_actual_path,after_relative_path,after_actual_path,expected_fingerprint,status FROM file_operations WHERE status IN ('pending','needs_reconcile') ORDER BY created_at").map_err(|error| error.to_string())?;
+            let mut statement = connection.prepare("SELECT id,undo_token,comic_id,location_id,action,source_id,before_relative_path,before_actual_path,after_relative_path,after_actual_path,expected_fingerprint,status,COALESCE(error_message='undo_pending',0) FROM file_operations WHERE status IN ('pending','needs_reconcile') ORDER BY created_at").map_err(|error| error.to_string())?;
             let rows = statement.query_map([], |row| Ok(FileOperationRecord {
                 id: row.get(0)?, undo_token: row.get(1)?, comic_id: row.get(2)?, location_id: row.get(3)?, action: row.get(4)?, source_id: row.get(5)?,
-                before_relative_path: row.get(6)?, before_actual_path: row.get(7)?, after_relative_path: row.get(8)?, after_actual_path: row.get(9)?, expected_fingerprint: row.get(10)?, status: row.get(11)?,
+                before_relative_path: row.get(6)?, before_actual_path: row.get(7)?, after_relative_path: row.get(8)?, after_actual_path: row.get(9)?, expected_fingerprint: row.get(10)?, status: row.get(11)?, undo_pending: row.get(12)?,
             })).map_err(|error| error.to_string())?.collect::<Result<Vec<_>, _>>().map_err(|error| error.to_string())?;
             Ok(rows)
         })?;
@@ -1034,16 +1296,68 @@ impl CatalogStore {
                 result.needs_attention += 1;
                 continue;
             }
+            if operation.undo_pending {
+                let before_exists = operation
+                    .before_actual_path
+                    .as_deref()
+                    .is_some_and(|path| Path::new(path).symlink_metadata().is_ok());
+                let after_exists = operation
+                    .after_actual_path
+                    .as_deref()
+                    .is_some_and(|path| Path::new(path).symlink_metadata().is_ok());
+                let before_matches = before_exists
+                    && local_operation_path_matches_fingerprint(
+                        &operation,
+                        &operation.before_relative_path,
+                    );
+                let after_matches = after_exists
+                    && operation
+                        .after_relative_path
+                        .as_deref()
+                        .is_some_and(|relative| {
+                            local_operation_path_matches_fingerprint(&operation, relative)
+                        });
+                match (before_matches, after_matches, before_exists, after_exists) {
+                    (true, false, true, false) => {
+                        let runtime_id = general_purpose::URL_SAFE_NO_PAD
+                            .encode(operation.before_relative_path.as_bytes());
+                        self.complete_file_operation_undo(&operation.id, Some(&runtime_id))?;
+                        result.completed += 1;
+                    }
+                    (false, true, false, true) => {
+                        self.cancel_file_operation_undo(&operation.id)?;
+                        result.rolled_back += 1;
+                    }
+                    _ => {
+                        self.with_connection(|connection| {
+                            connection.execute(
+                                "UPDATE file_operations SET status='needs_reconcile',error_message='還原中斷後來源／目的地或檔案版本不唯一，已停止自動處理' WHERE id=?1 AND status='pending' AND error_message='undo_pending'",
+                                [&operation.id],
+                            ).map_err(|error| error.to_string())?;
+                            Ok(())
+                        })?;
+                        result.needs_attention += 1;
+                    }
+                }
+                continue;
+            }
             let before_exists = operation
                 .before_actual_path
                 .as_deref()
-                .is_some_and(|path| Path::new(path).exists());
+                .is_some_and(|path| Path::new(path).symlink_metadata().is_ok());
             let after_exists = operation
                 .after_actual_path
                 .as_deref()
-                .is_some_and(|path| Path::new(path).exists());
-            match (before_exists, after_exists) {
-                (false, true) => {
+                .is_some_and(|path| Path::new(path).symlink_metadata().is_ok());
+            let after_matches = after_exists
+                && operation
+                    .after_relative_path
+                    .as_deref()
+                    .is_some_and(|relative| {
+                        local_operation_path_matches_fingerprint(&operation, relative)
+                    });
+            match (before_exists, after_exists, after_matches) {
+                (false, true, true) => {
                     let runtime_id = operation
                         .after_relative_path
                         .as_deref()
@@ -1055,13 +1369,13 @@ impl CatalogStore {
                     )?;
                     result.completed += 1;
                 }
-                (true, false) => {
+                (true, false, _) => {
                     self.fail_file_operation(&operation.id, "啟動復原：檔案系統操作尚未發生")?;
                     result.rolled_back += 1;
                 }
                 _ => {
                     self.with_connection(|connection| {
-                        connection.execute("UPDATE file_operations SET status='needs_reconcile',error_message='來源與目的地狀態不唯一，已停止自動處理' WHERE id=?1 AND status='pending'", [&operation.id]).map_err(|error| error.to_string())?;
+                        connection.execute("UPDATE file_operations SET status='needs_reconcile',error_message='來源／目的地狀態或目的地檔案版本不唯一，已停止自動處理' WHERE id=?1 AND status='pending'", [&operation.id]).map_err(|error| error.to_string())?;
                         Ok(())
                     })?;
                     result.needs_attention += 1;
@@ -1243,6 +1557,104 @@ impl CatalogStore {
         })
     }
 
+    /// Registers one already-authorized and successfully opened location.
+    /// Unlike a library sync, this never retires any other source or location.
+    pub(crate) fn register_opened_location(
+        &self,
+        comic: &ComicItem,
+        verified_pages: usize,
+        is_directory: bool,
+    ) -> Result<crate::state::Progress, String> {
+        if comic.id.trim().is_empty()
+            || comic.source_id.trim().is_empty()
+            || comic.relative_path.trim().is_empty()
+            || verified_pages == 0
+            || is_quarantine_relative_path(&comic.relative_path)
+        {
+            return Err("已驗證漫畫來源位置資訊不完整，拒絕登記目錄".into());
+        }
+        self.with_connection(|connection| {
+            let tx = connection
+                .transaction_with_behavior(TransactionBehavior::Immediate)
+                .map_err(|error| error.to_string())?;
+            let conflicting_identity: bool = tx
+                .query_row(
+                    "SELECT EXISTS(
+                       SELECT 1 FROM comic_locations
+                       WHERE source_id=?1 AND (runtime_id=?2 OR comic_id=?2)
+                         AND relative_path<>?3
+                     )",
+                    params![comic.source_id, comic.id, comic.relative_path],
+                    |row| row.get::<_, i64>(0).map(|value| value != 0),
+                )
+                .map_err(|error| error.to_string())?;
+            if conflicting_identity {
+                return Err("此來源的漫畫識別碼已綁定其他位置，拒絕登記".into());
+            }
+            let location_exists: bool = tx
+                .query_row(
+                    "SELECT EXISTS(SELECT 1 FROM comic_locations WHERE source_id=?1 AND relative_path=?2)",
+                    params![comic.source_id, comic.relative_path],
+                    |row| row.get::<_, i64>(0).map(|value| value != 0),
+                )
+                .map_err(|error| error.to_string())?;
+            #[cfg(test)]
+            tests::run_opened_location_read_hook();
+            let (comic_id, _) = upsert_location(&tx, comic, None, None, None)?;
+            if !location_exists {
+                let filename_source = metadata::filename_metadata_for_discovered_path(
+                    Path::new(&comic.relative_path),
+                    is_directory,
+                );
+                replace_imports(
+                    &tx,
+                    &comic_id,
+                    &comic.relative_path,
+                    vec![filename_source],
+                    vec![],
+                    vec![],
+                )?;
+                resolve_effective_metadata(&tx, &comic_id)?;
+                if comic.progress.total_pages == verified_pages
+                    && comic.progress.current_page < verified_pages
+                    && comic.progress.percent.is_finite()
+                    && (0.0..=100.0).contains(&comic.progress.percent)
+                {
+                    import_runtime_progress(&tx, &comic_id, &comic.progress)?;
+                }
+            }
+            tx.execute(
+                "UPDATE comics SET offline=0 WHERE id=?1",
+                [&comic_id],
+            )
+            .map_err(|error| error.to_string())?;
+            refresh_fts(&tx, &comic_id)?;
+            let progress = tx
+                .query_row(
+                    "SELECT current_page,total_pages,percent,updated_at FROM reading_progress WHERE comic_id=?1",
+                    [&comic_id],
+                    |row| {
+                        Ok(crate::state::Progress {
+                            current_page: row.get::<_, i64>(0)?.max(0) as usize,
+                            total_pages: row.get::<_, i64>(1)?.max(0) as usize,
+                            percent: row.get(2)?,
+                            updated_at: row.get(3)?,
+                        })
+                    },
+                )
+                .optional()
+                .map_err(|error| error.to_string())?
+                .unwrap_or(crate::state::Progress {
+                    current_page: 0,
+                    total_pages: 0,
+                    percent: 0.0,
+                    updated_at: None,
+                });
+            tx.commit().map_err(|error| error.to_string())?;
+            Ok(progress)
+        })
+    }
+
     pub fn get_runtime_items_by_ids(&self, ids: &[String]) -> Result<Vec<ComicItem>, String> {
         if ids.len() > RUNTIME_ITEM_IDS_MAX {
             return Err(format!(
@@ -1392,7 +1804,9 @@ impl CatalogStore {
             return Err("標籤名稱不可為空".into());
         }
         self.with_connection(|connection| {
-            let tx = connection.transaction().map_err(|error| error.to_string())?;
+            let tx = connection
+                .transaction_with_behavior(TransactionBehavior::Immediate)
+                .map_err(|error| error.to_string())?;
             let (namespace, old_display, old_normalized, disabled): (String, String, String, i64) = tx
                 .query_row(
                     "SELECT namespace,display_value,normalized_value,disabled FROM canonical_tags WHERE id=?1",
@@ -1446,7 +1860,9 @@ impl CatalogStore {
             return Err("來源與目標標籤不可相同".into());
         }
         self.with_connection(|connection| {
-            let tx = connection.transaction().map_err(|error| error.to_string())?;
+            let tx = connection
+                .transaction_with_behavior(TransactionBehavior::Immediate)
+                .map_err(|error| error.to_string())?;
             let final_target = final_canonical_tag_id(&tx, target_tag_id)?;
             if final_target == source_tag_id {
                 return Err("標籤合併會形成循環，已拒絕".into());
@@ -1496,7 +1912,7 @@ impl CatalogStore {
     ) -> Result<TagMutationResult, String> {
         self.with_connection(|connection| {
             let tx = connection
-                .transaction()
+                .transaction_with_behavior(TransactionBehavior::Immediate)
                 .map_err(|error| error.to_string())?;
             let before: i64 = tx
                 .query_row(
@@ -1539,9 +1955,13 @@ impl CatalogStore {
         progress: &crate::state::Progress,
     ) -> Result<(), String> {
         self.with_connection(|connection| {
-            let comic_id = resolve_progress_comic_id(connection, identifier, None)?
+            let tx = connection
+                .transaction_with_behavior(TransactionBehavior::Immediate)
+                .map_err(|error| error.to_string())?;
+            let comic_id = resolve_progress_comic_id(&tx, identifier, None)?
                 .ok_or_else(|| format!("找不到漫畫進度身分：{identifier}"))?;
-            save_progress_row(connection, &comic_id, progress)
+            persist_progress_write(&tx, &comic_id, progress, None)?;
+            tx.commit().map_err(|error| error.to_string())
         })
     }
 
@@ -1554,10 +1974,223 @@ impl CatalogStore {
         source_id: &str,
         progress: &crate::state::Progress,
     ) -> Result<(), String> {
+        self.save_progress_for_source_with_intent(identifier, source_id, progress, None)
+    }
+
+    pub fn save_progress_for_source_with_intent(
+        &self,
+        identifier: &str,
+        source_id: &str,
+        progress: &crate::state::Progress,
+        intent_sequence: Option<u64>,
+    ) -> Result<(), String> {
         self.with_connection(|connection| {
-            let comic_id = resolve_progress_comic_id(connection, identifier, Some(source_id))?
+            let tx = connection
+                .transaction_with_behavior(TransactionBehavior::Immediate)
+                .map_err(|error| error.to_string())?;
+            let comic_id = resolve_progress_comic_id(&tx, identifier, Some(source_id))?
                 .ok_or_else(|| format!("找不到來源漫畫進度身分：{identifier} ({source_id})"))?;
-            save_progress_row(connection, &comic_id, progress)
+            persist_progress_write(&tx, &comic_id, progress, intent_sequence)?;
+            tx.commit().map_err(|error| error.to_string())
+        })
+    }
+
+    /// Saves progress only if runtime ID, source, and relative path still name
+    /// one exact catalog location in the same SQLite write transaction.
+    pub fn save_progress_for_source_location(
+        &self,
+        identifier: &str,
+        source_id: &str,
+        relative_path: &str,
+        progress: &crate::state::Progress,
+    ) -> Result<(), String> {
+        self.save_progress_for_source_location_with_intent(
+            identifier,
+            source_id,
+            relative_path,
+            progress,
+            None,
+        )
+    }
+
+    pub fn save_progress_for_source_location_with_intent(
+        &self,
+        identifier: &str,
+        source_id: &str,
+        relative_path: &str,
+        progress: &crate::state::Progress,
+        intent_sequence: Option<u64>,
+    ) -> Result<(), String> {
+        self.with_connection(|connection| {
+            let tx = connection
+                .transaction_with_behavior(TransactionBehavior::Immediate)
+                .map_err(|error| error.to_string())?;
+            let mut statement = tx
+                .prepare(
+                    "SELECT comic_id,relative_path FROM comic_locations
+                     WHERE source_id=?2 AND (runtime_id=?1 OR comic_id=?1)",
+                )
+                .map_err(|error| error.to_string())?;
+            let matches = statement
+                .query_map(params![identifier, source_id], |row| {
+                    Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
+                })
+                .map_err(|error| error.to_string())?
+                .collect::<Result<Vec<_>, _>>()
+                .map_err(|error| error.to_string())?;
+            drop(statement);
+            let comic_id = match matches.as_slice() {
+                [(comic_id, path)] if path == relative_path => comic_id,
+                [] => return Err("來源漫畫位置已變更，已拒絕寫入進度".into()),
+                [_] => return Err("來源漫畫位置已變更，已拒絕寫入進度".into()),
+                _ => return Err("來源漫畫位置不唯一，已拒絕寫入進度".into()),
+            };
+            persist_progress_write(&tx, comic_id, progress, intent_sequence)?;
+            tx.commit().map_err(|error| error.to_string())
+        })
+    }
+
+    /// Persist a native open proof together with the current progress baseline.
+    /// The source location must resolve uniquely at the time the proof is issued.
+    pub fn register_progress_recovery_proof(
+        &self,
+        proof: ProgressRecoveryProof<'_>,
+    ) -> Result<u64, String> {
+        if proof.token.is_empty() || proof.total_pages == 0 {
+            return Err("原生開書憑證格式不正確".into());
+        }
+        let persisted_revision = if proof.smb_content_hash.is_some() {
+            crate::state::SourceRevision {
+                len: proof.revision.len,
+                modified: None,
+                ctime: None,
+                file_id: None,
+            }
+        } else {
+            proof.revision.clone()
+        };
+        let revision_json =
+            serde_json::to_string(&persisted_revision).map_err(|error| error.to_string())?;
+        self.with_connection(|connection| {
+            let tx = connection.transaction_with_behavior(TransactionBehavior::Immediate).map_err(|error| error.to_string())?;
+            let comic_id = exact_progress_comic_id(&tx, proof.identifier, proof.source_id, proof.relative_path)?;
+            let (page,total,updated): (i64,i64,Option<String>) = tx.query_row(
+                "SELECT current_page,total_pages,updated_at FROM reading_progress WHERE comic_id=?1",
+                [&comic_id], |row| Ok((row.get(0)?,row.get(1)?,row.get(2)?))
+            ).optional().map_err(|error| error.to_string())?.unwrap_or((0,0,None));
+            let fence: i64 = tx.query_row("SELECT intent_sequence FROM progress_intent_fences WHERE comic_id=?1", [&comic_id], |row| row.get(0)).optional().map_err(|error| error.to_string())?.unwrap_or(0);
+            tx.execute(
+                "DELETE FROM progress_recovery_proofs WHERE comic_id=?1 AND source_id=?2 AND relative_path=?3",
+                params![comic_id, proof.source_id, proof.relative_path],
+            ).map_err(|error| error.to_string())?;
+            tx.execute("INSERT OR REPLACE INTO progress_recovery_proofs(token,comic_id,source_id,relative_path,total_pages,revision_json,smb_content_hash,baseline_page,baseline_total,baseline_updated_at,intent_sequence)
+                        VALUES(?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11)",
+                params![proof.token,comic_id,proof.source_id,proof.relative_path,proof.total_pages as i64,revision_json,proof.smb_content_hash.map(|hash| hash.to_vec()),page,total,updated,fence])
+                .map_err(|error| error.to_string())?;
+            tx.execute("DELETE FROM progress_recovery_proofs WHERE token IN (SELECT token FROM progress_recovery_proofs ORDER BY created_at DESC,rowid DESC LIMIT -1 OFFSET 64)", []).map_err(|error| error.to_string())?;
+            tx.commit().map_err(|error| error.to_string())?;
+            Ok(fence as u64)
+        })
+    }
+
+    pub fn progress_intent_floor(
+        &self,
+        identifier: &str,
+        source_id: &str,
+        relative_path: &str,
+    ) -> Result<u64, String> {
+        self.with_connection(|connection| {
+            let comic_id =
+                exact_progress_comic_id(connection, identifier, source_id, relative_path)?;
+            let fence: Option<i64> = connection
+                .query_row(
+                    "SELECT intent_sequence FROM progress_intent_fences WHERE comic_id=?1",
+                    [&comic_id],
+                    |row| row.get(0),
+                )
+                .optional()
+                .map_err(|error| error.to_string())?;
+            Ok(fence.unwrap_or(0).max(0) as u64)
+        })
+    }
+
+    pub fn progress_for_source_location(
+        &self,
+        identifier: &str,
+        source_id: &str,
+        relative_path: &str,
+    ) -> Result<Option<crate::state::Progress>, String> {
+        self.with_connection(|connection| {
+            let comic_id = exact_progress_comic_id(connection, identifier, source_id, relative_path)?;
+            connection.query_row("SELECT current_page,total_pages,percent,updated_at FROM reading_progress WHERE comic_id=?1", [&comic_id], |row| {
+                Ok(crate::state::Progress { current_page: row.get::<_,i64>(0)?.max(0) as usize, total_pages: row.get::<_,i64>(1)?.max(0) as usize, percent: row.get(2)?, updated_at: row.get(3)? })
+            }).optional().map_err(|error| error.to_string())
+        })
+    }
+
+    pub fn load_progress_recovery_evidence(
+        &self,
+        identifier: &str,
+        source_id: &str,
+        relative_path: &str,
+        token: &str,
+    ) -> Result<Option<crate::state::ProgressRecoveryEvidence>, String> {
+        self.with_connection(|connection| {
+            let comic_id = exact_progress_comic_id(connection, identifier, source_id, relative_path)?;
+            let proof: Option<(i64,String,Option<Vec<u8>>,i64)> = connection.query_row(
+                "SELECT total_pages,revision_json,smb_content_hash,intent_sequence FROM progress_recovery_proofs WHERE token=?1 AND comic_id=?2 AND source_id=?3 AND relative_path=?4",
+                params![token,comic_id,source_id,relative_path],
+                |row| Ok((row.get(0)?,row.get(1)?,row.get(2)?,row.get(3)?))
+            ).optional().map_err(|error| error.to_string())?;
+            let Some((pages,revision_json,hash,intent_sequence)) = proof else { return Ok(None); };
+            let revision: crate::state::SourceRevision = serde_json::from_str(&revision_json).map_err(|error| error.to_string())?;
+            let smb_content_hash = hash.map(|bytes| {
+                let mut digest = [0u8;32];
+                if bytes.len() == 32 { digest.copy_from_slice(&bytes); }
+                digest
+            });
+            Ok(Some(crate::state::ProgressRecoveryEvidence {
+                source_id: source_id.to_owned(), relative_path: relative_path.to_owned(), total_pages: pages.max(0) as usize,
+                generation: intent_sequence.max(0) as u64, revision: Some(revision), smb_content_hash, token: token.to_owned(),
+            }))
+        })
+    }
+
+    pub fn recover_progress_for_source_location(
+        &self,
+        request: ProgressRecoveryCommit<'_>,
+    ) -> Result<(), String> {
+        validate_intent_sequence(request.intent_sequence)?;
+        self.with_connection(|connection| {
+            let tx = connection.transaction_with_behavior(TransactionBehavior::Immediate).map_err(|error| error.to_string())?;
+            let comic_id = exact_progress_comic_id(&tx, request.identifier, request.source_id, request.relative_path)?;
+            let proof: Option<PersistedProgressRecoveryProof> = tx.query_row(
+                "SELECT comic_id,source_id,relative_path,total_pages,revision_json,smb_content_hash,baseline_page,baseline_total,baseline_updated_at,intent_sequence FROM progress_recovery_proofs WHERE token=?1",
+                [request.token], |row| Ok(PersistedProgressRecoveryProof {
+                    comic_id: row.get(0)?, source_id: row.get(1)?, relative_path: row.get(2)?,
+                    total_pages: row.get(3)?, revision_json: row.get(4)?, smb_content_hash: row.get(5)?,
+                    baseline_page: row.get(6)?, baseline_total: row.get(7)?, baseline_updated_at: row.get(8)?,
+                    intent_sequence: row.get(9)?,
+                })
+            ).optional().map_err(|error| error.to_string())?;
+            let Some(proof) = proof else { return Err("原生開書憑證不存在，已保留待復原紀錄".into()); };
+            let observed_hash = request.smb_content_hash.map(|hash| hash.to_vec());
+            let persisted_revision = if request.smb_content_hash.is_some() { crate::state::SourceRevision { len: request.revision.len, modified: None, ctime: None, file_id: None } } else { request.revision.clone() };
+            if proof.comic_id != comic_id || proof.source_id != request.source_id || proof.relative_path != request.relative_path || proof.total_pages != request.total_pages as i64 || proof.revision_json != serde_json::to_string(&persisted_revision).map_err(|error| error.to_string())? || proof.smb_content_hash != observed_hash {
+                return Err("原生開書憑證與來源版本不符，已保留待復原紀錄".into());
+            }
+            let (page,total,updated): (i64,i64,Option<String>) = tx.query_row("SELECT current_page,total_pages,updated_at FROM reading_progress WHERE comic_id=?1", [&comic_id], |row| Ok((row.get(0)?,row.get(1)?,row.get(2)?))).optional().map_err(|error| error.to_string())?.unwrap_or((0,0,None));
+            let canonical_fence: i64 = tx.query_row("SELECT intent_sequence FROM progress_intent_fences WHERE comic_id=?1", [&comic_id], |row| row.get(0)).optional().map_err(|error| error.to_string())?.unwrap_or(0);
+            let same_saved = page == request.current_page as i64 && total == request.total_pages as i64 && canonical_fence == request.intent_sequence as i64;
+            if !(same_saved && proof.intent_sequence == canonical_fence) {
+                if (page,total,updated) != (proof.baseline_page,proof.baseline_total,proof.baseline_updated_at) || proof.intent_sequence != canonical_fence || request.intent_sequence as i64 <= canonical_fence {
+                    return Err("目錄進度或閱讀意圖已改變，已保留待復原紀錄".into());
+                }
+                save_progress_row(&tx, &comic_id, request.progress)?;
+                tx.execute("INSERT INTO progress_intent_fences(comic_id,intent_sequence) VALUES(?1,?2) ON CONFLICT(comic_id) DO UPDATE SET intent_sequence=excluded.intent_sequence", params![comic_id,request.intent_sequence as i64]).map_err(|error| error.to_string())?;
+                update_recovery_proof_baselines(&tx, &comic_id, request.progress, request.intent_sequence)?;
+            }
+            tx.commit().map_err(|error| error.to_string())
         })
     }
 
@@ -1658,7 +2291,7 @@ impl CatalogStore {
     pub fn undo_batch(&self, token: &str) -> Result<usize, String> {
         self.with_connection(|connection| {
             let tx = connection
-                .transaction()
+                .transaction_with_behavior(TransactionBehavior::Immediate)
                 .map_err(|error| error.to_string())?;
             let snapshot: String = tx
                 .query_row(
@@ -1721,7 +2354,9 @@ impl CatalogStore {
             return Err("資料夾規則缺少來源".into());
         }
         self.with_connection(|connection| {
-            let tx = connection.transaction().map_err(|error| error.to_string())?;
+            let tx = connection
+                .transaction()
+                .map_err(|error| error.to_string())?;
             let tag_id = ensure_tag_tx(&tx, &rule.tag)?;
             let folder_path = normalize_path(&rule.folder_path);
             tx.execute(
@@ -1750,7 +2385,7 @@ impl CatalogStore {
         }
         let targets = self.with_connection(|connection| {
             let tx = connection
-                .transaction_with_behavior(TransactionBehavior::Immediate)
+                .transaction()
                 .map_err(|error| error.to_string())?;
             let mut targets = Vec::new();
             if request.comic_ids.is_empty() && request.targets.is_empty() {
@@ -1961,6 +2596,20 @@ impl CatalogStore {
     pub fn mark_source_offline(&self, source_id: &str) -> Result<usize, String> {
         self.with_connection(|connection| {
             let tx = connection.transaction().map_err(|error| error.to_string())?;
+            let comic_ids = {
+                let mut statement = tx
+                    .prepare(
+                        "SELECT DISTINCT comic_id FROM comic_locations
+                         WHERE source_id=?1 AND online=1",
+                    )
+                    .map_err(|error| error.to_string())?;
+                let rows = statement
+                    .query_map([source_id], |row| row.get::<_, String>(0))
+                    .map_err(|error| error.to_string())?;
+                rows.collect::<Result<BTreeSet<_>, _>>()
+                    .map_err(|error| error.to_string())?
+            };
+            let primary_before = primary_location_keys_for_comics(&tx, &comic_ids)?;
             let changed = tx.execute(
                 "UPDATE comic_locations SET online=0 WHERE source_id=?1 AND online=1",
                 [source_id],
@@ -1969,6 +2618,13 @@ impl CatalogStore {
                 "UPDATE comics SET offline = CASE WHEN EXISTS (SELECT 1 FROM comic_locations l WHERE l.comic_id=comics.id AND l.online=1) THEN 0 ELSE 1 END",
                 [],
             ).map_err(|error| error.to_string())?;
+            let primary_after = primary_location_keys_for_comics(&tx, &comic_ids)?;
+            let changed_primary = primary_before
+                .iter()
+                .filter(|(comic_id, old_key)| primary_after.get(*comic_id) != Some(*old_key))
+                .map(|(comic_id, _)| comic_id.clone())
+                .collect::<BTreeSet<_>>();
+            refresh_fts_batch(&tx, &changed_primary)?;
             tx.commit().map_err(|error| error.to_string())?;
             Ok(changed)
         })
@@ -2004,7 +2660,7 @@ impl CatalogStore {
     pub fn forget_source_locations(&self, source_id: &str) -> Result<usize, String> {
         self.with_connection(|connection| {
             let tx = connection
-                .transaction()
+                .transaction_with_behavior(TransactionBehavior::Immediate)
                 .map_err(|error| error.to_string())?;
             let comic_ids = {
                 let mut statement = tx
@@ -2331,6 +2987,29 @@ const MIGRATION_10: &str = "
           ON catalog_short_ngrams(gram, comic_id);
 ";
 
+const MIGRATION_11: &str = "
+        CREATE TABLE IF NOT EXISTS progress_intent_fences(
+          comic_id TEXT PRIMARY KEY REFERENCES comics(id) ON DELETE CASCADE,
+          intent_sequence INTEGER NOT NULL CHECK(intent_sequence >= 0)
+        );
+        CREATE TABLE IF NOT EXISTS progress_recovery_proofs(
+          token TEXT PRIMARY KEY,
+          comic_id TEXT NOT NULL REFERENCES comics(id) ON DELETE CASCADE,
+          source_id TEXT NOT NULL,
+          relative_path TEXT NOT NULL,
+          total_pages INTEGER NOT NULL CHECK(total_pages > 0),
+          revision_json TEXT NOT NULL,
+          smb_content_hash BLOB,
+          baseline_page INTEGER NOT NULL,
+          baseline_total INTEGER NOT NULL,
+          baseline_updated_at TEXT,
+          intent_sequence INTEGER NOT NULL DEFAULT 0,
+          created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+        );
+        CREATE INDEX IF NOT EXISTS idx_progress_recovery_proofs_comic
+          ON progress_recovery_proofs(comic_id, created_at DESC);
+";
+
 const MIGRATIONS: &[(i64, &str)] = &[
     (1, MIGRATION_1),
     (2, MIGRATION_2),
@@ -2342,7 +3021,93 @@ const MIGRATIONS: &[(i64, &str)] = &[
     (8, MIGRATION_8),
     (9, MIGRATION_9),
     (10, MIGRATION_10),
+    (11, MIGRATION_11),
 ];
+
+fn local_operation_path_matches_fingerprint(
+    operation: &FileOperationRecord,
+    relative_path: &str,
+) -> bool {
+    let Some(expected) = operation.expected_fingerprint.as_deref() else {
+        return false;
+    };
+    let Some(root_encoded) = operation.source_id.strip_prefix("local:") else {
+        return false;
+    };
+    let Ok(root_bytes) = general_purpose::URL_SAFE_NO_PAD.decode(root_encoded) else {
+        return false;
+    };
+    let Ok(configured_root) = String::from_utf8(root_bytes) else {
+        return false;
+    };
+    let configured_root = PathBuf::from(configured_root);
+    let Some(root_name) = configured_root.file_name() else {
+        return false;
+    };
+    let root_parent = configured_root
+        .parent()
+        .filter(|parent| !parent.as_os_str().is_empty())
+        .unwrap_or_else(|| Path::new("."));
+    let Ok(root_parent) = root_parent.canonicalize() else {
+        return false;
+    };
+    let relative = Path::new(relative_path);
+    if relative.as_os_str().is_empty()
+        || relative.is_absolute()
+        || relative
+            .components()
+            .any(|part| !matches!(part, Component::Normal(_)))
+    {
+        return false;
+    }
+
+    let Ok(parent_dir) =
+        cap_std::fs::Dir::open_ambient_dir(root_parent, cap_std::ambient_authority())
+    else {
+        return false;
+    };
+    let Ok(root_dir) = parent_dir.open_dir_nofollow(root_name) else {
+        return false;
+    };
+    let mut current = root_dir;
+    let Some(name) = relative.file_name() else {
+        return false;
+    };
+    let name = Path::new(name);
+    if let Some(parent) = relative.parent() {
+        for component in parent.components() {
+            let Component::Normal(component) = component else {
+                return false;
+            };
+            let Ok(next) = current.open_dir_nofollow(component) else {
+                return false;
+            };
+            current = next;
+        }
+    }
+    let Ok(metadata) = current.symlink_metadata(name) else {
+        return false;
+    };
+    if metadata.file_type().is_symlink() {
+        return false;
+    }
+
+    if expected.starts_with("location-revision-v1:") {
+        let Some((size, mtime)) = file_signature_from_dir(&current, name) else {
+            return false;
+        };
+        location_revision(
+            &operation.source_id,
+            &operation.before_relative_path,
+            size,
+            mtime.as_deref(),
+        )
+        .is_some_and(|fingerprint| fingerprint == expected)
+    } else {
+        sampled_fingerprint_from_dir(&current, name)
+            .is_ok_and(|fingerprint| fingerprint == expected)
+    }
+}
 
 fn load_file_operation(
     connection: &Connection,
@@ -2355,12 +3120,12 @@ fn load_file_operation(
         "id=?1"
     };
     connection.query_row(
-        &format!("SELECT id,undo_token,comic_id,location_id,action,source_id,before_relative_path,before_actual_path,after_relative_path,after_actual_path,expected_fingerprint,status FROM file_operations WHERE {predicate}"),
+        &format!("SELECT id,undo_token,comic_id,location_id,action,source_id,before_relative_path,before_actual_path,after_relative_path,after_actual_path,expected_fingerprint,status,COALESCE(error_message='undo_pending',0) FROM file_operations WHERE {predicate}"),
         [identifier],
         |row| Ok(FileOperationRecord {
             id: row.get(0)?, undo_token: row.get(1)?, comic_id: row.get(2)?, location_id: row.get(3)?,
             action: row.get(4)?, source_id: row.get(5)?, before_relative_path: row.get(6)?, before_actual_path: row.get(7)?,
-            after_relative_path: row.get(8)?, after_actual_path: row.get(9)?, expected_fingerprint: row.get(10)?, status: row.get(11)?,
+                after_relative_path: row.get(8)?, after_actual_path: row.get(9)?, expected_fingerprint: row.get(10)?, status: row.get(11)?, undo_pending: row.get(12)?,
         }),
     ).map_err(|error| error.to_string())
 }
@@ -2761,7 +3526,49 @@ fn retire_unseen_sources(
     tx: &Transaction<'_>,
     source_ids: &BTreeSet<String>,
     current_locations: &[(String, String)],
-) -> Result<(), String> {
+) -> Result<BTreeSet<String>, String> {
+    let mut candidate_comics = BTreeSet::new();
+    if source_ids
+        .iter()
+        .any(|source_id| source_id == "local" || source_id.starts_with("local:"))
+    {
+        {
+            let mut statement = tx
+                .prepare(
+                    "SELECT DISTINCT comic_id FROM comic_locations
+                     WHERE online=1 AND (source_id='local' OR source_id LIKE 'local:%')",
+                )
+                .map_err(|error| error.to_string())?;
+            let rows = statement
+                .query_map([], |row| row.get::<_, String>(0))
+                .map_err(|error| error.to_string())?;
+            candidate_comics.extend(
+                rows.collect::<Result<Vec<_>, _>>()
+                    .map_err(|error| error.to_string())?,
+            );
+        }
+    }
+    for source_id in source_ids
+        .iter()
+        .filter(|source_id| *source_id != "local" && !source_id.starts_with("local:"))
+    {
+        {
+            let mut statement = tx
+                .prepare(
+                    "SELECT DISTINCT comic_id FROM comic_locations
+                     WHERE source_id=?1 AND online=1",
+                )
+                .map_err(|error| error.to_string())?;
+            let rows = statement
+                .query_map([source_id], |row| row.get::<_, String>(0))
+                .map_err(|error| error.to_string())?;
+            candidate_comics.extend(
+                rows.collect::<Result<Vec<_>, _>>()
+                    .map_err(|error| error.to_string())?,
+            );
+        }
+    }
+    let primary_before = primary_location_keys_for_comics(tx, &candidate_comics)?;
     if source_ids
         .iter()
         .any(|source_id| source_id == "local" || source_id.starts_with("local:"))
@@ -2792,7 +3599,12 @@ fn retire_unseen_sources(
         )
         .map_err(|error| error.to_string())?;
     }
-    Ok(())
+    let primary_after = primary_location_keys_for_comics(tx, &candidate_comics)?;
+    Ok(primary_before
+        .iter()
+        .filter(|(comic_id, old_key)| primary_after.get(*comic_id) != Some(*old_key))
+        .map(|(comic_id, _)| comic_id.clone())
+        .collect())
 }
 
 /// A metadata revision token is deliberately not called a content hash: it only
@@ -2889,6 +3701,8 @@ fn upsert_location(
         )
         .optional()
         .map_err(|error| error.to_string())?;
+    #[cfg(test)]
+    tests::run_sync_batch_read_hook();
     let mut fingerprint_collision = false;
     let comic_id = if let Some(id) = existing {
         id
@@ -3102,12 +3916,13 @@ fn resolve_effective_metadata(tx: &Transaction<'_>, comic_id: &str) -> Result<()
 
 fn build_search_view(connection: &Connection, comic_id: &str) -> Result<ComicMetadataView, String> {
     let visible_location = visible_location_predicate("l");
+    let primary_order = primary_location_order("l");
     let mut view = connection.query_row(
         &format!(
             "SELECT c.id,c.title,c.series,c.volume,c.number,c.summary,c.language,c.reading_direction,c.published_at,c.offline,
               l.runtime_id,l.relative_path,l.source_id FROM comics c
               LEFT JOIN comic_locations l ON l.comic_id=c.id AND {visible_location}
-              WHERE c.id=?1 ORDER BY l.online DESC,l.last_seen_at DESC LIMIT 1"
+              WHERE c.id=?1 ORDER BY {primary_order} LIMIT 1"
         ),
         [comic_id],
         |row| Ok(ComicMetadataView {
@@ -3126,13 +3941,14 @@ fn build_search_views_batch(
     connection: &Connection,
 ) -> Result<HashMap<String, ComicMetadataView>, String> {
     let mut views = HashMap::new();
+    let primary_order = primary_location_order("l");
     let mut statement = connection
         .prepare(&format!(
             "WITH ranked_locations AS (
                SELECT l.*,
                       ROW_NUMBER() OVER (
                         PARTITION BY l.comic_id
-                        ORDER BY l.online DESC,l.last_seen_at DESC
+                        ORDER BY {primary_order}
                       ) AS location_rank
                FROM comic_locations l
                WHERE {visible_location}
@@ -3647,7 +4463,20 @@ fn effective_tags(connection: &Connection, comic_id: &str) -> Result<Vec<ScopedT
         let (id, tag) = row.map_err(|error| error.to_string())?;
         raw_tags.insert(id, tag);
     }
-    let location: Option<(String, String)> = connection.query_row("SELECT source_id,relative_path FROM comic_locations WHERE comic_id=?1 ORDER BY online DESC,last_seen_at DESC LIMIT 1", [comic_id], |row| Ok((row.get(0)?, row.get(1)?))).optional().map_err(|error| error.to_string())?;
+    let visible_location = visible_location_predicate("l");
+    let primary_order = primary_location_order("l");
+    let location: Option<(String, String)> = connection
+        .query_row(
+            &format!(
+                "SELECT l.source_id,l.relative_path FROM comic_locations l
+             WHERE l.comic_id=?1 AND {visible_location}
+             ORDER BY {primary_order} LIMIT 1"
+            ),
+            [comic_id],
+            |row| Ok((row.get(0)?, row.get(1)?)),
+        )
+        .optional()
+        .map_err(|error| error.to_string())?;
     if let Some((source_id, path)) = location {
         let normalized = normalize_path(&path);
         let mut statement = connection.prepare("SELECT t.id,t.namespace,t.value,r.folder_path FROM folder_tag_rules r JOIN tags t ON t.id=r.tag_id WHERE r.source_id=?1 AND r.enabled=1").map_err(|error| error.to_string())?;
@@ -3763,7 +4592,7 @@ fn refresh_fts_batch(connection: &Connection, comic_ids: &BTreeSet<String>) -> R
         .prepare("INSERT OR IGNORE INTO catalog_short_ngrams(comic_id,gram) VALUES(?1,?2)")
         .map_err(|error| error.to_string())?;
     for comic_id in comic_ids {
-        let view = build_view(connection, comic_id)?;
+        let view = build_search_view(connection, comic_id)?;
         insert_fts_view(&mut insert, comic_id, &view)?;
         insert_short_ngrams(&mut short_insert, comic_id, &view)?;
     }
@@ -3771,7 +4600,7 @@ fn refresh_fts_batch(connection: &Connection, comic_ids: &BTreeSet<String>) -> R
 }
 
 fn refresh_fts_inner(connection: &Connection, comic_id: &str) -> Result<(), String> {
-    let view = build_view(connection, comic_id)?;
+    let view = build_search_view(connection, comic_id)?;
     connection
         .execute("DELETE FROM catalog_fts WHERE comic_id=?1", [comic_id])
         .map_err(|error| error.to_string())?;
@@ -3904,7 +4733,7 @@ fn rebuild_catalog_fts(connection: &mut Connection) -> Result<(), String> {
         .prepare("INSERT OR IGNORE INTO catalog_short_ngrams(comic_id,gram) VALUES(?1,?2)")
         .map_err(|error| error.to_string())?;
     for comic_id in comic_ids {
-        let view = build_view(&tx, &comic_id)?;
+        let view = build_search_view(&tx, &comic_id)?;
         insert_fts_view(&mut insert, &comic_id, &view)?;
         insert_short_ngrams(&mut short_insert, &comic_id, &view)?;
     }
@@ -4654,6 +5483,81 @@ fn resolve_progress_comic_id(
         [comic_id] => Ok(Some(comic_id.clone())),
         _ => Err(format!("漫畫進度識別碼不唯一，已拒絕寫入：{identifier}")),
     }
+}
+
+fn exact_progress_comic_id(
+    connection: &Connection,
+    identifier: &str,
+    source_id: &str,
+    relative_path: &str,
+) -> Result<String, String> {
+    let mut statement = connection
+        .prepare(
+            "SELECT comic_id FROM comic_locations WHERE source_id=?2 AND relative_path=?3
+         AND (runtime_id=?1 OR comic_id=?1)",
+        )
+        .map_err(|error| error.to_string())?;
+    let matches = statement
+        .query_map(params![identifier, source_id, relative_path], |row| {
+            row.get::<_, String>(0)
+        })
+        .map_err(|error| error.to_string())?
+        .collect::<Result<Vec<_>, _>>()
+        .map_err(|error| error.to_string())?;
+    match matches.as_slice() {
+        [comic_id] => Ok(comic_id.clone()),
+        [] => Err("來源漫畫位置已變更，已拒絕寫入進度".into()),
+        _ => Err("來源漫畫位置不唯一，已拒絕寫入進度".into()),
+    }
+}
+
+fn update_recovery_proof_baselines(
+    connection: &Connection,
+    comic_id: &str,
+    progress: &crate::state::Progress,
+    intent_sequence: u64,
+) -> Result<(), String> {
+    validate_intent_sequence(intent_sequence)?;
+    connection.execute(
+        "UPDATE progress_recovery_proofs SET baseline_page=?2,baseline_total=?3,baseline_updated_at=?4,intent_sequence=?5 WHERE comic_id=?1",
+        params![comic_id,progress.current_page as i64,progress.total_pages as i64,progress.updated_at,intent_sequence as i64],
+    ).map_err(|error| error.to_string())?;
+    Ok(())
+}
+
+fn persist_progress_write(
+    tx: &Transaction<'_>,
+    comic_id: &str,
+    progress: &crate::state::Progress,
+    intent_sequence: Option<u64>,
+) -> Result<(), String> {
+    if let Some(intent) = intent_sequence {
+        validate_intent_sequence(intent)?;
+        let fence: Option<i64> = tx
+            .query_row(
+                "SELECT intent_sequence FROM progress_intent_fences WHERE comic_id=?1",
+                [comic_id],
+                |row| row.get(0),
+            )
+            .optional()
+            .map_err(|error| error.to_string())?;
+        if fence.is_some_and(|value| intent as i64 <= value) {
+            return Err("閱讀意圖已過期，已保留較新的進度".into());
+        }
+        save_progress_row(tx, comic_id, progress)?;
+        tx.execute("INSERT INTO progress_intent_fences(comic_id,intent_sequence) VALUES(?1,?2) ON CONFLICT(comic_id) DO UPDATE SET intent_sequence=excluded.intent_sequence", params![comic_id,intent as i64]).map_err(|error| error.to_string())?;
+        update_recovery_proof_baselines(tx, comic_id, progress, intent)?;
+    } else {
+        // Legacy writes have no comparable intent order. Discard proofs in the
+        // same transaction so a later recovery cannot mistake this write for its baseline.
+        tx.execute(
+            "DELETE FROM progress_recovery_proofs WHERE comic_id=?1",
+            [comic_id],
+        )
+        .map_err(|error| error.to_string())?;
+        save_progress_row(tx, comic_id, progress)?;
+    }
+    Ok(())
 }
 
 fn save_progress_row(
@@ -5623,6 +6527,217 @@ mod tests {
     };
     use std::time::Instant;
 
+    thread_local! {
+        static OPENED_LOCATION_READ_HOOK: std::cell::RefCell<Option<Box<dyn FnOnce()>>> =
+            std::cell::RefCell::new(None);
+        static SYNC_BATCH_READ_HOOK: std::cell::RefCell<Option<Box<dyn FnOnce()>>> =
+            std::cell::RefCell::new(None);
+    }
+
+    pub(super) fn run_opened_location_read_hook() {
+        let hook = OPENED_LOCATION_READ_HOOK.with(|slot| slot.borrow_mut().take());
+        if let Some(hook) = hook {
+            hook();
+        }
+    }
+
+    pub(super) fn run_sync_batch_read_hook() {
+        let hook = SYNC_BATCH_READ_HOOK.with(|slot| slot.borrow_mut().take());
+        if let Some(hook) = hook {
+            hook();
+        }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn local_operation_fingerprint_does_not_follow_root_symlink() {
+        use std::os::unix::fs::symlink;
+
+        let base =
+            std::env::temp_dir().join(format!("comic_catalog_root_link_{}", uuid::Uuid::new_v4()));
+        let target = base.join("target");
+        std::fs::create_dir_all(&target).unwrap();
+        std::fs::write(target.join("book.cbz"), b"test archive bytes").unwrap();
+        let root_link = base.join("library-link");
+        symlink(&target, &root_link).unwrap();
+        let expected = sampled_fingerprint(&target.join("book.cbz")).unwrap();
+        let operation = |root: &Path| FileOperationRecord {
+            id: "operation".into(),
+            undo_token: "undo".into(),
+            comic_id: "comic".into(),
+            location_id: 1,
+            action: "rename".into(),
+            source_id: crate::scanner::local_source_id(root),
+            before_relative_path: "book.cbz".into(),
+            before_actual_path: Some(root.join("book.cbz").to_string_lossy().into_owned()),
+            after_relative_path: None,
+            after_actual_path: None,
+            expected_fingerprint: Some(expected.clone()),
+            status: "pending".into(),
+            undo_pending: false,
+        };
+
+        assert!(local_operation_path_matches_fingerprint(
+            &operation(&target),
+            "book.cbz"
+        ));
+        assert!(!local_operation_path_matches_fingerprint(
+            &operation(&root_link),
+            "book.cbz"
+        ));
+
+        let _ = std::fs::remove_dir_all(base);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn pending_reconcile_rejects_replacement_bytes_and_retargeted_root_symlink() {
+        use std::os::unix::fs::symlink;
+
+        let store = store("pending_reconcile_exact_file");
+        let base =
+            std::env::temp_dir().join(format!("comic_pending_reconcile_{}", uuid::Uuid::new_v4()));
+        let valid_root = base.join("valid-root");
+        let replacement_root = base.join("replacement-root");
+        let root_a = base.join("root-a");
+        let root_b = base.join("root-b");
+        std::fs::create_dir_all(&valid_root).unwrap();
+        std::fs::create_dir_all(&replacement_root).unwrap();
+        std::fs::create_dir_all(&root_a).unwrap();
+        std::fs::create_dir_all(&root_b).unwrap();
+        let root_link = base.join("library-link");
+        symlink(&root_a, &root_link).unwrap();
+
+        let valid_before = valid_root.join("book-valid.cbz");
+        let replacement_before = replacement_root.join("book-replaced.cbz");
+        let linked_before = root_a.join("book-linked.cbz");
+        let expected_bytes = b"original archive bytes";
+        std::fs::write(&valid_before, b"valid original archive bytes").unwrap();
+        std::fs::write(&replacement_before, expected_bytes).unwrap();
+        std::fs::write(&linked_before, b"linked original archive bytes").unwrap();
+
+        let make_item = |runtime_id: &str, relative: &str, root: &Path, path: &Path| {
+            let mut item = comic(runtime_id, relative);
+            item.source_id = crate::scanner::local_source_id(root);
+            item.source_path = Some(path.to_string_lossy().into_owned());
+            item
+        };
+        store
+            .sync_library(&[
+                make_item(
+                    "pending-valid",
+                    "book-valid.cbz",
+                    &valid_root,
+                    &valid_before,
+                ),
+                make_item(
+                    "pending-replaced",
+                    "book-replaced.cbz",
+                    &replacement_root,
+                    &replacement_before,
+                ),
+                make_item(
+                    "pending-linked",
+                    "book-linked.cbz",
+                    &root_link,
+                    &root_link.join("book-linked.cbz"),
+                ),
+            ])
+            .unwrap();
+
+        let begin_pending =
+            |runtime_id: &str, destination_relative: &str, destination_path: &Path| {
+                let location = store.get_location(runtime_id).unwrap();
+                let destination_path = destination_path.to_string_lossy().into_owned();
+                let operation = store
+                    .begin_file_operation(
+                        &location,
+                        "rename",
+                        Some(destination_relative),
+                        Some(&destination_path),
+                    )
+                    .unwrap();
+                store
+                    .set_file_operation_expected_fingerprint(
+                        &operation.id,
+                        location.fingerprint.as_deref().unwrap(),
+                    )
+                    .unwrap();
+                operation
+            };
+
+        let valid_after = valid_root.join("moved-valid.cbz");
+        let valid_operation = begin_pending("pending-valid", "moved-valid.cbz", &valid_after);
+        std::fs::rename(&valid_before, &valid_after).unwrap();
+
+        let replacement_after = replacement_root.join("moved-replaced.cbz");
+        let replacement_operation =
+            begin_pending("pending-replaced", "moved-replaced.cbz", &replacement_after);
+        std::fs::rename(&replacement_before, &replacement_after).unwrap();
+        // Same length but different bytes ensures the sampled fingerprint
+        // rejects the replacement itself, rather than only a size mismatch.
+        let replacement_bytes = b"replaced archive bytes";
+        assert_eq!(expected_bytes.len(), replacement_bytes.len());
+        std::fs::write(&replacement_after, replacement_bytes).unwrap();
+
+        let linked_after = root_a.join("moved-linked.cbz");
+        let linked_operation = begin_pending(
+            "pending-linked",
+            "moved-linked.cbz",
+            &root_link.join("moved-linked.cbz"),
+        );
+        std::fs::rename(&linked_before, &linked_after).unwrap();
+        std::fs::write(
+            root_b.join("moved-linked.cbz"),
+            b"linked original archive bytes",
+        )
+        .unwrap();
+        std::fs::remove_file(&root_link).unwrap();
+        symlink(&root_b, &root_link).unwrap();
+
+        let reconciled = store.reconcile_file_operations().unwrap();
+        assert_eq!(reconciled.completed, 1);
+        assert_eq!(reconciled.needs_attention, 2);
+        assert_eq!(
+            store
+                .file_operation_for_undo(&valid_operation.undo_token)
+                .unwrap()
+                .status,
+            "succeeded"
+        );
+        for operation in [&replacement_operation, &linked_operation] {
+            assert_eq!(
+                store
+                    .file_operation_for_undo(&operation.undo_token)
+                    .unwrap()
+                    .status,
+                "needs_reconcile"
+            );
+        }
+        assert_eq!(
+            store
+                .get_location(&valid_operation.comic_id)
+                .unwrap()
+                .relative_path,
+            "moved-valid.cbz"
+        );
+        assert_eq!(
+            store
+                .get_location("pending-replaced")
+                .unwrap()
+                .relative_path,
+            "book-replaced.cbz"
+        );
+        assert_eq!(
+            store.get_location("pending-linked").unwrap().relative_path,
+            "book-linked.cbz"
+        );
+        assert_eq!(std::fs::read(replacement_after).unwrap(), replacement_bytes);
+
+        drop(store);
+        let _ = std::fs::remove_dir_all(base);
+    }
+
     #[test]
     fn location_kind_preserves_loose_image_runtime_types() {
         assert_eq!(
@@ -5680,6 +6795,160 @@ mod tests {
             source_id: "local".into(),
             source_path: None,
         }
+    }
+
+    #[test]
+    fn reader_background_sync_finishes_and_restores_shelf_batches() {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        let store = store("reader_background_sync");
+        let comics = (0..80)
+            .map(|index| comic(&format!("reader-{index}"), &format!("book-{index}.cbz")))
+            .collect::<Vec<_>>();
+        let stage = AtomicUsize::new(0);
+        let mut batches = Vec::new();
+        store
+            .sync_library_with_reader_priority(
+                &comics,
+                true,
+                |done, _| {
+                    batches.push(done);
+                    if done == 8 {
+                        stage.store(1, Ordering::Release);
+                    }
+                },
+                || true,
+                || {
+                    if stage.load(Ordering::Acquire) == 0 {
+                        ReaderPriority::Active
+                    } else {
+                        ReaderPriority::Idle
+                    }
+                },
+            )
+            .unwrap();
+        assert_eq!(batches, vec![0, 8, 72, 80]);
+        assert!(store.get_runtime_item("reader-79").unwrap().is_some());
+        let mut done = Vec::new();
+        store
+            .sync_library_with_reader_priority(
+                &comics[..17],
+                true,
+                |count, _| done.push(count),
+                || true,
+                || ReaderPriority::Active,
+            )
+            .unwrap();
+        assert_eq!(done, vec![0, 8, 16, 17]);
+    }
+
+    #[test]
+    fn active_metadata_gate_limits_shared_workers_to_one() {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+
+        let gate = MetadataIoGate::new();
+        let active = Arc::new(AtomicUsize::new(0));
+        let maximum = Arc::new(AtomicUsize::new(0));
+        let workers = (0..8)
+            .map(|_| {
+                let gate = Arc::clone(&gate);
+                let active = Arc::clone(&active);
+                let maximum = Arc::clone(&maximum);
+                std::thread::spawn(move || {
+                    let _permit =
+                        acquire_active_metadata_permit(&gate, &|| true, &|| ReaderPriority::Active)
+                            .unwrap()
+                            .unwrap();
+                    let current = active.fetch_add(1, Ordering::SeqCst) + 1;
+                    maximum.fetch_max(current, Ordering::SeqCst);
+                    std::thread::sleep(Duration::from_millis(5));
+                    active.fetch_sub(1, Ordering::SeqCst);
+                })
+            })
+            .collect::<Vec<_>>();
+        for worker in workers {
+            worker.join().unwrap();
+        }
+        assert_eq!(maximum.load(Ordering::SeqCst), 1);
+    }
+
+    #[test]
+    fn real_metadata_sync_handles_idle_active_idle_transition() {
+        use std::sync::atomic::{AtomicBool, AtomicU8, AtomicUsize, Ordering};
+
+        let store = store("real_metadata_reader_transition");
+        let root =
+            std::env::temp_dir().join(format!("comic_reader_metadata_{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&root).unwrap();
+        let mut comics = Vec::new();
+        for index in 0..160 {
+            let folder = root.join(format!("book-{index}"));
+            std::fs::create_dir_all(&folder).unwrap();
+            // Distinct image names make these distinct folder fingerprints;
+            // metadata-only empty image folders intentionally deduplicate.
+            std::fs::write(folder.join(format!("page-{index}.png")), [index as u8]).unwrap();
+            std::fs::write(
+                folder.join("ComicInfo.xml"),
+                format!(
+                    "<ComicInfo><Title>實檔 metadata {index}</Title><Summary>{}</Summary></ComicInfo>",
+                    "內容".repeat(4096)
+                ),
+            )
+            .unwrap();
+            let mut item = comic(&format!("real-reader-{index}"), &format!("book-{index}"));
+            item.r#type = "folder".into();
+            item.source_path = Some(folder.to_string_lossy().into_owned());
+            comics.push(item);
+        }
+
+        let stage = Arc::new(AtomicU8::new(0));
+        let active_seen = Arc::new(AtomicBool::new(false));
+        let priority_calls = AtomicUsize::new(0);
+        let progress_stage = Arc::clone(&stage);
+        let priority_stage = Arc::clone(&stage);
+        let priority_seen = Arc::clone(&active_seen);
+        let imported = store
+            .sync_library_with_reader_priority(
+                &comics,
+                false,
+                move |done, _| {
+                    // An Active 8-item batch has completed; return to Idle so
+                    // the remaining real-file metadata work can use the pool.
+                    if done >= 72 {
+                        progress_stage.store(2, Ordering::Release);
+                    }
+                },
+                || true,
+                || {
+                    let call = priority_calls.fetch_add(1, Ordering::SeqCst);
+                    let state_at_entry = priority_stage.load(Ordering::Acquire);
+                    // The initial wait sees Idle; the batch-size decision also
+                    // sees Idle, then flips priority before any of that 64-item
+                    // batch begins metadata work.
+                    if call == 1 {
+                        priority_stage.store(1, Ordering::Release);
+                    }
+                    match state_at_entry {
+                        1 => {
+                            priority_seen.store(true, Ordering::Release);
+                            ReaderPriority::Active
+                        }
+                        _ => ReaderPriority::Idle,
+                    }
+                },
+            )
+            .unwrap();
+
+        assert_eq!(imported, 160);
+        assert!(active_seen.load(Ordering::Acquire));
+        assert_eq!(
+            store.get_metadata("real-reader-0").unwrap().title,
+            "實檔 metadata 0"
+        );
+        assert_eq!(
+            store.get_metadata("real-reader-159").unwrap().title,
+            "實檔 metadata 159"
+        );
+        let _ = std::fs::remove_dir_all(root);
     }
 
     fn discovery_comics(count: usize, source_id: &str) -> Vec<ComicItem> {
@@ -6028,6 +7297,84 @@ mod tests {
     }
 
     #[test]
+    fn location_scoped_progress_rejects_path_replaced_after_catalog_lookup() {
+        let store = store("location_scoped_progress");
+        store
+            .with_connection(|connection| {
+                connection
+                    .execute_batch(
+                        "INSERT INTO comics(id,title) VALUES('comic-a','A');
+                         INSERT INTO comic_locations(comic_id,runtime_id,source_id,relative_path,kind)
+                         VALUES('comic-a','runtime-a','local:root','old/book.cbz','archive');",
+                    )
+                    .map_err(|error| error.to_string())
+            })
+            .unwrap();
+        let progress = crate::state::Progress {
+            current_page: 2,
+            total_pages: 8,
+            percent: 37.5,
+            updated_at: Some("2026-11-08T00:00:00Z".into()),
+        };
+        store
+            .with_connection(|connection| {
+                connection
+                    .execute(
+                        "UPDATE comic_locations SET relative_path='new/book.cbz' WHERE runtime_id='runtime-a'",
+                        [],
+                    )
+                    .map_err(|error| error.to_string())?;
+                Ok(())
+            })
+            .unwrap();
+
+        assert!(
+            store
+                .save_progress_for_source_location(
+                    "runtime-a",
+                    "local:root",
+                    "old/book.cbz",
+                    &progress,
+                )
+                .is_err()
+        );
+        store
+            .with_connection(|connection| {
+                connection
+                    .execute_batch(
+                        "INSERT INTO comics(id,title) VALUES('comic-b','B');
+                         INSERT INTO comic_locations(comic_id,runtime_id,source_id,relative_path,kind)
+                         VALUES('comic-b','runtime-a','local:root','another/book.cbz','archive');",
+                    )
+                    .map_err(|error| error.to_string())
+            })
+            .unwrap();
+        assert!(store
+            .save_progress_for_source_location("runtime-a", "local:root", "new/book.cbz", &progress)
+            .is_err());
+        store
+            .with_connection(|connection| {
+                connection
+                    .execute("DELETE FROM comic_locations WHERE comic_id='comic-b'", [])
+                    .map_err(|error| error.to_string())?;
+                connection
+                    .execute("DELETE FROM comics WHERE id='comic-b'", [])
+                    .map_err(|error| error.to_string())?;
+                Ok(())
+            })
+            .unwrap();
+        store
+            .save_progress_for_source_location("runtime-a", "local:root", "new/book.cbz", &progress)
+            .unwrap();
+        let saved = store
+            .get_runtime_item_for_source("runtime-a", "local:root")
+            .unwrap()
+            .unwrap();
+        assert_eq!(saved.relative_path, "new/book.cbz");
+        assert_eq!(saved.progress.current_page, 2);
+    }
+
+    #[test]
     fn legacy_progress_rejects_ambiguous_runtime_id() {
         let store = store("legacy_progress_ambiguous");
         store
@@ -6091,7 +7438,7 @@ mod tests {
             .unwrap();
         let callbacks = callbacks.lock().unwrap();
         assert_eq!(callbacks.last().copied(), Some((5620, 5620, 5620)));
-        assert_eq!(callbacks.len(), 1 + (5620usize + 63) / 64);
+        assert_eq!(callbacks.len(), 1 + 5620usize.div_ceil(64));
         println!(
             "discovery-only 5620 elapsed: {:?}, callbacks: {}",
             started.elapsed(),
@@ -6128,12 +7475,12 @@ mod tests {
                     .map_err(|error| error.to_string())?
                     .collect::<Result<Vec<_>, _>>()
                     .map_err(|error| error.to_string())?;
-                assert_eq!(versions, vec![1, 2, 3, 4, 5, 6, 7, 8, 9, 10]);
+                assert_eq!(versions, vec![1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11]);
                 assert_eq!(
                     connection
                         .pragma_query_value(None, "user_version", |row| row.get::<_, i64>(0))
                         .map_err(|error| error.to_string())?,
-                    10
+                    11
                 );
                 let fts_sql: String = connection
                     .query_row(
@@ -6209,6 +7556,95 @@ mod tests {
 
         let reopened = CatalogStore::new(store.path().to_path_buf()).unwrap();
         assert_eq!(reopened.search(query).unwrap().total, 1);
+    }
+
+    #[test]
+    fn mark_source_offline_refreshes_fts_when_primary_location_changes() {
+        let store = store("mark_source_offline_refreshes_primary_fts");
+        store
+            .with_connection(|connection| {
+                let tx = connection.transaction().map_err(|error| error.to_string())?;
+                tx.execute(
+                    "INSERT INTO comics(id,title) VALUES('shared-work','Shared Work')",
+                    [],
+                )
+                .map_err(|error| error.to_string())?;
+                tx.execute(
+                    "INSERT INTO comic_locations(comic_id,runtime_id,source_id,relative_path,kind,online,last_seen_at)
+                     VALUES('shared-work','alpha-runtime','external:alpha','library/AlphaPrimaryMarker.cbz','archive',1,'2026-01-01 00:00:00'),
+                           ('shared-work','beta-runtime','external:beta','library/BetaPrimaryMarker.cbz','archive',1,'2026-02-01 00:00:00')",
+                    [],
+                )
+                .map_err(|error| error.to_string())?;
+                refresh_fts(&tx, "shared-work")?;
+                tx.commit().map_err(|error| error.to_string())
+            })
+            .unwrap();
+
+        let query_total = |query: &str| {
+            store
+                .search(CatalogQuery {
+                    query: query.into(),
+                    offset: 0,
+                    limit: 20,
+                })
+                .unwrap()
+                .total
+        };
+        assert_eq!(query_total("BetaPrimaryMarker"), 1);
+        assert_eq!(query_total("AlphaPrimaryMarker"), 0);
+
+        store.mark_source_offline("external:beta").unwrap();
+
+        assert_eq!(query_total("AlphaPrimaryMarker"), 1);
+        assert_eq!(query_total("BetaPrimaryMarker"), 0);
+    }
+
+    #[test]
+    fn final_sync_retirement_refreshes_unseen_primary_location_fts() {
+        let store = store("sync_retirement_refreshes_primary_fts");
+        store
+            .with_connection(|connection| {
+                let tx = connection.transaction().map_err(|error| error.to_string())?;
+                tx.execute(
+                    "INSERT INTO comics(id,title) VALUES('shared-work','Shared Work'),('current-work','Current Work')",
+                    [],
+                )
+                .map_err(|error| error.to_string())?;
+                tx.execute(
+                    "INSERT INTO comic_locations(comic_id,runtime_id,source_id,relative_path,kind,online,last_seen_at)
+                     VALUES('shared-work','alpha-old','external:alpha','library/AlphaUnseenMarker.cbz','archive',1,'2026-02-01 00:00:00'),
+                           ('shared-work','beta-kept','external:beta','library/BetaKeptMarker.cbz','archive',1,'2026-01-01 00:00:00')",
+                    [],
+                )
+                .map_err(|error| error.to_string())?;
+                refresh_fts(&tx, "shared-work")?;
+                tx.commit().map_err(|error| error.to_string())
+            })
+            .unwrap();
+
+        let query_total = |query: &str| {
+            store
+                .search(CatalogQuery {
+                    query: query.into(),
+                    offset: 0,
+                    limit: 20,
+                })
+                .unwrap()
+                .total
+        };
+        assert_eq!(query_total("AlphaUnseenMarker"), 1);
+        assert_eq!(query_total("BetaKeptMarker"), 0);
+
+        let mut current = comic("current-runtime", "library/current.cbz");
+        current.source_id = "external:alpha".into();
+        current.source_path = None;
+        store
+            .sync_library_with_progress(&[current], true, |_, _| {}, || true)
+            .unwrap();
+
+        assert_eq!(query_total("AlphaUnseenMarker"), 0);
+        assert_eq!(query_total("BetaKeptMarker"), 1);
     }
 
     #[test]
@@ -6491,6 +7927,117 @@ mod tests {
     }
 
     #[test]
+    fn search_primary_location_excludes_quarantine_and_breaks_timestamp_ties() {
+        let store = store("search_primary_location_visibility_and_tie");
+        let mut visible = comic("visible-runtime", "library/visible.cbz");
+        visible.source_id = "local:visible".into();
+        let mut tied = comic("tied-runtime", "Z/tied.cbz");
+        tied.source_id = "external:z".into();
+        store.sync_library(&[visible, tied]).unwrap();
+        let visible_id = store.get_metadata("visible-runtime").unwrap().comic_id;
+        let tied_id = store.get_metadata("tied-runtime").unwrap().comic_id;
+
+        store
+            .with_connection(|connection| {
+                let tx = connection.transaction().map_err(|error| error.to_string())?;
+                tx.execute(
+                    "INSERT INTO comic_locations(comic_id,runtime_id,source_id,relative_path,kind,online,last_seen_at)
+                     VALUES(?1,'hidden-runtime','local:hidden','.gai-quarantine/hidden/book.cbz','archive',1,'2026-11-01T00:00:00Z')",
+                    [&visible_id],
+                )
+                .map_err(|error| error.to_string())?;
+                let hidden_tag = ensure_tag_tx(
+                    &tx,
+                    &ScopedTag {
+                        namespace: "general".into(),
+                        value: "HiddenFolderMarker".into(),
+                    },
+                )?;
+                tx.execute(
+                    "INSERT INTO folder_tag_rules(source_id,folder_path,tag_id,enabled) VALUES('local:hidden','.gai-quarantine/hidden',?1,1)",
+                    [hidden_tag],
+                )
+                .map_err(|error| error.to_string())?;
+
+                let tied_seen_at: String = tx
+                    .query_row(
+                        "SELECT last_seen_at FROM comic_locations WHERE comic_id=?1 AND source_id='external:z'",
+                        [&tied_id],
+                        |row| row.get(0),
+                    )
+                    .map_err(|error| error.to_string())?;
+                tx.execute(
+                    "INSERT INTO comic_locations(comic_id,runtime_id,source_id,relative_path,kind,online,last_seen_at)
+                     VALUES(?1,'alpha-runtime','external:a','A/tied.cbz','archive',1,?2)",
+                    params![&tied_id, tied_seen_at],
+                )
+                .map_err(|error| error.to_string())?;
+                let alpha_tag = ensure_tag_tx(
+                    &tx,
+                    &ScopedTag {
+                        namespace: "general".into(),
+                        value: "AlphaTieMarker".into(),
+                    },
+                )?;
+                let zeta_tag = ensure_tag_tx(
+                    &tx,
+                    &ScopedTag {
+                        namespace: "general".into(),
+                        value: "ZetaTieMarker".into(),
+                    },
+                )?;
+                tx.execute(
+                    "INSERT INTO folder_tag_rules(source_id,folder_path,tag_id,enabled) VALUES('external:a','A',?1,1),('external:z','Z',?2,1)",
+                    params![alpha_tag, zeta_tag],
+                )
+                .map_err(|error| error.to_string())?;
+                refresh_fts(&tx, &visible_id)?;
+                refresh_fts(&tx, &tied_id)?;
+                tx.commit().map_err(|error| error.to_string())
+            })
+            .unwrap();
+
+        let query_total = |query: &str| {
+            store
+                .search(CatalogQuery {
+                    query: query.into(),
+                    offset: 0,
+                    limit: 20,
+                })
+                .unwrap()
+                .total
+        };
+        assert_eq!(query_total("HiddenFolderMarker"), 0);
+        assert_eq!(store.get_metadata(&visible_id).unwrap().tags.len(), 0);
+        store.mark_source_offline("local:hidden").unwrap();
+        assert_eq!(query_total("HiddenFolderMarker"), 0);
+
+        let tied_view = store.get_metadata(&tied_id).unwrap();
+        assert_eq!(tied_view.source_id.as_deref(), Some("external:a"));
+        assert_eq!(
+            tied_view.tags,
+            vec![ScopedTag {
+                namespace: "general".into(),
+                value: "AlphaTieMarker".into(),
+            }]
+        );
+        assert_eq!(query_total("AlphaTieMarker"), 1);
+        assert_eq!(query_total("ZetaTieMarker"), 0);
+        store.mark_source_offline("external:a").unwrap();
+        let switched_view = store.get_metadata(&tied_id).unwrap();
+        assert_eq!(switched_view.source_id.as_deref(), Some("external:z"));
+        assert_eq!(
+            switched_view.tags,
+            vec![ScopedTag {
+                namespace: "general".into(),
+                value: "ZetaTieMarker".into(),
+            }]
+        );
+        assert_eq!(query_total("AlphaTieMarker"), 0);
+        assert_eq!(query_total("ZetaTieMarker"), 1);
+    }
+
+    #[test]
     fn runtime_items_by_ids_preserves_requested_order_and_deduplicates() {
         let store = store("runtime_items_batch");
         store
@@ -6743,7 +8290,7 @@ mod tests {
                     .query_row("SELECT COUNT(*) FROM schema_migrations", [], |row| row.get(0))
                     .map_err(|error| error.to_string())?;
                 assert_eq!(tag_aliases_exists, 1);
-                assert_eq!(versions, 10);
+                assert_eq!(versions, 11);
                 Ok(())
             })
             .unwrap();
@@ -8830,6 +10377,78 @@ mod tests {
     }
 
     #[test]
+    fn opened_location_registration_prevents_scan_commit_between_read_and_write() {
+        let store = store("opened_location_busy_scan_writer");
+        let retained = comic("retained-runtime", "retained.zip");
+        store.sync_library(&[retained]).unwrap();
+        let retained_title = store.get_metadata("retained-runtime").unwrap().title;
+        let attempted = Arc::new(AtomicBool::new(false));
+        let observed = Arc::clone(&attempted);
+        let database_path = store.path().to_owned();
+        OPENED_LOCATION_READ_HOOK.with(|slot| {
+            *slot.borrow_mut() = Some(Box::new(move || {
+                // Run exactly after registration reads its snapshot, before
+                // its first write. A deferred transaction permits this other
+                // connection's commit and then cannot upgrade its snapshot.
+                let scan_connection = Connection::open(database_path).unwrap();
+                scan_connection.busy_timeout(Duration::ZERO).unwrap();
+                let result =
+                    scan_connection.execute("UPDATE comics SET title='concurrent scan title'", []);
+                assert!(matches!(result,
+                    Err(rusqlite::Error::SqliteFailure(error, _))
+                        if error.code == rusqlite::ErrorCode::DatabaseBusy));
+                observed.store(true, Ordering::SeqCst);
+            }));
+        });
+        let result = store.register_opened_location(&comic("new-runtime", "new.zip"), 2, false);
+        OPENED_LOCATION_READ_HOOK.with(|slot| slot.borrow_mut().take());
+        result.unwrap();
+        assert!(attempted.load(Ordering::SeqCst));
+        assert_eq!(
+            store.get_metadata("retained-runtime").unwrap().title,
+            retained_title
+        );
+        assert!(store.get_location("new-runtime").unwrap().online);
+    }
+
+    #[test]
+    fn sync_batch_keeps_its_snapshot_against_a_competing_connection() {
+        let store = store("sync_batch_immediate_race");
+        store
+            .sync_library(&[comic("old-runtime", "same.cbz")])
+            .unwrap();
+        let database_path = store.path().to_owned();
+        let attempted = Arc::new(AtomicBool::new(false));
+        let observed = Arc::clone(&attempted);
+        SYNC_BATCH_READ_HOOK.with(|slot| {
+            *slot.borrow_mut() = Some(Box::new(move || {
+                // upsert_location has completed its initial SELECT. With a
+                // deferred batch this write can commit, after which the
+                // batch's snapshot upgrade fails with SQLITE_BUSY_SNAPSHOT.
+                let concurrent = Connection::open(database_path).unwrap();
+                concurrent.busy_timeout(Duration::ZERO).unwrap();
+                let result = concurrent.execute(
+                    "UPDATE comics SET title='racing writer' WHERE id=(SELECT comic_id FROM comic_locations WHERE source_id='local' AND relative_path='same.cbz')",
+                    [],
+                );
+                assert!(matches!(result,
+                    Err(rusqlite::Error::SqliteFailure(error, _))
+                        if error.code == rusqlite::ErrorCode::DatabaseBusy));
+                observed.store(true, Ordering::SeqCst);
+            }));
+        });
+
+        let mut refreshed = comic("new-runtime", "same.cbz");
+        refreshed.title = "Refreshed title".into();
+        store.sync_library(&[refreshed]).unwrap();
+        SYNC_BATCH_READ_HOOK.with(|slot| slot.borrow_mut().take());
+        assert!(attempted.load(Ordering::SeqCst));
+        let location = store.get_location("new-runtime").unwrap();
+        assert!(location.online);
+        assert_eq!(location.relative_path, "same.cbz");
+    }
+
+    #[test]
     fn ai_candidates_wait_for_a_busy_scan_writer() {
         let store = store("ai_busy_scan_writer");
         store.sync_library(&[comic("runtime", "ai.zip")]).unwrap();
@@ -9257,5 +10876,255 @@ mod tests {
             .preview_exchange_json(&payload)
             .unwrap_err()
             .contains("必須是字串或 null"));
+    }
+
+    #[test]
+    fn persistent_progress_recovery_proof_survives_reopen_and_enforces_cas() {
+        let store = store("progress_recovery_cas");
+        let path = store.path().to_path_buf();
+        store
+            .sync_library(&[comic("proof-book", "book.cbz")])
+            .unwrap();
+        let revision = crate::state::SourceRevision {
+            len: 100,
+            modified: Some((10, 0)),
+            ctime: Some((10, 0)),
+            file_id: Some((1, 4)),
+        };
+        let progress = crate::state::Progress {
+            current_page: 3,
+            total_pages: 10,
+            percent: 30.0,
+            updated_at: Some("2026-11-08T00:00:00Z".into()),
+        };
+        let token = "native-proof-one";
+        store
+            .register_progress_recovery_proof(ProgressRecoveryProof {
+                identifier: "proof-book",
+                source_id: "local",
+                relative_path: "book.cbz",
+                token,
+                total_pages: 10,
+                revision: &revision,
+                smb_content_hash: None,
+            })
+            .unwrap();
+
+        // A fresh store models process restart; only the persisted native proof
+        // is available to validate and recover the source.
+        drop(store);
+        let reopened = CatalogStore::new(path.clone()).unwrap();
+        assert!(reopened
+            .load_progress_recovery_evidence("proof-book", "local", "book.cbz", token,)
+            .unwrap()
+            .is_some());
+        reopened
+            .recover_progress_for_source_location(ProgressRecoveryCommit {
+                identifier: "proof-book",
+                source_id: "local",
+                relative_path: "book.cbz",
+                token,
+                revision: &revision,
+                smb_content_hash: None,
+                total_pages: 10,
+                current_page: 3,
+                intent_sequence: 40,
+                progress: &progress,
+            })
+            .unwrap();
+        // A retry of the already committed intent/page is idempotent even if
+        // its fresh native timestamp differs from the persisted row.
+        let retry = crate::state::Progress {
+            updated_at: Some("later retry".into()),
+            ..progress.clone()
+        };
+        reopened
+            .recover_progress_for_source_location(ProgressRecoveryCommit {
+                identifier: "proof-book",
+                source_id: "local",
+                relative_path: "book.cbz",
+                token,
+                revision: &revision,
+                smb_content_hash: None,
+                total_pages: 10,
+                current_page: 3,
+                intent_sequence: 40,
+                progress: &retry,
+            })
+            .unwrap();
+        assert!(reopened
+            .recover_progress_for_source_location(ProgressRecoveryCommit {
+                identifier: "proof-book",
+                source_id: "local",
+                relative_path: "book.cbz",
+                token,
+                revision: &revision,
+                smb_content_hash: None,
+                total_pages: 10,
+                current_page: 4,
+                intent_sequence: 39,
+                progress: &retry,
+            },)
+            .is_err());
+
+        let next_token = "native-proof-two";
+        reopened
+            .register_progress_recovery_proof(ProgressRecoveryProof {
+                identifier: "proof-book",
+                source_id: "local",
+                relative_path: "book.cbz",
+                token: next_token,
+                total_pages: 10,
+                revision: &revision,
+                smb_content_hash: None,
+            })
+            .unwrap();
+        assert!(reopened
+            .load_progress_recovery_evidence("proof-book", "other-source", "book.cbz", next_token,)
+            .is_err());
+        assert!(reopened
+            .load_progress_recovery_evidence("proof-book", "local", "other.cbz", next_token,)
+            .is_err());
+        assert!(reopened
+            .load_progress_recovery_evidence("proof-book", "local", "book.cbz", "unknown-token",)
+            .unwrap()
+            .is_none());
+        let mut replaced_revision = revision.clone();
+        replaced_revision.file_id = Some((1, 5));
+        assert!(reopened
+            .recover_progress_for_source_location(ProgressRecoveryCommit {
+                identifier: "proof-book",
+                source_id: "local",
+                relative_path: "book.cbz",
+                token: next_token,
+                revision: &replaced_revision,
+                smb_content_hash: None,
+                total_pages: 10,
+                current_page: 5,
+                intent_sequence: 41,
+                progress: &retry,
+            },)
+            .is_err());
+
+        // Simulate a database writer that changed progress without going
+        // through the intent API; the proof's captured baseline must fail CAS.
+        reopened.with_connection(|connection| {
+            let changed = connection.execute(
+                "UPDATE reading_progress SET current_page=6,updated_at='external write' WHERE comic_id=(SELECT comic_id FROM progress_recovery_proofs WHERE token='native-proof-two')", [],
+            ).map_err(|error| error.to_string())?;
+            assert_eq!(changed, 1);
+            Ok(())
+        }).unwrap();
+        assert!(reopened
+            .recover_progress_for_source_location(ProgressRecoveryCommit {
+                identifier: "proof-book",
+                source_id: "local",
+                relative_path: "book.cbz",
+                token: next_token,
+                revision: &revision,
+                smb_content_hash: None,
+                total_pages: 10,
+                current_page: 5,
+                intent_sequence: 41,
+                progress: &retry,
+            },)
+            .is_err());
+        let _ = std::fs::remove_file(path);
+    }
+
+    #[test]
+    fn progress_recovery_intent_sequence_rejects_unsafe_values_without_changing_fence() {
+        let store = store("intent_safe_integer");
+        store.sync_library(&[comic("runtime", "book.cbz")]).unwrap();
+        let revision = crate::state::SourceRevision {
+            len: 100,
+            modified: Some((10, 0)),
+            ctime: Some((10, 0)),
+            file_id: Some((1, 4)),
+        };
+        let progress = crate::state::Progress {
+            current_page: 2,
+            total_pages: 10,
+            percent: 20.0,
+            updated_at: Some("before overflow".into()),
+        };
+        store
+            .save_progress_for_source_with_intent(
+                "runtime",
+                "local",
+                &progress,
+                Some(MAX_SAFE_INTENT_SEQUENCE),
+            )
+            .unwrap();
+        let before = store
+            .progress_for_source_location("runtime", "local", "book.cbz")
+            .unwrap()
+            .unwrap();
+        let unsafe_sequence = MAX_SAFE_INTENT_SEQUENCE + 1;
+        assert!(store
+            .save_progress_for_source_with_intent(
+                "runtime",
+                "local",
+                &crate::state::Progress {
+                    current_page: 8,
+                    updated_at: Some("must not commit".into()),
+                    ..progress.clone()
+                },
+                Some(unsafe_sequence),
+            )
+            .is_err());
+        assert_eq!(
+            store
+                .progress_intent_floor("runtime", "local", "book.cbz")
+                .unwrap(),
+            MAX_SAFE_INTENT_SEQUENCE
+        );
+        let after_unsafe_save = store
+            .progress_for_source_location("runtime", "local", "book.cbz")
+            .unwrap()
+            .unwrap();
+        assert_eq!(after_unsafe_save.current_page, before.current_page);
+        assert_eq!(after_unsafe_save.total_pages, before.total_pages);
+        assert_eq!(after_unsafe_save.updated_at, before.updated_at);
+
+        let token = "safe-boundary-proof";
+        store
+            .register_progress_recovery_proof(ProgressRecoveryProof {
+                identifier: "runtime",
+                source_id: "local",
+                relative_path: "book.cbz",
+                token,
+                total_pages: 10,
+                revision: &revision,
+                smb_content_hash: None,
+            })
+            .unwrap();
+        assert!(store
+            .recover_progress_for_source_location(ProgressRecoveryCommit {
+                identifier: "runtime",
+                source_id: "local",
+                relative_path: "book.cbz",
+                token,
+                revision: &revision,
+                smb_content_hash: None,
+                total_pages: 10,
+                current_page: 3,
+                intent_sequence: unsafe_sequence,
+                progress: &progress,
+            })
+            .is_err());
+        assert_eq!(
+            store
+                .progress_intent_floor("runtime", "local", "book.cbz")
+                .unwrap(),
+            MAX_SAFE_INTENT_SEQUENCE
+        );
+        let after_unsafe_recovery = store
+            .progress_for_source_location("runtime", "local", "book.cbz")
+            .unwrap()
+            .unwrap();
+        assert_eq!(after_unsafe_recovery.current_page, before.current_page);
+        assert_eq!(after_unsafe_recovery.total_pages, before.total_pages);
+        assert_eq!(after_unsafe_recovery.updated_at, before.updated_at);
     }
 }

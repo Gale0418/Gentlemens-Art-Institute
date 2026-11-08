@@ -16,8 +16,8 @@ Downloads 根目錄唯讀盤點共有 1,036 個支援圖片檔。前端維持每
 
 ## 交付
 
-- Mac App：`/Users/chiudavid/Desktop/紳士藝術研究所 Gentlemen's Art Institute.app`
-- Mac 回復備份：`/Users/chiudavid/Desktop/紳士藝術研究所 Gentlemen's Art Institute.previous-20260912-build16.app`
+- Mac App：`$HOME/Desktop/紳士藝術研究所 Gentlemen's Art Institute.app`
+- Mac 回復備份：`$HOME/Desktop/紳士藝術研究所 Gentlemen's Art Institute.previous-20260912-build16.app`
 - iPad development IPA：`output/release/2026-09-13-build17/GAI-1.0.0-build17-development.ipa`
 - IPA SHA-256：`1a76f65cadd20b94c7f3b43aaa939d70b1ef108e646ce9d8195ba427a096abf7`
 - IPA 解包回讀：`com.windsheep.gai`、`1.0.0 (17)`，strict codesign 驗證通過。

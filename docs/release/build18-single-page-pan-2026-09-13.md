@@ -20,8 +20,8 @@
 
 ## 交付
 
-- Mac App：`/Users/chiudavid/Desktop/紳士藝術研究所 Gentlemen's Art Institute.app`
-- Mac 回復備份：`/Users/chiudavid/Desktop/紳士藝術研究所 Gentlemen's Art Institute.previous-20260913-build17.app`
+- Mac App：`$HOME/Desktop/紳士藝術研究所 Gentlemen's Art Institute.app`
+- Mac 回復備份：`$HOME/Desktop/紳士藝術研究所 Gentlemen's Art Institute.previous-20260913-build17.app`
 - iPad development IPA：`output/release/2026-09-13-build18/GAI-1.0.0-build18-development.ipa`
 - IPA SHA-256：`6473a0911f4e27c9ca7810cab639e529b7071ac84cde48a3d3370ba8157e8b7f`
 - iPad：iPad Air（第 5 代）；已安裝並回讀 build 18，待解鎖後人工開啟。

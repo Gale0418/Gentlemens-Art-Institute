@@ -53,8 +53,8 @@ targets:
           - UIInterfaceOrientationLandscapeLeft
           - UIInterfaceOrientationLandscapeRight
         CFBundleLocalizations: [zh-Hant, en, ja]
-        CFBundleShortVersionString: 1.0.2
-        CFBundleVersion: "63"
+        CFBundleShortVersionString: 1.0.4
+        CFBundleVersion: "69"
         ITSAppUsesNonExemptEncryption: false
         NSCameraUsageDescription: "Take a photo to import it into your local comic library. Photos are stored on this device."
         NSPhotoLibraryUsageDescription: "Link your selected albums to browse photos and keep album contents up to date. Your photos will not be modified or deleted."

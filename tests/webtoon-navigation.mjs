@@ -505,7 +505,7 @@ async function flushMicrotasks() {
   assert.ok(sequences.every((sequence, index) => index === 0 || sequence > sequences[index - 1]), 'progress sequence is strict across comics in one app session');
 }
 
-// 單筆 native failure 不得讓 queue 卡死，後續頁碼仍會送出。
+// 尚未執行的舊快照讓位給新頁碼；native failure 仍須重試最新快照。
 {
   const runtime = createRuntimeHarness();
   runtime.context.console = { error() {} };
@@ -525,15 +525,14 @@ async function flushMicrotasks() {
   runtime.hooks.state.currentPageIndex = 1;
   const recovered = runtime.hooks.saveReadingProgress();
   // The real bounded retry waits on the injected clock. Flush the rejected
-  // native call first, advance its 250 ms retry, then let the queue continue
-  // to the newer snapshot; otherwise this fixture leaves a live retry timer.
+  // native call first and advance its 250 ms retry; otherwise this fixture
+  // leaves a live retry timer.
   await flushMicrotasks();
   runtime.clock.tick(250);
   await flushMicrotasks();
   await Promise.all([failed, recovered]);
-  assert.deepEqual(calls, [0, 0, 1], 'queue retries the failed snapshot before the newer page');
-  assert.equal(sequences[1], sequences[0], 'retry preserves the failed snapshot sequence');
-  assert.ok(sequences[2] > sequences[1], 'newer progress keeps a monotonic session sequence');
+  assert.deepEqual(calls, [1, 1], 'queue skips the superseded snapshot and retries the latest page');
+  assert.equal(sequences[1], sequences[0], 'retry preserves the latest snapshot sequence');
 }
 console.log('PASS: serialized reading progress preserves rapid and backward navigation order');
 

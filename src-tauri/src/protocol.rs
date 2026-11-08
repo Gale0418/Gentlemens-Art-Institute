@@ -1,6 +1,8 @@
 use crate::state::{self, AppState, ComicItem};
 use base64::{engine::general_purpose, Engine as _};
-use cap_fs_ext::DirExt;
+#[cfg(windows)]
+use cap_fs_ext::OpenOptionsMaybeDirExt;
+use cap_fs_ext::{DirExt, OpenOptionsFollowExt, OpenOptionsSyncExt};
 use std::fs::File;
 use std::io::{self, Read};
 use std::path::{Component, Path, PathBuf};
@@ -407,6 +409,62 @@ pub(crate) fn external_bookmark_capability(
     }
     let directory = cap_std::fs::Dir::open_ambient_dir(root, cap_std::ambient_authority())?;
     Ok((directory, relative.to_path_buf()))
+}
+
+/// Read metadata for a source-relative leaf without following symlinks in any
+/// parent component. The returned metadata comes from the directory descriptor
+/// rooted at the existing source capability, not an ambient absolute path.
+pub(crate) fn symlink_metadata_from_capability(
+    root: &cap_std::fs::Dir,
+    relative: &Path,
+) -> io::Result<std::fs::Metadata> {
+    if relative.as_os_str().is_empty()
+        || relative.is_absolute()
+        || relative
+            .components()
+            .any(|component| !matches!(component, Component::Normal(_)))
+    {
+        return Err(io::Error::new(
+            io::ErrorKind::PermissionDenied,
+            "invalid source-relative path",
+        ));
+    }
+    let leaf = relative
+        .file_name()
+        .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidInput, "source path has no leaf"))?;
+    let parent_path = relative.parent().unwrap_or_else(|| Path::new(""));
+    let mut parent = root.try_clone()?;
+    for component in parent_path.components() {
+        let Component::Normal(name) = component else {
+            return Err(io::Error::new(
+                io::ErrorKind::PermissionDenied,
+                "invalid source parent component",
+            ));
+        };
+        parent = parent.open_dir_nofollow(name)?;
+    }
+    let path_metadata = parent.symlink_metadata(leaf)?;
+    if path_metadata.file_type().is_symlink() {
+        return Err(io::Error::new(
+            io::ErrorKind::PermissionDenied,
+            "source leaf is a symlink",
+        ));
+    }
+    if !path_metadata.is_file() && !path_metadata.is_dir() {
+        return Err(io::Error::new(
+            io::ErrorKind::PermissionDenied,
+            "source leaf is not a regular file or directory",
+        ));
+    }
+    let mut options = cap_std::fs::OpenOptions::new();
+    options
+        .read(true)
+        .follow(cap_fs_ext::FollowSymlinks::No)
+        .nonblock(true);
+    #[cfg(windows)]
+    options.maybe_dir(true);
+    let file = parent.open_with(leaf, &options)?;
+    file.into_std().metadata()
 }
 
 /// Resolve a comic to a capability root and relative path for background

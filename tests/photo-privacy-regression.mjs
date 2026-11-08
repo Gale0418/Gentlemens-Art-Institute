@@ -28,4 +28,22 @@ assert.ok(
 assert.match(swift, /PhotoLibraryCache\.shared\.removeAssetsNotIn\(currentAssetIDs\)/);
 assert.match(swift, /PhotoLibraryCache\.shared\.removeAll\(\)/);
 
+const assetLookupStart = swift.indexOf('private func asset(_ assetID: String, inAlbum albumID: String, status: PHAuthorizationStatus) -> PHAsset? {');
+const assetLookupEnd = swift.indexOf('\n  private func currentAssetIfReadable', assetLookupStart);
+assert.ok(assetLookupStart >= 0 && assetLookupEnd > assetLookupStart, 'asset membership lookup exists');
+const assetLookup = swift.slice(assetLookupStart, assetLookupEnd);
+assert.match(assetLookup, /guard let asset = PHAsset\.fetchAssets\(withLocalIdentifiers: \[assetID\], options: nil\)\.firstObject,\s*asset\.mediaType == \.image else/, 'missing and non-image assets fail closed');
+assert.match(assetLookup, /status == \.limited && albumID == "limited-library"/, 'limited authorization only accepts the limited-library pseudo-album');
+assert.match(assetLookup, /status == \.authorized && albumID == "photo-library"/, 'full authorization retains the photo-library pseudo-album');
+assert.match(assetLookup, /PHAssetCollection\.fetchAssetCollectionsContaining\(asset, with: \.album, options: nil\)/, 'user album membership uses Photos reverse lookup');
+assert.match(assetLookup, /collections\.object\(at: index\)\.localIdentifier == albumID/, 'membership must match the requested collection identifier');
+assert.doesNotMatch(assetLookup, /PHAsset\.fetchAssets\(in: collection/, 'membership lookup does not scan every asset in the requested album');
+
+const albumDescriptorsStart = swift.indexOf('private func albumDescriptors() -> [PhotoAlbumReference] {');
+const albumDescriptorsEnd = swift.indexOf('\n  private func photoLibraryDescriptor', albumDescriptorsStart);
+assert.ok(albumDescriptorsStart >= 0 && albumDescriptorsEnd > albumDescriptorsStart, 'album listing source exists');
+const albumDescriptors = swift.slice(albumDescriptorsStart, albumDescriptorsEnd);
+assert.match(albumDescriptors, /PHAssetCollection\.fetchAssetCollections\(with: \.album, subtype: \.any, options: nil\)/, 'selectable collection IDs are fetched from the regular album type');
+assert.doesNotMatch(albumDescriptors, /\.smartAlbum/, 'selectable albums do not include smart albums that use a distinct collection type');
+
 console.log('PASS: photo progress reconciliation, membership cleanup, cache generation, and cache-hit revalidation');

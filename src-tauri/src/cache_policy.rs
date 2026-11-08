@@ -94,7 +94,7 @@ mod tests {
 
     #[test]
     fn small_book_uses_the_whole_budget_but_starts_at_current_page() {
-        let selection = select_pages_for_budget(&vec![MIB; 7], 3, 256 * MIB as usize);
+        let selection = select_pages_for_budget(&[MIB; 7], 3, 256 * MIB as usize);
         assert!(selection.whole_book);
         assert_eq!(selection.indices, vec![3, 4, 2, 5, 1, 6, 0]);
         assert_eq!(selection.selected_bytes, 7 * MIB);

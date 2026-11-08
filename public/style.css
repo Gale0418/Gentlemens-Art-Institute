@@ -410,6 +410,25 @@ body {
   line-height: 1.45;
 }
 
+.reading-progress-recovery-entries {
+  display: grid;
+  gap: 8px;
+  margin-top: 8px;
+}
+
+.reading-progress-recovery-entry {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 8px;
+}
+
+.reading-progress-recovery-entry > span {
+  flex: 1 1 12rem;
+  min-width: 0;
+  overflow-wrap: anywhere;
+}
+
 #reading-progress-recovery button {
   flex: 0 0 auto;
   min-height: 44px;
@@ -5143,6 +5162,31 @@ select:focus-visible,
   transform: translateY(calc(100% + max(16px, env(safe-area-inset-bottom)) + 8px));
   border-color: color-mix(in srgb, var(--reader-accent) 25%, rgba(255, 255, 255, 0.12));
   background: var(--reader-chrome);
+}
+
+.reader-bottom-bar .bottom-bar-left {
+  flex: 0 0 max-content;
+}
+
+.reader-bottom-bar .bottom-bar-center {
+  min-width: 160px;
+}
+
+.reader-bottom-bar .bottom-bar-right {
+  min-width: 0;
+  overflow-x: auto;
+  overscroll-behavior-x: contain;
+  scrollbar-width: thin;
+}
+
+.reader-bottom-bar .bottom-bar-right > *,
+.reader-bottom-bar .bottom-bar-right button,
+.reader-bottom-bar .bottom-bar-right .zoom-value {
+  flex-shrink: 0;
+}
+
+.reader-bottom-bar .page-counter {
+  white-space: nowrap;
 }
 
 .reader-overlay:not(.reader-idle):hover .reader-bottom-bar,

@@ -212,6 +212,10 @@ Tauri 會編譯 Rust static library、呼叫 Xcode project，再產生 signed ap
 
 第69版 source-v7 的公開指紋見 [build69-source-manifest.json](docs/release/build69-source-manifest.json)；source-v6／source-v7 的建置、安裝、功能驗收與未完成項目見 [第69版建置驗證紀錄](docs/release/build69-validation.md)。請依紀錄區分各次安裝版本，不把 v6 的驗收誤記為 v7 實機結果。
 
+第70版閱讀紀錄的來源指紋見 [build70-source-manifest.json](docs/release/build70-source-manifest.json)，同一凍結來源的兩端建置與操作結果見 [第70版驗證紀錄](docs/release/build70-validation.md)。歷史從功能啟用後累積，不以舊進度補造事件；測試前先備份裝置資料，原地更新時不要解除安裝或還原舊資料。
+
+本輪 iPad 實機驗收使用初次 Xcode 建置完成的已簽章 App；同來源 IPA 另已封存與匯出，未另行安裝。Mac 本機測試包採 ad-hoc 簽章。這些本機驗證不代表已完成 notarization、商店上傳或送審。
+
 ### 4.4.1 Xcode 顯示 SDK 但實體裝置為 ineligible
 
 `xcodebuild -showsdks` 有列出 iOS SDK，不代表這個 Xcode 已安裝目前所需的 iOS platform support，也不能單靠 SDK 清單判定實體裝置可作為建置目的地。若 Xcode 顯示裝置但標為 `ineligible`，先在 **Xcode > Settings > Components** 檢查並安裝該 Xcode 版本實際需要的平台元件；完成後重新開啟 Xcode 並確認目的地狀態。這次介面曾顯示可取得 **iOS 26.5.1 與 iOS 26.5 Simulator**，這只是當時可見的元件選項，不是所有 Xcode 或裝置都相同的固定版本要求。

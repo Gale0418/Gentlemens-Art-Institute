@@ -26,7 +26,7 @@
   FINISH: unreviewed and undocumented is unfinished; this build ends with the finish review, the verdict, and DESIGN.md
   -->
 
-  <a class="skip-link" href="#comic-grid" data-i18n="跳到漫畫書架">跳到漫畫書架</a>
+  <a class="skip-link" href="#main-content" data-i18n="跳到漫畫書架">跳到漫畫書架</a>
 
   <!-- 隱藏式 SVG 銀利化濃鎮定義 -->
   <svg xmlns="http://www.w3.org/2000/svg" style="position:absolute;width:0;height:0;overflow:hidden;">
@@ -148,7 +148,23 @@
 
       <section class="library-workspace">
         <!-- 漫畫書架網格 -->
-        <main class="content-area">
+        <main class="content-area" id="main-content" tabindex="-1">
+          <section class="reading-history-page" id="reading-history-page" aria-labelledby="reading-history-title" hidden>
+            <div class="reading-history-header">
+              <button class="reading-history-back" id="reading-history-back" type="button" data-i18n="返回書架">
+                <i class="fa-solid fa-arrow-left" aria-hidden="true"></i><span>返回書架</span>
+              </button>
+              <h2 id="reading-history-title" tabindex="-1" data-i18n="閱讀紀錄">閱讀紀錄</h2>
+            </div>
+            <div class="reading-history-ranges" role="group" aria-label="閱讀紀錄範圍" data-i18n-aria-label="閱讀紀錄範圍">
+              <button type="button" data-history-period="month" aria-pressed="true" data-i18n="30 天">30 天</button>
+              <button type="button" data-history-period="year" aria-pressed="false" data-i18n="一年">一年</button>
+              <button type="button" data-history-period="all" aria-pressed="false" data-i18n="全部">全部</button>
+            </div>
+            <div class="reading-history-status" id="reading-history-status" role="status" aria-live="polite"></div>
+            <div class="reading-history-list" id="reading-history-list"></div>
+            <button class="reading-history-more" id="reading-history-more" type="button" hidden data-i18n="載入更多">載入更多</button>
+          </section>
           <section class="library-start-panel" id="library-start-panel" aria-labelledby="library-start-title" hidden>
             <div class="library-start-copy">
               <h2 id="library-start-title" data-i18n="找漫畫像考古？先翻一本。">找漫畫像考古？先翻一本。</h2>
@@ -174,7 +190,7 @@
               <div>
                 <h2 id="continue-title" data-i18n="繼續閱讀">繼續閱讀</h2>
               </div>
-              <span class="section-hint" data-i18n="最近進度與收藏會優先出現在這裡">最近進度與收藏會優先出現在這裡</span>
+              <button class="reading-history-entry" id="reading-history-entry" type="button" data-i18n="閱讀紀錄">閱讀紀錄</button>
             </div>
             <div class="continue-strip" id="continue-strip">
               <!-- 動態插入繼續閱讀卡片 -->

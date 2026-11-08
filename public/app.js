@@ -142,6 +142,14 @@ const SCAN_STATUS_POLL_WALLCLOCK_MS = 42 * 60 * 1000;
 const CATALOG_APPEND_FRAME_CHUNK = 32;
 let lastGridRenderSignature = '';
 let lastContinueRenderSignature = '';
+const READING_HISTORY_PAGE_SIZE = 40;
+let readingHistoryRequestGeneration = 0;
+let readingHistoryRefreshGeneration = 0;
+const READING_HISTORY_RECORD_RETRY_DELAYS_MS = [300, 900];
+let readingHistoryRecordGeneration = 0;
+let readingHistoryRecordInFlight = null;
+let readingHistoryRecordRetryTimer = null;
+let readingHistoryRecordAttempts = 0;
 let lastInspectorRenderSignature = '';
 let libraryRefreshRunner = null;
 let incrementalLibraryRenderFrame = null;
@@ -1357,6 +1365,22 @@ let state = {
   readerReturnFocus: null,
   readerReturnComicFolder: null,
   readerReturnLibraryContext: null,
+  readingHistoryVisible: false,
+  readingHistoryReturnToReader: false,
+  readingHistoryPeriod: 'month',
+  readingHistoryOffset: 0,
+  readingHistoryLoadedCount: 0,
+  readingHistoryTotal: 0,
+  readingHistoryItems: [],
+  readingHistoryLoading: false,
+  readingHistoryError: '',
+  readingHistoryErrorIsReset: false,
+  readingHistoryScrollTop: 0,
+  readingHistoryLibraryScrollTop: 0,
+  readingHistoryReturnComicId: '',
+  readingHistoryReturnSourceId: '',
+  readerHistoryRecorded: false,
+  readerOpenRequestToken: null,
   libraryRefreshFocusSnapshot: null,
   scanStatusPollTimer: null,
   scanStatusPollWallclockTimer: null,
@@ -1505,6 +1529,13 @@ const elements = {
   scanSourceBtn: document.getElementById('scan-source-btn'),
   continuePanel: document.getElementById('continue-panel'),
   continueStrip: document.getElementById('continue-strip'),
+  readingHistoryPage: document.getElementById('reading-history-page'),
+  readingHistoryEntry: document.getElementById('reading-history-entry'),
+  readingHistoryBack: document.getElementById('reading-history-back'),
+  readingHistoryTitle: document.getElementById('reading-history-title'),
+  readingHistoryStatus: document.getElementById('reading-history-status'),
+  readingHistoryList: document.getElementById('reading-history-list'),
+  readingHistoryMore: document.getElementById('reading-history-more'),
   comicInspector: document.getElementById('comic-inspector'),
   organizeBar: document.getElementById('organize-bar'),
   organizeCount: document.getElementById('organize-count'),
@@ -2183,13 +2214,41 @@ function handleRamCacheProgress(data) {
 }
 
 function bindEvents() {
+  document.querySelectorAll('.header-actions .action-btn').forEach(button => {
+    const accessibleName = button.getAttribute('title') || button.textContent.trim();
+    if (accessibleName) button.setAttribute('aria-label', accessibleName);
+  });
+  elements.refreshBtn?.setAttribute('aria-label', readerText('重新整理'));
+  elements.settingsBtn?.setAttribute('aria-label', readerText('設定'));
+  elements.readingHistoryEntry?.addEventListener('click', () => openReadingHistory());
+  elements.readingHistoryBack?.addEventListener('click', closeReadingHistory);
+  elements.readingHistoryMore?.addEventListener('click', () => {
+    if (state.readingHistoryError) loadReadingHistory({
+      reset: state.readingHistoryErrorIsReset,
+      preserveLoadedCount: state.readingHistoryErrorIsReset,
+    });
+    else loadReadingHistory();
+  });
+  elements.readingHistoryPage?.querySelectorAll('[data-history-period]').forEach(button => {
+    button.addEventListener('click', () => {
+      setReadingHistoryPeriod(button.dataset.historyPeriod, button);
+    });
+  });
+  elements.readingHistoryPage?.addEventListener('keydown', event => {
+    if (event.key !== 'Escape') return;
+    event.preventDefault();
+    closeReadingHistory();
+  });
   window.addEventListener('gai:photo-library-changed', requestDeferredLibraryRefresh);
   document.addEventListener('visibilitychange', () => {
     if (document.visibilityState === 'visible' && isIOSLibraryDevice()) {
       requestDeferredLibraryRefresh();
     }
   });
-  elements.contentArea?.addEventListener('scroll', noteCatalogScroll, { passive: true });
+  elements.contentArea?.addEventListener('scroll', () => {
+    if (state.readingHistoryVisible) state.readingHistoryScrollTop = Number(elements.contentArea.scrollTop) || 0;
+    noteCatalogScroll();
+  }, { passive: true });
   elements.sidebarCollapseBtn?.addEventListener('click', () => {
     applySidebarCollapsed(!state.sidebarCollapsed);
   });
@@ -2932,10 +2991,78 @@ function markReaderPageReady(index, img, renderGeneration = state.renderGenerati
   state.readerReadyComicSourceId = getComicSourceId(state.currentComic);
   state.readerReadyPages.add(index);
   state.readerFailedPages.delete(index);
+  recordCurrentComicHistoryOnce();
   if (state.currentPageIndex === index) {
     state.readerLastReadyPageIndex = index;
     saveReadingProgress();
   }
+  return true;
+}
+
+function startReaderHistoryRecordingSession(requestToken) {
+  clearTimeout(readingHistoryRecordRetryTimer);
+  readingHistoryRecordRetryTimer = null;
+  readingHistoryRecordGeneration += 1;
+  readingHistoryRecordInFlight = null;
+  readingHistoryRecordAttempts = 0;
+  state.readerHistoryRecorded = false;
+  state.readerOpenRequestToken = typeof requestToken === 'string' && requestToken.trim()
+    ? requestToken.trim() : null;
+}
+
+function endReaderHistoryRecordingSession() {
+  clearTimeout(readingHistoryRecordRetryTimer);
+  readingHistoryRecordRetryTimer = null;
+  readingHistoryRecordGeneration += 1;
+  readingHistoryRecordInFlight = null;
+  readingHistoryRecordAttempts = 0;
+  state.readerHistoryRecorded = false;
+  state.readerOpenRequestToken = null;
+}
+
+function recordCurrentComicHistoryOnce() {
+  const comic = state.currentComic;
+  const requestToken = state.readerOpenRequestToken;
+  if (state.readerHistoryRecorded || !comic || isBuiltInDemoComic(comic)
+    || typeof requestToken !== 'string' || !requestToken.trim()
+    || typeof eAPI?.recordReadingHistory !== 'function'
+    || readingHistoryRecordInFlight
+    || readingHistoryRecordRetryTimer !== null
+    || readingHistoryRecordAttempts >= READING_HISTORY_RECORD_RETRY_DELAYS_MS.length + 1) return false;
+  const id = typeof comic.id === 'string' ? comic.id : '';
+  const sourceId = getComicSourceId(comic);
+  if (!id || !sourceId) return false;
+  const sessionGeneration = readingHistoryRecordGeneration;
+  const flight = { sessionGeneration, requestToken };
+  readingHistoryRecordInFlight = flight;
+  readingHistoryRecordAttempts += 1;
+  Promise.resolve()
+    .then(() => eAPI.recordReadingHistory({ id, sourceId, requestToken }))
+    .then(() => {
+      if (sessionGeneration !== readingHistoryRecordGeneration
+        || state.readerOpenRequestToken !== requestToken) return;
+      state.readerHistoryRecorded = true;
+      readingHistoryRecordAttempts = 0;
+    })
+    .catch(error => {
+      if (sessionGeneration !== readingHistoryRecordGeneration
+        || state.readerOpenRequestToken !== requestToken) return;
+      state.readerHistoryRecorded = false;
+      const retryDelay = READING_HISTORY_RECORD_RETRY_DELAYS_MS[readingHistoryRecordAttempts - 1];
+      if (retryDelay !== undefined) {
+        readingHistoryRecordRetryTimer = setTimeout(() => {
+          if (sessionGeneration !== readingHistoryRecordGeneration
+            || state.readerOpenRequestToken !== requestToken) return;
+          readingHistoryRecordRetryTimer = null;
+          recordCurrentComicHistoryOnce();
+        }, retryDelay);
+      } else {
+        console.warn('[閱讀紀錄] 有限重試後仍無法保存這次開啟紀錄：', error);
+      }
+    })
+    .finally(() => {
+      if (readingHistoryRecordInFlight === flight) readingHistoryRecordInFlight = null;
+    });
   return true;
 }
 
@@ -4914,7 +5041,7 @@ function renderContinueStrip() {
 
   elements.continueStrip.querySelectorAll('.lazy-cover').forEach(removeScheduledCover);
   if (candidates.length === 0) {
-    if (elements.continuePanel) elements.continuePanel.hidden = true;
+    if (elements.continuePanel) elements.continuePanel.hidden = false;
     elements.continueStrip.replaceChildren();
     return;
   }
@@ -4944,6 +5071,282 @@ function renderContinueStrip() {
   });
   const observer = ensureCoverObserver();
   elements.continueStrip.querySelectorAll('.lazy-cover').forEach(img => observer.observe(img));
+}
+
+function openReadingHistory({ focus = true } = {}) {
+  state.readingHistoryLibraryScrollTop = Number(elements.contentArea?.scrollTop) || 0;
+  state.readingHistoryVisible = true;
+  if (elements.readingHistoryPage) elements.readingHistoryPage.hidden = false;
+  elements.contentArea?.classList.add('history-visible');
+  elements.mainLayout?.classList.add('history-visible');
+  if (elements.contentArea) elements.contentArea.scrollTop = state.readingHistoryScrollTop;
+  const refresh = refreshReadingHistoryAfterReader();
+  if (focus) elements.readingHistoryTitle?.focus({ preventScroll: true });
+  return refresh;
+}
+
+function closeReadingHistory({ restoreFocus = true } = {}) {
+  if (elements.readingHistoryPage) {
+    elements.readingHistoryPage.querySelectorAll('.lazy-cover').forEach(removeScheduledCover);
+  }
+  state.readingHistoryVisible = false;
+  state.readingHistoryReturnToReader = false;
+  if (elements.readingHistoryPage) elements.readingHistoryPage.hidden = true;
+  elements.mainLayout?.classList.remove('history-visible');
+  readingHistoryRefreshGeneration += 1;
+  readingHistoryRequestGeneration += 1;
+  state.readingHistoryLoading = false;
+  elements.contentArea?.classList.remove('history-visible');
+  if (elements.contentArea) elements.contentArea.scrollTop = state.readingHistoryLibraryScrollTop;
+  if (restoreFocus) elements.readingHistoryEntry?.focus({ preventScroll: true });
+}
+
+function setReadingHistoryPeriod(period, selectedButton = null) {
+  if (!['month', 'year', 'all'].includes(period) || period === state.readingHistoryPeriod) return false;
+  readingHistoryRefreshGeneration += 1;
+  state.readingHistoryPeriod = period;
+  state.readingHistoryScrollTop = 0;
+  state.readingHistoryItems = [];
+  state.readingHistoryOffset = 0;
+  state.readingHistoryLoadedCount = 0;
+  state.readingHistoryTotal = 0;
+  state.readingHistoryError = '';
+  state.readingHistoryErrorIsReset = false;
+  renderReadingHistory({ reset: true });
+  if (elements.contentArea) elements.contentArea.scrollTop = 0;
+  elements.readingHistoryPage?.querySelectorAll('[data-history-period]').forEach(button => {
+    button.setAttribute('aria-pressed', String(button === selectedButton));
+  });
+  loadReadingHistory({ reset: true });
+  return true;
+}
+
+function readingHistoryTime(openedAt) {
+  const date = new Date(openedAt);
+  if (!Number.isFinite(date.getTime())) return '';
+  const locale = window.GAIL10n?.locale || undefined;
+  return new Intl.DateTimeFormat(locale, { hour: '2-digit', minute: '2-digit' }).format(date);
+}
+
+function readingHistoryGroupLabel(openedAt) {
+  const date = new Date(openedAt);
+  if (!Number.isFinite(date.getTime())) return readerText('日期不明');
+  const now = new Date();
+  const entryDay = new Date(date.getFullYear(), date.getMonth(), date.getDate());
+  if (entryDay.getTime() === new Date(now.getFullYear(), now.getMonth(), now.getDate()).getTime()) return readerText('今天');
+  if (entryDay.getTime() === new Date(now.getFullYear(), now.getMonth(), now.getDate() - 1).getTime()) return readerText('昨天');
+  return new Intl.DateTimeFormat(window.GAIL10n?.locale || undefined, {
+    year: 'numeric', month: 'long', day: 'numeric',
+  }).format(date);
+}
+
+function readingHistoryDateKey(openedAt) {
+  const date = new Date(openedAt);
+  if (!Number.isFinite(date.getTime())) return 'unknown';
+  return [date.getFullYear(), String(date.getMonth() + 1).padStart(2, '0'), String(date.getDate()).padStart(2, '0')].join('-');
+}
+
+function renderReadingHistory({ reset = false, appendFrom = null } = {}) {
+  if (!elements.readingHistoryList) return;
+  const shouldReset = reset || appendFrom === null;
+  if (shouldReset) {
+    elements.readingHistoryList.querySelectorAll('.lazy-cover').forEach(removeScheduledCover);
+    elements.readingHistoryList.replaceChildren();
+  }
+
+  const firstIndex = shouldReset ? 0 : Math.max(0, Math.trunc(Number(appendFrom) || 0));
+  let groupSection = shouldReset ? null : elements.readingHistoryList.lastElementChild;
+  let groupRows = groupSection?.querySelector('.reading-history-rows') || null;
+  let groupDateKey = groupSection?.dataset?.historyDate || '';
+  for (let index = firstIndex; index < state.readingHistoryItems.length; index += 1) {
+    const item = state.readingHistoryItems[index];
+    const comic = item?.comic || {};
+    const dateKey = readingHistoryDateKey(item?.openedAt);
+    if (!groupSection || dateKey !== groupDateKey) {
+      groupSection = document.createElement('section');
+      groupSection.className = 'reading-history-group';
+      groupSection.dataset.historyDate = dateKey;
+      groupSection.setAttribute('aria-labelledby', `history-group-${dateKey}`);
+      const heading = document.createElement('h3');
+      heading.id = `history-group-${dateKey}`;
+      heading.textContent = readingHistoryGroupLabel(item?.openedAt);
+      groupRows = document.createElement('div');
+      groupRows.className = 'reading-history-rows';
+      groupSection.append(heading, groupRows);
+      elements.readingHistoryList.append(groupSection);
+      groupDateKey = dateKey;
+    }
+
+    const sourceId = getComicSourceId(comic);
+    const progress = getProgressInfo(comic);
+    const pageLabel = progress.totalPages > 0
+      ? readerText('第 {page} / {total} 頁', { page: progress.currentPage + 1, total: progress.totalPages })
+      : readerText('第 {page} 頁', { page: progress.currentPage + 1 });
+    const offline = isComicOffline(comic);
+    const row = document.createElement('button');
+    row.type = 'button';
+    row.className = 'reading-history-row';
+    row.dataset.historyIndex = String(index);
+    row.dataset.historyComicId = String(comic.id || '');
+    row.dataset.historySourceId = sourceId;
+    if (offline) {
+      row.disabled = true;
+      row.setAttribute('aria-label', `${comic.title || readerText('未知作品')} · ${readerText('來源離線')}`);
+    }
+
+    const cover = document.createElement('img');
+    cover.className = 'lazy-cover';
+    cover.dataset.coverPriority = 'secondary';
+    cover.dataset.coverId = String(comic.id || '');
+    cover.dataset.coverSourceId = sourceId;
+    cover.dataset.src = getCoverUrl(comic.id, sourceId);
+    cover.loading = 'lazy';
+    cover.decoding = 'async';
+    cover.fetchPriority = 'low';
+    cover.alt = '';
+
+    const copy = document.createElement('span');
+    copy.className = 'reading-history-copy';
+    const title = document.createElement('strong');
+    title.title = comic.title || readerText('未知作品');
+    title.textContent = comic.title || readerText('未知作品');
+    const detail = document.createElement('span');
+    detail.append(document.createTextNode(readingHistoryTime(item?.openedAt)));
+    const separator = document.createElement('span');
+    separator.className = 'reading-history-separator';
+    separator.textContent = ' · ';
+    detail.append(separator, document.createTextNode(pageLabel));
+    copy.append(title, detail);
+    if (offline) {
+      const offlineLabel = document.createElement('small');
+      offlineLabel.className = 'reading-history-offline';
+      offlineLabel.textContent = readerText('來源離線');
+      copy.append(offlineLabel);
+    }
+
+    const icon = document.createElement('i');
+    icon.className = 'fa-solid fa-chevron-right';
+    icon.setAttribute('aria-hidden', 'true');
+    row.append(cover, copy, icon);
+    row.addEventListener('click', () => {
+      if (!item?.comic || isComicOffline(item.comic)) return;
+      state.readingHistoryScrollTop = Number(elements.contentArea?.scrollTop) || 0;
+      state.readingHistoryReturnComicId = String(item.comic.id || '');
+      state.readingHistoryReturnSourceId = getComicSourceId(item.comic);
+      openReader(item.comic);
+    });
+    groupRows.append(row);
+    ensureCoverObserver().observe(cover);
+  }
+  renderReadingHistoryStatus();
+}
+
+function renderReadingHistoryStatus() {
+  if (!elements.readingHistoryList) return;
+  const status = elements.readingHistoryStatus;
+  if (status) {
+    if (state.readingHistoryLoading) status.textContent = readerText('正在載入閱讀紀錄…');
+    else if (state.readingHistoryError) status.textContent = state.readingHistoryError;
+    else if (!state.readingHistoryItems.length) status.textContent = readerText('這段期間沒有閱讀紀錄。');
+    else status.textContent = '';
+  }
+  if (!elements.readingHistoryMore) return;
+  elements.readingHistoryMore.hidden = state.readingHistoryItems.length >= state.readingHistoryTotal
+    || state.readingHistoryLoading || state.readingHistoryItems.length === 0;
+  elements.readingHistoryMore.disabled = state.readingHistoryLoading;
+  elements.readingHistoryMore.textContent = state.readingHistoryLoading
+    ? readerText('載入中…')
+    : state.readingHistoryError ? readerText('重試') : readerText('載入更多');
+  if (state.readingHistoryError && elements.readingHistoryMore) elements.readingHistoryMore.hidden = false;
+}
+
+async function loadReadingHistory({ reset = false, preserveLoadedCount = false } = {}) {
+  if (typeof eAPI?.getReadingHistory !== 'function') {
+    state.readingHistoryError = readerText('目前無法載入閱讀紀錄。');
+    state.readingHistoryErrorIsReset = reset;
+    renderReadingHistoryStatus();
+    return false;
+  }
+  if (state.readingHistoryLoading && !reset) return false;
+  const requestGeneration = ++readingHistoryRequestGeneration;
+  const queryPeriod = state.readingHistoryPeriod;
+  const offset = reset ? 0 : state.readingHistoryOffset;
+  const previousItemCount = state.readingHistoryItems.length;
+  state.readingHistoryLoading = true;
+  state.readingHistoryError = '';
+  state.readingHistoryErrorIsReset = false;
+  renderReadingHistoryStatus();
+  try {
+    const result = await eAPI.getReadingHistory({
+      period: queryPeriod,
+      offset,
+      limit: READING_HISTORY_PAGE_SIZE,
+      timeZoneOffsetMinutes: -new Date().getTimezoneOffset(),
+    });
+    if (requestGeneration !== readingHistoryRequestGeneration || queryPeriod !== state.readingHistoryPeriod) return false;
+    const items = Array.isArray(result?.items) ? result.items : [];
+    state.readingHistoryItems = reset ? items : state.readingHistoryItems.concat(items);
+    state.readingHistoryOffset = offset + items.length;
+    state.readingHistoryLoadedCount = preserveLoadedCount
+      ? Math.max(state.readingHistoryLoadedCount || 0, state.readingHistoryOffset)
+      : state.readingHistoryOffset;
+    state.readingHistoryTotal = Math.max(0, Number(result?.total) || 0);
+  } catch (error) {
+    if (requestGeneration !== readingHistoryRequestGeneration || queryPeriod !== state.readingHistoryPeriod) return false;
+    state.readingHistoryError = readerText('閱讀紀錄載入失敗，請重試。');
+    state.readingHistoryErrorIsReset = reset;
+    console.warn('[閱讀紀錄] 載入失敗：', error);
+  } finally {
+    if (requestGeneration === readingHistoryRequestGeneration && queryPeriod === state.readingHistoryPeriod) {
+      state.readingHistoryLoading = false;
+      if (!state.readingHistoryError) {
+        renderReadingHistory(reset ? { reset: true } : { appendFrom: previousItemCount });
+      } else {
+        renderReadingHistoryStatus();
+      }
+      if (state.readingHistoryVisible && elements.contentArea) {
+        elements.contentArea.scrollTop = state.readingHistoryScrollTop;
+      }
+    }
+  }
+  return !state.readingHistoryError;
+}
+
+async function refreshReadingHistoryAfterReader() {
+  const refreshGeneration = ++readingHistoryRefreshGeneration;
+  const loadedCount = Math.max(READING_HISTORY_PAGE_SIZE, state.readingHistoryLoadedCount, state.readingHistoryOffset);
+  const targetPages = Math.max(1, Math.ceil(loadedCount / READING_HISTORY_PAGE_SIZE));
+  const scrollTop = state.readingHistoryScrollTop;
+  state.readingHistoryScrollTop = scrollTop;
+  const focusReturnRow = () => {
+    const returnRow = [...(elements.readingHistoryList?.querySelectorAll('.reading-history-row') || [])]
+      .find(row => row.dataset.historyComicId === state.readingHistoryReturnComicId
+        && row.dataset.historySourceId === state.readingHistoryReturnSourceId);
+    returnRow?.focus({ preventScroll: true });
+    state.readingHistoryReturnComicId = '';
+    state.readingHistoryReturnSourceId = '';
+  };
+  if (!await loadReadingHistory({ reset: true, preserveLoadedCount: true })) {
+    if (refreshGeneration === readingHistoryRefreshGeneration && state.readingHistoryVisible) focusReturnRow();
+    return;
+  }
+  if (refreshGeneration !== readingHistoryRefreshGeneration || !state.readingHistoryVisible) return;
+  if (state.readingHistoryOffset === 0) {
+    focusReturnRow();
+    if (elements.contentArea) elements.contentArea.scrollTop = scrollTop;
+    return;
+  }
+  let loadedPages = 1;
+  while (loadedPages < targetPages && state.readingHistoryOffset < state.readingHistoryTotal) {
+    const previousOffset = state.readingHistoryOffset;
+    if (!await loadReadingHistory() || refreshGeneration !== readingHistoryRefreshGeneration
+      || !state.readingHistoryVisible || state.readingHistoryOffset <= previousOffset) break;
+    loadedPages += 1;
+  }
+  if (refreshGeneration === readingHistoryRefreshGeneration && state.readingHistoryVisible) {
+    if (elements.contentArea) elements.contentArea.scrollTop = scrollTop;
+    focusReturnRow();
+  }
 }
 
 function inspectorRenderSignature(comic) {
@@ -5469,6 +5872,7 @@ async function loadInspectorMetadata(comic) {
 
 // 搜尋過濾
 function handleSearch(e) {
+  if (state.readingHistoryVisible) closeReadingHistory({ restoreFocus: false });
   const query = e.target.value.trim();
   elements.clearSearchBtn.style.display = query ? 'block' : 'none';
   state.renderLimit = 200;
@@ -6590,6 +6994,7 @@ async function openReader(comicOrId, { returnToComicFolder = false } = {}) {
   const selectedShelfComic = !requestedComic && state.selectedComicId === comicId ? getSelectedComic() : null;
   const shelfComic = requestedComic || selectedShelfComic || state.comics.find(comic => comic.id === comicId);
   const previousReadingMode = state.readingMode;
+  const returnToHistory = state.readingHistoryVisible;
   if (isComicOffline(shelfComic)) {
     showLibrarySourceRecovery(readerText('這本漫畫仍保留在書架，但原本的磁碟位置目前無法存取。請重新掛載 NAS，或選擇新的漫畫目錄。'));
     return;
@@ -6599,9 +7004,10 @@ async function openReader(comicOrId, { returnToComicFolder = false } = {}) {
   }
   // 一般書架入口恢復原視圖；Continue 是跨目錄入口，返回漫畫所在資料夾。
   // 相鄰換本時沿用第一次進入閱讀器時的返回策略。
-  if (!state.currentComic && !returnToComicFolder && !state.readerReturnLibraryContext) {
+  if (!state.currentComic && !returnToComicFolder && !returnToHistory && !state.readerReturnLibraryContext) {
     state.readerReturnLibraryContext = captureLibraryViewContext();
   }
+  state.readingHistoryReturnToReader = returnToHistory;
   await state.readerClosePromise;
   const savedReturnFocus = state.readerReturnFocus;
   const keepComicFolderReturn = returnToComicFolder || (state.currentComic && state.readerReturnComicFolder !== null);
@@ -6665,6 +7071,7 @@ async function openReader(comicOrId, { returnToComicFolder = false } = {}) {
     state.readerReadyComicId = data.id;
     state.readerReadyComicSourceId = sourceId;
     state.readerLoadTrackingActive = true;
+    startReaderHistoryRecordingSession(data.historyToken);
     state.currentComicIsDir = data.isDir || false;
     state.currentComicFilenames = data.filenames || [];
     state.aiExplainCache.clear();
@@ -6720,6 +7127,8 @@ async function openReader(comicOrId, { returnToComicFolder = false } = {}) {
     state.currentComicPages = [];
     state.pendingComicId = null;
     state.pendingComicSourceId = '';
+    state.readingHistoryReturnToReader = false;
+    endReaderHistoryRecordingSession();
     state.readerReturnComicFolder = null;
     state.readerReturnLibraryContext = null;
     // openComic 可能在 overlay 已呈現或上一輪清理尚未完成時失敗；這裡
@@ -6881,6 +7290,9 @@ async function closeReader({ switchingComic = false } = {}) {
   state.readerReadyComicId = null;
   state.readerReadyComicSourceId = '';
   state.readerLoadTrackingActive = false;
+  endReaderHistoryRecordingSession();
+  const returnToHistory = state.readingHistoryReturnToReader;
+  state.readingHistoryReturnToReader = false;
   state.webtoonMeasuredPageHeights.clear();
   state.webtoonMetricsComicId = null;
   state.webtoonMetricsComicSourceId = '';
@@ -6932,7 +7344,14 @@ async function closeReader({ switchingComic = false } = {}) {
   restoreReaderFocus();
   state.libraryRefreshFocusSnapshot = libraryFocusSnapshot;
 
-  if (!switchingComic && returnLibraryContext) {
+  if (!switchingComic && returnToHistory && state.readingHistoryVisible) {
+    state.readingHistoryVisible = true;
+    elements.contentArea?.classList.add('history-visible');
+    elements.mainLayout?.classList.add('history-visible');
+    const scrollTop = state.readingHistoryScrollTop;
+    if (elements.contentArea) elements.contentArea.scrollTop = scrollTop;
+    refreshReadingHistoryAfterReader();
+  } else if (!switchingComic && returnLibraryContext) {
     restoreLibraryViewContext(returnLibraryContext);
   } else if (!switchingComic && returnComicFolder !== null) {
     // Continue 是跨目錄入口；返回時顯示這本漫畫所在的書架，而非根目錄。
@@ -8399,6 +8818,7 @@ function requestVisibleDirectoryScan(relativePath, {
 }
 
 function navigateLibraryToPath(relativePath, sourceId = '') {
+  if (state.readingHistoryVisible) closeReadingHistory({ restoreFocus: false });
   const location = normalizeDirectoryLocation(relativePath, sourceId);
   if (location.relativePath === '📁 外部裝置') location.sourceId = '';
   if (elements.searchInput?.value) {

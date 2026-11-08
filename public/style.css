@@ -1906,6 +1906,298 @@ body {
   }
 }
 
+/* 閱讀紀錄延用書架的 dark theme 語意 tokens，並保留同一個捲動工作區。 */
+.content-area.history-visible > :not(#reading-history-page) {
+  display: none !important;
+}
+
+.reading-history-page {
+  width: min(100%, 920px);
+  margin: 0 auto;
+  padding: clamp(16px, 3vw, 32px);
+  color: var(--text-main);
+}
+
+.reading-history-page[hidden] {
+  display: none !important;
+}
+
+.main-layout.history-visible .library-workspace {
+  grid-template-columns: minmax(0, 1fr);
+}
+
+.main-layout.history-visible .comic-inspector,
+.main-layout.history-visible .sidebar-collapse-btn,
+.main-layout.history-visible .inspector-collapse-btn {
+  display: none !important;
+}
+
+.reading-history-header {
+  display: grid;
+  grid-template-columns: minmax(44px, auto) 1fr minmax(44px, auto);
+  align-items: center;
+  gap: 14px;
+  margin-bottom: 18px;
+}
+
+.reading-history-back,
+.reading-history-entry,
+.reading-history-ranges button,
+.reading-history-more {
+  min-height: 44px;
+  border: 1px solid var(--card-border);
+  border-radius: 9px;
+  color: var(--text-main);
+  background: var(--theme-surface-raised);
+  font: inherit;
+  cursor: pointer;
+}
+
+.reading-history-back {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 8px;
+  padding: 0 12px;
+  white-space: nowrap;
+}
+
+.reading-history-header h2 {
+  grid-column: 2;
+  margin: 0;
+  text-align: center;
+  font-family: var(--font-display, "Songti TC", "Noto Serif TC", serif);
+  font-size: clamp(1.45rem, 2.4vw, 2rem);
+  font-weight: 600;
+  line-height: 1.2;
+}
+
+.reading-history-entry {
+  flex: 0 0 auto;
+  padding: 0 13px;
+  color: var(--text-muted);
+  background: var(--theme-surface-raised);
+  font-size: 13px;
+}
+
+.reading-history-back:hover,
+.reading-history-entry:hover,
+.reading-history-ranges button:hover,
+.reading-history-more:hover {
+  border-color: var(--accent-color);
+  color: var(--text-main);
+}
+
+.reading-history-back:focus-visible,
+.reading-history-entry:focus-visible,
+.reading-history-ranges button:focus-visible,
+.reading-history-row:focus-visible,
+.reading-history-more:focus-visible {
+  outline: 3px solid var(--focus-ring, var(--accent-color));
+  outline-offset: 2px;
+}
+
+.reading-history-ranges {
+  display: flex;
+  gap: 8px;
+  margin: 0 auto 22px;
+  justify-content: center;
+}
+
+.reading-history-ranges button {
+  min-width: 84px;
+  padding: 0 16px;
+  color: var(--text-muted);
+}
+
+.reading-history-ranges button[aria-pressed="true"] {
+  border-color: var(--accent-color);
+  color: var(--text-main);
+  background: var(--theme-surface-raised);
+  font-weight: 600;
+}
+
+.reading-history-status {
+  min-height: 22px;
+  margin: 0 0 8px;
+  color: var(--text-muted);
+  text-align: center;
+  font-size: 13px;
+}
+
+.reading-history-group {
+  margin: 0 0 22px;
+}
+
+.reading-history-group h3 {
+  margin: 20px 0 8px;
+  color: var(--text-muted);
+  font-size: 13px;
+  font-weight: 600;
+}
+
+.reading-history-rows {
+  overflow: hidden;
+  border: 1px solid var(--card-border);
+  border-radius: 15px;
+  background: var(--theme-surface);
+}
+
+.reading-history-row {
+  display: grid;
+  grid-template-columns: 58px minmax(0, 1fr) 18px;
+  align-items: center;
+  gap: 14px;
+  width: 100%;
+  min-height: 84px;
+  padding: 10px 14px;
+  border: 0;
+  border-bottom: 1px solid var(--card-border);
+  color: var(--text-main);
+  background: transparent;
+  text-align: left;
+  cursor: pointer;
+}
+
+.reading-history-row:last-child {
+  border-bottom: 0;
+}
+
+.reading-history-row:not(:disabled):hover {
+  background: color-mix(in srgb, var(--accent-color) 8%, transparent);
+}
+
+.reading-history-row:disabled {
+  opacity: 1;
+  cursor: default;
+}
+
+.reading-history-row > img {
+  width: 58px;
+  height: 64px;
+  border-radius: 8px;
+  background: var(--theme-surface-raised);
+  object-fit: cover;
+}
+
+.reading-history-copy {
+  display: grid;
+  min-width: 0;
+  gap: 4px;
+  color: var(--text-muted);
+  font-size: 13px;
+  font-variant-numeric: tabular-nums;
+}
+
+.reading-history-copy strong {
+  overflow: hidden;
+  color: var(--text-main);
+  font-size: 15px;
+  font-weight: 600;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.reading-history-copy > span {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.reading-history-separator {
+  color: var(--text-dark);
+}
+
+.reading-history-offline {
+  color: var(--text-dark);
+}
+
+.reading-history-row > i {
+  color: var(--text-dark);
+  font-size: 12px;
+}
+
+.reading-history-more {
+  display: block;
+  min-width: 120px;
+  margin: 6px auto 24px;
+  padding: 0 20px;
+}
+
+.reading-history-more[hidden] {
+  display: none;
+}
+
+@media (max-width: 620px) {
+  .reading-history-page {
+    padding: 14px 12px;
+  }
+
+  .reading-history-header {
+    grid-template-columns: auto 1fr;
+    gap: 10px;
+  }
+
+  .reading-history-header h2 {
+    grid-column: 2;
+    text-align: right;
+    overflow-wrap: anywhere;
+  }
+
+  .reading-history-back {
+    padding: 0 10px;
+  }
+
+  .reading-history-row {
+    grid-template-columns: 52px minmax(0, 1fr) 12px;
+    gap: 10px;
+    padding: 9px 10px;
+  }
+
+  .reading-history-row > img {
+    width: 52px;
+    height: 60px;
+  }
+
+  .reading-history-copy strong {
+    font-size: 14px;
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .reading-history-page *,
+  .reading-history-page *::before,
+  .reading-history-page *::after {
+    scroll-behavior: auto !important;
+    animation-duration: 0.01ms !important;
+    animation-iteration-count: 1 !important;
+    transition-duration: 0.01ms !important;
+  }
+}
+
+@media (min-width: 761px) and (max-width: 900px) {
+  .header-actions .action-btn {
+    flex: 0 0 44px;
+    width: 44px;
+    min-width: 44px;
+    min-height: 44px;
+    padding: 0;
+    justify-content: center;
+    overflow: hidden;
+    color: transparent !important;
+    font-size: 0;
+  }
+
+  .header-actions .action-btn span {
+    display: none;
+  }
+
+  .header-actions .action-btn i {
+    color: var(--text-main);
+    font-size: 14px;
+  }
+}
+
 .input-tip {
   font-size: 11px;
   color: var(--text-dark);

@@ -1,4 +1,52 @@
 window.GAIL10n.register({
+  "閱讀紀錄": {
+    "en": "Reading history",
+    "ja": "閲覧履歴"
+  },
+  "閱讀紀錄範圍": {
+    "en": "Reading history range",
+    "ja": "閲覧履歴の期間"
+  },
+  "30 天": {
+    "en": "30 days",
+    "ja": "30日"
+  },
+  "一年": {
+    "en": "1 year",
+    "ja": "1年"
+  },
+  "載入更多": {
+    "en": "Load more",
+    "ja": "さらに読み込む"
+  },
+  "正在載入閱讀紀錄…": {
+    "en": "Loading reading history…",
+    "ja": "閲覧履歴を読み込み中…"
+  },
+  "這段期間沒有閱讀紀錄。": {
+    "en": "No reading history for this period.",
+    "ja": "この期間の閲覧履歴はありません。"
+  },
+  "目前無法載入閱讀紀錄。": {
+    "en": "Reading history is unavailable right now.",
+    "ja": "現在、閲覧履歴を読み込めません。"
+  },
+  "閱讀紀錄載入失敗，請重試。": {
+    "en": "Could not load reading history. Try again.",
+    "ja": "閲覧履歴を読み込めませんでした。再試行してください。"
+  },
+  "今天": {
+    "en": "Today",
+    "ja": "今日"
+  },
+  "昨天": {
+    "en": "Yesterday",
+    "ja": "昨日"
+  },
+  "日期不明": {
+    "en": "Date unknown",
+    "ja": "日付不明"
+  },
   "無法驗證漫畫的來源位置；為避免誤改其他檔案，批次編輯已取消。請重新掃描後再試。": {
     "en": "The comic's source location could not be verified. The operation was cancelled to avoid changing another file. Rescan the library and try again.",
     "ja": "漫画のソースの場所を確認できませんでした。別のファイルを変更しないよう操作を中止しました。ライブラリを再スキャンしてから再試行してください。"

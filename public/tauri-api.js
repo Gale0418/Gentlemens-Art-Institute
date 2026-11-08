@@ -690,6 +690,12 @@ if (window.__TAURI__) {
       ...(sourceId ? { sourceId } : {}),
     }),
     searchCatalog: (query) => invoke('search_catalog', { query }),
+    getReadingHistory: (query) => invoke('get_reading_history', { query }),
+    recordReadingHistory: ({ id, sourceId, requestToken }) => invoke('record_reading_history', {
+      id,
+      sourceId,
+      requestToken,
+    }),
     getDiscoveryTags: (runtimeIds, targets) => invoke('get_discovery_tags', {
       runtimeIds,
       ...(Array.isArray(targets) && targets.length ? { targets } : {}),

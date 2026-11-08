@@ -50,6 +50,8 @@ function extractSection(source, startMarker, endMarker) {
     extractFunction(appSource, 'enqueueReadingProgressSnapshot'),
     extractFunction(appSource, 'flushReadingProgressBeforeClose'),
     extractFunction(appSource, 'clearReaderPageNotice'),
+    extractFunction(appSource, 'startReaderHistoryRecordingSession'),
+    extractFunction(appSource, 'endReaderHistoryRecordingSession'),
     extractFunction(appSource, 'closeReader'),
   ].join('\n');
   let sequence = 0;
@@ -124,6 +126,10 @@ function extractSection(source, startMarker, endMarker) {
     localStorage: { setItem() {} },
     state,
     elements,
+    readingHistoryRecordGeneration: 0,
+    readingHistoryRecordInFlight: null,
+    readingHistoryRecordRetryTimer: null,
+    readingHistoryRecordAttempts: 0,
     readingProgressSaveQueue: Promise.resolve(),
     latestQueuedReadingProgressById: new Map(),
     discardedReadingProgressIntents: new Map(),
@@ -336,6 +342,10 @@ function extractSection(source, startMarker, endMarker) {
   const openReader = extractFunction(appSource, 'openReader');
   const alerts = [];
   const context = {
+    readingHistoryRecordGeneration: 0,
+    readingHistoryRecordInFlight: null,
+    readingHistoryRecordRetryTimer: null,
+    readingHistoryRecordAttempts: 0,
     state: {
       comics: [{ id: 'broken', title: 'Broken' }],
       currentComic: null,
@@ -370,7 +380,7 @@ function extractSection(source, startMarker, endMarker) {
     clearTimeout,
     scheduleCoverLoadDrain() {},
   };
-  vm.runInNewContext(`${extractFunction(appSource, 'getComicSourceId')}\n${extractFunction(appSource, 'setSelectedComic')}\n${extractFunction(appSource, 'clearReaderPageNotice')}\n${openReader}\nglobalThis.openReader = openReader;`, context);
+  vm.runInNewContext(`${extractFunction(appSource, 'getComicSourceId')}\n${extractFunction(appSource, 'setSelectedComic')}\n${extractFunction(appSource, 'clearReaderPageNotice')}\n${extractFunction(appSource, 'startReaderHistoryRecordingSession')}\n${extractFunction(appSource, 'endReaderHistoryRecordingSession')}\n${openReader}\nglobalThis.openReader = openReader;`, context);
   await context.openReader('broken');
   assert.equal(context.elements.readerOverlay.style.display, 'none');
   assert.equal(context.document.body.style.overflow, 'auto');
@@ -481,6 +491,8 @@ assert.match(readerMessagesSource, /"重試"\s*:/);
     },
     elements: { readerStatusPanel: { querySelectorAll: () => [], appendChild() {} } },
     saveReadingProgress: () => { saves += 1; },
+    // History's first-image/session contract is exercised in reading-history-ui.
+    recordCurrentComicHistoryOnce() {},
     renderPages: () => { renders += 1; },
     clearReaderImageError() {},
     document: { createElement: () => ({ addEventListener() {}, setAttribute() {} }) },
@@ -562,6 +574,7 @@ assert.match(readerMessagesSource, /"重試"\s*:/);
     },
     document: { createElement: tag => tag === 'img' ? createImage() : createButton() },
     WEBTOON_EAGER_IMAGES: 2,
+    recordCurrentComicHistoryOnce() {},
     updateWebtoonPageHeight() {},
     applyImageEffects() {},
     saveReadingProgress() {},

@@ -1466,6 +1466,7 @@ async fn open_comic(
         require_reader_pages(&assets)?;
         let reader_generation =
             begin_pending_open(state.inner(), &id, Some(item.source_id.clone()));
+        let history_token = uuid::Uuid::new_v4().to_string();
         let _pending_open_guard = PendingOpenGuard::new(
             state.inner().clone(),
             id.clone(),
@@ -1487,6 +1488,8 @@ async fn open_comic(
             state.opened_comic_revisions.write().unwrap().remove(&id);
             *state.active_comic_id.lock().unwrap() = Some(id.clone());
             *state.active_comic_source_id.lock().unwrap() = Some(item.source_id.clone());
+            *state.active_reading_history_token.lock().unwrap() = Some(history_token.clone());
+            *state.active_reading_history_comic.lock().unwrap() = Some(item.clone());
             *state.pending_open_id.lock().unwrap() = None;
             *state.pending_open_source_id.lock().unwrap() = None;
             state
@@ -1505,7 +1508,8 @@ async fn open_comic(
             "isDir": false,
             "pages": pages,
             "progress": item.progress,
-            "preloadGeneration": preload_generation
+            "preloadGeneration": preload_generation,
+            "historyToken": history_token
         }));
     }
     let requested_source_id = parse_requested_source_id(source_id.as_deref())?;
@@ -1999,6 +2003,7 @@ async fn open_comic(
     let title = comic_info.title.clone();
     let r#type = comic_info.r#type.clone();
     let verified_page_count = opened_files.len();
+    let history_token = uuid::Uuid::new_v4().to_string();
 
     let progress_identity = format!("{}\0{}", comic_info.source_id, id);
     let progress_state = state.inner().clone();
@@ -2066,6 +2071,8 @@ async fn open_comic(
             }
             *state.active_comic_id.lock().unwrap() = Some(id.clone());
             *state.active_comic_source_id.lock().unwrap() = Some(comic_info.source_id.clone());
+            *state.active_reading_history_token.lock().unwrap() = Some(history_token.clone());
+            *state.active_reading_history_comic.lock().unwrap() = Some(comic_info.clone());
             *state.pending_open_id.lock().unwrap() = None;
             *state.pending_open_source_id.lock().unwrap() = None;
             let preload_generation = state
@@ -2119,9 +2126,171 @@ async fn open_comic(
         "pages": pages,
         "progress": progress,
         "recoveryToken": recovery_token,
+        "historyToken": history_token,
         "sequenceFloor": sequence_floor,
         "preloadGeneration": preload_generation
     }))
+}
+
+#[tauri::command]
+async fn record_reading_history(
+    id: String,
+    source_id: String,
+    request_token: String,
+    state: State<'_, Arc<AppState>>,
+) -> Result<(), String> {
+    if request_token.is_empty() || request_token.len() > 64 {
+        return Err("閱讀紀錄開書 token 無效".into());
+    }
+    let (opened_page_count, item, opened_at) = {
+        let _lifecycle = state.comic_lifecycle.lock().unwrap();
+        let active_id = state.active_comic_id.lock().unwrap();
+        let active_source = state.active_comic_source_id.lock().unwrap();
+        let active_token = state.active_reading_history_token.lock().unwrap();
+        let active_comic = state.active_reading_history_comic.lock().unwrap();
+        if !reading_history_session_matches(
+            active_id.as_deref(),
+            active_source.as_deref(),
+            active_token.as_deref(),
+            Some(id.as_str()),
+            Some(source_id.as_str()),
+            Some(request_token.as_str()),
+        ) {
+            return Err("閱讀紀錄開書 session 已過期".into());
+        }
+        let opened = state.opened_comic_files.read().unwrap();
+        let page_count = opened
+            .get(&id)
+            .map(Vec::len)
+            .filter(|count| *count > 0)
+            .ok_or_else(|| "漫畫尚未成功開啟".to_string())?;
+        let item = active_comic
+            .as_ref()
+            .filter(|comic| comic.id == id && comic.source_id == source_id)
+            .cloned()
+            .ok_or_else(|| "已開啟漫畫快照已過期".to_string())?;
+        let opened_at = chrono::Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Millis, true);
+        (page_count, item, opened_at)
+    };
+
+    // The opened session supplies the trusted source identity and item snapshot;
+    // the catalog lookup only refreshes progress and never touches source files.
+    if item.source_id != source_id {
+        return Err("閱讀紀錄來源與已開啟漫畫不符".into());
+    }
+    let mut progress = item.progress.clone();
+    if !photo_library::is_photo_album_id(&id) {
+        if let Ok(store) = catalog_store(&state) {
+            let lookup_id = id.clone();
+            let lookup_source = source_id.clone();
+            let lookup_path = item.relative_path.clone();
+            if let Ok(Ok(Some(current))) = tauri::async_runtime::spawn_blocking(move || {
+                store.get_runtime_item_for_source_path(&lookup_id, &lookup_source, &lookup_path)
+            })
+            .await
+            {
+                progress = current.progress;
+            }
+        }
+    }
+    let snapshot = catalog::ReadingHistoryComic {
+        id: item.id,
+        source_id: item.source_id,
+        relative_path: item.relative_path,
+        title: item.title,
+        page_count: opened_page_count,
+        progress,
+        offline: item.r#type == "offline",
+    };
+    let store = catalog_store(&state)?;
+    let session_key = request_token;
+    tauri::async_runtime::spawn_blocking(move || {
+        store
+            .record_reading_history(&session_key, &snapshot, &opened_at)
+            .map(|_| ())
+    })
+    .await
+    .map_err(|error| format!("寫入閱讀紀錄背景工作失敗：{error}"))?
+}
+
+fn reading_history_session_matches(
+    active_id: Option<&str>,
+    active_source_id: Option<&str>,
+    active_token: Option<&str>,
+    requested_id: Option<&str>,
+    requested_source_id: Option<&str>,
+    requested_token: Option<&str>,
+) -> bool {
+    active_id.is_some()
+        && active_id == requested_id
+        && active_source_id == requested_source_id
+        && active_token.is_some()
+        && active_token == requested_token
+}
+
+#[derive(Debug, serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct ReadingHistoryQuery {
+    period: String,
+    offset: usize,
+    limit: usize,
+    time_zone_offset_minutes: i32,
+}
+
+#[tauri::command]
+async fn get_reading_history(
+    query: ReadingHistoryQuery,
+    state: State<'_, Arc<AppState>>,
+) -> Result<catalog::ReadingHistoryPage, String> {
+    let store = catalog_store(&state)?;
+    let mut page = tauri::async_runtime::spawn_blocking(move || {
+        store.get_reading_history(
+            &query.period,
+            query.offset,
+            query.limit,
+            query.time_zone_offset_minutes,
+        )
+    })
+    .await
+    .map_err(|error| format!("查詢閱讀紀錄背景工作失敗：{error}"))??;
+    let current_photos = if page
+        .items
+        .iter()
+        .any(|history| history.comic.source_id == "photos:")
+    {
+        Some(photo_library::items(state.inner()).await)
+    } else {
+        None
+    };
+    for history in &mut page.items {
+        if history.comic.source_id == "photos:" {
+            let current = current_photos
+                .as_ref()
+                .and_then(|items| items.iter().find(|item| item.id == history.comic.id));
+            refresh_photo_history_item(&mut history.comic, current);
+        }
+    }
+    Ok(page)
+}
+
+fn refresh_photo_history_item(
+    history: &mut catalog::ReadingHistoryComic,
+    current: Option<&ComicItem>,
+) {
+    let Some(current) =
+        current.filter(|item| item.id == history.id && item.source_id == history.source_id)
+    else {
+        history.offline = true;
+        return;
+    };
+    history.title = current.title.clone();
+    history.progress = current.progress.clone();
+    if current.page_count > 0 {
+        history.page_count = current.page_count;
+        history.offline = false;
+    } else {
+        history.offline = true;
+    }
 }
 
 #[tauri::command]
@@ -2184,6 +2353,8 @@ async fn close_comic(
         // superseded pending open so an old same-ID worker cannot republish.
         *active_id = None;
         *active_source_id = None;
+        *state.active_reading_history_token.lock().unwrap() = None;
+        *state.active_reading_history_comic.lock().unwrap() = None;
         *pending_open_id = None;
         *pending_source_id = None;
         state.ram_cache_pool.lock().unwrap().remove(id);
@@ -2223,6 +2394,8 @@ async fn close_comic(
                 .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
             *state.active_comic_id.lock().unwrap() = None;
             *state.active_comic_source_id.lock().unwrap() = None;
+            *state.active_reading_history_token.lock().unwrap() = None;
+            *state.active_reading_history_comic.lock().unwrap() = None;
             *state.pending_open_id.lock().unwrap() = None;
             *state.pending_open_source_id.lock().unwrap() = None;
             state.ram_cache_pool.lock().unwrap().clear();
@@ -5415,6 +5588,8 @@ pub fn run() {
             scan_visible_directory,
             scan_priority_library,
             open_comic,
+            record_reading_history,
+            get_reading_history,
             close_comic,
             update_reader_cache_window,
             save_progress,
@@ -5481,6 +5656,88 @@ pub fn run() {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn reading_history_requires_the_current_reader_session_and_source() {
+        assert!(reading_history_session_matches(
+            Some("book"),
+            Some("local:root"),
+            Some("open-uuid"),
+            Some("book"),
+            Some("local:root"),
+            Some("open-uuid"),
+        ));
+        assert!(!reading_history_session_matches(
+            Some("book"),
+            Some("local:root"),
+            Some("reopened"),
+            Some("book"),
+            Some("local:root"),
+            Some("open-uuid"),
+        ));
+        assert!(!reading_history_session_matches(
+            Some("book"),
+            Some("smb:v1:source-a"),
+            Some("open-uuid"),
+            Some("book"),
+            Some("smb:v1:source-b"),
+            Some("open-uuid"),
+        ));
+        assert!(!reading_history_session_matches(
+            Some("book"),
+            Some("local:root"),
+            None,
+            Some("book"),
+            Some("local:root"),
+            Some("open-uuid"),
+        ));
+    }
+
+    #[test]
+    fn photo_history_refresh_uses_current_photo_progress_and_marks_missing_album_offline() {
+        let mut history = catalog::ReadingHistoryComic {
+            id: "photo-album-1".into(),
+            source_id: "photos:".into(),
+            relative_path: "photo-album-1".into(),
+            title: "Title at open".into(),
+            page_count: 3,
+            progress: Progress {
+                current_page: 0,
+                total_pages: 3,
+                percent: 0.0,
+                updated_at: None,
+            },
+            offline: false,
+        };
+        let current = ComicItem {
+            id: history.id.clone(),
+            r#type: "photo-album".into(),
+            relative_path: history.relative_path.clone(),
+            ext: ".jpg".into(),
+            title: "Updated album title".into(),
+            series: "Photos".into(),
+            updated_at: String::new(),
+            page_count: 5,
+            progress: Progress {
+                current_page: 2,
+                total_pages: 5,
+                percent: 60.0,
+                updated_at: Some("2026-11-09T00:00:00Z".into()),
+            },
+            source_id: "photos:".into(),
+            source_path: None,
+            external_bookmark: None,
+        };
+        refresh_photo_history_item(&mut history, Some(&current));
+        assert_eq!(history.title, "Updated album title");
+        assert_eq!(history.page_count, 5);
+        assert_eq!(history.progress.current_page, 2);
+        assert!(!history.offline);
+
+        refresh_photo_history_item(&mut history, None);
+        assert!(history.offline);
+        assert_eq!(history.progress.current_page, 2);
+    }
 
     #[cfg(unix)]
     #[test]

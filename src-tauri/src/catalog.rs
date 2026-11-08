@@ -628,9 +628,55 @@ pub struct ReimportResult {
     pub diagnostics: usize,
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ReadingHistoryComic {
+    pub id: String,
+    pub source_id: String,
+    pub relative_path: String,
+    pub title: String,
+    pub page_count: usize,
+    pub progress: crate::state::Progress,
+    pub offline: bool,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ReadingHistoryItem {
+    pub id: String,
+    pub opened_at: String,
+    pub comic: ReadingHistoryComic,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ReadingHistoryPage {
+    pub items: Vec<ReadingHistoryItem>,
+    pub total: usize,
+}
+
 fn default_page_size() -> usize {
     100
 }
+
+fn normalize_history_timestamp(value: &str) -> Result<String, String> {
+    chrono::DateTime::parse_from_rfc3339(value)
+        .map(|timestamp| {
+            timestamp
+                .with_timezone(&chrono::Utc)
+                .to_rfc3339_opts(chrono::SecondsFormat::Millis, true)
+        })
+        .map_err(|error| format!("閱讀紀錄時間格式無效：{error}"))
+}
+
+fn history_local_day_modifier(client_offset_minutes: i32, native_offset_minutes: i32) -> String {
+    if client_offset_minutes == native_offset_minutes {
+        "localtime".to_string()
+    } else {
+        format!("{client_offset_minutes:+} minutes")
+    }
+}
+
 fn default_true() -> bool {
     true
 }
@@ -1554,6 +1600,182 @@ impl CatalogStore {
                 )
                 .optional()
                 .map_err(|error| error.to_string())
+        })
+    }
+
+    pub fn record_reading_history(
+        &self,
+        session_key: &str,
+        comic: &ReadingHistoryComic,
+        opened_at: &str,
+    ) -> Result<bool, String> {
+        if session_key.is_empty() || session_key.len() > 160 || comic.page_count == 0 {
+            return Err("閱讀紀錄資料無效".into());
+        }
+        let opened_at = normalize_history_timestamp(opened_at)?;
+        self.with_connection(|connection| {
+            let changed = connection
+                .execute(
+                    "INSERT OR IGNORE INTO reading_history(
+                   session_key,comic_id,source_id,relative_path,opened_at,title,page_count,
+                   offline,progress_page,progress_total,progress_percent,progress_updated_at
+                 ) VALUES(?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12)",
+                    params![
+                        session_key,
+                        comic.id,
+                        comic.source_id,
+                        comic.relative_path,
+                        opened_at,
+                        comic.title,
+                        comic.page_count as i64,
+                        comic.offline as i64,
+                        comic.progress.current_page as i64,
+                        comic.progress.total_pages as i64,
+                        comic.progress.percent,
+                        comic.progress.updated_at
+                    ],
+                )
+                .map_err(|error| format!("無法寫入閱讀紀錄：{error}"))?;
+            Ok(changed > 0)
+        })
+    }
+
+    pub fn get_reading_history(
+        &self,
+        period: &str,
+        offset: usize,
+        limit: usize,
+        time_zone_offset_minutes: i32,
+    ) -> Result<ReadingHistoryPage, String> {
+        if !matches!(period, "month" | "year" | "all") {
+            return Err("閱讀紀錄期間無效".into());
+        }
+        if !(-840..=840).contains(&time_zone_offset_minutes) {
+            return Err("時區偏移分鐘數無效".into());
+        }
+        let limit = limit.clamp(1, 100);
+        let offset = offset.min(i64::MAX as usize) as i64;
+        let cutoff = match period {
+            "month" => normalize_history_timestamp(
+                &(chrono::Utc::now() - chrono::Duration::days(30)).to_rfc3339(),
+            )?,
+            "year" => normalize_history_timestamp(
+                &(chrono::Utc::now() - chrono::Duration::days(365)).to_rfc3339(),
+            )?,
+            _ => "0000-01-01T00:00:00Z".to_string(),
+        };
+        let native_offset_minutes = chrono::Local::now().offset().local_minus_utc() / 60;
+        let local_day_modifier =
+            history_local_day_modifier(time_zone_offset_minutes, native_offset_minutes);
+        self.with_connection(|connection| {
+            let tx = connection
+                .transaction_with_behavior(TransactionBehavior::Deferred)
+                .map_err(|error| format!("無法開始閱讀紀錄查詢快照：{error}"))?;
+            let total: i64 = tx
+                .query_row(
+                    "WITH grouped AS (
+                   SELECT source_id,relative_path,date(datetime(opened_at,?1)) AS local_day
+                   FROM reading_history WHERE opened_at>=?2
+                   GROUP BY source_id,relative_path,local_day
+                 ) SELECT COUNT(*) FROM grouped",
+                    params![local_day_modifier, cutoff],
+                    |row| row.get(0),
+                )
+                .map_err(|error| format!("無法計算閱讀紀錄數量：{error}"))?;
+            let mut statement = tx
+                .prepare(
+                    "WITH ranked AS (
+                   SELECT h.*, ROW_NUMBER() OVER (
+                     PARTITION BY source_id,relative_path,date(datetime(opened_at,?1))
+                     ORDER BY opened_at DESC,session_key DESC
+                   ) AS day_rank
+                   FROM reading_history h WHERE opened_at>=?2
+                 )
+                 SELECT ranked.session_key,COALESCE(l.runtime_id,ranked.comic_id),
+                        ranked.source_id,ranked.relative_path,ranked.opened_at,
+                        COALESCE(c.title,ranked.title),ranked.page_count,
+                        CASE WHEN l.id IS NULL OR l.online=0 THEN 1 ELSE 0 END,
+                        COALESCE(p.current_page,ranked.progress_page),
+                        COALESCE(p.total_pages,ranked.progress_total),
+                        COALESCE(p.percent,ranked.progress_percent),
+                        COALESCE(p.updated_at,ranked.progress_updated_at)
+                 FROM ranked
+                 LEFT JOIN comic_locations l
+                   ON l.source_id=ranked.source_id AND l.relative_path=ranked.relative_path
+                 LEFT JOIN comics c ON c.id=l.comic_id
+                 LEFT JOIN reading_progress p ON p.comic_id=l.comic_id
+                 WHERE ranked.day_rank=1
+                 ORDER BY ranked.opened_at DESC,ranked.session_key DESC LIMIT ?3 OFFSET ?4",
+                )
+                .map_err(|error| format!("無法準備閱讀紀錄查詢：{error}"))?;
+            let rows = statement
+                .query_map(
+                    params![local_day_modifier, cutoff, limit as i64, offset],
+                    |row| {
+                        Ok((
+                            row.get::<_, String>(0)?,
+                            row.get::<_, String>(1)?,
+                            row.get::<_, String>(2)?,
+                            row.get::<_, String>(3)?,
+                            row.get::<_, String>(4)?,
+                            row.get::<_, String>(5)?,
+                            row.get::<_, i64>(6)?,
+                            row.get::<_, i64>(7)?,
+                            row.get::<_, i64>(8)?,
+                            row.get::<_, i64>(9)?,
+                            row.get::<_, f64>(10)?,
+                            row.get::<_, Option<String>>(11)?,
+                        ))
+                    },
+                )
+                .map_err(|error| format!("無法查詢閱讀紀錄：{error}"))?;
+            let rows = rows
+                .collect::<Result<Vec<_>, _>>()
+                .map_err(|error| error.to_string())?;
+            drop(statement);
+            tx.commit()
+                .map_err(|error| format!("無法完成閱讀紀錄查詢快照：{error}"))?;
+            let items = rows
+                .into_iter()
+                .map(|row| {
+                    let (
+                        session,
+                        id,
+                        source_id,
+                        relative_path,
+                        opened_at,
+                        title,
+                        page_count,
+                        offline,
+                        progress_page,
+                        progress_total,
+                        progress_percent,
+                        progress_updated_at,
+                    ) = row;
+                    Ok(ReadingHistoryItem {
+                        id: session,
+                        opened_at,
+                        comic: ReadingHistoryComic {
+                            id,
+                            source_id,
+                            relative_path,
+                            title,
+                            page_count: page_count.max(0) as usize,
+                            progress: crate::state::Progress {
+                                current_page: progress_page.max(0) as usize,
+                                total_pages: progress_total.max(0) as usize,
+                                percent: progress_percent,
+                                updated_at: progress_updated_at,
+                            },
+                            offline: offline != 0,
+                        },
+                    })
+                })
+                .collect::<Result<Vec<_>, String>>()?;
+            Ok(ReadingHistoryPage {
+                items,
+                total: total.max(0) as usize,
+            })
         })
     }
 
@@ -3010,6 +3232,27 @@ const MIGRATION_11: &str = "
           ON progress_recovery_proofs(comic_id, created_at DESC);
 ";
 
+const MIGRATION_12: &str = "
+        CREATE TABLE IF NOT EXISTS reading_history(
+          session_key TEXT PRIMARY KEY,
+          comic_id TEXT NOT NULL,
+          source_id TEXT NOT NULL,
+          relative_path TEXT NOT NULL,
+          opened_at TEXT NOT NULL,
+          title TEXT NOT NULL,
+          page_count INTEGER NOT NULL CHECK(page_count > 0),
+          offline INTEGER NOT NULL DEFAULT 0,
+          progress_page INTEGER NOT NULL DEFAULT 0,
+          progress_total INTEGER NOT NULL DEFAULT 0,
+          progress_percent REAL NOT NULL DEFAULT 0,
+          progress_updated_at TEXT
+        );
+        CREATE INDEX IF NOT EXISTS idx_reading_history_opened_at
+          ON reading_history(opened_at DESC);
+        CREATE INDEX IF NOT EXISTS idx_reading_history_group
+          ON reading_history(source_id, relative_path, opened_at DESC);
+";
+
 const MIGRATIONS: &[(i64, &str)] = &[
     (1, MIGRATION_1),
     (2, MIGRATION_2),
@@ -3022,6 +3265,7 @@ const MIGRATIONS: &[(i64, &str)] = &[
     (9, MIGRATION_9),
     (10, MIGRATION_10),
     (11, MIGRATION_11),
+    (12, MIGRATION_12),
 ];
 
 fn local_operation_path_matches_fingerprint(
@@ -7475,12 +7719,12 @@ mod tests {
                     .map_err(|error| error.to_string())?
                     .collect::<Result<Vec<_>, _>>()
                     .map_err(|error| error.to_string())?;
-                assert_eq!(versions, vec![1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11]);
+                assert_eq!(versions, vec![1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12]);
                 assert_eq!(
                     connection
                         .pragma_query_value(None, "user_version", |row| row.get::<_, i64>(0))
                         .map_err(|error| error.to_string())?,
-                    11
+                    12
                 );
                 let fts_sql: String = connection
                     .query_row(
@@ -7531,6 +7775,324 @@ mod tests {
         let view = store.get_metadata("runtime").unwrap();
         assert!(view.offline);
         assert_eq!(view.title, "a");
+    }
+
+    #[test]
+    fn reading_history_is_idempotent_grouped_by_local_day_and_source() {
+        let store = store("reading_history");
+        let snapshot = ReadingHistoryComic {
+            id: "runtime-book".into(),
+            source_id: "local:root".into(),
+            relative_path: "series/book.cbz".into(),
+            title: "Book".into(),
+            page_count: 12,
+            progress: crate::state::Progress {
+                current_page: 3,
+                total_pages: 12,
+                percent: 25.0,
+                updated_at: Some("2020-01-01T00:00:00Z".into()),
+            },
+            offline: false,
+        };
+        assert!(store
+            .record_reading_history("session-1", &snapshot, "2020-01-01T16:30:00Z")
+            .unwrap());
+        assert!(!store
+            .record_reading_history("session-1", &snapshot, "2020-01-01T16:30:01Z")
+            .unwrap());
+        let mut newer = snapshot.clone();
+        newer.title = "Latest title snapshot".into();
+        assert!(store
+            .record_reading_history("session-2", &newer, "2020-01-02T01:00:00Z")
+            .unwrap());
+        // UTC dates differ, but +08:00 places both opens on the same local day.
+        assert!(store
+            .record_reading_history("session-3", &snapshot, "2020-01-02T02:00:00Z")
+            .unwrap());
+        let mut other_source = snapshot.clone();
+        other_source.source_id = "smb:v1:other".into();
+        assert!(store
+            .record_reading_history("session-4", &other_source, "2020-01-02T02:30:00Z")
+            .unwrap());
+
+        let page = store.get_reading_history("all", 0, 40, 480).unwrap();
+        assert_eq!(
+            page.total, 2,
+            "same path/day should merge while another source remains distinct"
+        );
+        assert_eq!(page.items[0].id, "session-4");
+        assert_eq!(page.items[1].id, "session-3");
+        assert_eq!(page.items[1].comic.title, "Book");
+        assert_eq!(page.items[1].comic.progress.current_page, 3);
+
+        let first = store.get_reading_history("all", 0, 1, 480).unwrap();
+        let second = store.get_reading_history("all", 1, 1, 480).unwrap();
+        assert_eq!(first.total, 2);
+        assert_eq!(first.items.len(), 1);
+        assert_eq!(second.items.len(), 1);
+        assert!(store.get_reading_history("invalid", 0, 20, 480).is_err());
+        assert!(store.get_reading_history("all", 0, 20, 900).is_err());
+        assert_eq!(
+            store
+                .get_reading_history("all", 0, 500, 480)
+                .unwrap()
+                .items
+                .len(),
+            2
+        );
+    }
+
+    #[test]
+    fn reading_history_hydrates_exact_location_and_never_borrows_other_source_progress() {
+        let store = store("reading_history_hydrate");
+        let first = comic("runtime-old", "same/book.cbz");
+        store.sync_library(std::slice::from_ref(&first)).unwrap();
+        let snapshot = ReadingHistoryComic {
+            id: first.id.clone(),
+            source_id: first.source_id.clone(),
+            relative_path: first.relative_path.clone(),
+            title: "Title at open".into(),
+            page_count: 10,
+            progress: crate::state::Progress {
+                current_page: 1,
+                total_pages: 10,
+                percent: 10.0,
+                updated_at: Some("2020-01-01T00:00:00Z".into()),
+            },
+            offline: false,
+        };
+        store
+            .record_reading_history("history-hydrate", &snapshot, "2020-01-01T00:00:00Z")
+            .unwrap();
+        store
+            .save_progress_for_source_location(
+                "runtime-old",
+                "local",
+                "same/book.cbz",
+                &crate::state::Progress {
+                    current_page: 6,
+                    total_pages: 10,
+                    percent: 60.0,
+                    updated_at: Some("2020-01-02T00:00:00Z".into()),
+                },
+            )
+            .unwrap();
+        store.with_connection(|connection| {
+            connection.execute(
+                "UPDATE comic_locations SET runtime_id='runtime-new' WHERE source_id='local' AND relative_path='same/book.cbz'", [],
+            ).map_err(|error| error.to_string())?;
+            connection.execute("UPDATE comics SET title='Current catalog title' WHERE id=(
+                SELECT comic_id FROM comic_locations WHERE source_id='local' AND relative_path='same/book.cbz'
+            )", [])
+                .map_err(|error| error.to_string())?;
+            Ok(())
+        }).unwrap();
+
+        let online = store.get_reading_history("all", 0, 10, 480).unwrap();
+        let item = &online.items[0].comic;
+        assert_eq!(item.id, "runtime-new");
+        assert_eq!(item.title, "Current catalog title");
+        assert!(!item.offline);
+        assert_eq!(item.progress.current_page, 6);
+
+        let mut other = comic("other-canonical", "same/book.cbz");
+        other.source_id = "local:other".into();
+        store.sync_library(&[other]).unwrap();
+        store.with_connection(|connection| {
+            connection.execute(
+                "UPDATE comic_locations SET online=0 WHERE source_id='local' AND relative_path='same/book.cbz'", [],
+            ).map_err(|error| error.to_string())?;
+            connection.execute("UPDATE comics SET offline=1 WHERE id=(
+                SELECT comic_id FROM comic_locations WHERE source_id='local' AND relative_path='same/book.cbz'
+            )", [])
+                .map_err(|error| error.to_string())?;
+            Ok(())
+        }).unwrap();
+        let offline = store.get_reading_history("all", 0, 10, 480).unwrap();
+        assert!(offline.items[0].comic.offline);
+        assert_eq!(offline.items[0].comic.progress.current_page, 6);
+
+        store.with_connection(|connection| {
+            connection.execute(
+                "DELETE FROM comic_locations WHERE source_id='local' AND relative_path='same/book.cbz'", [],
+            ).map_err(|error| error.to_string())?;
+            Ok(())
+        }).unwrap();
+        let removed = store.get_reading_history("all", 0, 10, 480).unwrap();
+        assert_eq!(removed.items[0].comic.id, "runtime-old");
+        assert_eq!(removed.items[0].comic.title, "Title at open");
+        assert_eq!(removed.items[0].comic.progress.current_page, 1);
+        assert!(removed.items[0].comic.offline);
+    }
+
+    #[test]
+    fn reading_history_month_and_year_use_normalized_utc_cutoffs() {
+        let store = store("reading_history_periods");
+        let snapshot = ReadingHistoryComic {
+            id: "period-book".into(),
+            source_id: "local".into(),
+            relative_path: "period/book.cbz".into(),
+            title: "Period".into(),
+            page_count: 1,
+            progress: crate::state::Progress {
+                current_page: 0,
+                total_pages: 1,
+                percent: 0.0,
+                updated_at: None,
+            },
+            offline: false,
+        };
+        let now = chrono::Utc::now();
+        for (key, days) in [("one-day", 1), ("31-day", 31), ("366-day", 366)] {
+            let opened = (now - chrono::Duration::days(days)).to_rfc3339();
+            store
+                .record_reading_history(key, &snapshot, &opened)
+                .unwrap();
+        }
+        assert_eq!(
+            store
+                .get_reading_history("month", 0, 10, 480)
+                .unwrap()
+                .total,
+            1
+        );
+        assert_eq!(
+            store.get_reading_history("year", 0, 10, 480).unwrap().total,
+            2
+        );
+        assert_eq!(
+            store.get_reading_history("all", 0, 10, 480).unwrap().total,
+            3
+        );
+    }
+
+    #[test]
+    fn reading_history_normalizes_offset_timestamps_to_utc_millis() {
+        let store = store("reading_history_timestamp");
+        let snapshot = ReadingHistoryComic {
+            id: "offset-book".into(),
+            source_id: "local".into(),
+            relative_path: "offset/book.cbz".into(),
+            title: "Offset".into(),
+            page_count: 1,
+            progress: crate::state::Progress {
+                current_page: 0,
+                total_pages: 1,
+                percent: 0.0,
+                updated_at: None,
+            },
+            offline: false,
+        };
+        store
+            .record_reading_history("offset-session", &snapshot, "2020-01-02T02:00:00+08:00")
+            .unwrap();
+        let page = store.get_reading_history("all", 0, 10, 480).unwrap();
+        assert_eq!(page.items[0].opened_at, "2020-01-01T18:00:00.000Z");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn reading_history_dst_uses_os_historical_timezone_in_child_process() {
+        let executable = std::env::current_exe().unwrap();
+        let listing = std::process::Command::new(&executable)
+            .arg("--list")
+            .output()
+            .unwrap();
+        assert!(listing.status.success());
+        let test_name = String::from_utf8_lossy(&listing.stdout)
+            .lines()
+            .find_map(|line| {
+                let (name, _) = line.split_once(": test")?;
+                name.ends_with("reading_history_dst_child_process")
+                    .then(|| name.to_string())
+            })
+            .expect("find isolated DST child test");
+        let result = std::process::Command::new(executable)
+            .args(["--exact", test_name.as_str(), "--nocapture"])
+            .env("TZ", "America/New_York")
+            .env("G_AI_READING_HISTORY_DST_CHILD", "1")
+            .output()
+            .unwrap();
+        assert!(
+            result.status.success(),
+            "DST child failed: {}{}",
+            String::from_utf8_lossy(&result.stdout),
+            String::from_utf8_lossy(&result.stderr)
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn reading_history_dst_child_process() {
+        if std::env::var_os("G_AI_READING_HISTORY_DST_CHILD").is_none() {
+            return;
+        }
+        let store = store("reading_history_dst_child");
+        let snapshot = ReadingHistoryComic {
+            id: "dst-book".into(),
+            source_id: "local".into(),
+            relative_path: "dst/book.cbz".into(),
+            title: "DST".into(),
+            page_count: 1,
+            progress: crate::state::Progress {
+                current_page: 0,
+                total_pages: 1,
+                percent: 0.0,
+                updated_at: None,
+            },
+            offline: false,
+        };
+        let native_offset = chrono::Local::now().offset().local_minus_utc() / 60;
+        assert!(matches!(native_offset, -300 | -240), "{native_offset}");
+        let (first, second) = if native_offset == -300 {
+            ("2020-06-15T04:30:00Z", "2020-06-15T05:30:00Z")
+        } else {
+            ("2020-01-15T04:30:00Z", "2020-01-15T05:30:00Z")
+        };
+        store
+            .record_reading_history("dst-first", &snapshot, first)
+            .unwrap();
+        store
+            .record_reading_history("dst-second", &snapshot, second)
+            .unwrap();
+        let page = store
+            .get_reading_history("all", 0, 10, native_offset)
+            .unwrap();
+        let (historical_days, fixed_offset_days): (i64, i64) = store
+            .with_connection(|connection| {
+                connection
+                    .query_row(
+                        "SELECT COUNT(DISTINCT date(datetime(opened_at,'localtime'))),
+                            COUNT(DISTINCT date(datetime(opened_at,?1)))
+                     FROM reading_history",
+                        [format!("{native_offset:+} minutes")],
+                        |row| Ok((row.get(0)?, row.get(1)?)),
+                    )
+                    .map_err(|error| error.to_string())
+            })
+            .unwrap();
+        assert_ne!(historical_days, fixed_offset_days);
+        assert_eq!(page.total, historical_days as usize);
+    }
+
+    #[test]
+    fn reading_history_migration_does_not_fabricate_legacy_events_and_is_indexed() {
+        let store = store("reading_history_migration");
+        store
+            .sync_library(&[comic("legacy-book", "old.cbz")])
+            .unwrap();
+        store.with_connection(|connection| {
+            let count: i64 = connection.query_row("SELECT COUNT(*) FROM reading_history", [], |row| row.get(0))
+                .map_err(|error| error.to_string())?;
+            assert_eq!(count, 0);
+            let plan = connection.prepare(
+                "EXPLAIN QUERY PLAN SELECT session_key FROM reading_history ORDER BY opened_at DESC LIMIT 40",
+            ).map_err(|error| error.to_string())?.query_map([], |row| row.get::<_, String>(3))
+                .map_err(|error| error.to_string())?.collect::<Result<Vec<_>, _>>()
+                .map_err(|error| error.to_string())?;
+            assert!(plan.iter().any(|line| line.contains("idx_reading_history_opened_at")), "{plan:?}");
+            Ok(())
+        }).unwrap();
     }
 
     #[test]
@@ -8290,7 +8852,7 @@ mod tests {
                     .query_row("SELECT COUNT(*) FROM schema_migrations", [], |row| row.get(0))
                     .map_err(|error| error.to_string())?;
                 assert_eq!(tag_aliases_exists, 1);
-                assert_eq!(versions, 11);
+                assert_eq!(versions, 12);
                 Ok(())
             })
             .unwrap();

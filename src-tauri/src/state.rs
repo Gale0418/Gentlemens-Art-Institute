@@ -620,6 +620,11 @@ pub struct AppState {
     pub progress_sequences: tokio::sync::Mutex<HashMap<String, u64>>,
     pub active_bookmarks: std::sync::Mutex<HashMap<String, String>>,
     pub active_comic_id: std::sync::Mutex<Option<String>>,
+    /// Immutable token for the currently opened reader session, used by
+    /// success-only reading history writes independently of cache generations.
+    pub active_reading_history_token: std::sync::Mutex<Option<String>>,
+    /// Exact trusted ComicItem captured when the current reader open succeeds.
+    pub active_reading_history_comic: std::sync::Mutex<Option<ComicItem>>,
     /// Source identity paired with the single active reader ID. Runtime IDs
     /// are not globally unique, so every reader/cache publication must bind
     /// both values under `comic_lifecycle`.
@@ -712,6 +717,8 @@ impl AppState {
             progress_sequences: tokio::sync::Mutex::new(HashMap::new()),
             active_bookmarks: std::sync::Mutex::new(HashMap::new()),
             active_comic_id: std::sync::Mutex::new(None),
+            active_reading_history_token: std::sync::Mutex::new(None),
+            active_reading_history_comic: std::sync::Mutex::new(None),
             active_comic_source_id: std::sync::Mutex::new(None),
             pending_open_id: std::sync::Mutex::new(None),
             pending_open_source_id: std::sync::Mutex::new(None),
@@ -923,6 +930,8 @@ impl AppState {
         self.progress_recovery_evidence.lock().unwrap().clear();
         *self.active_comic_id.lock().unwrap() = None;
         *self.active_comic_source_id.lock().unwrap() = None;
+        *self.active_reading_history_token.lock().unwrap() = None;
+        *self.active_reading_history_comic.lock().unwrap() = None;
         *self.pending_open_id.lock().unwrap() = None;
         *self.pending_open_source_id.lock().unwrap() = None;
     }

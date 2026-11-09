@@ -113,21 +113,25 @@ window.GAIL10n.register({
   }
 });
 window.GAIL10n.register({
-  "找漫畫像考古？先翻一本。": {
-    "en": "Digging for comics? Open a book.",
-    "ja": "漫画探しは発掘作業？まず一冊。"
+  "自己的漫畫，打開資料夾就能讀。": {
+    "en": "Your comics. Open a folder and read.",
+    "ja": "自分の漫画を、フォルダーからすぐに。"
   },
-  "加入本機、外接硬碟或已掛載 NAS 的漫畫資料夾；也能先試讀原創風景圖集。": {
-    "en": "Add a comics folder from your device, an external drive, or a mounted NAS. Or try the original landscape collection first.",
-    "ja": "本体、外付けドライブ、マウント済み NAS の漫画フォルダーを追加できます。まずはオリジナル風景画像集で試し読みもできます。"
+  "支援本機、外接硬碟與已掛載的 NAS；原始檔案留在原處。": {
+    "en": "Read from your device, an external drive, or a mounted NAS. Your files stay where they are.",
+    "ja": "本体、外付けドライブ、マウント済み NAS に対応。元のファイルはそのままの場所に。"
   },
-  "試讀原創風景": {
+  "先試讀原創風景": {
     "en": "Try original landscapes",
     "ja": "オリジナル風景を試し読み"
   },
   "加入漫畫資料夾": {
     "en": "Add a comics folder",
     "ja": "漫画フォルダーを追加"
+  },
+  "原創風景選集": {
+    "en": "Original landscape collections",
+    "ja": "オリジナル風景コレクション"
   },
   "隨手翻一本": {
     "en": "Surprise me",
@@ -937,9 +941,9 @@ window.GAIL10n.register({
     "en": "Landscape art",
     "ja": "風景イラスト"
   },
-  "查看風景選集：{title}": {
-    "en": "View landscape collection: {title}",
-    "ja": "風景コレクションを見る：{title}"
+  "試讀風景選集：{title}": {
+    "en": "Read landscape collection: {title}",
+    "ja": "風景コレクションを試し読み：{title}"
   },
   "開啟風景選集": {
     "en": "Open landscape collection",

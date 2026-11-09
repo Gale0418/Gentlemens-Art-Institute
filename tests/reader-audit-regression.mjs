@@ -148,7 +148,7 @@ assert.match(connectSources, /(?:^|\s)http:\/\/ipc\.localhost(?:\s|$)/);
 console.log('PASS: CSP permits Tauri binary IPC transport');
 
 // iPad settings must finish independently of the desktop scan-path editor.
-const settingsFunctions = ['isIOSLibraryDevice', 'configureSettingsSourceControls', 'openSettingsModal', 'closeSettingsModal', 'chooseLibrarySource']
+const settingsFunctions = ['isIOSLibraryDevice', 'configureSettingsSourceControls', 'openSettingsModal', 'closeSettingsModal', 'showLibrarySourceStatus', 'chooseLibrarySource']
   .map(name => {
     const fn = source.match(new RegExp(`(?:async )?function ${name}\\([^)]*\\) \\{[\\s\\S]*?\\n\\}`))?.[0];
     assert.ok(fn, `${name} is present`);
@@ -197,7 +197,7 @@ function settingsHarness(navigator, nativeBookmarks = true) {
     addIOSLibrarySource: async () => calls.push('bookmarks'), chooseNativeLibrarySource: async () => calls.push('nativeFolder'),
     readerText: text => text,
   };
-  vm.runInNewContext(`${settingsFunctions}\n${settingsClickBinding}\nglobalThis.open = openSettingsModal;\nglobalThis.chooseSource = chooseLibrarySource;`, context);
+  vm.runInNewContext(`let librarySourceSelectionPending = false;\n${settingsFunctions}\n${settingsClickBinding}\nglobalThis.open = openSettingsModal;\nglobalThis.chooseSource = chooseLibrarySource;`, context);
   return { context, callbacks, elements, calls, savedBookmarks, originalBookmarks };
 }
 for (const navigator of [

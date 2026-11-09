@@ -19,9 +19,9 @@ window.GAIL10n.register({
     "en": "Gentlemen's Art Institute",
     "ja": "紳士藝術研究所 Gentlemen's Art Institute"
   },
-  "Private manga archive": {
-    "en": "Private manga archive",
-    "ja": "プライベート漫画アーカイブ"
+  "本機與 NAS 漫畫閱讀器": {
+    "en": "Comics from your device and NAS",
+    "ja": "本体と NAS の漫画リーダー"
   },
   "本機漫畫庫": {
     "en": "Local manga library",

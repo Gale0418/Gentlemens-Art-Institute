@@ -1647,6 +1647,39 @@ impl CatalogStore {
         limit: usize,
         time_zone_offset_minutes: i32,
     ) -> Result<ReadingHistoryPage, String> {
+        self.get_reading_history_inner(period, offset, limit, time_zone_offset_minutes, None)
+    }
+
+    /// iOS-only view of history with old UUIDs for this app's Documents root
+    /// treated as read-time aliases. History rows are never rewritten.
+    #[cfg(any(target_os = "ios", test))]
+    pub(crate) fn get_reading_history_for_ios_documents(
+        &self,
+        period: &str,
+        offset: usize,
+        limit: usize,
+        time_zone_offset_minutes: i32,
+        documents: &Path,
+    ) -> Result<ReadingHistoryPage, String> {
+        let current_source_id = crate::ios_documents::current_documents_source_id(documents)
+            .ok_or_else(|| "iOS Documents 位置無效".to_string())?;
+        self.get_reading_history_inner(
+            period,
+            offset,
+            limit,
+            time_zone_offset_minutes,
+            Some((documents, current_source_id)),
+        )
+    }
+
+    fn get_reading_history_inner(
+        &self,
+        period: &str,
+        offset: usize,
+        limit: usize,
+        time_zone_offset_minutes: i32,
+        ios_documents: Option<(&Path, String)>,
+    ) -> Result<ReadingHistoryPage, String> {
         if !matches!(period, "month" | "year" | "all") {
             return Err("閱讀紀錄期間無效".into());
         }
@@ -1667,50 +1700,110 @@ impl CatalogStore {
         let native_offset_minutes = chrono::Local::now().offset().local_minus_utc() / 60;
         let local_day_modifier =
             history_local_day_modifier(time_zone_offset_minutes, native_offset_minutes);
+
         self.with_connection(|connection| {
             let tx = connection
                 .transaction_with_behavior(TransactionBehavior::Deferred)
                 .map_err(|error| format!("無法開始閱讀紀錄查詢快照：{error}"))?;
+
+            let aliases = if let Some((documents, current_source_id)) = ios_documents.as_ref() {
+                // Discover only the source IDs which can affect this period.
+                // Desktop callers skip this query and retain the legacy identity.
+                let mut statement = tx
+                    .prepare("SELECT DISTINCT source_id FROM reading_history WHERE opened_at>=?1")
+                    .map_err(|error| format!("無法準備閱讀紀錄來源查詢：{error}"))?;
+                let source_rows = statement
+                    .query_map([&cutoff], |row| row.get::<_, String>(0))
+                    .map_err(|error| format!("無法查詢閱讀紀錄來源：{error}"))?;
+                let mut aliases = BTreeMap::new();
+                for source in source_rows {
+                    let source = source.map_err(|error| error.to_string())?;
+                    if crate::ios_documents::is_previous_documents_source_id(&source, documents) {
+                        aliases.insert(source, current_source_id.clone());
+                    }
+                }
+                serde_json::to_string(&aliases)
+                    .map_err(|error| format!("無法編碼閱讀紀錄來源別名：{error}"))?
+            } else {
+                "{}".to_string()
+            };
+
             let total: i64 = tx
                 .query_row(
-                    "WITH grouped AS (
-                   SELECT source_id,relative_path,date(datetime(opened_at,?1)) AS local_day
-                   FROM reading_history WHERE opened_at>=?2
-                   GROUP BY source_id,relative_path,local_day
-                 ) SELECT COUNT(*) FROM grouped",
-                    params![local_day_modifier, cutoff],
+                    "WITH source_aliases AS (
+                       SELECT key AS old_source_id,value AS logical_source_id FROM json_each(?1)
+                     ), logical_rows AS (
+                       SELECT h.source_id,h.relative_path,
+                              COALESCE(a.logical_source_id,h.source_id) AS logical_source_id,
+                              date(datetime(h.opened_at,?2)) AS local_day
+                       FROM reading_history h
+                       LEFT JOIN source_aliases a ON a.old_source_id=h.source_id
+                       WHERE h.opened_at>=?3
+                     ), grouped AS (
+                       SELECT logical_source_id,relative_path,local_day FROM logical_rows
+                       GROUP BY logical_source_id,relative_path,local_day
+                     ) SELECT COUNT(*) FROM grouped",
+                    params![aliases, local_day_modifier, cutoff],
                     |row| row.get(0),
                 )
                 .map_err(|error| format!("無法計算閱讀紀錄數量：{error}"))?;
+
             let mut statement = tx
                 .prepare(
-                    "WITH ranked AS (
-                   SELECT h.*, ROW_NUMBER() OVER (
-                     PARTITION BY source_id,relative_path,date(datetime(opened_at,?1))
-                     ORDER BY opened_at DESC,session_key DESC
-                   ) AS day_rank
-                   FROM reading_history h WHERE opened_at>=?2
-                 )
-                 SELECT ranked.session_key,COALESCE(l.runtime_id,ranked.comic_id),
-                        ranked.source_id,ranked.relative_path,ranked.opened_at,
-                        COALESCE(c.title,ranked.title),ranked.page_count,
-                        CASE WHEN l.id IS NULL OR l.online=0 THEN 1 ELSE 0 END,
-                        COALESCE(p.current_page,ranked.progress_page),
-                        COALESCE(p.total_pages,ranked.progress_total),
-                        COALESCE(p.percent,ranked.progress_percent),
-                        COALESCE(p.updated_at,ranked.progress_updated_at)
-                 FROM ranked
-                 LEFT JOIN comic_locations l
-                   ON l.source_id=ranked.source_id AND l.relative_path=ranked.relative_path
-                 LEFT JOIN comics c ON c.id=l.comic_id
-                 LEFT JOIN reading_progress p ON p.comic_id=l.comic_id
-                 WHERE ranked.day_rank=1
-                 ORDER BY ranked.opened_at DESC,ranked.session_key DESC LIMIT ?3 OFFSET ?4",
+                     "WITH source_aliases AS (
+                       SELECT key AS old_source_id,value AS logical_source_id FROM json_each(?1)
+                     ), previous_progress_ranked AS (
+                       SELECT l.source_id,l.relative_path,p.current_page,p.total_pages,p.percent,p.updated_at,
+                              ROW_NUMBER() OVER (
+                                PARTITION BY l.source_id,l.relative_path
+                                ORDER BY p.updated_at DESC,l.id DESC
+                              ) AS progress_rank
+                       FROM comic_locations l
+                       JOIN source_aliases a ON a.old_source_id=l.source_id
+                       JOIN reading_progress p ON p.comic_id=l.comic_id
+                     ), previous_progress AS (
+                       SELECT source_id,relative_path,current_page,total_pages,percent,updated_at
+                       FROM previous_progress_ranked WHERE progress_rank=1
+                     ), logical_rows AS (
+                       SELECT h.*,
+                              COALESCE(a.logical_source_id,h.source_id) AS logical_source_id
+                       FROM reading_history h
+                       LEFT JOIN source_aliases a ON a.old_source_id=h.source_id
+                       WHERE h.opened_at>=?2
+                     ), ranked AS (
+                       SELECT logical_rows.*,ROW_NUMBER() OVER (
+                         PARTITION BY logical_source_id,relative_path,
+                                      date(datetime(opened_at,?3))
+                         ORDER BY opened_at DESC,session_key DESC
+                       ) AS day_rank
+                       FROM logical_rows
+                     )
+                     SELECT ranked.session_key,COALESCE(l.runtime_id,ranked.comic_id),
+                            CASE WHEN l.id IS NOT NULL THEN ranked.logical_source_id
+                                 ELSE ranked.source_id END,
+                            ranked.relative_path,ranked.opened_at,
+                            COALESCE(c.title,ranked.title),ranked.page_count,
+                            CASE WHEN l.id IS NULL OR l.online=0 THEN 1 ELSE 0 END,
+                            COALESCE(p.current_page,previous_progress.current_page,ranked.progress_page),
+                            COALESCE(p.total_pages,previous_progress.total_pages,ranked.progress_total),
+                            COALESCE(p.percent,previous_progress.percent,ranked.progress_percent),
+                            COALESCE(p.updated_at,previous_progress.updated_at,ranked.progress_updated_at)
+                     FROM ranked
+                     LEFT JOIN comic_locations l
+                       ON l.source_id=ranked.logical_source_id
+                      AND l.relative_path=ranked.relative_path
+                     LEFT JOIN comics c ON c.id=l.comic_id
+                     LEFT JOIN reading_progress p ON p.comic_id=l.comic_id
+                     LEFT JOIN previous_progress
+                       ON previous_progress.source_id=ranked.source_id
+                      AND previous_progress.relative_path=ranked.relative_path
+                     WHERE ranked.day_rank=1
+                     ORDER BY ranked.opened_at DESC,ranked.session_key DESC LIMIT ?4 OFFSET ?5",
                 )
                 .map_err(|error| format!("無法準備閱讀紀錄查詢：{error}"))?;
             let rows = statement
                 .query_map(
-                    params![local_day_modifier, cutoff, limit as i64, offset],
+                    params![aliases, cutoff, local_day_modifier, limit as i64, offset],
                     |row| {
                         Ok((
                             row.get::<_, String>(0)?,
@@ -1752,7 +1845,7 @@ impl CatalogStore {
                         progress_percent,
                         progress_updated_at,
                     ) = row;
-                    Ok(ReadingHistoryItem {
+                    ReadingHistoryItem {
                         id: session,
                         opened_at,
                         comic: ReadingHistoryComic {
@@ -1769,9 +1862,9 @@ impl CatalogStore {
                             },
                             offline: offline != 0,
                         },
-                    })
+                    }
                 })
-                .collect::<Result<Vec<_>, String>>()?;
+                .collect();
             Ok(ReadingHistoryPage {
                 items,
                 total: total.max(0) as usize,
@@ -7923,6 +8016,272 @@ mod tests {
         assert_eq!(removed.items[0].comic.title, "Title at open");
         assert_eq!(removed.items[0].comic.progress.current_page, 1);
         assert!(removed.items[0].comic.offline);
+    }
+
+    #[test]
+    fn ios_documents_history_aliases_old_container_inside_grouping_and_paging() {
+        let store = store("ios_documents_history_alias");
+        let documents = Path::new(
+            "/private/var/mobile/Containers/Data/Application/22222222-2222-4222-8222-222222222222/Documents",
+        );
+        let old_source = crate::scanner::local_source_id(Path::new(
+            "/var/mobile/Containers/Data/Application/11111111-1111-4111-8111-111111111111/Documents",
+        ));
+        let current_source = crate::scanner::local_source_id(documents);
+        let mut current = comic("runtime-current", "same/book.cbz");
+        current.source_id = current_source.clone();
+        current.title = "Current catalog title".into();
+        current.page_count = 12;
+        store.sync_library(std::slice::from_ref(&current)).unwrap();
+        store
+            .with_connection(|connection| {
+                connection
+                    .execute(
+                        "UPDATE comics SET title='Current catalog title' WHERE id=(
+                           SELECT comic_id FROM comic_locations
+                           WHERE runtime_id=?1 AND source_id=?2 AND relative_path=?3
+                         )",
+                        params![current.id, current_source, current.relative_path],
+                    )
+                    .map_err(|error| error.to_string())?;
+                Ok(())
+            })
+            .unwrap();
+        store
+            .save_progress_for_source_location(
+                &current.id,
+                &current_source,
+                &current.relative_path,
+                &crate::state::Progress {
+                    current_page: 9,
+                    total_pages: 12,
+                    percent: 75.0,
+                    updated_at: Some("2020-01-02T00:00:00Z".into()),
+                },
+            )
+            .unwrap();
+
+        let snapshot = |source_id: String| ReadingHistoryComic {
+            id: "old-runtime-id".into(),
+            source_id,
+            relative_path: "same/book.cbz".into(),
+            title: "Title at open".into(),
+            page_count: 12,
+            progress: crate::state::Progress {
+                current_page: 2,
+                total_pages: 12,
+                percent: 16.7,
+                updated_at: Some("2020-01-01T00:00:00Z".into()),
+            },
+            offline: true,
+        };
+        store
+            .record_reading_history(
+                "ios-old-session",
+                &snapshot(old_source.clone()),
+                "2020-01-02T01:00:00Z",
+            )
+            .unwrap();
+        let mut current_snapshot = snapshot(current_source.clone());
+        current_snapshot.id = current.id.clone();
+        store
+            .record_reading_history(
+                "ios-current-session",
+                &current_snapshot,
+                "2020-01-02T02:00:00Z",
+            )
+            .unwrap();
+
+        // An external/NAS source at the same relative path remains independent.
+        let mut external = snapshot("smb:v1:nas".into());
+        external.id = "nas-runtime".into();
+        store
+            .record_reading_history("ios-nas-session", &external, "2020-01-02T03:00:00Z")
+            .unwrap();
+
+        let raw_before = store
+            .with_connection(|connection| {
+                connection
+                    .prepare("SELECT session_key,source_id,relative_path,opened_at,title,progress_page FROM reading_history ORDER BY session_key")
+                    .map_err(|error| error.to_string())?
+                    .query_map([], |row| {
+                        Ok((
+                            row.get::<_, String>(0)?,
+                            row.get::<_, String>(1)?,
+                            row.get::<_, String>(2)?,
+                            row.get::<_, String>(3)?,
+                            row.get::<_, String>(4)?,
+                            row.get::<_, i64>(5)?,
+                        ))
+                    })
+                    .map_err(|error| error.to_string())?
+                    .collect::<Result<Vec<_>, _>>()
+                    .map_err(|error| error.to_string())
+            })
+            .unwrap();
+
+        let first = store
+            .get_reading_history_for_ios_documents("all", 0, 1, 480, documents)
+            .unwrap();
+        let second = store
+            .get_reading_history_for_ios_documents("all", 1, 1, 480, documents)
+            .unwrap();
+        assert_eq!(
+            first.total, 2,
+            "old/current own-container rows group once; NAS stays separate"
+        );
+        assert_eq!(second.total, 2);
+        assert_eq!(first.items.len(), 1);
+        assert_eq!(second.items.len(), 1);
+        let own_container = [&first.items[0], &second.items[0]]
+            .into_iter()
+            .find(|item| item.id == "ios-current-session")
+            .unwrap();
+        assert_eq!(own_container.comic.id, current.id);
+        assert_eq!(own_container.comic.source_id, current_source);
+        assert_eq!(own_container.comic.progress.current_page, 9);
+        assert_eq!(own_container.comic.title, "Current catalog title");
+        assert!(!own_container.comic.offline);
+
+        let raw_after = store
+            .with_connection(|connection| {
+                connection
+                    .prepare("SELECT session_key,source_id,relative_path,opened_at,title,progress_page FROM reading_history ORDER BY session_key")
+                    .map_err(|error| error.to_string())?
+                    .query_map([], |row| {
+                        Ok((
+                            row.get::<_, String>(0)?,
+                            row.get::<_, String>(1)?,
+                            row.get::<_, String>(2)?,
+                            row.get::<_, String>(3)?,
+                            row.get::<_, String>(4)?,
+                            row.get::<_, i64>(5)?,
+                        ))
+                    })
+                    .map_err(|error| error.to_string())?
+                    .collect::<Result<Vec<_>, _>>()
+                    .map_err(|error| error.to_string())
+            })
+            .unwrap();
+        assert_eq!(
+            raw_after, raw_before,
+            "query never rewrites raw history events"
+        );
+
+        // The same old source with no current exact location stays offline and
+        // keeps its original source ID, even if a NAS location exists.
+        let mut missing = snapshot(old_source.clone());
+        missing.relative_path = "missing/book.cbz".into();
+        store
+            .record_reading_history("ios-missing-session", &missing, "2020-01-03T01:00:00Z")
+            .unwrap();
+        let mut nas_location = comic("nas-comic", "missing/book.cbz");
+        nas_location.source_id = "smb:v1:nas".into();
+        store
+            .sync_library(std::slice::from_ref(&nas_location))
+            .unwrap();
+        let missing = store
+            .get_reading_history_for_ios_documents("all", 0, 10, 480, documents)
+            .unwrap()
+            .items
+            .into_iter()
+            .find(|item| item.id == "ios-missing-session")
+            .unwrap();
+        assert!(missing.comic.offline);
+        assert_eq!(missing.comic.source_id, old_source);
+
+        store
+            .with_connection(|connection| {
+                connection
+                    .pragma_update(None, "query_only", true)
+                    .map_err(|error| error.to_string())
+            })
+            .unwrap();
+        assert!(store
+            .get_reading_history_for_ios_documents("all", 0, 10, 480, documents)
+            .is_ok());
+    }
+
+    #[test]
+    fn ios_documents_history_falls_back_to_exact_old_location_progress() {
+        let store = store("ios_documents_history_old_progress");
+        let documents = Path::new(
+            "/private/var/mobile/Containers/Data/Application/22222222-2222-4222-8222-222222222222/Documents",
+        );
+        let old_source = crate::scanner::local_source_id(Path::new(
+            "/var/mobile/Containers/Data/Application/11111111-1111-4111-8111-111111111111/Documents",
+        ));
+        let mut old_location = comic("old-runtime", "same/book.cbz");
+        old_location.source_id = old_source.clone();
+        store
+            .sync_library(std::slice::from_ref(&old_location))
+            .unwrap();
+        store
+            .save_progress_for_source_location(
+                &old_location.id,
+                &old_source,
+                &old_location.relative_path,
+                &crate::state::Progress {
+                    current_page: 8,
+                    total_pages: 12,
+                    percent: 66.7,
+                    updated_at: Some("2026-11-08T10:00:00Z".into()),
+                },
+            )
+            .unwrap();
+
+        let mut foreign = comic("foreign-runtime", "same/book.cbz");
+        foreign.source_id = "smb:v1:foreign".into();
+        store.sync_library(std::slice::from_ref(&foreign)).unwrap();
+        store
+            .save_progress_for_source_location(
+                &foreign.id,
+                &foreign.source_id,
+                &foreign.relative_path,
+                &crate::state::Progress {
+                    current_page: 11,
+                    total_pages: 12,
+                    percent: 91.7,
+                    updated_at: Some("2026-11-09T10:00:00Z".into()),
+                },
+            )
+            .unwrap();
+
+        let snapshot = ReadingHistoryComic {
+            id: old_location.id,
+            source_id: old_source.clone(),
+            relative_path: "same/book.cbz".into(),
+            title: "Title at open".into(),
+            page_count: 12,
+            progress: crate::state::Progress {
+                current_page: 2,
+                total_pages: 12,
+                percent: 16.7,
+                updated_at: Some("2026-11-07T10:00:00Z".into()),
+            },
+            offline: true,
+        };
+        store
+            .record_reading_history("old-container-session", &snapshot, "2026-11-08T11:00:00Z")
+            .unwrap();
+
+        let page = store
+            .get_reading_history_for_ios_documents("all", 0, 10, 480, documents)
+            .unwrap();
+        assert_eq!(page.total, 1);
+        assert_eq!(page.items.len(), 1);
+        let history = &page.items[0].comic;
+        assert!(
+            history.offline,
+            "old catalog location is not current online state"
+        );
+        assert_eq!(history.source_id, old_source);
+        assert_eq!(history.relative_path, "same/book.cbz");
+        assert_eq!(history.progress.current_page, 8);
+        assert_eq!(
+            history.progress.updated_at.as_deref(),
+            Some("2026-11-08T10:00:00Z")
+        );
     }
 
     #[test]

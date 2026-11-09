@@ -103,6 +103,9 @@ function historyHarness(api, { removeReturnGuard = false } = {}) {
     console,
     clearTimeout,
     setTimeout,
+    atob,
+    TextDecoder,
+    Uint8Array,
     removeScheduledCover() {},
     document: {
       fullscreenElement: null,
@@ -135,6 +138,9 @@ function historyHarness(api, { removeReturnGuard = false } = {}) {
     const READING_HISTORY_RECORD_RETRY_DELAYS_MS = [300, 900];
     let readingHistoryRequestGeneration = 0;
     let readingHistoryRefreshGeneration = 0;
+    let readingHistoryLivePendingPaths = new Map();
+    let readingHistoryRefreshInFlight = false;
+    let readingHistoryRefreshActiveGeneration = 0;
     let readingHistoryRecordGeneration = 0;
     let readingHistoryRecordInFlight = null;
     let readingHistoryRecordRetryTimer = null;
@@ -156,13 +162,174 @@ function historyHarness(api, { removeReturnGuard = false } = {}) {
     ${extractFunction(app, 'renderReadingHistoryStatus')}
     ${extractFunction(app, 'loadReadingHistory')}
     ${extractFunction(app, 'refreshReadingHistoryAfterReader')}
+    ${extractFunction(app, 'currentIOSDocumentsSource')}
+    ${extractFunction(app, 'queueReadingHistoryRefreshForLibraryBatch')}
+    ${extractFunction(app, 'drainReadingHistoryLiveRefresh')}
     ${extractFunction(app, 'handleSearch')}
     ${extractFunction(app, 'navigateLibraryToPath')}
     ${extractFunction(app, 'openReader')}
     ${closeReaderForTest}
-    globalThis.run = { startReaderHistoryRecordingSession, endReaderHistoryRecordingSession, recordCurrentComicHistoryOnce, markReaderPageReady, openReadingHistory, closeReadingHistory, setReadingHistoryPeriod, renderReadingHistory, renderReadingHistoryStatus, loadReadingHistory, refreshReadingHistoryAfterReader, handleSearch, navigateLibraryToPath, openReader, closeReader };
+    globalThis.run = { startReaderHistoryRecordingSession, endReaderHistoryRecordingSession, recordCurrentComicHistoryOnce, markReaderPageReady, openReadingHistory, closeReadingHistory, setReadingHistoryPeriod, renderReadingHistory, renderReadingHistoryStatus, loadReadingHistory, refreshReadingHistoryAfterReader, currentIOSDocumentsSource, queueReadingHistoryRefreshForLibraryBatch, drainReadingHistoryLiveRefresh, handleSearch, navigateLibraryToPath, openReader, closeReader };
   `, context);
   return context;
+}
+
+function liveDocumentsSource(uuid = 'A1234567-B123-4234-9234-A123456789AB') {
+  const root = `/private/var/mobile/Containers/Data/Application/${uuid}/Documents`;
+  return `local:${Buffer.from(root).toString('base64url')}`;
+}
+
+function liveRefreshHarness(getReadingHistory) {
+  const context = historyHarness({
+    eAPI: { getReadingHistory },
+    isComicOffline: comic => Boolean(comic?.offline),
+    getComicSourceId: comic => comic?.sourceId || '',
+  });
+  context.state = {
+    readingHistoryVisible: true,
+    readingHistoryPeriod: 'month',
+    readingHistoryItems: [],
+    readingHistoryOffset: 0,
+    readingHistoryLoadedCount: 40,
+    readingHistoryTotal: 0,
+    readingHistoryLoading: false,
+    readingHistoryError: '',
+    readingHistoryReturnComicId: '',
+    readingHistoryReturnSourceId: '',
+    readingHistoryScrollTop: 67,
+    readingHistoryReturnToReader: false,
+    comics: [],
+  };
+  context.elements = { contentArea: { scrollTop: 67 }, readingHistoryList: new FakeElement('div') };
+  return context;
+}
+
+// A live refresh retains the previous multi-page target, scroll, and return
+// focus while reconstructing the same loaded window from native pages.
+{
+  const requests = [];
+  const context = liveRefreshHarness(async args => {
+    requests.push(args);
+    return {
+      items: Array.from({ length: 40 }, (_, index) => ({
+        openedAt: '2026-11-09T10:00:00Z', comic: { id: `book-${args.offset + index}`, sourceId: 'source', offline: false },
+      })),
+      total: 80,
+    };
+  });
+  vm.runInContext('renderReadingHistory = () => {}; renderReadingHistoryStatus = () => {};', context);
+  context.state.readingHistoryLoadedCount = 80;
+  context.state.readingHistoryOffset = 80;
+  context.state.readingHistoryTotal = 80;
+  context.state.readingHistoryReturnComicId = 'return-book';
+  context.state.readingHistoryReturnSourceId = 'source';
+  let focusCalls = 0;
+  context.elements.readingHistoryList = {
+    querySelectorAll: selector => selector === '.reading-history-row'
+      ? [{ dataset: { historyComicId: 'return-book', historySourceId: 'source' }, focus() { focusCalls += 1; } }]
+      : [],
+  };
+  await context.run.refreshReadingHistoryAfterReader();
+  assert.deepEqual(requests.map(request => request.offset), [0, 40], 'refresh reloads all previously loaded pages');
+  assert.equal(context.state.readingHistoryLoadedCount, 80);
+  assert.equal(context.state.readingHistoryOffset, 80);
+  assert.equal(context.elements.contentArea.scrollTop, 67);
+  assert.equal(focusCalls, 1, 'refresh returns focus to the same history row');
+}
+
+// A current iOS Documents discovery batch hydrates only the exact offline
+// history source/path, then a second batch during the refresh is coalesced.
+{
+  let finishFirst;
+  const requests = [];
+  const context = liveRefreshHarness(args => {
+    requests.push(args);
+    return new Promise(resolve => { finishFirst = resolve; });
+  });
+  const sourceId = liveDocumentsSource();
+  const offlineA = { id: 'A', sourceId, relativePath: 'series/A.cbz', offline: true };
+  context.state.readingHistoryItems = [{ comic: offlineA, openedAt: '2026-11-09T10:00:00Z' }];
+  context.run.queueReadingHistoryRefreshForLibraryBatch([{ id: 'A', sourceId, relativePath: 'series/A.cbz' }]);
+  assert.equal(requests.length, 1, 'exact offline own-Documents row starts one refresh');
+  context.run.queueReadingHistoryRefreshForLibraryBatch([{ id: 'B', sourceId, relativePath: 'series/B.cbz' }]);
+  context.run.queueReadingHistoryRefreshForLibraryBatch([{ id: 'A', sourceId, relativePath: 'series/A.cbz' }]);
+  assert.equal(requests.length, 1, 'batches coalesce while the multi-page refresh is active');
+  finishFirst({ items: [
+    { comic: { ...offlineA, offline: false }, openedAt: '2026-11-09T10:00:00Z' },
+    { comic: { id: 'B', sourceId, relativePath: 'series/B.cbz', offline: true }, openedAt: '2026-11-09T09:00:00Z' },
+  ], total: 2 });
+  await new Promise(resolve => setImmediate(resolve));
+  assert.equal(requests.length, 2, 'one pending matching path gets one follow-up refresh');
+  assert.equal(context.state.readingHistoryItems[0].comic.offline, false, 'follow-up enables the newly live history row');
+  assert.equal(context.elements.contentArea.scrollTop, 67, 'refresh preserves history scroll position');
+  assert.equal(context.state.readingHistoryLoadedCount, 40, 'refresh preserves loaded-count paging contract');
+  finishFirst({ items: [
+    { comic: { ...offlineA, offline: false }, openedAt: '2026-11-09T10:00:00Z' },
+    { comic: { id: 'B', sourceId, relativePath: 'series/B.cbz', offline: false }, openedAt: '2026-11-09T09:00:00Z' },
+  ], total: 2 });
+  await new Promise(resolve => setImmediate(resolve));
+  assert.equal(requests.length, 2, 'online rows are not refreshed again');
+}
+
+// A first request can be in flight before it has returned any history rows.
+// Keep its discovery intent until those rows arrive, then issue one follow-up.
+{
+  let resolveInitial;
+  let calls = 0;
+  const sourceId = liveDocumentsSource();
+  const historyComic = { id: 'first', sourceId, relativePath: 'one.cbz', offline: true };
+  const context = liveRefreshHarness(() => {
+    calls += 1;
+    if (calls === 1) return new Promise(resolve => { resolveInitial = resolve; });
+    return Promise.resolve({ items: [{ comic: { ...historyComic, offline: false } }], total: 1 });
+  });
+  const initialLoad = context.run.loadReadingHistory({ reset: true });
+  context.run.queueReadingHistoryRefreshForLibraryBatch([{ id: 'first', sourceId, relativePath: 'one.cbz' }]);
+  assert.equal(calls, 1, 'discovery waits while the first empty-items request is pending');
+  resolveInitial({ items: [{ comic: historyComic }], total: 1 });
+  await initialLoad;
+  await new Promise(resolve => setImmediate(resolve));
+  assert.equal(calls, 2, 'completed first request is compared with pending discovery paths');
+  assert.equal(context.state.readingHistoryItems[0].comic.offline, false);
+}
+
+// The path must be the same current local Documents source. Similar paths from
+// SMB, NAS, Files bookmarks, or another local folder are inert.
+{
+  let calls = 0;
+  const context = liveRefreshHarness(async () => { calls += 1; return { items: [], total: 0 }; });
+  const sourceId = liveDocumentsSource();
+  for (const comic of [
+    { sourceId: 'smb:server', relativePath: 'same.cbz' },
+    { sourceId: 'external:bookmark', relativePath: 'same.cbz' },
+    { sourceId: 'local:library', relativePath: 'same.cbz' },
+  ]) {
+    context.state.readingHistoryItems = [{ comic: { ...comic, offline: true } }];
+    context.run.queueReadingHistoryRefreshForLibraryBatch([{ id: 'same', ...comic }]);
+  }
+  assert.equal(calls, 0, 'foreign source IDs and UUIDs never refresh a same-path row');
+  context.state.readingHistoryItems = [{ comic: { id: 'same', sourceId, relativePath: 'same.cbz', offline: false } }];
+  context.run.queueReadingHistoryRefreshForLibraryBatch([{ id: 'same', sourceId, relativePath: 'same.cbz' }]);
+  assert.equal(calls, 0, 'already online rows do not refresh');
+}
+
+// Hidden history or an active reader must not retain discovery intent that can
+// reopen or steal focus from the user's current screen.
+{
+  let calls = 0;
+  const context = liveRefreshHarness(async () => { calls += 1; return { items: [], total: 0 }; });
+  const sourceId = liveDocumentsSource();
+  context.state.readingHistoryItems = [{ comic: { id: 'A', sourceId, relativePath: 'A.cbz', offline: true } }];
+  context.state.readingHistoryVisible = false;
+  context.run.queueReadingHistoryRefreshForLibraryBatch([{ id: 'A', sourceId, relativePath: 'A.cbz' }]);
+  context.state.readingHistoryVisible = true;
+  context.run.drainReadingHistoryLiveRefresh();
+  assert.equal(calls, 0, 'leaving history discards later refresh eligibility');
+  context.state.currentComic = { id: 'reader' };
+  context.run.queueReadingHistoryRefreshForLibraryBatch([{ id: 'A', sourceId, relativePath: 'A.cbz' }]);
+  context.state.currentComic = null;
+  context.run.drainReadingHistoryLiveRefresh();
+  assert.equal(calls, 0, 'reader-covered history does not schedule or resurrect a page');
 }
 
 async function runNativeCloseHistoryRace({ removeReturnGuard = false } = {}) {

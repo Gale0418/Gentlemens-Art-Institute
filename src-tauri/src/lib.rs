@@ -6,6 +6,7 @@ pub mod cache_policy;
 pub mod catalog;
 pub mod commerce;
 pub mod file_ops;
+pub(crate) mod ios_documents;
 pub mod metadata;
 pub mod photo_library;
 pub mod protocol;
@@ -873,14 +874,16 @@ fn external_bookmarks_for_restore(
 // iOS 更新 App 後容器 UUID 可能改變；只重定位內建 Documents，不改外部來源。
 #[cfg(any(target_os = "ios", test))]
 fn relocate_ios_documents(saved: &str, documents: &Path) -> String {
-    let stripped = saved.strip_prefix("/private").unwrap_or(saved);
-    let Some(rest) = stripped.strip_prefix("/var/mobile/Containers/Data/Application/") else {
+    let Some(saved_container) = ios_documents::documents_container_id(saved) else {
         return saved.to_string();
     };
-    let Some((container, suffix)) = rest.split_once('/') else {
+    let Some(current_container) = documents
+        .to_str()
+        .and_then(ios_documents::documents_container_id)
+    else {
         return saved.to_string();
     };
-    if uuid::Uuid::parse_str(container).is_err() || suffix != "Documents" {
+    if saved_container == current_container {
         return saved.to_string();
     }
     documents.to_string_lossy().into_owned()
@@ -2237,13 +2240,78 @@ struct ReadingHistoryQuery {
     time_zone_offset_minutes: i32,
 }
 
+#[cfg(any(target_os = "ios", test))]
+type IosDocumentsHistoryContext = (PathBuf, String);
+
+#[cfg(any(target_os = "ios", test))]
+fn ios_history_documents_context(
+    native_documents: Option<&Path>,
+    configured_dir: &str,
+) -> (
+    Option<IosDocumentsHistoryContext>,
+    Option<IosDocumentsHistoryContext>,
+) {
+    let Some(native_documents) = native_documents
+        .filter(|documents| ios_documents::current_documents_source_id(documents).is_some())
+    else {
+        return (None, None);
+    };
+    let configured_documents = Path::new(configured_dir);
+    if !configured_dir.is_empty()
+        && ios_documents::same_documents_root(native_documents, configured_documents)
+    {
+        if let Some(source_id) = ios_documents::current_documents_source_id(configured_documents) {
+            let context = (configured_documents.to_path_buf(), source_id);
+            return (Some(context.clone()), Some(context));
+        }
+    }
+    let Some(source_id) = ios_documents::current_documents_source_id(native_documents) else {
+        return (None, None);
+    };
+    (Some((native_documents.to_path_buf(), source_id)), None)
+}
+
 #[tauri::command]
 async fn get_reading_history(
     query: ReadingHistoryQuery,
     state: State<'_, Arc<AppState>>,
+    _app_handle: AppHandle,
 ) -> Result<catalog::ReadingHistoryPage, String> {
     let store = catalog_store(&state)?;
+    #[cfg(target_os = "ios")]
+    let (documents_for_query, hydration_context) = {
+        let _scan_lifecycle = state.scan_lifecycle.lock().await;
+        let native_documents = _app_handle.path().document_dir().ok();
+        let configured_dir = state.scan_dir.read().unwrap().clone();
+        let (query_context, hydration_context) =
+            ios_history_documents_context(native_documents.as_deref(), &configured_dir);
+        let hydration = hydration_context.map(|(documents, source_id)| {
+            (
+                documents,
+                source_id,
+                configured_dir,
+                state
+                    .scan_generation
+                    .load(std::sync::atomic::Ordering::Acquire),
+            )
+        });
+        (query_context, hydration)
+    };
+    #[cfg(target_os = "ios")]
+    let documents_for_query = documents_for_query.clone();
+    #[cfg(target_os = "ios")]
+    let hydration_store = store.clone();
     let mut page = tauri::async_runtime::spawn_blocking(move || {
+        #[cfg(target_os = "ios")]
+        if let Some((documents, _)) = documents_for_query {
+            return store.get_reading_history_for_ios_documents(
+                &query.period,
+                query.offset,
+                query.limit,
+                query.time_zone_offset_minutes,
+                &documents,
+            );
+        }
         store.get_reading_history(
             &query.period,
             query.offset,
@@ -2270,6 +2338,96 @@ async fn get_reading_history(
             refresh_photo_history_item(&mut history.comic, current);
         }
     }
+    #[cfg(target_os = "ios")]
+    if let Some((documents, current_source_id, configured_dir, generation)) = hydration_context {
+        let eligible_paths = page
+            .items
+            .iter()
+            .filter(|history| {
+                history.comic.offline
+                    && (history.comic.source_id == current_source_id
+                        || ios_documents::is_previous_documents_source_id(
+                            &history.comic.source_id,
+                            &documents,
+                        ))
+            })
+            .map(|history| history.comic.relative_path.clone())
+            .collect::<std::collections::BTreeSet<_>>();
+        if !eligible_paths.is_empty() {
+            let current_items = {
+                let _scan_lifecycle = state.scan_lifecycle.lock().await;
+                if !ios_documents_hydration_snapshot_is_current(
+                    &configured_dir,
+                    generation,
+                    &state.scan_dir.read().unwrap(),
+                    state
+                        .scan_generation
+                        .load(std::sync::atomic::Ordering::Acquire),
+                ) {
+                    Vec::new()
+                } else {
+                    let comics = state.comics.lock().await;
+                    comics
+                        .iter()
+                        .filter(|item| {
+                            item.source_id == current_source_id
+                                && item.r#type != "offline"
+                                && eligible_paths.contains(&item.relative_path)
+                        })
+                        .cloned()
+                        .collect::<Vec<_>>()
+                }
+            };
+            if !current_items.is_empty() {
+                let original_page = page.clone();
+                let hydrated_page = tauri::async_runtime::spawn_blocking(move || {
+                    let mut current_items = hydration_store
+                        .overlay_library_with_options(
+                            current_items.clone(),
+                            &BTreeSet::new(),
+                            false,
+                        )
+                        .unwrap_or(current_items);
+                    current_items = current_items
+                        .into_iter()
+                        .map(normalize_runtime_item)
+                        .collect();
+                    let Ok(root) = cap_std::fs::Dir::open_ambient_dir(
+                        &documents,
+                        cap_std::ambient_authority(),
+                    ) else {
+                        return page;
+                    };
+                    for history in &mut page.items {
+                        refresh_ios_documents_history_item(
+                            &mut history.comic,
+                            &current_items,
+                            &documents,
+                            &current_source_id,
+                            &current_source_id,
+                            &root,
+                        );
+                    }
+                    page
+                })
+                .await
+                .map_err(|error| format!("驗證本機閱讀紀錄位置背景工作失敗：{error}"))?;
+                let _scan_lifecycle = state.scan_lifecycle.lock().await;
+                page = if ios_documents_hydration_snapshot_is_current(
+                    &configured_dir,
+                    generation,
+                    &state.scan_dir.read().unwrap(),
+                    state
+                        .scan_generation
+                        .load(std::sync::atomic::Ordering::Acquire),
+                ) {
+                    hydrated_page
+                } else {
+                    original_page
+                };
+            }
+        }
+    }
     Ok(page)
 }
 
@@ -2290,6 +2448,126 @@ fn refresh_photo_history_item(
         history.offline = false;
     } else {
         history.offline = true;
+    }
+}
+
+#[cfg(any(target_os = "ios", test))]
+fn refresh_ios_documents_history_item(
+    history: &mut catalog::ReadingHistoryComic,
+    current_items: &[ComicItem],
+    documents: &Path,
+    current_source_id: &str,
+    configured_source_id: &str,
+    root: &cap_std::fs::Dir,
+) {
+    if !history.offline
+        || current_source_id != configured_source_id
+        || ios_documents::current_documents_source_id(documents).as_deref()
+            != Some(current_source_id)
+    {
+        return;
+    }
+    if history.source_id != current_source_id
+        && !ios_documents::is_previous_documents_source_id(&history.source_id, documents)
+    {
+        return;
+    }
+    let Some(relative) = safe_ios_history_relative_path(&history.relative_path) else {
+        return;
+    };
+    let Some(current) = current_items.iter().find(|item| {
+        item.source_id == current_source_id
+            && item.relative_path == history.relative_path
+            && matches!(item.r#type.as_str(), "archive" | "folder" | "image")
+            && item.external_bookmark.is_none()
+    }) else {
+        return;
+    };
+    let Ok(metadata) = protocol::symlink_metadata_from_capability(root, &relative) else {
+        return;
+    };
+    let expected_kind_matches = if current.r#type == "folder" {
+        metadata.is_dir()
+    } else {
+        metadata.is_file()
+    };
+    if !expected_kind_matches {
+        return;
+    }
+
+    history.id = current.id.clone();
+    history.source_id = current_source_id.to_string();
+    history.title.clone_from(&current.title);
+    let progress = if current_history_progress_is_newer(&current.progress, &history.progress) {
+        current.progress.clone()
+    } else {
+        history.progress.clone()
+    };
+    history.page_count = if current.page_count > 0 {
+        current.page_count
+    } else if progress.total_pages > 0 {
+        progress.total_pages
+    } else {
+        history.page_count
+    };
+    history.progress = progress;
+    history.offline = false;
+}
+
+#[cfg(any(target_os = "ios", test))]
+fn ios_documents_hydration_snapshot_is_current(
+    expected_root: &str,
+    expected_generation: u64,
+    current_root: &str,
+    current_generation: u64,
+) -> bool {
+    expected_root == current_root && expected_generation == current_generation
+}
+
+#[cfg(any(target_os = "ios", test))]
+fn safe_ios_history_relative_path(relative_path: &str) -> Option<PathBuf> {
+    let relative = Path::new(relative_path);
+    if relative_path.is_empty()
+        || relative_path.contains('\\')
+        || relative.is_absolute()
+        || relative
+            .components()
+            .any(|component| !matches!(component, std::path::Component::Normal(_)))
+    {
+        return None;
+    }
+    Some(relative.to_path_buf())
+}
+
+#[cfg(any(target_os = "ios", test))]
+fn valid_history_progress(progress: &Progress) -> bool {
+    progress.total_pages > 0
+        && progress.current_page <= progress.total_pages
+        && progress.percent.is_finite()
+        && (0.0..=100.0).contains(&progress.percent)
+}
+
+#[cfg(any(target_os = "ios", test))]
+fn current_history_progress_is_newer(current: &Progress, snapshot: &Progress) -> bool {
+    if !valid_history_progress(current) {
+        return false;
+    }
+    if !valid_history_progress(snapshot) {
+        return true;
+    }
+    match (
+        current
+            .updated_at
+            .as_deref()
+            .and_then(|value| chrono::DateTime::parse_from_rfc3339(value).ok()),
+        snapshot
+            .updated_at
+            .as_deref()
+            .and_then(|value| chrono::DateTime::parse_from_rfc3339(value).ok()),
+    ) {
+        (Some(current), Some(snapshot)) => current >= snapshot,
+        (Some(_), None) => true,
+        _ => false,
     }
 }
 
@@ -5658,6 +5936,60 @@ mod tests {
     use super::*;
 
     #[test]
+    fn ios_history_uses_native_documents_for_custom_scan_roots() {
+        let native = test_documents_root("22222222-2222-4222-8222-222222222222");
+        let custom = Path::new("/Volumes/External/Comics");
+        let (query, hydration) =
+            ios_history_documents_context(Some(&native), custom.to_str().unwrap());
+        assert_eq!(query.unwrap().0, native);
+        assert!(hydration.is_none());
+
+        let invalid_native = Path::new("/Volumes/External/Documents");
+        let (query, hydration) =
+            ios_history_documents_context(Some(invalid_native), custom.to_str().unwrap());
+        assert!(query.is_none());
+        assert!(hydration.is_none());
+    }
+
+    #[test]
+    fn ios_history_context_keeps_configured_source_for_private_var_alias() {
+        let native = test_documents_root("22222222-2222-4222-8222-222222222222");
+        let configured = Path::new(
+            "/var/mobile/Containers/Data/Application/22222222-2222-4222-8222-222222222222/Documents",
+        );
+        let (query, hydration) =
+            ios_history_documents_context(Some(&native), configured.to_str().unwrap());
+        assert_eq!(query.as_ref().unwrap().0, configured);
+        assert_eq!(
+            query.as_ref().unwrap().1,
+            scanner::local_source_id(configured)
+        );
+        assert_eq!(hydration.unwrap().0, configured);
+    }
+
+    #[test]
+    fn ios_documents_history_hydration_rejects_stale_scan_root_or_generation() {
+        assert!(ios_documents_hydration_snapshot_is_current(
+            "/documents",
+            7,
+            "/documents",
+            7
+        ));
+        assert!(!ios_documents_hydration_snapshot_is_current(
+            "/documents",
+            7,
+            "/other-documents",
+            7
+        ));
+        assert!(!ios_documents_hydration_snapshot_is_current(
+            "/documents",
+            7,
+            "/documents",
+            8
+        ));
+    }
+
+    #[test]
     fn reading_history_requires_the_current_reader_session_and_source() {
         assert!(reading_history_session_matches(
             Some("book"),
@@ -5737,6 +6069,280 @@ mod tests {
         refresh_photo_history_item(&mut history, None);
         assert!(history.offline);
         assert_eq!(history.progress.current_page, 2);
+    }
+
+    fn history_hydration_fixture(
+        relative_path: &str,
+        history_source_id: String,
+        current_source_id: &str,
+        progress: Progress,
+    ) -> (catalog::ReadingHistoryComic, ComicItem) {
+        (
+            catalog::ReadingHistoryComic {
+                id: "old-runtime-id".into(),
+                source_id: history_source_id,
+                relative_path: relative_path.into(),
+                title: "Title at open".into(),
+                page_count: 8,
+                progress: Progress {
+                    current_page: 2,
+                    total_pages: 8,
+                    percent: 25.0,
+                    updated_at: Some("2026-11-08T10:00:00Z".into()),
+                },
+                offline: true,
+            },
+            ComicItem {
+                id: "current-runtime-id".into(),
+                r#type: "archive".into(),
+                relative_path: relative_path.into(),
+                ext: ".cbz".into(),
+                title: "Current title".into(),
+                series: "Current series".into(),
+                updated_at: "2026-11-09T00:00:00Z".into(),
+                page_count: 0,
+                progress,
+                source_id: current_source_id.into(),
+                source_path: None,
+                external_bookmark: None,
+            },
+        )
+    }
+
+    fn test_documents_root(container: &str) -> PathBuf {
+        PathBuf::from(format!(
+            "/private/var/mobile/Containers/Data/Application/{container}/Documents"
+        ))
+    }
+
+    #[test]
+    fn live_current_documents_history_hydrates_exact_capability_checked_item() {
+        let current_root = test_documents_root("22222222-2222-4222-8222-222222222222");
+        let old_root = test_documents_root("11111111-1111-4111-8111-111111111111");
+        let current_source_id = scanner::local_source_id(&current_root);
+        let old_source_id = scanner::local_source_id(&old_root);
+        let temp_root =
+            std::env::temp_dir().join(format!("gai_history_live_docs_{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(temp_root.join("Audit69")).unwrap();
+        std::fs::write(temp_root.join("Audit69/Audit68-A.cbz"), b"book").unwrap();
+        let capability =
+            cap_std::fs::Dir::open_ambient_dir(&temp_root, cap_std::ambient_authority()).unwrap();
+        let (mut history, current) = history_hydration_fixture(
+            "Audit69/Audit68-A.cbz",
+            old_source_id,
+            &current_source_id,
+            Progress {
+                current_page: 4,
+                total_pages: 12,
+                percent: 33.3,
+                updated_at: Some("2026-11-08T10:30:00Z".into()),
+            },
+        );
+        refresh_ios_documents_history_item(
+            &mut history,
+            &[current],
+            &current_root,
+            &current_source_id,
+            &current_source_id,
+            &capability,
+        );
+        assert_eq!(history.id, "current-runtime-id");
+        assert_eq!(history.source_id, current_source_id);
+        assert_eq!(history.relative_path, "Audit69/Audit68-A.cbz");
+        assert_eq!(history.title, "Current title");
+        assert_eq!(history.page_count, 12);
+        assert_eq!(history.progress.current_page, 4);
+        assert!(!history.offline);
+
+        let (mut snapshot_history, current_without_progress) = history_hydration_fixture(
+            "Audit69/Audit68-A.cbz",
+            scanner::local_source_id(&old_root),
+            &current_source_id,
+            Progress {
+                current_page: 0,
+                total_pages: 0,
+                percent: 0.0,
+                updated_at: None,
+            },
+        );
+        refresh_ios_documents_history_item(
+            &mut snapshot_history,
+            &[current_without_progress],
+            &current_root,
+            &current_source_id,
+            &current_source_id,
+            &capability,
+        );
+        assert!(!snapshot_history.offline);
+        assert_eq!(snapshot_history.progress.current_page, 2);
+        assert_eq!(snapshot_history.page_count, 8);
+        std::fs::remove_dir_all(temp_root).unwrap();
+    }
+
+    #[test]
+    fn live_documents_hydration_keeps_snapshot_progress_and_rejects_bad_context_or_sources() {
+        let current_root = test_documents_root("22222222-2222-4222-8222-222222222222");
+        let old_root = test_documents_root("11111111-1111-4111-8111-111111111111");
+        let current_source_id = scanner::local_source_id(&current_root);
+        let old_source_id = scanner::local_source_id(&old_root);
+        let temp_root = std::env::temp_dir().join(format!(
+            "gai_history_live_docs_negative_{}",
+            uuid::Uuid::new_v4()
+        ));
+        std::fs::create_dir_all(&temp_root).unwrap();
+        let capability =
+            cap_std::fs::Dir::open_ambient_dir(&temp_root, cap_std::ambient_authority()).unwrap();
+        let (mut history, current) = history_hydration_fixture(
+            "missing.cbz",
+            old_source_id,
+            &current_source_id,
+            Progress {
+                current_page: 0,
+                total_pages: 0,
+                percent: 0.0,
+                updated_at: None,
+            },
+        );
+        let before = (
+            history.id.clone(),
+            history.source_id.clone(),
+            history.progress.current_page,
+        );
+        refresh_ios_documents_history_item(
+            &mut history,
+            std::slice::from_ref(&current),
+            &current_root,
+            &current_source_id,
+            &current_source_id,
+            &capability,
+        );
+        assert!(history.offline, "missing current file must fail closed");
+        assert_eq!(
+            (
+                history.id.clone(),
+                history.source_id.clone(),
+                history.progress.current_page
+            ),
+            before
+        );
+
+        refresh_ios_documents_history_item(
+            &mut history,
+            std::slice::from_ref(&current),
+            &current_root,
+            &current_source_id,
+            "local:other-configured-root",
+            &capability,
+        );
+        assert!(history.offline, "configured root mismatch must fail closed");
+        assert_eq!(
+            (
+                history.id.clone(),
+                history.source_id.clone(),
+                history.progress.current_page
+            ),
+            before
+        );
+
+        refresh_ios_documents_history_item(
+            &mut history,
+            std::slice::from_ref(&current),
+            Path::new("/Volumes/External/Documents"),
+            &current_source_id,
+            &current_source_id,
+            &capability,
+        );
+        assert!(
+            history.offline,
+            "invalid native Documents context must fail closed"
+        );
+
+        history.source_id = "smb:v1:nas".into();
+        refresh_ios_documents_history_item(
+            &mut history,
+            std::slice::from_ref(&current),
+            &current_root,
+            &current_source_id,
+            &current_source_id,
+            &capability,
+        );
+        assert!(
+            history.offline,
+            "NAS history must not borrow an identical relative path"
+        );
+
+        history.source_id = scanner::local_source_id(&old_root);
+        history.relative_path = "different.cbz".into();
+        refresh_ios_documents_history_item(
+            &mut history,
+            &[current],
+            &current_root,
+            &current_source_id,
+            &current_source_id,
+            &capability,
+        );
+        assert!(history.offline, "relative path must match exactly");
+        assert_eq!(
+            history.progress.current_page, 2,
+            "missing live progress preserves history snapshot"
+        );
+        std::fs::remove_dir_all(temp_root).unwrap();
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn live_documents_hydration_rejects_symlinks_and_unsafe_relative_paths() {
+        use std::os::unix::fs::symlink;
+
+        let current_root = test_documents_root("22222222-2222-4222-8222-222222222222");
+        let old_root = test_documents_root("11111111-1111-4111-8111-111111111111");
+        let current_source_id = scanner::local_source_id(&current_root);
+        let temp_root = std::env::temp_dir().join(format!(
+            "gai_history_live_docs_symlinks_{}",
+            uuid::Uuid::new_v4()
+        ));
+        let outside = temp_root.with_extension("outside");
+        std::fs::create_dir_all(&temp_root).unwrap();
+        std::fs::create_dir_all(&outside).unwrap();
+        std::fs::write(outside.join("book.cbz"), b"outside").unwrap();
+        symlink(outside.join("book.cbz"), temp_root.join("leaf-link.cbz")).unwrap();
+        symlink(&outside, temp_root.join("parent-link")).unwrap();
+        let capability =
+            cap_std::fs::Dir::open_ambient_dir(&temp_root, cap_std::ambient_authority()).unwrap();
+
+        for relative_path in [
+            "leaf-link.cbz",
+            "parent-link/book.cbz",
+            "../book.cbz",
+            "/outside/book.cbz",
+            "a\\..\\book.cbz",
+        ] {
+            let (mut history, current) = history_hydration_fixture(
+                relative_path,
+                scanner::local_source_id(&old_root),
+                &current_source_id,
+                Progress {
+                    current_page: 0,
+                    total_pages: 0,
+                    percent: 0.0,
+                    updated_at: None,
+                },
+            );
+            refresh_ios_documents_history_item(
+                &mut history,
+                &[current],
+                &current_root,
+                &current_source_id,
+                &current_source_id,
+                &capability,
+            );
+            assert!(
+                history.offline,
+                "unsafe path should stay offline: {relative_path}"
+            );
+        }
+        std::fs::remove_dir_all(temp_root).unwrap();
+        std::fs::remove_dir_all(outside).unwrap();
     }
 
     #[cfg(unix)]

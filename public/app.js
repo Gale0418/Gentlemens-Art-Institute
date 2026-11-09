@@ -145,6 +145,9 @@ let lastContinueRenderSignature = '';
 const READING_HISTORY_PAGE_SIZE = 40;
 let readingHistoryRequestGeneration = 0;
 let readingHistoryRefreshGeneration = 0;
+let readingHistoryLivePendingPaths = new Map();
+let readingHistoryRefreshInFlight = false;
+let readingHistoryRefreshActiveGeneration = 0;
 const READING_HISTORY_RECORD_RETRY_DELAYS_MS = [300, 900];
 let readingHistoryRecordGeneration = 0;
 let readingHistoryRecordInFlight = null;
@@ -1021,6 +1024,7 @@ function applyIncrementalLibraryBatch(payload) {
       state.comics[index] = comic;
     }
   });
+  queueReadingHistoryRefreshForLibraryBatch(validItems);
   sanitizeOrganizerSelection();
   if (state.visibleDirectoryGeneration !== generation) {
     state.visibleDirectories.clear();
@@ -1514,6 +1518,8 @@ const elements = {
   libraryStartPanel: document.getElementById('library-start-panel'),
   libraryStartChoose: document.getElementById('library-start-choose'),
   libraryStartDemo: document.getElementById('library-start-demo'),
+  libraryStartStatus: document.getElementById('library-start-status'),
+  libraryTitle: document.getElementById('library-title'),
   libraryDiscoveryBtn: document.getElementById('library-discovery-btn'),
   libraryDiscoveryStatus: document.getElementById('library-discovery-status'),
   libraryTagDiscoveryBtn: document.getElementById('library-tag-discovery-btn'),
@@ -1528,6 +1534,7 @@ const elements = {
   scanRetryBtn: document.getElementById('scan-retry-btn'),
   scanSourceBtn: document.getElementById('scan-source-btn'),
   continuePanel: document.getElementById('continue-panel'),
+  continueTitle: document.getElementById('continue-title'),
   continueStrip: document.getElementById('continue-strip'),
   readingHistoryPage: document.getElementById('reading-history-page'),
   readingHistoryEntry: document.getElementById('reading-history-entry'),
@@ -2072,7 +2079,7 @@ async function addIOSLibrarySource() {
     const result = await window.electronAPI.openExternalFolder();
     const selectedBookmark = normalizeExternalBookmarkSelection(result);
     if (!selectedBookmark) {
-      alert(readerText('選取的外部資料夾授權無效，來源清單沒有變更。'));
+      showLibrarySourceStatus(readerText('選取的外部資料夾授權無效，來源清單沒有變更。'));
       return;
     }
 
@@ -2080,6 +2087,7 @@ async function addIOSLibrarySource() {
       if (externalBookmarksRecoveryRequired) {
         if (!confirm(readerText('先備份損壞清單、重建為已選來源，其他來源需重新加入。確定要繼續嗎？'))) {
           recoveryCancelled = true;
+          showLibrarySourceStatus(readerText('已取消選擇，漫畫來源沒有變更。'));
           return;
         }
         if (!window.electronAPI?.repairExternalBookmarks) {
@@ -2099,7 +2107,7 @@ async function addIOSLibrarySource() {
       if (existingIndex >= 0) {
         if (bookmarks[existingIndex].name === selectedBookmark.name) {
           duplicateBookmark = true;
-          alert(readerText('這個資料夾已經加入了。'));
+          showLibrarySourceStatus(readerText('這個資料夾已經加入了。'));
           return;
         }
         const renamedBookmarks = bookmarks.map((bookmark, index) => (
@@ -2128,12 +2136,20 @@ async function addIOSLibrarySource() {
     }
     if (duplicateBookmark) return;
     renderExternalBookmarks();
-    if (renamedBookmark) return;
+    if (renamedBookmark) {
+      showLibrarySourceStatus(readerText('已選擇：{path}', { path: selectedBookmark.name }));
+      return;
+    }
     if (elements.scanDirStatus) elements.scanDirStatus.textContent = readerText('已加入：{name}，正在重新掃描。', { name: selectedBookmark.name });
     showLoader(readerText('正在掃描新加入的漫畫來源...'), { progress: null, detail: readerText('掃描完成後會更新書架，期間仍可操作目前畫面') });
     startScanStatusPolling();
     scheduleLibraryRefresh(0);
   } catch (error) {
+    const errorMessage = typeof error === 'string' ? error : error?.message;
+    if (error?.code === 'FOLDER_PICKER_CANCELLED' || errorMessage === 'FOLDER_PICKER_CANCELLED') {
+      showLibrarySourceStatus(readerText('已取消選擇，漫畫來源沒有變更。'));
+      return;
+    }
     console.error('加入 iOS 外部資料夾失敗：', error);
     const { message, stateWasUpdated } = classifyBookmarkUpdateError(error);
     if (repairAttempted && !stateWasUpdated) {
@@ -2143,10 +2159,8 @@ async function addIOSLibrarySource() {
       if (repairAttempted) externalBookmarksRecoveryRequired = false;
       rememberExternalBookmarks(desiredBookmarks);
       renderExternalBookmarks();
+      showLibrarySourceStatus(readerText('外部資料夾已更新，但舊資料夾權限釋放部分失敗：{message}', { message }));
       if (renamedBookmark) return;
-      if (elements.scanDirStatus) {
-        elements.scanDirStatus.textContent = readerText('外部資料夾已更新，但舊資料夾權限釋放部分失敗：{message}', { message });
-      }
       showLoader(readerText('正在掃描新加入的漫畫來源...'), { progress: null, detail: readerText('掃描完成後會更新書架，期間仍可操作目前畫面') });
       startScanStatusPolling();
       scheduleLibraryRefresh(0);
@@ -2168,11 +2182,25 @@ async function chooseNativeLibrarySource() {
   await saveSettingsPath(selectedPath);
 }
 
+let librarySourceSelectionPending = false;
+
+function showLibrarySourceStatus(message) {
+  if (elements.scanDirStatus) elements.scanDirStatus.textContent = message;
+  if (elements.libraryStartStatus) {
+    elements.libraryStartStatus.textContent = message;
+    elements.libraryStartStatus.hidden = !message;
+  }
+}
+
 async function chooseLibrarySource() {
-  if (!elements.librarySourceBtn) return;
-  elements.librarySourceBtn.disabled = true;
-  elements.librarySourceBtn.setAttribute('aria-busy', 'true');
-  if (elements.scanDirStatus) elements.scanDirStatus.textContent = readerText('正在開啟系統檔案選擇器…');
+  if (librarySourceSelectionPending) return;
+  librarySourceSelectionPending = true;
+  const buttons = [elements.librarySourceBtn, elements.libraryStartChoose].filter(Boolean);
+  buttons.forEach(button => {
+    button.disabled = true;
+    button.setAttribute('aria-busy', 'true');
+  });
+  showLibrarySourceStatus(readerText('正在開啟系統檔案選擇器…'));
 
   try {
     if (isIOSLibraryDevice() && typeof window.electronAPI?.openExternalFolder === 'function') {
@@ -2182,15 +2210,18 @@ async function chooseLibrarySource() {
     } else if (elements.fallbackFolderBrowser) {
       elements.fallbackFolderBrowser.style.display = 'flex';
       await fetchBrowserFolders(elements.scanDirInput.value.trim());
+      if (elements.scanDirStatus) elements.scanDirStatus.textContent = '';
     }
   } catch (error) {
     console.error('加入漫畫來源失敗：', error);
-    if (elements.scanDirStatus) {
-      elements.scanDirStatus.textContent = readerText('無法加入漫畫來源：{error}', { error: error?.message || error });
-    }
+    showLibrarySourceStatus(readerText('無法加入漫畫來源：{error}', { error: error?.message || error }));
   } finally {
-    elements.librarySourceBtn.disabled = false;
-    elements.librarySourceBtn.removeAttribute('aria-busy');
+    showLibrarySourceStatus(elements.scanDirStatus?.textContent || '');
+    librarySourceSelectionPending = false;
+    buttons.forEach(button => {
+      button.disabled = false;
+      button.removeAttribute('aria-busy');
+    });
   }
 }
 
@@ -4189,9 +4220,16 @@ function isComicOfflineForSearch(comic, metadata) {
 }
 
 function updateLibraryStartPanel() {
-  if (!elements.libraryStartPanel) return;
   const hasFormalComic = state.comics.some(comic => comic && !isBuiltInDemoComic(comic));
-  elements.libraryStartPanel.hidden = hasFormalComic;
+  if (elements.libraryStartPanel) elements.libraryStartPanel.hidden = hasFormalComic;
+  const isWelcome = !hasFormalComic && !state.currentPath;
+  elements.mainLayout?.classList.toggle('library-welcome', isWelcome);
+  elements.mainLayout?.classList.toggle('library-default-filters', state.activeFilter === 'all' && state.activeSeries === 'all');
+  if (elements.libraryTitle) {
+    const title = isWelcome ? '原創風景選集' : '全部漫畫';
+    elements.libraryTitle.dataset.i18n = title;
+    elements.libraryTitle.textContent = readerText(title);
+  }
 }
 
 function setScanRecoveryVisible(visible, message = '') {
@@ -5004,6 +5042,14 @@ function renderContinueStrip() {
     })
     .slice(0, 5);
 
+  const isEmpty = candidates.length === 0;
+  if (elements.continueTitle) elements.continueTitle.hidden = isEmpty;
+  if (elements.continuePanel) {
+    elements.continuePanel.hidden = false;
+    elements.continuePanel.classList.toggle('is-empty', isEmpty);
+    elements.continuePanel.setAttribute('aria-labelledby', isEmpty ? 'reading-history-entry' : 'continue-title');
+  }
+
   const titleCounts = new Map();
   candidates.forEach(comic => titleCounts.set(comic.title, (titleCounts.get(comic.title) || 0) + 1));
   const contexts = new Map(candidates.map(comic => {
@@ -5095,6 +5141,9 @@ function closeReadingHistory({ restoreFocus = true } = {}) {
   elements.mainLayout?.classList.remove('history-visible');
   readingHistoryRefreshGeneration += 1;
   readingHistoryRequestGeneration += 1;
+  readingHistoryRefreshInFlight = false;
+  readingHistoryRefreshActiveGeneration = 0;
+  readingHistoryLivePendingPaths.clear();
   state.readingHistoryLoading = false;
   elements.contentArea?.classList.remove('history-visible');
   if (elements.contentArea) elements.contentArea.scrollTop = state.readingHistoryLibraryScrollTop;
@@ -5104,6 +5153,9 @@ function closeReadingHistory({ restoreFocus = true } = {}) {
 function setReadingHistoryPeriod(period, selectedButton = null) {
   if (!['month', 'year', 'all'].includes(period) || period === state.readingHistoryPeriod) return false;
   readingHistoryRefreshGeneration += 1;
+  readingHistoryRefreshInFlight = false;
+  readingHistoryRefreshActiveGeneration = 0;
+  readingHistoryLivePendingPaths.clear();
   state.readingHistoryPeriod = period;
   state.readingHistoryScrollTop = 0;
   state.readingHistoryItems = [];
@@ -5307,13 +5359,17 @@ async function loadReadingHistory({ reset = false, preserveLoadedCount = false }
       if (state.readingHistoryVisible && elements.contentArea) {
         elements.contentArea.scrollTop = state.readingHistoryScrollTop;
       }
+      drainReadingHistoryLiveRefresh();
     }
   }
   return !state.readingHistoryError;
 }
 
 async function refreshReadingHistoryAfterReader() {
+  if (readingHistoryRefreshInFlight) return false;
+  readingHistoryRefreshInFlight = true;
   const refreshGeneration = ++readingHistoryRefreshGeneration;
+  readingHistoryRefreshActiveGeneration = refreshGeneration;
   const loadedCount = Math.max(READING_HISTORY_PAGE_SIZE, state.readingHistoryLoadedCount, state.readingHistoryOffset);
   const targetPages = Math.max(1, Math.ceil(loadedCount / READING_HISTORY_PAGE_SIZE));
   const scrollTop = state.readingHistoryScrollTop;
@@ -5326,27 +5382,79 @@ async function refreshReadingHistoryAfterReader() {
     state.readingHistoryReturnComicId = '';
     state.readingHistoryReturnSourceId = '';
   };
-  if (!await loadReadingHistory({ reset: true, preserveLoadedCount: true })) {
-    if (refreshGeneration === readingHistoryRefreshGeneration && state.readingHistoryVisible) focusReturnRow();
-    return;
+  try {
+    if (!await loadReadingHistory({ reset: true, preserveLoadedCount: true })) {
+      if (refreshGeneration === readingHistoryRefreshGeneration && state.readingHistoryVisible) focusReturnRow();
+      return false;
+    }
+    if (refreshGeneration !== readingHistoryRefreshGeneration || !state.readingHistoryVisible) return false;
+    if (state.readingHistoryOffset === 0) {
+      focusReturnRow();
+      if (elements.contentArea) elements.contentArea.scrollTop = scrollTop;
+      return true;
+    }
+    let loadedPages = 1;
+    while (loadedPages < targetPages && state.readingHistoryOffset < state.readingHistoryTotal) {
+      const previousOffset = state.readingHistoryOffset;
+      if (!await loadReadingHistory() || refreshGeneration !== readingHistoryRefreshGeneration
+        || !state.readingHistoryVisible || state.readingHistoryOffset <= previousOffset) break;
+      loadedPages += 1;
+    }
+    if (refreshGeneration === readingHistoryRefreshGeneration && state.readingHistoryVisible) {
+      if (elements.contentArea) elements.contentArea.scrollTop = scrollTop;
+      focusReturnRow();
+    }
+    return true;
+  } finally {
+    if (readingHistoryRefreshActiveGeneration === refreshGeneration) {
+      readingHistoryRefreshInFlight = false;
+      readingHistoryRefreshActiveGeneration = 0;
+      drainReadingHistoryLiveRefresh();
+    }
   }
-  if (refreshGeneration !== readingHistoryRefreshGeneration || !state.readingHistoryVisible) return;
-  if (state.readingHistoryOffset === 0) {
-    focusReturnRow();
-    if (elements.contentArea) elements.contentArea.scrollTop = scrollTop;
-    return;
+}
+
+function currentIOSDocumentsSource(sourceId) {
+  if (typeof sourceId !== 'string' || !sourceId.startsWith('local:')) return false;
+  const encoded = sourceId.slice('local:'.length);
+  if (!/^[A-Za-z0-9_-]+={0,2}$/.test(encoded)) return false;
+  try {
+    const base64 = encoded.replace(/-/g, '+').replace(/_/g, '/');
+    const decoded = new TextDecoder().decode(Uint8Array.from(atob(base64), char => char.charCodeAt(0)));
+    return /^\/?(?:private\/)?var\/mobile\/Containers\/Data\/Application\/[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}\/Documents\/?$/i.test(decoded);
+  } catch {
+    return false;
   }
-  let loadedPages = 1;
-  while (loadedPages < targetPages && state.readingHistoryOffset < state.readingHistoryTotal) {
-    const previousOffset = state.readingHistoryOffset;
-    if (!await loadReadingHistory() || refreshGeneration !== readingHistoryRefreshGeneration
-      || !state.readingHistoryVisible || state.readingHistoryOffset <= previousOffset) break;
-    loadedPages += 1;
+}
+
+function queueReadingHistoryRefreshForLibraryBatch(items) {
+  if (!state.readingHistoryVisible || state.currentComic || state.pendingComicId || state.readerOpenRequestToken
+    || state.readingHistoryReturnToReader || !Array.isArray(items)) return;
+  for (const comic of items) {
+    const sourceId = getComicSourceId(comic);
+    if (!currentIOSDocumentsSource(sourceId)) continue;
+    const relativePath = typeof (comic?.relativePath ?? comic?.relative_path) === 'string'
+      ? String(comic.relativePath ?? comic.relative_path) : '';
+    if (!relativePath) continue;
+    readingHistoryLivePendingPaths.set(`${sourceId}\u0000${relativePath}`, { sourceId, relativePath });
   }
-  if (refreshGeneration === readingHistoryRefreshGeneration && state.readingHistoryVisible) {
-    if (elements.contentArea) elements.contentArea.scrollTop = scrollTop;
-    focusReturnRow();
-  }
+  drainReadingHistoryLiveRefresh();
+}
+
+function drainReadingHistoryLiveRefresh() {
+  if (!readingHistoryLivePendingPaths.size || !state.readingHistoryVisible || state.currentComic
+    || state.pendingComicId || state.readerOpenRequestToken || state.readingHistoryReturnToReader
+    || state.readingHistoryLoading || readingHistoryRefreshInFlight) return false;
+  const matched = [...readingHistoryLivePendingPaths].filter(([, path]) => state.readingHistoryItems.some(item => {
+    const comic = item?.comic;
+    const relativePath = typeof (comic?.relativePath ?? comic?.relative_path) === 'string'
+      ? String(comic.relativePath ?? comic.relative_path) : '';
+    return isComicOffline(comic) && getComicSourceId(comic) === path.sourceId && relativePath === path.relativePath;
+  }));
+  if (!matched.length) return false;
+  readingHistoryLivePendingPaths.clear();
+  refreshReadingHistoryAfterReader();
+  return true;
 }
 
 function inspectorRenderSignature(comic) {
@@ -5408,6 +5516,10 @@ function syncGridSelectionState() {
 
 function activateGridComic(comic) {
   if (!comic) return;
+  if (isBuiltInDemoComic(comic)) {
+    openReader(comic);
+    return;
+  }
   if (state.organizeMode && !comic.isDirectory && !isBuiltInDemoComic(comic)) {
     toggleOrganizerSelection(comic);
     return;
@@ -6333,6 +6445,7 @@ function getDirectoryItems() {
 function filterAndRenderGrid(options = {}) {
   const hadAppendIntent = Boolean(catalogAppendRenderContext || catalogAppendDeferredIntent);
   cancelCatalogAppendRender({ preserveIntent: true });
+  updateLibraryStartPanel();
   syncLibraryUpButton();
   // 1. 取得目前路徑下的項目
   state.filteredComics = getDirectoryItems();
@@ -6444,7 +6557,7 @@ function updateShelfCardState(card, comic) {
   card.classList.toggle('organize-selectable', state.organizeMode && !comic.isDirectory);
   card.classList.toggle('organize-selected', state.organizeMode && state.organizeSelection.has(comic.id));
   if (isBuiltInDemoComic(comic)) {
-    card.setAttribute('aria-pressed', 'false');
+    card.removeAttribute('aria-pressed');
   } else if (!comic.isDirectory) {
     card.setAttribute('aria-pressed', String(state.organizeMode
       ? state.organizeSelection.has(comic.id)
@@ -6777,8 +6890,7 @@ function renderGrid({ skipUnchanged = false, background = false, appendOnly = fa
         </div>
       `;
       card.onclick = () => activateGridComic(comic);
-      configureInteractiveItem(card, readerText('查看風景選集：{title}', { title: comic.title }), card.onclick);
-      card.setAttribute('aria-pressed', 'false');
+      configureInteractiveItem(card, readerText('試讀風景選集：{title}', { title: comic.title }), card.onclick);
     } else if (comic.isDirectory) {
       // ==========================================
       // 📁 【虛擬資料夾卡片】 YACReader 級層級折疊！
@@ -11720,6 +11832,7 @@ if (typeof window !== 'undefined' && window.__GIA_TEST_HOOKS__) {
     state,
     elements,
     updateLibraryStartPanel,
+    chooseLibrarySource,
     updateScanRecovery,
     setScanRecoveryVisible,
     retryLibraryScan,

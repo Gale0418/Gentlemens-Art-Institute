@@ -302,6 +302,9 @@ function createHarness({ width = 1000, storageFails = false } = {}) {
     confirm: () => true,
     navigator: { userAgent: '' },
     btoa: value => Buffer.from(value, 'binary').toString('base64'),
+    atob,
+    TextDecoder,
+    Uint8Array,
     unescape,
   };
   context.IntersectionObserver = class FakeIntersectionObserver {
@@ -851,6 +854,62 @@ assert.equal(hooks.catalogThumbnailURL('/fixture/page-3.png'), '/fixture/page-3.
   assert.equal(scrolling.context.incrementalRenders, 1, '停止滑動後補一次被 gate 的增量 render');
   assert.equal(refreshes, 0, '增量 render 補償不應重抓整庫');
   scrolling.hooks.setLibraryRefreshRunner(null);
+}
+
+// History live hydration is scheduled only after applyIncrementalLibraryBatch
+// accepts the current generation; the real stale-generation early return must
+// not enqueue an otherwise matching own-Documents source/path.
+{
+  const ownDocuments = `local:${Buffer.from('/private/var/mobile/Containers/Data/Application/A1234567-B123-4234-9234-A123456789AB/Documents').toString('base64url')}`;
+  const makeHistoryBatchHarness = () => {
+    const h = createHarness();
+    vm.runInContext('renderReadingHistory = () => {}; renderReadingHistoryStatus = () => {};', h.context);
+    let requests = 0;
+    h.context.window.electronAPI.getReadingHistory = async () => {
+      requests += 1;
+      return { items: [{ openedAt: '2026-11-09T10:00:00Z', comic: {
+        id: 'history-A', sourceId: ownDocuments, relativePath: 'A.cbz', offline: false,
+      } }], total: 1 };
+    };
+    h.hooks.state.readingHistoryVisible = true;
+    h.hooks.state.readingHistoryPeriod = 'month';
+    h.hooks.state.readingHistoryItems = [{ comic: {
+      id: 'history-A', sourceId: ownDocuments, relativePath: 'A.cbz', offline: true,
+    }, openedAt: '2026-11-09T10:00:00Z' }];
+    h.hooks.state.readingHistoryOffset = 1;
+    h.hooks.state.readingHistoryLoadedCount = 1;
+    h.hooks.state.readingHistoryTotal = 1;
+    h.hooks.state.readingHistoryLoading = false;
+    h.hooks.state.readingHistoryScrollTop = 51;
+    h.hooks.elements.contentArea = { scrollTop: 51 };
+    h.hooks.state.scanStatus = { isScanning: true, generation: 50, found: 1 };
+    return { ...h, get requests() { return requests; } };
+  };
+  const accepted = makeHistoryBatchHarness();
+  accepted.hooks.applyIncrementalLibraryBatch({
+    generation: 50,
+    items: [{ id: 'history-A', sourceId: ownDocuments, relativePath: 'A.cbz' }],
+  });
+  await new Promise(resolve => setImmediate(resolve));
+  assert.equal(accepted.requests, 1, 'accepted own-Documents discovery refreshes its exact offline history row');
+  assert.equal(accepted.hooks.state.readingHistoryItems[0].comic.offline, false);
+  assert.equal(accepted.hooks.elements.contentArea.scrollTop, 51, 'batch hydration preserves history scroll');
+
+  const stale = makeHistoryBatchHarness();
+  stale.hooks.state.scanStatus.generation = 51;
+  stale.hooks.applyIncrementalLibraryBatch({
+    generation: 50,
+    items: [{ id: 'history-A', sourceId: ownDocuments, relativePath: 'A.cbz' }],
+  });
+  await new Promise(resolve => setImmediate(resolve));
+  assert.equal(stale.requests, 0, 'stale batch generation returns before queuing a history refresh');
+  const foreign = makeHistoryBatchHarness();
+  foreign.hooks.applyIncrementalLibraryBatch({
+    generation: 50,
+    items: [{ id: 'history-A', sourceId: 'smb:server', relativePath: 'A.cbz' }],
+  });
+  await new Promise(resolve => setImmediate(resolve));
+  assert.equal(foreign.requests, 0, 'same relative path from SMB cannot refresh own-Documents history');
 }
 
 // 已完成掃描後的 visible batch 仍需保留 full refresh，避免局部目錄快照取代
@@ -2748,9 +2807,88 @@ for (let columns = 1; columns <= 12; columns += 1) {
     const previewComic = createBuiltInDemoComics()[0];
     activateGridComic(previewComic);
   `, selection.context);
-  assert.deepEqual(Array.from(selection.context.window.readerOpens), ['normal-book'], '示範卡第一次同樣只顯示詳情');
+  assert.deepEqual(Array.from(selection.context.window.readerOpens), ['normal-book', 'builtin:landscape-mountains'], '示範卡第一次直接開始試讀');
   vm.runInContext('activateGridComic(previewComic);', selection.context);
-  assert.deepEqual(Array.from(selection.context.window.readerOpens), ['normal-book', 'builtin:landscape-mountains'], '示範卡第二次才開始試讀');
+  assert.deepEqual(Array.from(selection.context.window.readerOpens), ['normal-book', 'builtin:landscape-mountains', 'builtin:landscape-mountains'], '再次操作示範仍直接開啟');
+}
+
+// 首頁與設定共用 chooser single-flight，涵蓋忙碌、取消、成功、失敗及解除鎖定。
+{
+  const h = createHarness();
+  const { elements } = h.hooks;
+  let resolvePicker;
+  let pickerCalls = 0;
+  h.context.navigator.userAgent = 'Macintosh';
+  elements.scanDirInput.value = '';
+  h.context.window.electronAPI.openFolderDialog = () => {
+    pickerCalls += 1;
+    return new Promise(resolve => { resolvePicker = resolve; });
+  };
+  const first = h.hooks.chooseLibrarySource();
+  assert.equal(elements.librarySourceBtn.disabled, true);
+  assert.equal(elements.libraryStartChoose.disabled, true);
+  assert.equal(elements.librarySourceBtn.getAttribute('aria-busy'), 'true');
+  assert.equal(elements.libraryStartChoose.getAttribute('aria-busy'), 'true');
+  assert.match(elements.scanDirStatus.textContent, /正在開啟/);
+  assert.equal(elements.libraryStartStatus.textContent, elements.scanDirStatus.textContent);
+  assert.equal(elements.libraryStartStatus.hidden, false);
+  await h.hooks.chooseLibrarySource();
+  assert.equal(pickerCalls, 1, '同時從首頁與設定觸發只開一個系統選擇器');
+  resolvePicker(null);
+  await first;
+  assert.match(elements.scanDirStatus.textContent, /取消/);
+  assert.equal(elements.libraryStartStatus.textContent, elements.scanDirStatus.textContent);
+  assert.equal(elements.libraryStartStatus.hidden, false);
+  assert.equal(elements.librarySourceBtn.disabled, false);
+  assert.equal(elements.libraryStartChoose.disabled, false);
+  assert.equal(elements.librarySourceBtn.getAttribute('aria-busy'), null);
+  assert.equal(elements.libraryStartChoose.getAttribute('aria-busy'), null);
+
+  const success = createHarness();
+  success.context.navigator.userAgent = 'Macintosh';
+  success.hooks.elements.scanDirInput.value = '';
+  success.context.window.electronAPI.openFolderDialog = async () => '/Users/test/Manga';
+  success.context.window.electronAPI.setConfig = async config => ({ scanDir: config.scanDir });
+  vm.runInContext(`
+    filterAndRenderGrid = () => {};
+    renderSidebar = () => {};
+    renderContinueStrip = () => {};
+    renderInspectorEmpty = () => {};
+    startScanStatusPolling = () => {};
+    scheduleLibraryRefresh = () => {};
+  `, success.context);
+  await success.hooks.chooseLibrarySource();
+  assert.match(success.hooks.elements.scanDirStatus.textContent, /已選擇/);
+  assert.equal(success.hooks.elements.libraryStartStatus.textContent, success.hooks.elements.scanDirStatus.textContent);
+  assert.equal(success.hooks.elements.libraryStartStatus.hidden, false);
+  assert.equal(success.hooks.elements.librarySourceBtn.disabled, false);
+  assert.equal(success.hooks.elements.libraryStartChoose.disabled, false);
+
+  const failed = createHarness();
+  failed.context.navigator.userAgent = 'Macintosh';
+  failed.hooks.elements.scanDirInput.value = '';
+  failed.context.window.electronAPI.openFolderDialog = async () => { throw new Error('permission denied'); };
+  await failed.hooks.chooseLibrarySource();
+  assert.match(failed.hooks.elements.scanDirStatus.textContent, /無法加入漫畫來源/);
+  assert.equal(failed.hooks.elements.libraryStartStatus.textContent, failed.hooks.elements.scanDirStatus.textContent);
+  assert.equal(failed.hooks.elements.libraryStartStatus.hidden, false);
+  assert.equal(failed.hooks.elements.librarySourceBtn.disabled, false);
+  assert.equal(failed.hooks.elements.libraryStartChoose.disabled, false);
+
+  const iosCancelled = createHarness();
+  iosCancelled.context.navigator.userAgent = 'iPad';
+  iosCancelled.context.window.electronAPI.openExternalFolder = async () => {
+    const error = new Error('已取消選擇');
+    error.code = 'FOLDER_PICKER_CANCELLED';
+    throw error;
+  };
+  await iosCancelled.hooks.chooseLibrarySource();
+  assert.match(iosCancelled.hooks.elements.scanDirStatus.textContent, /取消/);
+  assert.doesNotMatch(iosCancelled.hooks.elements.scanDirStatus.textContent, /無效|無法加入/);
+  assert.equal(iosCancelled.hooks.elements.libraryStartStatus.textContent, iosCancelled.hooks.elements.scanDirStatus.textContent);
+  assert.equal(iosCancelled.hooks.elements.libraryStartStatus.hidden, false);
+  assert.equal(iosCancelled.hooks.elements.librarySourceBtn.disabled, false);
+  assert.equal(iosCancelled.hooks.elements.libraryStartChoose.disabled, false);
 }
 
 // 內建風景 catalog 固定為 8 組；page-01 是封面本身，不另加一張重複封面頁。
@@ -2774,6 +2912,145 @@ for (let columns = 1; columns <= 12; columns += 1) {
       ['assets/demo/landscapes/cosmos/page-01.png', 'assets/demo/landscapes/cosmos/page-02.png', 'assets/demo/landscapes/cosmos/page-03.png'],
     ]
   );
+}
+
+// 空書架仍保留第 70 版的閱讀紀錄入口，但將空的繼續閱讀區壓成精簡列。
+{
+  const h = createHarness();
+  const { state, elements } = h.hooks;
+  state.comics = [];
+  h.hooks.renderContinueStrip();
+  assert.equal(elements.continuePanel.hidden, false, '空書架仍保留閱讀紀錄操作列');
+  assert.equal(elements.continuePanel.classList.contains('is-empty'), true, '沒有候選時使用精簡列樣式');
+  assert.equal(elements.continueTitle.hidden, true, '空狀態隱藏無內容的繼續閱讀標題');
+  assert.equal(elements.continuePanel.getAttribute('aria-labelledby'), 'reading-history-entry', '精簡列以閱讀紀錄按鈕作 accessible name');
+  assert.notEqual(elements.readingHistoryEntry.hidden, true, '閱讀紀錄入口仍可使用');
+
+  state.comics = [{
+    id: 'formal-reading',
+    title: '正式閱讀中',
+    relativePath: 'formal-reading.cbz',
+    pageCount: 4,
+    progress: { currentPage: 1, totalPages: 4, updatedAt: '2026-11-09T00:00:00.000Z' },
+  }];
+  h.hooks.renderContinueStrip();
+  assert.equal(elements.continuePanel.classList.contains('is-empty'), false, '正式閱讀候選回來後恢復完整區塊');
+  assert.equal(elements.continueTitle.hidden, false, '有候選時恢復繼續閱讀標題');
+  assert.equal(elements.continuePanel.getAttribute('aria-labelledby'), 'continue-title', '有候選時恢復區塊標題 accessible name');
+  assert.equal(elements.continuePanel.hidden, false);
+}
+
+// welcome 只暫時收起工作區；正式來源出現後還原原本版面偏好與書架標題。
+{
+  const h = createHarness();
+  const { state, elements } = h.hooks;
+  elements.mainLayout = new FakeElement('div');
+  state.sidebarCollapsed = true;
+  state.inspectorCollapsed = true;
+  elements.mainLayout.classList.add('sidebar-collapsed', 'inspector-collapsed');
+  state.comics = h.hooks.createBuiltInDemoComics();
+  h.hooks.updateLibraryStartPanel();
+  assert.equal(elements.mainLayout.classList.contains('library-welcome'), true, '空正式庫進入精簡 welcome 版面');
+  assert.equal(elements.libraryTitle.textContent, '原創風景選集');
+  assert.equal(state.sidebarCollapsed, true);
+  assert.equal(state.inspectorCollapsed, true);
+  assert.equal(elements.mainLayout.classList.contains('sidebar-collapsed'), true);
+  assert.equal(elements.mainLayout.classList.contains('inspector-collapsed'), true);
+
+  state.comics = [...state.comics, { id: 'formal-arrived', title: '剛加入的漫畫', relativePath: 'formal-arrived.cbz' }];
+  h.hooks.updateLibraryStartPanel();
+  assert.equal(elements.mainLayout.classList.contains('library-welcome'), false, '正式來源到達後退出 welcome 版面');
+  assert.equal(elements.libraryTitle.textContent, '全部漫畫');
+  assert.equal(elements.libraryStartPanel.hidden, true);
+  assert.equal(state.sidebarCollapsed, true, '使用者原本的側欄偏好不被 welcome 覆寫');
+  assert.equal(state.inspectorCollapsed, true, '使用者原本的詳情偏好不被 welcome 覆寫');
+  assert.equal(elements.mainLayout.classList.contains('sidebar-collapsed'), true);
+  assert.equal(elements.mainLayout.classList.contains('inspector-collapsed'), true);
+}
+
+// 最後一本正式漫畫移除後，active filter/series 必須仍可見，切回全部後恢復示範。
+{
+  const prepare = () => {
+    const h = createHarness();
+    h.hooks.elements.mainLayout = new FakeElement('div');
+    h.hooks.elements.searchInput.value = '';
+    vm.runInContext(`
+      syncLibraryUpButton = () => {};
+      closeDiscoveryTags = () => {};
+      setDiscoveryStatus = () => {};
+      syncDiscoveryButton = () => {};
+      renderGrid = () => {};
+      ensureInspectorSelection = () => {};
+    `, h.context);
+    return h;
+  };
+
+  // 舊邏輯的反證：只有 library-welcome 時不區分預設與非預設篩選，filter 控制會被舊 CSS 一併藏起來。
+  const legacy = prepare();
+  legacy.hooks.state.comics = legacy.hooks.createBuiltInDemoComics();
+  legacy.hooks.state.activeFilter = 'favorite';
+  vm.runInContext(`
+    updateLibraryStartPanel = () => elements.mainLayout.classList.toggle('library-welcome', true);
+    filterAndRenderGrid();
+  `, legacy.context);
+  assert.equal(legacy.hooks.elements.mainLayout.classList.contains('library-welcome'), true);
+  assert.equal(legacy.hooks.elements.mainLayout.classList.contains('library-default-filters'), false,
+    '舊版沒有用篩選狀態區分可否收起 filter controls');
+  assert.equal(legacy.hooks.state.filteredComics.length, 0, 'favorite 篩選排除示範，舊版因此沒有書可開');
+
+  for (const scope of ['favorite', 'series']) {
+    const h = prepare();
+    const { state, elements } = h.hooks;
+    state.sidebarCollapsed = true;
+    state.inspectorCollapsed = true;
+    elements.mainLayout.classList.add('sidebar-collapsed', 'inspector-collapsed');
+    const demos = h.hooks.createBuiltInDemoComics();
+    const formal = {
+      id: `last-formal-${scope}`,
+      title: '最後一本正式漫畫',
+      series: '正式系列',
+      relativePath: '最後一本.cbz',
+      pageCount: 3,
+      progress: { currentPage: 0, totalPages: 3 },
+    };
+    state.comics = [...demos, formal];
+    if (scope === 'favorite') {
+      state.activeFilter = 'favorite';
+      h.hooks.setFavorites([formal.id]);
+    } else {
+      state.activeFilter = 'all';
+      state.activeSeries = '正式系列';
+    }
+
+    h.hooks.filterAndRenderGrid();
+    assert.equal(state.filteredComics.some(comic => comic.id === formal.id), true, `${scope}:正式漫畫仍符合目前篩選`);
+    state.comics = demos;
+    h.hooks.filterAndRenderGrid();
+    assert.equal(elements.mainLayout.classList.contains('library-welcome'), true, `${scope}:返回空正式庫的根目錄`);
+    assert.equal(elements.mainLayout.classList.contains('library-default-filters'), false, `${scope}:保留可清除篩選的 filter controls`);
+    assert.equal(state.filteredComics.length, 0, `${scope}:示範不冒充 favorite 或不符合的系列`);
+    assert.equal(state.sidebarCollapsed, true, `${scope}:welcome 不改側欄收合偏好`);
+    assert.equal(state.inspectorCollapsed, true, `${scope}:welcome 不改 inspector 收合偏好`);
+
+    state.activeFilter = 'all';
+    state.activeSeries = 'all';
+    h.hooks.filterAndRenderGrid();
+    assert.equal(elements.mainLayout.classList.contains('library-welcome'), true);
+    assert.equal(elements.mainLayout.classList.contains('library-default-filters'), true, `${scope}:切回全部後 filter controls 可再次收起`);
+    assert.deepEqual(Array.from(state.filteredComics, comic => comic.id), Array.from(demos, comic => comic.id), `${scope}:切回全部後示範選集可閱讀`);
+  }
+
+  const emptyFolder = prepare();
+  emptyFolder.hooks.state.comics = emptyFolder.hooks.createBuiltInDemoComics();
+  emptyFolder.hooks.state.currentPath = 'Parent/Empty';
+  emptyFolder.hooks.state.currentSourceId = 'local:test';
+  emptyFolder.hooks.state.sidebarCollapsed = true;
+  emptyFolder.hooks.elements.mainLayout.classList.add('sidebar-collapsed');
+  emptyFolder.hooks.filterAndRenderGrid();
+  assert.equal(emptyFolder.hooks.elements.mainLayout.classList.contains('library-welcome'), false,
+    '空子資料夾保留原資料夾導覽版面，不顯示根目錄 welcome');
+  assert.equal(emptyFolder.hooks.elements.mainLayout.classList.contains('sidebar-collapsed'), true);
+  assert.equal(emptyFolder.hooks.state.sidebarCollapsed, true);
 }
 
 // 有正式漫畫時隱藏內建示範；空書架仍可試讀。
@@ -3146,6 +3423,7 @@ console.log('external bookmark intent queue tests passed');
 // 同一 bookmark 改名只更新保存名稱，不應觸發重新掃描；相同名稱才是重複加入。
 {
   const duplicate = createHarness();
+  duplicate.context.navigator.userAgent = 'iPad';
   duplicate.context.localStorage.setItem('gai:externalBookmarks', JSON.stringify([
     { name: '舊名稱', bookmark: 'bookmark-same' },
   ]));
@@ -3158,10 +3436,32 @@ console.log('external bookmark intent queue tests passed');
   duplicate.context.showLoader = () => { throw new Error('rename must not show scan loader'); };
   duplicate.context.startScanStatusPolling = () => { throw new Error('rename must not start scan polling'); };
   duplicate.context.scheduleLibraryRefresh = () => { throw new Error('rename must not schedule a scan'); };
-  await duplicate.hooks.addIOSLibrarySource();
+  await duplicate.hooks.chooseLibrarySource();
   const persisted = JSON.parse(duplicate.context.localStorage.getItem('gai:externalBookmarks'));
   assert.deepEqual(persisted, [{ name: '新名稱', bookmark: 'bookmark-same' }], 'same bookmark rename must update the saved name');
   assert.equal(nativeCalls, 1, 'same bookmark rename must submit one updated native snapshot');
+  assert.match(duplicate.hooks.elements.libraryStartStatus.textContent, /已選擇/);
+  assert.equal(duplicate.hooks.elements.libraryStartChoose.disabled, false, '改名結果應解除首頁按鈕 busy');
+  assert.equal(duplicate.hooks.elements.libraryStartChoose.getAttribute('aria-busy'), null);
+
+  const partialRename = createHarness();
+  partialRename.context.navigator.userAgent = 'iPad';
+  partialRename.context.localStorage.setItem('gai:externalBookmarks', JSON.stringify([
+    { name: '舊名稱', bookmark: 'bookmark-same' },
+  ]));
+  partialRename.context.window.electronAPI.openExternalFolder = async () => ({ name: '新名稱', bookmark: 'bookmark-same' });
+  partialRename.context.window.electronAPI.setBookmarks = async () => {
+    throw new Error('BOOKMARKS_UPDATED: old folder permission cleanup failed');
+  };
+  partialRename.context.showLoader = () => { throw new Error('renamed partial success must not start scanning'); };
+  partialRename.context.startScanStatusPolling = () => { throw new Error('renamed partial success must not poll scans'); };
+  partialRename.context.scheduleLibraryRefresh = () => { throw new Error('renamed partial success must not schedule scanning'); };
+  await partialRename.hooks.chooseLibrarySource();
+  assert.match(partialRename.hooks.elements.scanDirStatus.textContent, /已更新.*部分失敗/);
+  assert.equal(partialRename.hooks.elements.libraryStartStatus.textContent, partialRename.hooks.elements.scanDirStatus.textContent);
+  assert.equal(partialRename.hooks.elements.libraryStartStatus.hidden, false);
+  assert.equal(partialRename.hooks.elements.libraryStartChoose.disabled, false, '部分成功改名也應解除首頁按鈕 busy');
+  assert.equal(partialRename.hooks.elements.libraryStartChoose.getAttribute('aria-busy'), null);
 }
 
 // SMB legacy config is sanitized before the modal opens; a failed rewrite removes
@@ -3574,13 +3874,15 @@ console.log('Finder platform boundary tests passed');
 {
   const html = fs.readFileSync(new URL('../public/index.html', import.meta.url), 'utf8');
   const startPanel = html.slice(html.indexOf('id="library-start-panel"'), html.indexOf('class="scan-recovery-panel"'));
+  assert.match(startPanel, /自己的漫畫，打開資料夾就能讀。/);
+  assert.match(startPanel, /支援本機、外接硬碟與已掛載的 NAS；原始檔案留在原處。/);
   assert.ok(startPanel.indexOf('id="library-start-demo"') < startPanel.indexOf('id="library-start-choose"'), '原創風景試讀是首次入口的第一個操作');
   assert.match(startPanel, /id="library-start-demo" class="library-start-primary"/);
   const dictionary = {};
   vm.runInNewContext(fs.readFileSync(new URL('../public/locales/reader-messages.js', import.meta.url), 'utf8'), {
     window: { GAIL10n: { register: entries => Object.assign(dictionary, entries) } },
   });
-  for (const message of ['找漫畫像考古？先翻一本。', '試讀原創風景', '加入漫畫資料夾', '隨手翻一本', '從目前資料夾與篩選結果挑一本，再點會盡量換一本。', '目前範圍沒有可讀漫畫，試著換個資料夾或清除篩選。']) {
+  for (const message of ['自己的漫畫，打開資料夾就能讀。', '支援本機、外接硬碟與已掛載的 NAS；原始檔案留在原處。', '先試讀原創風景', '加入漫畫資料夾', '隨手翻一本', '從目前資料夾與篩選結果挑一本，再點會盡量換一本。', '目前範圍沒有可讀漫畫，試著換個資料夾或清除篩選。']) {
     assert.ok(dictionary[message]?.en && dictionary[message]?.ja, `新增入口缺少翻譯：${message}`);
   }
 }

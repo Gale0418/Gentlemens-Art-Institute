@@ -2082,6 +2082,7 @@ body {
 
 .reading-history-copy {
   display: grid;
+  grid-column: 2;
   min-width: 0;
   gap: 4px;
   color: var(--text-muted);
@@ -2113,6 +2114,7 @@ body {
 }
 
 .reading-history-row > i {
+  grid-column: 3;
   color: var(--text-dark);
   font-size: 12px;
 }
@@ -6775,6 +6777,78 @@ select:focus-visible,
 
 .library-start-copy {
   max-width: 48ch;
+}
+
+/* 暫時簡化空書庫；不改動使用者儲存的側欄偏好。 */
+.main-layout.library-welcome .sidebar,
+.main-layout.library-welcome .comic-inspector,
+.main-layout.library-welcome .sidebar-collapse-btn,
+.main-layout.library-welcome .inspector-collapse-btn,
+.main-layout.library-welcome .library-panel-scrim,
+.main-layout.library-welcome.library-default-filters .filter-options,
+.main-layout.library-welcome .library-up-btn,
+.main-layout.library-welcome .library-discovery-btn {
+  display: none !important;
+}
+
+.main-layout.library-welcome .library-workspace {
+  grid-template-columns: minmax(0, 1fr);
+}
+
+.main-layout.library-welcome .content-area {
+  gap: 16px;
+}
+
+.main-layout.library-welcome .library-start-panel,
+.main-layout.library-welcome .library-header {
+  margin-bottom: 0;
+}
+
+.main-layout.library-welcome .library-header h2 {
+  text-align: start;
+}
+
+.main-layout.library-welcome .library-header {
+  align-items: flex-start;
+}
+
+.library-start-status {
+  flex-basis: 100%;
+  margin: 0;
+  color: var(--text-secondary);
+  overflow-wrap: anywhere;
+  line-height: 1.5;
+}
+
+.library-start-status[hidden],
+.continue-panel.is-empty #continue-title,
+.continue-panel.is-empty .continue-strip,
+.continue-panel.is-empty::before {
+  display: none;
+}
+
+.continue-panel.is-empty {
+  padding: 0;
+  margin-bottom: 0;
+  border: 0 !important;
+  background: transparent !important;
+  box-shadow: none !important;
+}
+
+.continue-panel.is-empty .section-title-row {
+  flex-direction: row;
+  align-items: center;
+  justify-content: flex-end;
+  margin: 0;
+}
+
+.continue-panel.is-empty .section-title-row > div {
+  display: none;
+}
+
+.library-start-actions button:disabled {
+  opacity: 0.55;
+  cursor: progress;
 }
 
 .library-discovery-btn {

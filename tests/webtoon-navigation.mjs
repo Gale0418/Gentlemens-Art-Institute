@@ -766,17 +766,20 @@ function renderWebtoonPages(hooks, count, currentPageIndex) {
   const { hooks, clock } = createRuntimeHarness();
   const oldTarget = renderWebtoonPages(hooks, 20, 9);
   clock.tick(201);
-  hooks.state.readingMode = 'catalog';
+  hooks.state.readingMode = 'single';
+  hooks.state.catalogOpen = true;
   hooks.renderPages();
   oldTarget._layoutHeight += 500;
   oldTarget.dispatch('load');
   assert.equal(hooks.state.webtoonAnchor, null, 'mode change clears old anchor');
 
+  hooks.state.catalogOpen = false;
   const nextTarget = renderWebtoonPages(hooks, 20, 9);
   clock.tick(201);
   const oldGeneration = hooks.state.renderGeneration;
   hooks.state.currentComic = comic('new-book', 'New book');
   hooks.state.currentComicPages = Array.from({ length: 20 }, (_, index) => `/new-${index}.svg`);
+  hooks.state.catalogOpen = false;
   hooks.renderPages();
   const newAnchor = hooks.state.webtoonAnchor;
   nextTarget._layoutHeight += 500;
@@ -930,6 +933,113 @@ function renderWebtoonPages(hooks, count, currentPageIndex) {
   await hooks.openReader('b');
   assert.equal(hooks.state.readingMode, 'webtoon', 'adjacent open preserves webtoon mode');
 }
+
+// The thumbnail overview is transient: it retains each real reader mode, page,
+// double-page phase, and webtoon anchor when cancelled or when a thumbnail wins.
+for (const mode of ['single', 'double', 'double-rtl', 'webtoon']) {
+  const runtime = createRuntimeHarness();
+  const { hooks, clock, context } = runtime;
+  const pageCount = 16;
+  hooks.state.currentComic = comic(`overview-${mode}`);
+  hooks.state.currentComicPages = Array.from({ length: pageCount }, (_, index) => `/overview-${mode}-${index}.svg`);
+  hooks.state.currentPageIndex = mode === 'webtoon' ? 5 : 4;
+  hooks.state.readingMode = mode;
+  hooks.state.doublePairOffset = 0;
+  hooks.elements.readerOverlay.style.display = 'flex';
+  hooks.elements.zoomValue.parentElement = { style: {} };
+  hooks.renderPages();
+  if (mode === 'webtoon') {
+    hooks.elements.readerViewport.scrollTop = 900;
+    hooks.elements.readerViewport.onscroll?.();
+    clock.tick(0);
+  }
+  const initialPage = hooks.state.currentPageIndex;
+  const initialOffset = hooks.state.doublePairOffset;
+  const storedSettings = new Map(context.localStorage.values);
+  assert.equal(hooks.togglePageOverview(), true, `${mode} opens the thumbnail overview`);
+  assert.equal(hooks.state.catalogOpen, true);
+  assert.equal(hooks.state.readingMode, mode, `${mode} stays the underlying reading mode`);
+  if (mode === 'webtoon') assert.ok(hooks.state.currentPageIndex > 0, 'pending webtoon scroll is synchronized before the overview');
+  assert.equal(hooks.state.doublePairOffset, initialOffset, `${mode} keeps the double-page phase`);
+  assert.deepEqual(new Map(context.localStorage.values), storedSettings, 'opening overview does not persist a reader-mode preference');
+  assert.equal(hooks.closePageOverview(), true, `${mode} can cancel the overview`);
+  assert.equal(hooks.state.readingMode, mode, `${mode} returns unchanged after cancellation`);
+  assert.equal(hooks.state.catalogOpen, false);
+  assert.equal(hooks.state.doublePairOffset, initialOffset, `${mode} keeps its page-pair offset after cancellation`);
+  if (mode !== 'webtoon') assert.equal(hooks.state.currentPageIndex, initialPage, `${mode} returns to its original page`);
+  else assert.ok(hooks.elements.readerViewport.scrollTop > 0, 'webtoon returns through the current-page anchor rather than its beginning');
+
+  hooks.togglePageOverview();
+  const oldThumb = walk(hooks.elements.pagesContainer).find(node => node.className === 'catalog-thumb' && node.dataset.index === '7');
+  assert.ok(oldThumb, `${mode} exposes the selected thumbnail in the current virtual window`);
+  oldThumb.onclick();
+  assert.equal(hooks.state.currentPageIndex, mode === 'double' || mode === 'double-rtl' ? 6 : 7,
+    `${mode} selection respects the requested page and active page-pair phase`);
+  assert.equal(hooks.state.readingMode, mode, `${mode} selection resumes the exact prior mode`);
+  assert.equal(hooks.state.catalogOpen, false, 'thumbnail selection closes the overview');
+  assert.equal(hooks.state.doublePairOffset, initialOffset, 'selection does not reset double-page pairing');
+
+  if (mode === 'double' || mode === 'double-rtl') {
+    hooks.state.doublePairOffset = 1;
+    hooks.togglePageOverview();
+    const offsetThumb = walk(hooks.elements.pagesContainer).find(node => node.className === 'catalog-thumb' && node.dataset.index === '8');
+    assert.ok(offsetThumb, `${mode} exposes the offset thumbnail in the current virtual window`);
+    offsetThumb.onclick();
+    assert.equal(hooks.state.currentPageIndex, 7, `${mode} selection preserves the offset-one pair start`);
+    assert.equal(hooks.state.doublePairOffset, 1, `${mode} selection retains the offset-one phase`);
+  }
+}
+console.log('PASS: page overview preserves single/double/RTL/webtoon state across cancel and selection');
+
+// Closing with the same overview button restores focus even for pointer or accessibility activation.
+{
+  const { hooks } = createRuntimeHarness();
+  hooks.state.currentComic = comic('overview-focus');
+  hooks.state.currentComicPages = ['/focus-1.svg', '/focus-2.svg'];
+  hooks.elements.readerOverlay.style.display = 'flex';
+  let focusCount = 0;
+  hooks.elements.pageOverviewButton.focus = () => { focusCount += 1; };
+  assert.equal(hooks.togglePageOverview(), true, 'overview button opens the catalog');
+  assert.equal(hooks.togglePageOverview(), true, 'overview button closes the catalog');
+  assert.equal(focusCount, 1, 'closing from the overview button restores focus to that button');
+}
+
+// An event retained by a removed old-book thumbnail cannot change the new book.
+{
+  const { hooks } = createRuntimeHarness();
+  hooks.state.currentComic = comic('overview-old');
+  hooks.state.currentComicPages = Array.from({ length: 12 }, (_, index) => `/old-${index}.svg`);
+  hooks.state.currentPageIndex = 1;
+  hooks.state.catalogOpen = true;
+  hooks.elements.readerOverlay.style.display = 'flex';
+  hooks.renderPages();
+  const oldThumb = walk(hooks.elements.pagesContainer).find(node => node.className === 'catalog-thumb' && node.dataset.index === '8');
+  assert.ok(oldThumb);
+  hooks.state.readerOperation++;
+  hooks.state.currentComic = comic('overview-new');
+  hooks.state.currentComicPages = Array.from({ length: 12 }, (_, index) => `/new-${index}.svg`);
+  hooks.state.currentPageIndex = 2;
+  oldThumb.onclick();
+  assert.equal(hooks.state.currentPageIndex, 2, 'stale old-book thumbnail is ignored');
+  assert.equal(hooks.state.catalogOpen, true, 'stale callback does not close the new overview');
+}
+console.log('PASS: stale thumbnail callbacks cannot select a page in a newer reader operation');
+
+// Reader Escape closes the overview first and only closes the reader on the next Escape.
+{
+  const { hooks } = createRuntimeHarness();
+  hooks.elements.readerOverlay.style.display = 'flex';
+  hooks.state.currentComic = comic('overview-escape');
+  hooks.state.currentComicPages = ['/escape-0.svg', '/escape-1.svg'];
+  hooks.state.catalogOpen = true;
+  const escape = () => hooks.handleKeyDown({ key: 'Escape', target: {}, preventDefault() {} });
+  escape();
+  assert.equal(hooks.state.catalogOpen, false, 'first Escape dismisses only the overview');
+  assert.ok(hooks.state.currentComic, 'first Escape keeps the reader open');
+  escape();
+  assert.equal(hooks.state.currentComic, null, 'second Escape closes the reader');
+}
+console.log('PASS: Escape dismisses overview before closing the reader');
 
 // Reopening/closing clears the generated controls.
 {
@@ -1088,6 +1198,34 @@ for (const cancel of ['previous', 'jump', 'mode']) {
   hooks.state.readingMode = 'single';
   assert.equal(hooks.advanceDoubleBySinglePage(), false, 'single mode ignores double shift');
   assert.equal(hooks.toggleDoubleDirection(), false, 'single mode ignores direction action');
+}
+
+// Re-selecting double mode from the overview returns to the same spread. The
+// active double button remains a no-op during ordinary reading.
+for (const mode of ['double', 'double-rtl']) {
+  for (const offset of [0, 1]) {
+    const { hooks } = createRuntimeHarness();
+    hooks.elements.readerOverlay.style.display = 'flex';
+    hooks.state.currentComic = comic('double-overview-return', 'Double overview return');
+    hooks.state.currentComicPages = Array.from({ length: 7 }, (_, index) => `/return-${index}.svg`);
+    hooks.state.readingMode = mode;
+    hooks.state.currentPageIndex = offset === 0 ? 2 : 3;
+    hooks.state.doublePairOffset = offset;
+    hooks.renderPages();
+    hooks.togglePageOverview();
+    assert.equal(hooks.state.catalogOpen, true);
+
+    const page = hooks.state.currentPageIndex;
+    hooks.elements.btnModeDouble.dispatch('click');
+    assert.equal(hooks.state.catalogOpen, false, `${mode} selected mode closes the overview`);
+    assert.equal(hooks.state.readingMode, mode, 're-selection preserves reading direction');
+    assert.equal(hooks.state.currentPageIndex, page, 're-selection preserves the current spread');
+    assert.equal(hooks.state.doublePairOffset, offset, 're-selection preserves pairing phase');
+
+    const generation = hooks.state.renderGeneration;
+    hooks.elements.btnModeDouble.dispatch('click');
+    assert.equal(hooks.state.renderGeneration, generation, 'ordinary active double selection does not reload pages');
+  }
 }
 
 // A double-page spread can end with one page; avoid a duplicated range such as 2-2.
@@ -1352,7 +1490,8 @@ console.log('PASS: webtoon tap shows UI; swipes, drags, multi-touch and cancella
   assert.equal(hooks.state.currentPageIndex, 1, 'oversized single-page swipe pans without turning the page');
 
   hooks.elements.readerOverlay.classList.add('single-page-pannable');
-  hooks.state.readingMode = 'catalog';
+  hooks.state.readingMode = 'single';
+  hooks.state.catalogOpen = true;
   hooks.renderPages();
   assert.equal(
     hooks.elements.readerOverlay.classList.contains('single-page-pannable'),
@@ -1368,7 +1507,7 @@ for (const mode of ['webtoon', 'catalog', 'single', 'double', 'double-rtl']) {
     const calls = [];
     const handle = vm.runInNewContext(`(${extractFunction('handleKeyDown')})`, {
       elements: { readerOverlay: { style: { display: 'flex' } } },
-      state: { readingMode: mode },
+      state: { readingMode: mode === 'catalog' ? 'single' : mode, catalogOpen: mode === 'catalog' },
       jumpToFirstPage: () => calls.push('first'),
       jumpToLastPage: () => calls.push('last'),
       nextPage: () => calls.push('next'),
@@ -1413,7 +1552,8 @@ console.log('PASS: progress range arrows have a single native input path');
   const slider = { id: 'progress-slider' };
   const handle = vm.runInNewContext(`(${extractFunction('handleKeyDown')})`, {
     elements: { readerOverlay: { style: { display: 'flex' } }, progressSlider: slider },
-    state: { readingMode: 'single', readerContextMenuOpen: false },
+    state: { readingMode: 'single', readerContextMenuOpen: false, catalogOpen: false },
+    closePageOverview: () => false,
     closeReader: () => calls.push('close'),
   });
   let prevented = false;

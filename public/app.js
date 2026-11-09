@@ -1319,6 +1319,7 @@ let state = {
   currentComicPages: [],
   currentPageIndex: 0,
   readingMode: 'single', // 'single', 'double', 'double-rtl', 'webtoon'
+  catalogOpen: false,
   // 雙頁配對相位：1 代表既有封面後的 2-3、4-5…；0 代表單頁錯開後的 3-4、5-6…。
   doublePairOffset: 1,
   zoomPercentage: 100,
@@ -1604,6 +1605,7 @@ const elements = {
   readerBottomBar: document.getElementById('reader-bottom-bar'),
   readerComicTitle: document.getElementById('reader-comic-title'),
   readerModeIndicator: document.getElementById('reader-mode-indicator'),
+  pageOverviewButton: document.getElementById('reader-page-overview-toggle'),
   readerAiToggle: document.getElementById('reader-ai-toggle'),
   readerViewport: document.getElementById('reader-viewport'),
   pagesContainer: document.getElementById('pages-container'),
@@ -1620,7 +1622,6 @@ const elements = {
   btnDoubleDirection: document.getElementById('btn-double-direction'),
   btnDoubleShift: document.getElementById('btn-double-shift'),
   btnModeWebtoon: document.getElementById('btn-mode-webtoon'),
-  btnModeCatalog: document.getElementById('btn-mode-catalog'),
   btnZoomOut: document.getElementById('btn-zoom-out'),
   btnZoomIn: document.getElementById('btn-zoom-in'),
   zoomValue: document.getElementById('zoom-value'),
@@ -2563,11 +2564,12 @@ function bindEvents() {
   elements.btnModeSingle.addEventListener('click', () => setReadingMode('single'));
   elements.btnModeDouble.addEventListener('click', () => {
     if (!isDoubleReadingMode()) setReadingMode('double');
+    else if (state.catalogOpen) setReadingMode(state.readingMode);
   });
   elements.btnDoubleDirection?.addEventListener('click', toggleDoubleDirection);
   elements.btnDoubleShift?.addEventListener('click', advanceDoubleBySinglePage);
   elements.btnModeWebtoon.addEventListener('click', () => setReadingMode('webtoon'));
-  elements.btnModeCatalog.addEventListener('click', () => setReadingMode('catalog'));
+  elements.pageOverviewButton?.addEventListener('click', togglePageOverview);
 
   // 縮放控制
   elements.btnZoomIn.addEventListener('click', () => adjustZoom(10));
@@ -2587,7 +2589,7 @@ function bindEvents() {
 
   // 全螢幕切換
   elements.btnFullscreen.addEventListener('click', toggleFullscreen);
-  for (const button of [elements.btnModeSingle, elements.btnModeDouble, elements.btnModeWebtoon, elements.btnModeCatalog]) {
+  for (const button of [elements.btnModeSingle, elements.btnModeDouble, elements.btnModeWebtoon]) {
     button.addEventListener('click', () => readerPanels?.close());
   }
   elements.btnAiExplain?.addEventListener('click', () => readerPanels?.close({ restoreFocus: false }));
@@ -2994,6 +2996,7 @@ function applyReaderImageTransform(img) {
 }
 
 function refreshReaderImageTransforms() {
+  if (state.catalogOpen) return;
   elements.pagesContainer.querySelectorAll('img').forEach(applyReaderImageTransform);
   refreshWebtoonPageMetricsForResize();
   elements.readerOverlay.classList.toggle('single-page-pannable', readerViewportCanScroll());
@@ -3001,8 +3004,11 @@ function refreshReaderImageTransforms() {
 
 function scheduleReaderImageTransformRefresh() {
   cancelAnimationFrame(readerTransformFrame);
+  if (state.catalogOpen) {
+    scheduleCatalogVirtualRender();
+    return;
+  }
   readerTransformFrame = requestAnimationFrame(refreshReaderImageTransforms);
-  if (state.readingMode === 'catalog') scheduleCatalogVirtualRender();
 }
 
 function replaceReaderImages(images) {
@@ -7422,6 +7428,9 @@ function renderGrid({ skipUnchanged = false, background = false, appendOnly = fa
 
 // 開啟閱讀器
 async function openReader(comicOrId, { returnToComicFolder = false } = {}) {
+  state.catalogOpen = false;
+  elements.pageOverviewButton?.setAttribute('aria-expanded', 'false');
+  elements.pageOverviewButton?.setAttribute('aria-label', readerText('ui.openPageOverview'));
   if (!discoveryOpening) discoveryReaderContext = null;
   const requestedComic = comicOrId && typeof comicOrId === 'object' ? comicOrId : null;
   const comicId = requestedComic?.id || comicOrId;
@@ -7562,6 +7571,7 @@ async function openReader(comicOrId, { returnToComicFolder = false } = {}) {
     // BUG-09 修正：失敗時清除 currentComic 避免殘留舊狀態
     state.currentComic = null;
     state.currentComicPages = [];
+    state.catalogOpen = false;
     state.pendingComicId = null;
     state.pendingComicSourceId = '';
     state.readingHistoryReturnToReader = false;
@@ -7703,6 +7713,9 @@ async function closeReader({ switchingComic = false } = {}) {
   elements.readerOverlay.classList.remove('reader-keyboard-controls');
   syncDiscoveryReaderButton();
   const closingComic = state.currentComic;
+  state.catalogOpen = false;
+  elements.pageOverviewButton?.setAttribute('aria-expanded', 'false');
+  elements.pageOverviewButton?.setAttribute('aria-label', readerText('ui.openPageOverview'));
   const closingPendingOpen = Boolean(state.pendingComicId);
   // scroll RAF 可能尚未執行；先同步套用最後一次條漫位置，再建立不可變快照。
   if (closingComic && state.readingMode === 'webtoon' && state.webtoonScrollFrame) {
@@ -8304,7 +8317,7 @@ function advanceDoubleBySinglePage() {
 function renderPages() {
   if (!state.currentComic) return;
 
-  if (state.readingMode !== 'catalog') {
+  if (!state.catalogOpen) {
     cancelCatalogResize();
     cancelCatalogVirtualRender();
     if (catalogImageObserver || catalogImageQueue.length || catalogImageTasks.size || catalogImageActive) {
@@ -8334,7 +8347,16 @@ function renderPages() {
   elements.readerViewport.scrollTop = 0;
   elements.readerViewport.scrollLeft = 0;
 
-  if (state.readingMode === 'single') {
+  if (state.catalogOpen) {
+    elements.readerOverlay.classList.add('mode-catalog');
+    elements.prevZone.style.width = '0';
+    elements.nextZone.style.width = '0';
+    elements.readerViewport.onscroll = handleCatalogScroll;
+    renderCatalogGrid();
+    elements.pageCounter.textContent = readerText('共 {total} 頁', { total: totalPages });
+    elements.progressSlider.max = totalPages;
+    elements.progressSlider.value = state.currentPageIndex + 1;
+  } else if (state.readingMode === 'single') {
     elements.readerOverlay.classList.add('mode-single');
     elements.readerModeIndicator.textContent = readerText('單頁模式');
     elements.prevZone.style.width = '15%';
@@ -8491,19 +8513,6 @@ function renderPages() {
     } else {
       loadWebtoonImagesAround(0);
     }
-  } else if (state.readingMode === 'catalog') {
-    // 目錄縮圖模式
-    elements.readerOverlay.classList.add('mode-catalog');
-    elements.readerModeIndicator.textContent = readerText('目錄模式');
-    elements.prevZone.style.width = '0';
-    elements.nextZone.style.width = '0';
-    elements.readerViewport.onscroll = handleCatalogScroll;
-
-    renderCatalogGrid();
-
-    elements.pageCounter.textContent = readerText('共 {total} 頁', { total: totalPages });
-    elements.progressSlider.max = totalPages;
-    elements.progressSlider.value = state.currentPageIndex + 1;
   }
 
   syncDoubleModeControls();
@@ -8514,6 +8523,7 @@ function renderPages() {
 
 // 翻到下一頁
 function nextPage() {
+  if (state.catalogOpen) return;
   const totalPages = state.currentComicPages.length;
   const previousIndex = state.currentPageIndex;
   let endReached = false;
@@ -8638,11 +8648,20 @@ function catalogGridMetrics() {
 }
 
 function catalogGridOffset() {
-  const controls = elements.pagesContainer?.querySelector?.('.reader-catalog-window-controls');
-  const offset = Number(controls?.offsetHeight);
-  return Number.isFinite(offset) && offset > 0
-    ? offset + CATALOG_GRID_GAP
-    : (Number(state.catalogControlOffset) || CATALOG_CONTROLS_OFFSET_FALLBACK);
+  const viewport = elements.readerViewport;
+  const grid = elements.pagesContainer?.querySelector?.('.reader-catalog-grid');
+  const topSpacer = elements.pagesContainer?.querySelector?.('[data-catalog-spacer="top"]');
+  if (typeof viewport?.getBoundingClientRect === 'function'
+    && typeof grid?.getBoundingClientRect === 'function') {
+    const viewportRect = viewport.getBoundingClientRect();
+    const gridRect = grid.getBoundingClientRect();
+    const borderTop = Number(viewport.clientTop) || 0;
+    const scrollTop = Number(viewport.scrollTop) || 0;
+    const spacerHeight = Number.parseFloat(topSpacer?.style?.height) || 0;
+    const offset = gridRect.top - viewportRect.top - borderTop + scrollTop - spacerHeight;
+    if (Number.isFinite(offset) && offset >= 0) return offset;
+  }
+  return Number(state.catalogControlOffset) || CATALOG_CONTROLS_OFFSET_FALLBACK;
 }
 
 function catalogScrollTopForPage(index, metrics = catalogGridMetrics()) {
@@ -8735,7 +8754,7 @@ function getCatalogVirtualBounds(totalPages, {
 }
 
 function scheduleCatalogVirtualRender() {
-  if (state.readingMode !== 'catalog' || catalogVirtualRenderFrame !== null || catalogResizeFrame !== null) return;
+  if (!state.catalogOpen || catalogVirtualRenderFrame !== null || catalogResizeFrame !== null) return;
   catalogVirtualRenderOwner = catalogRenderOwner();
   const callback = () => {
     catalogVirtualRenderFrame = null;
@@ -8763,6 +8782,7 @@ function catalogRenderOwner() {
     sourceId: getComicSourceId(state.currentComic),
     renderGeneration: state.renderGeneration,
     mode: state.readingMode,
+    catalogOpen: state.catalogOpen,
   };
 }
 
@@ -8773,7 +8793,8 @@ function isCatalogRenderOwnerCurrent(owner) {
     && owner.sourceId === getComicSourceId(state.currentComic)
     && owner.renderGeneration === state.renderGeneration
     && owner.mode === state.readingMode
-    && owner.mode === 'catalog');
+    && owner.catalogOpen === state.catalogOpen
+    && owner.catalogOpen === true);
 }
 
 function cancelCatalogResize() {
@@ -8825,7 +8846,7 @@ function scheduleCatalogResize() {
 }
 
 function handleReaderResize() {
-  if (state.readingMode === 'catalog') {
+  if (state.catalogOpen) {
     scheduleCatalogResize();
     return;
   }
@@ -8941,11 +8962,9 @@ function createCatalogThumbnail(source, index) {
   const thumb = document.createElement('div');
   thumb.className = 'catalog-thumb';
   thumb.dataset.index = String(index);
-  configureInteractiveItem(thumb, readerText('跳到第 {page} 頁', { page: index + 1 }), () => {
-    state.currentPageIndex = index;
-    const backMode = state.prevReadingMode || 'single';
-    setReadingMode(backMode);
-  });
+  const owner = catalogRenderOwner();
+  const selectPage = () => selectCatalogPage(index, owner);
+  configureInteractiveItem(thumb, readerText('跳到第 {page} 頁', { page: index + 1 }), selectPage);
   const img = document.createElement('img');
   // 目錄本身已由 IntersectionObserver／queue 控制何時 assign src；再掛原生
   // loading=lazy 會在 WKWebView 形成第二層延遲，快速跳到尾窗時可能遲遲不解碼。
@@ -8956,16 +8975,20 @@ function createCatalogThumbnail(source, index) {
   const label = document.createElement('div');
   label.className = 'catalog-thumb-label';
   label.textContent = `${index + 1}`;
-  // 點擊縮圖 → 跳頁並切回閱讀模式
-  thumb.onclick = () => {
-    state.currentPageIndex = index;
-    const backMode = state.prevReadingMode || 'single';
-    setReadingMode(backMode);
-  };
+  // 點擊縮圖只選目標頁並收起總覽；閱讀模式由 state.readingMode 保留。
+  thumb.onclick = selectPage;
   thumb.appendChild(img);
   thumb.appendChild(label);
   updateCatalogThumbnailNode(thumb, source, index);
   return thumb;
+}
+
+function selectCatalogPage(index, owner) {
+  if (!state.catalogOpen || !isCatalogRenderOwnerCurrent(owner)) return false;
+  const pageIndex = Math.max(0, Math.min(state.currentComicPages.length - 1, Number(index) || 0));
+  state.currentPageIndex = isDoubleReadingMode() ? doublePageStartForIndex(pageIndex) : pageIndex;
+  closePageOverview({ restoreFocus: true });
+  return true;
 }
 
 function updateCatalogThumbnailNode(thumb, source, index) {
@@ -9096,6 +9119,19 @@ function renderCatalogGrid({ preserveWindow = false, fromScroll = false, scrollT
   state.catalogColumns = columns;
   state.catalogRowHeight = rowHeight;
 
+  const heading = document.createElement('div');
+  heading.className = 'reader-catalog-heading';
+  const title = document.createElement('h2');
+  title.textContent = readerText('ui.pageOverviewTitle');
+  const backToReading = document.createElement('button');
+  backToReading.type = 'button';
+  backToReading.className = 'reader-catalog-return';
+  backToReading.textContent = readerText('ui.returnToReading');
+  backToReading.addEventListener('click', () => closePageOverview({ restoreFocus: true }));
+  heading.appendChild(title);
+  heading.appendChild(backToReading);
+  elements.pagesContainer.appendChild(heading);
+
   const controls = document.createElement('div');
   controls.className = 'reader-catalog-window-controls';
   const previous = document.createElement('button');
@@ -9137,8 +9173,6 @@ function renderCatalogGrid({ preserveWindow = false, fromScroll = false, scrollT
   controls.appendChild(next);
   updateCatalogWindowControls(controls, bounds, totalPages);
   elements.pagesContainer.appendChild(controls);
-  state.catalogControlOffset = catalogGridOffset();
-
   const grid = document.createElement('div');
   grid.className = 'reader-catalog-grid';
   updateCatalogGridLayout(grid, bounds);
@@ -9164,6 +9198,7 @@ function renderCatalogGrid({ preserveWindow = false, fromScroll = false, scrollT
   elements.pagesContainer.appendChild(topSpacer);
   elements.pagesContainer.appendChild(grid);
   elements.pagesContainer.appendChild(bottomSpacer);
+  state.catalogControlOffset = catalogGridOffset();
   startCatalogThumbnailLoads(grid);
   restoreCatalogFocus(focusDescriptor);
 
@@ -9549,6 +9584,7 @@ function requestWebtoonAdjacentComic(direction) {
 
 // 翻到上一頁
 function prevPage() {
+  if (state.catalogOpen) return;
   const previousIndex = state.currentPageIndex;
   let startReached = false;
   if (state.readingMode === 'single') {
@@ -9591,6 +9627,13 @@ function jumpToPage(pageIndex) {
   if (pageIndex < 0 || pageIndex >= totalPages) return;
   adjacentComicSwitchToken++;
   const previousIndex = state.currentPageIndex;
+
+  if (state.catalogOpen) {
+    state.currentPageIndex = isDoubleReadingMode() ? doublePageStartForIndex(pageIndex) : pageIndex;
+    renderPages();
+    if (state.currentPageIndex !== previousIndex) showReaderPageNotice();
+    return;
+  }
 
   if (state.readingMode === 'webtoon') {
     state.currentPageIndex = pageIndex;
@@ -9644,7 +9687,7 @@ function isCatalogThumbnailInteraction(event) {
   if (event.target?.closest?.('.catalog-thumb')) return true;
   // WK 相容事件可能以 viewport 為 target；用實際點位確認縮圖，
   // 保留目錄空白處原有的工具列操作。
-  if (state.readingMode !== 'catalog'
+  if (!state.catalogOpen
     || !Number.isFinite(event.clientX) || !Number.isFinite(event.clientY)) return false;
   return Boolean(document.elementFromPoint?.(event.clientX, event.clientY)?.closest?.('.catalog-thumb'));
 }
@@ -9663,6 +9706,7 @@ function handleReaderPointerClick(e) {
     hideReaderContextMenu();
     return;
   }
+  if (state.catalogOpen) return;
 
   const w = window.innerWidth;
   const x = e.clientX;
@@ -10041,44 +10085,70 @@ async function saveReadingProgress() {
 // 🎛️ 輔助控制 (Zoom、全螢幕、UI 狀態)
 // ==========================================================================
 
+function togglePageOverview() {
+  if (!state.currentComic) return false;
+  if (state.catalogOpen) return closePageOverview({ restoreFocus: true });
+  if (state.readingMode === 'webtoon') {
+    if (state.webtoonScrollFrame) {
+      if (typeof cancelAnimationFrame === 'function') cancelAnimationFrame(state.webtoonScrollFrame);
+      state.webtoonScrollFrame = null;
+    }
+    updateWebtoonScrollState();
+  }
+  state.catalogOpen = true;
+  updateReaderUiControls();
+  elements.pageOverviewButton?.setAttribute('aria-expanded', 'true');
+  elements.pageOverviewButton?.setAttribute('aria-label', readerText('ui.closePageOverview'));
+  renderPages();
+  return true;
+}
+
+function closePageOverview({ restoreFocus = false } = {}) {
+  if (!state.catalogOpen) return false;
+  state.catalogOpen = false;
+  elements.pageOverviewButton?.setAttribute('aria-expanded', 'false');
+  elements.pageOverviewButton?.setAttribute('aria-label', readerText('ui.openPageOverview'));
+  updateReaderUiControls();
+  renderPages();
+  if (restoreFocus) elements.pageOverviewButton?.focus?.();
+  return true;
+}
+
 // 切換閱讀模式
 function setReadingMode(mode) {
-  if (mode !== state.readingMode) adjacentComicSwitchToken++;
-  // 如果要退出 catalog，記住上一個模式
-  if (mode === 'catalog') {
-    state.prevReadingMode = state.readingMode !== 'catalog' ? state.readingMode : (state.prevReadingMode || 'single');
+  if (!['single', 'double', 'double-rtl', 'webtoon'].includes(mode)) return false;
+  if (state.catalogOpen && mode === state.readingMode) {
+    closePageOverview({ restoreFocus: true });
+    return true;
   }
+  if (mode !== state.readingMode) adjacentComicSwitchToken++;
+  state.catalogOpen = false;
+  elements.pageOverviewButton?.setAttribute('aria-expanded', 'false');
+  elements.pageOverviewButton?.setAttribute('aria-label', readerText('ui.openPageOverview'));
   const wasDouble = isDoubleReadingMode();
   state.readingMode = mode;
   if (isDoubleReadingMode(mode) && !wasDouble) {
     state.doublePairOffset = state.currentPageIndex === 0 ? 1 : state.currentPageIndex % 2;
   }
-
-  // 更新按鈕 active 樣式
   elements.btnModeSingle.classList.toggle('active', mode === 'single');
   elements.btnModeDouble.classList.toggle('active', isDoubleReadingMode(mode));
   elements.btnModeWebtoon.classList.toggle('active', mode === 'webtoon');
-  elements.btnModeCatalog.classList.toggle('active', mode === 'catalog');
   [
     [elements.btnModeSingle, 'single'],
     [elements.btnModeDouble, 'double'],
     [elements.btnModeWebtoon, 'webtoon'],
-    [elements.btnModeCatalog, 'catalog']
   ].forEach(([button, value]) => button.setAttribute('aria-pressed', String(value === 'double' ? isDoubleReadingMode(mode) : mode === value)));
-
-  // 控制 Zoom 面板的隱藏與顯示
-  const disableZoom = mode === 'webtoon' || mode === 'catalog';
+  const disableZoom = mode === 'webtoon';
   elements.zoomValue.parentElement.style.opacity = disableZoom ? '0.3' : '1';
   elements.zoomValue.parentElement.style.pointerEvents = disableZoom ? 'none' : 'auto';
   updateReaderUiControls();
-
-  // 重繪
   renderPages();
+  return true;
 }
 
 // 調整縮放
 function adjustZoom(amount) {
-  if (state.readingMode === 'webtoon' || state.readingMode === 'catalog') return;
+  if (state.readingMode === 'webtoon' || state.catalogOpen) return;
 
   state.zoomPercentage = Math.max(50, Math.min(250, state.zoomPercentage + amount));
   elements.zoomValue.textContent = `${state.zoomPercentage}%`;
@@ -10126,7 +10196,8 @@ function handleKeyDown(e) {
   // 快捷鍵再翻一次頁；Escape、F 等 reader shortcut 仍要能正常作用。
   if (e.target && (e.target === elements.progressSlider || e.target?.id === 'progress-slider')
     && ['ArrowLeft', 'ArrowRight', 'ArrowUp', 'ArrowDown', 'Home', 'End', 'PageUp', 'PageDown'].includes(e.key)) return;
-  if ((state.readingMode === 'webtoon' || state.readingMode === 'catalog')
+  if (state.catalogOpen && ['ArrowLeft', 'ArrowRight', 'ArrowUp', 'ArrowDown', 'Home', 'End', 'PageUp', 'PageDown', ' ', 'Spacebar'].includes(e.key)) return;
+  if (state.readingMode === 'webtoon'
     && ['ArrowUp', 'ArrowDown', ' ', 'Spacebar'].includes(e.key)) {
     cancelWebtoonAnchorFromUserInput();
     return;
@@ -10194,6 +10265,7 @@ function handleKeyDown(e) {
         triggerControlsActive();
         break;
       }
+      if (closePageOverview({ restoreFocus: true })) break;
       closeReader();
       break;
   }
@@ -10207,12 +10279,10 @@ function updateReaderUiControls() {
   elements.btnModeSingle.classList.toggle('active', mode === 'single');
   elements.btnModeDouble.classList.toggle('active', isDoubleReadingMode(mode));
   elements.btnModeWebtoon.classList.toggle('active', mode === 'webtoon');
-  elements.btnModeCatalog.classList.toggle('active', mode === 'catalog');
   [
     [elements.btnModeSingle, 'single'],
     [elements.btnModeDouble, 'double'],
-    [elements.btnModeWebtoon, 'webtoon'],
-    [elements.btnModeCatalog, 'catalog']
+    [elements.btnModeWebtoon, 'webtoon']
   ].forEach(([button, value]) => button.setAttribute('aria-pressed', String(value === 'double' ? isDoubleReadingMode(mode) : mode === value)));
   syncDoubleModeControls();
   elements.zoomValue.textContent = `${state.zoomPercentage}%`;
@@ -10222,8 +10292,8 @@ function updateReaderUiControls() {
   elements.btnBrightness.classList.toggle('active', state.brightness !== 100);
   elements.btnBrightness.setAttribute('aria-valuetext', `${state.brightness}%`);
 
-  // 條漫與目錄模式都沒有可套用 fit/rotate 的單頁圖片，控制項必須真的停用。
-  const imageTransformDisabled = mode === 'webtoon' || mode === 'catalog';
+  // 條漫與頁面總覽都沒有可套用 fit/rotate 的單頁圖片。
+  const imageTransformDisabled = mode === 'webtoon' || state.catalogOpen;
   const imageTransformControls = [elements.btnFitMode, elements.btnRotateLeft, elements.btnRotateRight, elements.btnZoomOut, elements.btnZoomIn];
   imageTransformControls.forEach(button => {
     if (!button) return;
@@ -10249,7 +10319,7 @@ function updateReaderUiControls() {
 
 // 📺 切換螢幕適應模式 (適應螢幕 -> 寬度適應 -> 高度適應)
 function toggleFitMode() {
-  if (state.readingMode === 'webtoon' || state.readingMode === 'catalog') return;
+  if (state.readingMode === 'webtoon' || state.catalogOpen) return;
 
   const modes = ['contain', 'width', 'height'];
   let currentIndex = modes.indexOf(state.fitMode);
@@ -10301,10 +10371,7 @@ function rotateImage(degrees) {
     showReaderToast(readerText('條漫模式不支援旋轉。'));
     return;
   }
-  if (state.readingMode === 'catalog') {
-    showReaderToast(readerText('目錄模式不支援旋轉。'));
-    return;
-  }
+  if (state.catalogOpen) return;
 
   state.rotationAngle = (state.rotationAngle + degrees) % 360;
   const normalizedAngle = normalizedRotationAngle();
@@ -10489,7 +10556,7 @@ function setReaderSharpenLevel(value) {
 
 function setReaderFitMode(value) {
   if (!['contain', 'width', 'height'].includes(value)
-    || state.readingMode === 'webtoon' || state.readingMode === 'catalog') return false;
+    || state.readingMode === 'webtoon' || state.catalogOpen) return false;
   state.fitMode = value;
   localStorage.setItem('readerFitMode', value);
   applyFitMode();
@@ -10884,7 +10951,7 @@ function stopScanStatusPolling() {
 function handleWheelScroll(e) {
   if (state.readingMode === 'webtoon') cancelWebtoonAnchor();
   // 如果是條漫模式或目錄模式，允許原生滾動，不作攔截
-  if (state.readingMode === 'webtoon' || state.readingMode === 'catalog') return;
+  if (state.readingMode === 'webtoon' || state.catalogOpen) return;
   // 放大單頁時 viewport 需要保留原生 wheel 平移；只有頁面沒有溢位時
   // 才把滾輪視為翻頁手勢。
   if (state.readingMode === 'single' && readerViewportCanScroll()) return;
@@ -11040,6 +11107,7 @@ function configureSettingsSourceControls() {
 
 async function openSettingsModal() {
   state.dialogReturnFocus = document.activeElement;
+  if (elements.scanDirStatus) elements.scanDirStatus.textContent = '';
   openLibraryModal(elements.settingsModal);
   elements.settingsModal.style.display = 'flex';
   focusLibraryModalEntry(elements.settingsModal, elements.closeSettingsBtn);
@@ -11049,7 +11117,10 @@ async function openSettingsModal() {
 
   // iOS 用 bookmark 加入來源；外觀即時保存，完成按鈕只關閉設定。
   // 不讀取或套用桌面路徑，也不等待正在背景掃描的外部書庫。
-  if (configureSettingsSourceControls()) return;
+  if (configureSettingsSourceControls()) {
+    if (elements.scanDirStatus) elements.scanDirStatus.textContent = readerText('可選擇「檔案」中的本機、iCloud 或已連線 NAS 資料夾。');
+    return;
+  }
 
   try {
     const config = await eAPI.getConfig();
@@ -12419,6 +12490,9 @@ getDiscoveryCandidates,
     nextPage,
     prevPage,
     setReadingMode,
+    togglePageOverview,
+    closePageOverview,
+    selectCatalogPage,
     openReader,
     openNextComicInFolder,
     openPrevComicInFolder,

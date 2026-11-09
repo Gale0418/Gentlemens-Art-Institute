@@ -95,6 +95,31 @@ window.GAIL10n.register({
     "en": "Auto Explain",
     "ja": "自動解説"
   },
+  "ui.pageOverviewButton": {
+    "zh-Hant": "頁面",
+    "en": "Pages",
+    "ja": "ページ"
+  },
+  "ui.pageOverviewTitle": {
+    "zh-Hant": "頁面總覽",
+    "en": "Page Overview",
+    "ja": "ページ一覧"
+  },
+  "ui.openPageOverview": {
+    "zh-Hant": "開啟頁面總覽",
+    "en": "Open page overview",
+    "ja": "ページ一覧を開く"
+  },
+  "ui.closePageOverview": {
+    "zh-Hant": "關閉頁面總覽",
+    "en": "Close page overview",
+    "ja": "ページ一覧を閉じる"
+  },
+  "ui.returnToReading": {
+    "zh-Hant": "返回閱讀",
+    "en": "Back to Reading",
+    "ja": "読書に戻る"
+  },
   "ui.closeReaderAi": {
     "zh-Hant": "關閉",
     "en": "Close",

@@ -3,6 +3,7 @@ import fs from 'node:fs';
 import vm from 'node:vm';
 
 const appSource = fs.readFileSync(new URL('../public/app.js', import.meta.url), 'utf8');
+const readerCss = fs.readFileSync(new URL('../public/style.css', import.meta.url), 'utf8');
 assert.match(appSource, /await restoreExternalBookmarks\(\)/, 'initial external bookmark restore must use the intent queue');
 assert.match(appSource, /eAPI\.restoreBookmarks\(readExternalBookmarks\(\), externalBookmarksLegacyReadable\)/, 'startup and first mutation must obtain an authoritative native bookmark snapshot');
 assert.match(appSource, /const latestBookmarks = readExternalBookmarks\(\)[\s\S]{0,180}bookmark\.bookmark !== bookmarkIdentity/, 'bookmark deletion must resolve identity inside the queue');
@@ -199,7 +200,8 @@ class FakeElement {
       const index = selector.match(/data-index="(\d+)"/)?.[1];
       return this.children.find(child => child.dataset?.index === index) || null;
     }
-    if (selector === '.reader-catalog-grid' || selector === '.reader-catalog-window-controls') {
+    if (selector === '.reader-catalog-grid' || selector === '.reader-catalog-window-controls'
+      || selector === '.reader-catalog-heading') {
       return this.children.find(child => child.className === selector.slice(1)) || null;
     }
     if (selector === '[data-catalog-spacer="top"]' || selector === '[data-catalog-spacer="bottom"]') {
@@ -360,7 +362,8 @@ assert.equal(hooks.catalogThumbnailURL('/fixture/page-3.png'), '/fixture/page-3.
   catalog.hooks.state.currentComic = { id: 'refresh-catalog' };
   catalog.hooks.state.currentComicPages = Array.from({ length: 5000 }, (_, index) => `p${index}`);
   catalog.hooks.state.currentPageIndex = 0;
-  catalog.hooks.state.readingMode = 'catalog';
+  catalog.hooks.state.readingMode = 'single';
+  catalog.hooks.state.catalogOpen = true;
   catalog.hooks.renderPages();
   const initialWindowStart = catalog.hooks.state.catalogWindowStart;
   catalog.hooks.elements.readerViewport.scrollTop = 60 + (Math.floor(3000 / 6) * 194);
@@ -378,11 +381,13 @@ assert.equal(hooks.catalogThumbnailURL('/fixture/page-3.png'), '/fixture/page-3.
   reader.hooks.state.currentComic = { id: 'refresh-reader' };
   reader.hooks.state.currentComicPages = Array.from({ length: 5000 }, (_, index) => `p${index}`);
   reader.hooks.state.currentPageIndex = 0;
-  reader.hooks.state.readingMode = 'catalog';
+  reader.hooks.state.readingMode = 'single';
+  reader.hooks.state.catalogOpen = true;
   reader.hooks.renderPages();
   const readerGrid = reader.hooks.elements.pagesContainer.querySelector('.reader-catalog-grid');
   const readerWindowStart = reader.hooks.state.catalogWindowStart;
   reader.hooks.state.readingMode = 'single';
+  reader.hooks.state.catalogOpen = false;
   reader.hooks.elements.readerViewport.scrollTop = 60 + (Math.floor(3000 / 6) * 194);
   reader.hooks.scheduleReaderImageTransformRefresh();
   reader.clock.tick(0);
@@ -390,6 +395,39 @@ assert.equal(hooks.catalogThumbnailURL('/fixture/page-3.png'), '/fixture/page-3.
     'normal reader image refresh does not schedule catalog virtualization');
   assert.equal(reader.hooks.elements.pagesContainer.querySelector('.reader-catalog-grid'), readerGrid,
     'normal reader image refresh leaves the catalog grid untouched');
+}
+
+// Continue 卡片的實際欄寬與排序欄位都必須進入簽名；未讀收藏不可偽裝成閱讀進度。
+// Fullscreen/AI changes and an already queued frame must never apply reader
+// rotation/zoom or webtoon geometry to overview thumbnails.
+{
+  const runtime = createHarness();
+  const { hooks, context, clock } = runtime;
+  vm.runInContext(`window.__GIA_TEST_HOOKS__.refreshReaderImageTransforms = refreshReaderImageTransforms;
+    window.__GIA_TEST_HOOKS__.scheduleReaderImageTransformRefresh = scheduleReaderImageTransformRefresh;`, context);
+  const image = new FakeElement('img');
+  image.style.transform = 'unchanged-thumbnail';
+  let imageQueries = 0;
+  hooks.elements.pagesContainer.querySelectorAll = selector => {
+    if (selector === 'img') { imageQueries += 1; return [image]; }
+    return [];
+  };
+  hooks.state.readingMode = 'double';
+  hooks.state.rotationAngle = 90;
+  hooks.state.zoomPercentage = 150;
+  hooks.scheduleReaderImageTransformRefresh();
+  hooks.state.catalogOpen = true;
+  clock.tick(0);
+  hooks.refreshReaderImageTransforms();
+  hooks.scheduleReaderImageTransformRefresh();
+  clock.tick(0);
+  assert.equal(imageQueries, 0, 'open overview rejects direct and queued reader transform refreshes');
+  assert.equal(image.style.transform, 'unchanged-thumbnail');
+  hooks.state.catalogOpen = false;
+  hooks.scheduleReaderImageTransformRefresh();
+  clock.tick(0);
+  assert.match(image.style.transform, /scale\(1\.5\) rotate\(90deg\)/,
+    'normal reader transforms remain active after returning from the overview');
 }
 
 // Continue 卡片的實際欄寬與排序欄位都必須進入簽名；未讀收藏不可偽裝成閱讀進度。
@@ -1678,6 +1716,83 @@ assert.equal(hooks.catalogThumbnailURL('/fixture/page-3.png'), '/fixture/page-3.
   assert.equal(stalledCalls, 2);
 }
 
+// Catalog positioning measures live scroll geometry, including viewport padding,
+// heading/control margins, and removes the currently materialized virtual top spacer.
+{
+  const runtime = createHarness();
+  vm.runInContext('window.__GIA_TEST_HOOKS__.catalogGridOffset = catalogGridOffset;', runtime.context);
+  const hooks = runtime.hooks;
+  const pages = hooks.elements.pagesContainer;
+  const viewport = hooks.elements.readerViewport;
+  const cssPixels = (selector, property) => {
+    const rule = readerCss.match(new RegExp(`${selector}\\s*\\{([^}]*)\\}`))?.[1] || '';
+    const match = rule.match(new RegExp(`${property}\\s*:\\s*([0-9.]+)px`));
+    assert.ok(match, `CSS rule ${selector} defines ${property} in px`);
+    return Number(match[1]);
+  };
+  const viewportPadding = cssPixels('\\.reader-overlay\\.mode-catalog \\.reader-viewport', 'padding');
+  const headingMargin = cssPixels('\\.reader-catalog-heading', 'margin-bottom');
+  const controlMargin = cssPixels('\\.reader-catalog-window-controls', 'margin-bottom');
+  const headingHeight = 39;
+  const controlsHeight = 47;
+  const borderTop = 3;
+  const scrollOriginTop = 80;
+  const viewportRect = { top: scrollOriginTop };
+  const spacer = new FakeElement('div');
+  spacer.dataset.catalogSpacer = 'top';
+  spacer.style.height = '3456px';
+  const heading = new FakeElement('div');
+  heading.className = 'reader-catalog-heading';
+  heading.offsetHeight = headingHeight;
+  const controls = new FakeElement('div');
+  controls.className = 'reader-catalog-window-controls';
+  controls.offsetHeight = controlsHeight;
+  const grid = new FakeElement('div');
+  grid.className = 'reader-catalog-grid';
+  pages.replaceChildren(heading, controls, spacer, grid);
+  viewport.clientTop = borderTop;
+  viewport.scrollTop = 137;
+  viewport.getBoundingClientRect = () => viewportRect;
+  const getGridTop = () => scrollOriginTop + borderTop + viewportPadding
+    + headingHeight + headingMargin + controlsHeight + controlMargin
+    + Number.parseFloat(spacer.style.height) - viewport.scrollTop;
+  grid.getBoundingClientRect = () => ({ top: getGridTop() });
+
+  const expectedBaseOffset = viewportPadding + headingHeight + headingMargin
+    + controlsHeight + controlMargin;
+  assert.equal(hooks.catalogGridOffset(), expectedBaseOffset,
+    'first logical grid row aligns after viewport padding, heading and controls');
+  spacer.style.height = '9876px';
+  viewport.scrollTop = 321;
+  assert.equal(hooks.catalogGridOffset(), expectedBaseOffset,
+    'scroll position and the virtual window top spacer do not shift the logical page origin');
+
+  pages.replaceChildren(heading, controls);
+  hooks.state.catalogControlOffset = 73;
+  viewport.getBoundingClientRect = undefined;
+  assert.equal(hooks.catalogGridOffset(), 73,
+    'layout-less runtimes keep the existing catalog offset fallback');
+
+  // The cached resize origin must be measured after the newly created grid
+  // has entered the DOM, rather than retaining the pre-attachment fallback.
+  viewport.getBoundingClientRect = () => viewportRect;
+  const createElement = runtime.document.createElement.bind(runtime.document);
+  runtime.document.createElement = tag => {
+    const node = createElement(tag);
+    node.getBoundingClientRect = () => ({ top: scrollOriginTop + borderTop + expectedBaseOffset
+      + (Number.parseFloat(pages.querySelector('[data-catalog-spacer="top"]')?.style?.height) || 0)
+      - viewport.scrollTop });
+    return node;
+  };
+  hooks.state.currentComic = { id: 'attached-grid-origin' };
+  hooks.state.currentComicPages = Array.from({ length: 30 }, (_, index) => `page-${index}`);
+  hooks.state.currentPageIndex = 0;
+  hooks.state.catalogOpen = true;
+  hooks.renderCatalogGrid();
+  assert.equal(hooks.state.catalogControlOffset, expectedBaseOffset,
+    'resize cache uses the attached grid geometry instead of its old fallback');
+}
+
 // 目錄縮圖只保留固定頁窗，避免大本漫畫一次建立數千個節點。
 {
   const catalog = createHarness();
@@ -1686,7 +1801,8 @@ assert.equal(hooks.catalogThumbnailURL('/fixture/page-3.png'), '/fixture/page-3.
   catalog.hooks.state.currentComic = { id: 'large-catalog' };
   catalog.hooks.state.currentComicPages = Array.from({ length: 5000 }, (_, index) => `p${index}`);
   catalog.hooks.state.currentPageIndex = 2500;
-  catalog.hooks.state.readingMode = 'catalog';
+  catalog.hooks.state.readingMode = 'single';
+  catalog.hooks.state.catalogOpen = true;
   catalog.hooks.renderPages();
   const grid = catalog.hooks.elements.pagesContainer.children.find(child => child.className === 'reader-catalog-grid');
   assert.ok(grid, 'catalog mode renders a thumbnail grid');
@@ -1731,7 +1847,8 @@ assert.equal(hooks.catalogThumbnailURL('/fixture/page-3.png'), '/fixture/page-3.
   assert.equal(shiftedGrid.children.includes(evictedThumb), false,
     '批次滑動回收離窗 thumbnail');
 
-  catalog.hooks.state.readingMode = 'catalog';
+  catalog.hooks.state.readingMode = 'single';
+  catalog.hooks.state.catalogOpen = true;
   catalog.hooks.updateReaderUiControls();
   for (const control of [catalog.hooks.elements.btnFitMode, catalog.hooks.elements.btnRotateLeft, catalog.hooks.elements.btnRotateRight]) {
     assert.equal(control.disabled, true, 'catalog mode disables image transform controls');
@@ -1753,7 +1870,8 @@ for (let columns = 1; columns <= 12; columns += 1) {
     catalog.hooks.state.catalogWindowStart = 0;
     catalog.hooks.state.catalogWindowEnd = 0;
     catalog.hooks.state.catalogColumns = 0;
-    catalog.hooks.state.readingMode = 'catalog';
+    catalog.hooks.state.readingMode = 'single';
+  catalog.hooks.state.catalogOpen = true;
     catalog.hooks.renderPages();
     const bounds = catalog.hooks.getCatalogVirtualBounds(totalPages, { preserveWindow: true });
     const grid = catalog.hooks.elements.pagesContainer.children
@@ -1790,7 +1908,8 @@ for (let columns = 1; columns <= 12; columns += 1) {
   tail.hooks.state.currentComic = { id: 'incremental-tail' };
   tail.hooks.state.currentComicPages = Array.from({ length: totalPages }, (_, index) => `p${index}`);
   tail.hooks.state.currentPageIndex = 0;
-  tail.hooks.state.readingMode = 'catalog';
+  tail.hooks.state.readingMode = 'single';
+  tail.hooks.state.catalogOpen = true;
   tail.hooks.renderPages();
   tail.hooks.elements.readerViewport.scrollTop = 60 + (Math.floor(3000 / columns) * 194);
   tail.hooks.renderCatalogGrid({ fromScroll: true });
@@ -1808,7 +1927,8 @@ for (let columns = 1; columns <= 12; columns += 1) {
   current.context.IntersectionObserver = undefined;
   current.hooks.state.currentComicPages = Array.from({ length: 5000 }, (_, index) => `p${index}`);
   current.hooks.state.currentComic = { id: `current-boundary-${columns}` };
-  current.hooks.state.readingMode = 'catalog';
+  current.hooks.state.readingMode = 'single';
+  current.hooks.state.catalogOpen = true;
   for (const pageIndex of [Math.max(0, capacity - 3), capacity - 2, capacity - 1,
     capacity, capacity + 1, capacity + 2, capacity + 3]) {
     current.hooks.state.currentPageIndex = pageIndex;
@@ -1830,7 +1950,8 @@ for (let columns = 1; columns <= 12; columns += 1) {
   entry.hooks.state.currentComic = { id: 'catalog-entry-race' };
   entry.hooks.state.currentComicPages = Array.from({ length: 5000 }, (_, index) => `p${index}`);
   entry.hooks.state.currentPageIndex = 4999;
-  entry.hooks.state.readingMode = 'catalog';
+  entry.hooks.state.readingMode = 'single';
+  entry.hooks.state.catalogOpen = true;
   entry.hooks.renderPages();
   assert.ok(entry.hooks.elements.readerViewport.scrollTop > 1000,
     'catalog entry positions the current page before returning');
@@ -1857,7 +1978,8 @@ for (let columns = 1; columns <= 12; columns += 1) {
   resize.hooks.state.currentComic = { id: 'catalog-resize' };
   resize.hooks.state.currentComicPages = Array.from({ length: 3016 }, (_, index) => `p${index}`);
   resize.hooks.state.currentPageIndex = 17;
-  resize.hooks.state.readingMode = 'catalog';
+  resize.hooks.state.readingMode = 'single';
+  resize.hooks.state.catalogOpen = true;
   resize.hooks.renderPages();
   resize.hooks.elements.readerViewport.scrollTop = 60 + (Math.floor(1500 / 5) * 194) + 20;
   const beforeResizeGrid = resize.hooks.elements.pagesContainer.children
@@ -1931,7 +2053,8 @@ for (let columns = 1; columns <= 12; columns += 1) {
   stale.hooks.state.currentComic = { id: 'stale-old' };
   stale.hooks.state.currentComicPages = Array.from({ length: 3016 }, (_, index) => `old-${index}`);
   stale.hooks.state.currentPageIndex = 0;
-  stale.hooks.state.readingMode = 'catalog';
+  stale.hooks.state.readingMode = 'single';
+  stale.hooks.state.catalogOpen = true;
   stale.hooks.renderPages();
   stale.context.window.innerWidth = 40 + (130 * 8) + (14 * 7);
   stale.hooks.handleReaderResize();
@@ -1942,7 +2065,8 @@ for (let columns = 1; columns <= 12; columns += 1) {
   stale.hooks.state.currentComic = { id: 'stale-new' };
   stale.hooks.state.currentComicPages = Array.from({ length: 80 }, (_, index) => `new-${index}`);
   stale.hooks.state.currentPageIndex = 0;
-  stale.hooks.state.readingMode = 'catalog';
+  stale.hooks.state.readingMode = 'single';
+  stale.hooks.state.catalogOpen = true;
   stale.hooks.renderPages();
   const newGrid = stale.hooks.elements.pagesContainer.children
     .find(child => child.className === 'reader-catalog-grid');
@@ -1965,7 +2089,8 @@ for (let columns = 1; columns <= 12; columns += 1) {
     catalog.hooks.state.currentComic = { id: `buttons-${columns}-${totalPages}` };
     catalog.hooks.state.currentComicPages = Array.from({ length: totalPages }, (_, index) => `p${index}`);
     catalog.hooks.state.currentPageIndex = 0;
-    catalog.hooks.state.readingMode = 'catalog';
+    catalog.hooks.state.readingMode = 'single';
+  catalog.hooks.state.catalogOpen = true;
     catalog.hooks.renderPages();
     const capacity = Math.max(columns, Math.floor(160 / columns) * columns);
     const forward = [];
@@ -2383,7 +2508,8 @@ for (let columns = 1; columns <= 12; columns += 1) {
   slowCatalog.hooks.state.currentComic = { id: 'slow-catalog' };
   slowCatalog.hooks.state.currentComicPages = Array.from({ length: 320 }, (_, index) => `slow-${index}`);
   slowCatalog.hooks.state.currentPageIndex = 0;
-  slowCatalog.hooks.state.readingMode = 'catalog';
+  slowCatalog.hooks.state.readingMode = 'single';
+  slowCatalog.hooks.state.catalogOpen = true;
   slowCatalog.hooks.renderPages();
   const firstGrid = slowCatalog.hooks.elements.pagesContainer.children.find(child => child.className === 'reader-catalog-grid');
   const oldActiveImages = firstGrid.children.slice(0, 8).map(thumb => thumb.children[0]);
@@ -2406,7 +2532,8 @@ for (let columns = 1; columns <= 12; columns += 1) {
   flingCatalog.hooks.state.currentComic = { id: 'fling-catalog' };
   flingCatalog.hooks.state.currentComicPages = Array.from({ length: 500 }, (_, index) => `fling-${index}`);
   flingCatalog.hooks.state.currentPageIndex = 0;
-  flingCatalog.hooks.state.readingMode = 'catalog';
+  flingCatalog.hooks.state.readingMode = 'single';
+  flingCatalog.hooks.state.catalogOpen = true;
   flingCatalog.hooks.renderPages();
   const firstGrid = flingCatalog.hooks.elements.pagesContainer.children
     .find(child => child.className === 'reader-catalog-grid');
@@ -2445,7 +2572,8 @@ for (let columns = 1; columns <= 12; columns += 1) {
   observerCatalog.hooks.state.currentComic = { id: 'observer-fling-catalog' };
   observerCatalog.hooks.state.currentComicPages = Array.from({ length: 500 }, (_, index) => `observer-${index}`);
   observerCatalog.hooks.state.currentPageIndex = 0;
-  observerCatalog.hooks.state.readingMode = 'catalog';
+  observerCatalog.hooks.state.readingMode = 'single';
+  observerCatalog.hooks.state.catalogOpen = true;
   observerCatalog.hooks.renderPages();
   const observer = observerCatalog.context.IntersectionObserver.instances.at(-1);
   const firstGrid = observerCatalog.hooks.elements.pagesContainer.children
@@ -2483,7 +2611,8 @@ for (let columns = 1; columns <= 12; columns += 1) {
   overlapCatalog.hooks.state.currentComic = { id: 'observer-overlap-catalog' };
   overlapCatalog.hooks.state.currentComicPages = Array.from({ length: 500 }, (_, index) => `overlap-${index}`);
   overlapCatalog.hooks.state.currentPageIndex = 0;
-  overlapCatalog.hooks.state.readingMode = 'catalog';
+  overlapCatalog.hooks.state.readingMode = 'single';
+  overlapCatalog.hooks.state.catalogOpen = true;
   overlapCatalog.hooks.renderPages();
   const observer = overlapCatalog.context.IntersectionObserver.instances.at(-1);
   const firstGrid = overlapCatalog.hooks.elements.pagesContainer.children
@@ -2509,7 +2638,8 @@ for (let columns = 1; columns <= 12; columns += 1) {
   closingCatalog.hooks.state.currentComic = { id: 'closing-catalog' };
   closingCatalog.hooks.state.currentComicPages = Array.from({ length: 320 }, (_, index) => `closing-${index}`);
   closingCatalog.hooks.state.currentPageIndex = 0;
-  closingCatalog.hooks.state.readingMode = 'catalog';
+  closingCatalog.hooks.state.readingMode = 'single';
+  closingCatalog.hooks.state.catalogOpen = true;
   closingCatalog.hooks.renderPages();
   const closingGrid = closingCatalog.hooks.elements.pagesContainer.children
     .find(child => child.className === 'reader-catalog-grid');
@@ -2529,12 +2659,14 @@ for (let columns = 1; columns <= 12; columns += 1) {
   closingCatalog.hooks.state.currentComic = { id: 'reopened-catalog' };
   closingCatalog.hooks.state.currentComicPages = Array.from({ length: 12 }, (_, index) => `reopened-${index}`);
   closingCatalog.hooks.state.currentPageIndex = 0;
-  closingCatalog.hooks.state.readingMode = 'catalog';
+  closingCatalog.hooks.state.readingMode = 'single';
+  closingCatalog.hooks.state.catalogOpen = true;
   closingCatalog.hooks.renderPages();
   assert.equal(closingCatalog.hooks.state.currentComic.id, 'reopened-catalog');
   assert.equal(closingCatalog.hooks.getCatalogThumbnailLoadState().active, 0,
     'late closed callback cannot occupy reopened generation');
   closingCatalog.hooks.state.readingMode = 'single';
+  closingCatalog.hooks.state.catalogOpen = false;
   closingCatalog.hooks.renderPages();
   const switchedState = closingCatalog.hooks.getCatalogThumbnailLoadState();
   assert.equal(switchedState.active, 0, 'leaving catalog clears active image tasks');
@@ -2715,7 +2847,8 @@ for (let columns = 1; columns <= 12; columns += 1) {
   const pointerCatalog = createHarness();
   pointerCatalog.hooks.elements.readerOverlay.style.display = 'flex';
   pointerCatalog.hooks.elements.readerOverlay.classList.add('reader-idle');
-  pointerCatalog.hooks.state.readingMode = 'catalog';
+  pointerCatalog.hooks.state.readingMode = 'single';
+  pointerCatalog.hooks.state.catalogOpen = true;
   const thumbTarget = new FakeElement('div');
   thumbTarget.classList.add('catalog-thumb');
   const eventTarget = { closest: selector => selector.includes('.catalog-thumb') ? thumbTarget : null };
@@ -2761,28 +2894,30 @@ for (let columns = 1; columns <= 12; columns += 1) {
   pointerCatalog.hooks.state.currentComic = { id: 'catalog-pointer' };
   pointerCatalog.hooks.state.currentComicPages = Array.from({ length: 12 }, (_, index) => `p${index}`);
   pointerCatalog.hooks.state.currentPageIndex = 0;
-  pointerCatalog.hooks.state.readingMode = 'catalog';
+  pointerCatalog.hooks.state.readingMode = 'single';
+  pointerCatalog.hooks.state.catalogOpen = true;
   pointerCatalog.hooks.renderPages();
   const grid = pointerCatalog.hooks.elements.pagesContainer.children
     .find(child => child.className === 'reader-catalog-grid');
   const thumb = grid.children[5];
   assert.equal(typeof thumb.onclick, 'function', 'catalog click handler remains installed');
   assert.equal(typeof thumb.onkeydown, 'function', 'catalog keyboard handler remains installed');
-  vm.runInContext(`
-    window.catalogModeSelections = [];
-    setReadingMode = mode => window.catalogModeSelections.push(mode);
-  `, pointerCatalog.context);
   thumb.onclick();
   assert.equal(pointerCatalog.hooks.state.currentPageIndex, 5, 'thumbnail click opens its own page');
-  assert.deepEqual(Array.from(pointerCatalog.context.window.catalogModeSelections), ['single'],
-    'thumbnail click changes mode exactly once');
+  assert.equal(pointerCatalog.hooks.state.readingMode, 'single', 'thumbnail click preserves the underlying reader mode');
+  assert.equal(pointerCatalog.hooks.state.catalogOpen, false, 'thumbnail click closes the overview');
   for (const key of ['Enter', ' ']) {
     pointerCatalog.hooks.state.currentPageIndex = 0;
-    thumb.onkeydown({ target: thumb, key, preventDefault() {}, stopPropagation() {} });
+    pointerCatalog.hooks.state.catalogOpen = true;
+    pointerCatalog.hooks.renderPages();
+    const freshGrid = pointerCatalog.hooks.elements.pagesContainer.children
+      .find(child => child.className === 'reader-catalog-grid');
+    const freshThumb = freshGrid.children[5];
+    freshThumb.onkeydown({ target: freshThumb, key, preventDefault() {}, stopPropagation() {} });
     assert.equal(pointerCatalog.hooks.state.currentPageIndex, 5, 'keyboard activation opens the same page');
+    assert.equal(pointerCatalog.hooks.state.catalogOpen, false, `${key} closes the overview`);
+    assert.equal(pointerCatalog.hooks.state.readingMode, 'single', `${key} keeps the reader mode`);
   }
-  assert.deepEqual(Array.from(pointerCatalog.context.window.catalogModeSelections), ['single', 'single', 'single'],
-    'click, Enter and Space each activate exactly once');
 }
 
 // 一般漫畫第一次只開詳情，收合後第二次仍開啟原書，而非被抽屜狀態重置選取。

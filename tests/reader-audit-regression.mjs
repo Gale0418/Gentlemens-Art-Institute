@@ -205,7 +205,10 @@ for (const navigator of [
   { userAgent: 'Macintosh', platform: 'MacIntel', maxTouchPoints: 5 },
 ]) {
   const h = settingsHarness(navigator);
+  h.elements.scanDirStatus.textContent = 'Previous source could not be opened';
   await h.context.open();
+  assert.equal(h.elements.scanDirStatus.textContent, '可選擇「檔案」中的本機、iCloud 或已連線 NAS 資料夾。',
+    'opening native iPad settings replaces a stale source error with its source-selection hint');
   assert.equal(h.elements.scanPathRow.hidden, true, 'iPad hides desktop absolute-path editing');
   assert.equal(h.elements.saveSettingsBtn.hidden, false, 'iPad exposes a completion action in the fixed header');
   assert.deepEqual(h.calls, ['open', 'remove:for'], 'iPad settings must not wait for filesystem config/browse');
@@ -220,7 +223,9 @@ for (const navigator of [
   assert.equal(h.elements.librarySourceBtn.disabled, false);
 }
 const desktopSettings = settingsHarness({ userAgent: 'Macintosh', platform: 'MacIntel', maxTouchPoints: 0 });
+desktopSettings.elements.scanDirStatus.textContent = 'Previous path could not be applied';
 await desktopSettings.context.open();
+assert.equal(desktopSettings.elements.scanDirStatus.textContent, '', 'reopening settings clears a resolved previous path error');
 assert.equal(desktopSettings.elements.scanPathRow.hidden, false);
 assert.equal(desktopSettings.elements.saveSettingsBtn.hidden, true);
 assert.equal(desktopSettings.elements.scanDirInput.value, '/Volumes/Comics');

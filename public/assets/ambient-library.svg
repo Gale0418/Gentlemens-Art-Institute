@@ -1,0 +1,14 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1440 900" fill="none">
+  <g stroke="#fff" stroke-linecap="round" stroke-linejoin="round">
+    <!-- A tall reading-room arch anchors the right side of the shelf. -->
+    <path d="M878 890V372a262 262 0 0 1 524 0v518" stroke-width="10"/>
+    <path d="M920 890V378a220 220 0 0 1 440 0v512" stroke-width="4"/>
+    <path d="M1140 158v510M920 420h440" stroke-width="3"/>
+
+    <!-- Quiet shelf lines and varied book spines, kept low in the frame. -->
+    <path d="M58 656h706M58 836h706M806 714h566M806 836h566" stroke-width="5"/>
+    <path d="M94 650v-112h48v112m15 0v-82h55v82m18 0v-138h41v138m17 0v-96h63v96m18 0v-126h46v126m17 0v-80h52v80m18 0v-144h39v144m16 0v-104h60v104m18 0v-126h48v126m19 0v-88h43v88" stroke-width="4"/>
+    <path d="M840 708v-94h42v94m16 0v-132h57v132m18 0v-108h38v108m17 0v-154h55v154m17 0v-112h45v112m17 0v-138h50v138m17 0v-92h55v92m17 0v-126h39v126m17 0v-106h46v106" stroke-width="4"/>
+    <path d="M130 832v-96h48v96m18 0v-124h44v124m18 0v-94h60v94m18 0v-130h42v130m18 0v-104h54v104m18 0v-118h47v118m18 0v-90h59v90m18 0v-126h42v126m18 0v-104h58v104m18 0v-120h48v120" stroke-width="4"/>
+  </g>
+</svg>

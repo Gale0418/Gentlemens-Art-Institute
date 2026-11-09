@@ -190,7 +190,8 @@ for (const invalid of ['cover', '', null, 1]) {
   assert.equal(calls.fitRefresh, before.refreshes, 'invalid fit mode does not render');
 }
 for (const restrictedMode of ['webtoon', 'catalog']) {
-  state.readingMode = restrictedMode;
+  state.readingMode = restrictedMode === 'webtoon' ? 'webtoon' : 'single';
+  state.catalogOpen = restrictedMode === 'catalog';
   state.fitMode = 'height';
   const before = { writes: writes.length, refreshes: calls.fitRefresh };
   assert.equal(context.setFit('contain'), false);
@@ -200,13 +201,15 @@ for (const restrictedMode of ['webtoon', 'catalog']) {
 }
 state.readingMode = 'single';
 for (const restrictedMode of ['webtoon', 'catalog']) {
-  state.readingMode = restrictedMode;
+  state.readingMode = restrictedMode === 'webtoon' ? 'webtoon' : 'single';
+  state.catalogOpen = restrictedMode === 'catalog';
   const before = calls.fitRefresh;
   context.adjustZoom(10);
   assert.equal(state.zoomPercentage, 100, `${restrictedMode} ignores zoom changes`);
   assert.equal(calls.fitRefresh, before);
 }
 state.readingMode = 'single';
+state.catalogOpen = false;
 context.adjustZoom(10);
 assert.equal(state.zoomPercentage, 110, 'single-page zoom remains available');
 assert.equal(elements.zoomValue.textContent, '110%');

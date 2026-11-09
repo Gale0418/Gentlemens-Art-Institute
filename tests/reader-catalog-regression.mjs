@@ -14,9 +14,12 @@ assert.match(app, /function handleCatalogScroll\(\)/);
 assert.match(app, /function handleReaderResize\(\)[\s\S]{0,180}scheduleCatalogResize\(\)/);
 assert.match(app, /function scheduleCatalogResize\(\)[\s\S]{0,1500}renderCatalogGrid\(\{ fromScroll: true/);
 assert.match(app, /oldScrollTop: Number\(elements\.readerViewport\?\.scrollTop\)/);
-assert.match(app, /state\.readingMode === 'catalog'[\s\S]{0,120}scheduleCatalogResize\(\);\s*return;/);
+assert.match(app, /state\.catalogOpen\)[\s\S]{0,120}scheduleCatalogResize\(\);\s*return;/);
 assert.match(app, /catalogResizeFrame !== null/);
-assert.match(app, /function catalogRenderOwner\(\)[\s\S]{0,240}readerOperation/);
+assert.match(app, /function catalogRenderOwner\(\)[\s\S]{0,300}catalogOpen: state\.catalogOpen/);
+assert.match(app, /function isCatalogRenderOwnerCurrent\(owner\)[\s\S]{0,500}owner\.catalogOpen === true/);
+assert.match(app, /function setReadingMode\(mode\)[\s\S]{0,280}catalogOpen && mode === state\.readingMode/);
+assert.doesNotMatch(app, /readingMode\s*===\s*['"]catalog['"]/);
 assert.match(app, /isCatalogRenderOwnerCurrent\(geometry\.owner\)/);
 assert.match(app, /cancelCatalogResize\(\);\s*cancelCatalogVirtualRender\(\);/);
 assert.match(app, /elements\.readerViewport\.onscroll = handleCatalogScroll/);
@@ -46,6 +49,9 @@ assert.doesNotMatch(app, /state\.currentComicPages\.slice\(windowStart, windowEn
 assert.match(style, /\.catalog-virtual-spacer\s*\{/);
 assert.match(style, /\.reader-catalog-grid\s*\{[\s\S]{0,500}contain:\s*layout paint style/);
 assert.match(style, /\.reader-catalog-grid\[data-catalog-start-column\]/);
+assert.match(style, /\.reader-catalog-return[\s\S]{0,200}min-height: 44px/);
+assert.match(app, /ui\.pageOverviewTitle/);
+assert.match(app, /ui\.returnToReading/);
 
 function extractFunction(source, name) {
   const start = source.indexOf(`function ${name}(`);

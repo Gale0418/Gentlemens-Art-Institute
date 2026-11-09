@@ -78,6 +78,9 @@ assert.equal(focusableCheck({ ...visibleControl, parentNode: hiddenParent }), fa
   assert.equal(redirected, 1, 'focus inside a hidden aria-modal still returns to the reader entry');
 }
 assert.match(extractFunction('trapReaderFocus'), /triggerControlsActive\(\)/, 'empty reader focus trap wakes idle chrome');
+assert.match(extractFunction('trapReaderFocus'), /reader-keyboard-controls/, 'Tab explicitly enables keyboard chrome visibility');
+assert.match(css, /\.reader-overlay\.reader-keyboard-controls\s+\.reader-top-bar:focus-within/);
+assert.doesNotMatch(css, /(?:^|,)\s*\.reader-top-bar:focus-within/m, 'focus alone cannot pin the top bar');
 assert.match(css, /\.reader-overlay\.mode-webtoon \.webtoon-nav-button[\s\S]*min-height: 44px/);
 assert.match(css, /\.reader-overlay\.mode-single \.reader-viewport[\s\S]*overflow: auto/);
 assert.match(css, /\.reader-overlay\.mode-single \.reader-viewport[\s\S]*touch-action: pan-x pan-y/);
@@ -119,6 +122,8 @@ assert.match(pageNoticeRule, /pointer-events:\s*none/, 'the transient page count
     elements, state, window: { innerWidth: 1000 },
     setTimeout: callback => { idleCallback = callback; return 1; },
     clearTimeout() {}, isCatalogThumbnailInteraction: () => false,
+    clearReaderIdleTimer() { state.readerIdleTimer = null; },
+    readerControlsPointerActive: () => false,
   };
   vm.runInNewContext(`${extractFunction('clearReaderPageNotice')}\n${extractFunction('triggerControlsActive')}\n${pointer}\nglobalThis.tap = handleReaderPointerClick;`, context);
   context.tap({ button: 0, clientX: 500, target: { closest: () => null } });
@@ -383,6 +388,11 @@ class FakeDocument {
     const handlers = this.listeners.get(type) || [];
     handlers.push(handler);
     this.listeners.set(type, handlers);
+  }
+  dispatch(type, detail = {}) {
+    const event = { type, target: this, ...detail };
+    for (const handler of [...(this.listeners.get(type) || [])]) handler(event);
+    return event;
   }
   removeEventListener() {}
 }
@@ -1121,13 +1131,156 @@ console.log('PASS: two-page direction, one-page shift, parity snap, and boundari
   const { hooks, document } = createRuntimeHarness();
   hooks.elements.readerOverlay.style.display = 'flex';
   hooks.elements.readerOverlay.classList.add('reader-idle');
+  hooks.focusReaderEntry();
+  assert.equal(hooks.elements.readerOverlay.classList.contains('reader-keyboard-controls'), false,
+    'automatic focus on the return button does not pin the chrome');
   let prevented = false;
   hooks.trapReaderFocus({ key: 'Tab', shiftKey: false, preventDefault() { prevented = true; } });
   assert.equal(prevented, true, 'empty reader focus trap owns Tab');
+  assert.equal(hooks.elements.readerOverlay.classList.contains('reader-keyboard-controls'), true,
+    'Tab enables keyboard chrome visibility');
   assert.equal(hooks.elements.readerOverlay.classList.contains('reader-idle'), false, 'empty focus trap wakes reader chrome');
   assert.equal(document.activeElement, hooks.elements.readerBackBtn, 'empty focus trap focuses visible keyboard entry');
+  hooks.elements.readerOverlay.classList.add('reader-idle');
+  hooks.elements.readerOverlay.dispatch('pointerdown', { pointerType: 'touch' });
+  assert.equal(hooks.elements.readerOverlay.classList.contains('reader-keyboard-controls'), false,
+    'pointer interaction returns to the normal idle policy');
+  hooks.elements.readerOverlay.classList.add('reader-keyboard-controls', 'reader-idle');
+  const topBarTarget = { closest: selector => selector.includes('.reader-top-bar') ? hooks.elements.readerTopBar : null };
+  hooks.elements.readerOverlay.dispatch('pointerdown', { pointerType: 'mouse', pointerId: 1, target: topBarTarget });
+  assert.equal(hooks.elements.readerOverlay.classList.contains('reader-idle'), false,
+    'pointerdown on a top-bar control wakes the chrome before clearing keyboard mode');
+  assert.equal(hooks.elements.readerOverlay.classList.contains('reader-keyboard-controls'), false,
+    'top-bar pointer interaction returns to normal chrome mode');
+  assert.equal(hooks.state.readerIdleTimer, null, 'held top-bar pointer pauses the idle timeout');
+  hooks.elements.readerOverlay.classList.add('reader-keyboard-controls', 'reader-idle');
+  const canvasTarget = { closest: () => null };
+  hooks.elements.readerOverlay.dispatch('pointerdown', { pointerType: 'mouse', target: canvasTarget });
+  assert.equal(hooks.elements.readerOverlay.classList.contains('reader-idle'), true,
+    'canvas pointerdown does not wake idle controls');
+  assert.equal(hooks.elements.readerOverlay.classList.contains('reader-keyboard-controls'), false,
+    'canvas pointerdown clears keyboard-only visibility');
+  hooks.elements.readerOverlay.classList.add('reader-keyboard-controls');
+  await hooks.closeReader();
+  assert.equal(hooks.elements.readerOverlay.classList.contains('reader-keyboard-controls'), false,
+    'closing the reader clears keyboard mode');
 }
 console.log('PASS: idle reader chrome restores a keyboard focus entry');
+
+// Mouse hover and held top-bar controls pause only the reader idle timer. Touch
+// controls are held until pointerup/cancel, and closing clears every pause.
+{
+  const mouse = createRuntimeHarness();
+  const { hooks, document, clock } = mouse;
+  const { readerOverlay, readerTopBar } = hooks.elements;
+  readerOverlay.style.display = 'flex';
+  readerOverlay.classList.add('reader-idle');
+  readerTopBar.dispatch('pointerenter', { pointerType: 'mouse', pointerId: 4 });
+  readerOverlay.dispatch('pointerdown', {
+    pointerType: 'mouse', pointerId: 4,
+    target: { closest: selector => selector.includes('.reader-top-bar') ? readerTopBar : null },
+  });
+  assert.equal(hooks.state.readerIdleTimer, null, 'mouse hover and header press keep the idle timer stopped');
+  clock.tick(3000);
+  assert.equal(readerOverlay.classList.contains('reader-idle'), false,
+    'mouse remains over the header without hiding it after the ordinary timeout');
+  document.dispatch('pointerup', { pointerType: 'mouse', pointerId: 4 });
+  assert.equal(hooks.state.readerIdleTimer, null, 'pointerup stays paused while mouse remains over the header');
+  readerTopBar.dispatch('pointerleave', { pointerType: 'mouse', pointerId: 4 });
+  assert.notEqual(hooks.state.readerIdleTimer, null, 'mouseleave restores the regular idle timeout');
+  clock.tick(2199);
+  assert.equal(readerOverlay.classList.contains('reader-idle'), false, 'mouseleave timeout retains the normal delay');
+  clock.tick(1);
+  assert.equal(readerOverlay.classList.contains('reader-idle'), true, 'controls return to idle after the normal delay');
+}
+
+{
+  const touch = createRuntimeHarness();
+  const { hooks, document, clock } = touch;
+  const { readerOverlay, readerTopBar } = hooks.elements;
+  const headerTarget = { closest: selector => selector.includes('.reader-top-bar') ? readerTopBar : null };
+  readerOverlay.style.display = 'flex';
+  readerOverlay.classList.add('reader-idle');
+  readerOverlay.dispatch('pointerdown', { pointerType: 'touch', pointerId: 8, target: headerTarget });
+  clock.tick(3000);
+  assert.equal(readerOverlay.classList.contains('reader-idle'), false, 'touch long press keeps the header visible');
+  document.dispatch('pointerup', { pointerType: 'touch', pointerId: 8 });
+  assert.notEqual(hooks.state.readerIdleTimer, null, 'touch pointerup resumes the normal idle timeout');
+  clock.tick(2200);
+  assert.equal(readerOverlay.classList.contains('reader-idle'), true, 'touch pointerup allows the regular idle transition');
+
+  readerOverlay.dispatch('pointerdown', { pointerType: 'touch', pointerId: 9, target: headerTarget });
+  clock.tick(3000);
+  assert.equal(readerOverlay.classList.contains('reader-idle'), false, 'a second touch hold remains visible before cancellation');
+  document.dispatch('pointercancel', { pointerType: 'touch', pointerId: 9 });
+  assert.notEqual(hooks.state.readerIdleTimer, null, 'pointercancel resumes the normal idle timeout');
+  clock.tick(2200);
+  assert.equal(readerOverlay.classList.contains('reader-idle'), true, 'pointercancel allows the regular idle transition');
+
+  readerTopBar.dispatch('pointerenter', { pointerType: 'mouse', pointerId: 10 });
+  readerOverlay.dispatch('pointerdown', { pointerType: 'mouse', pointerId: 10, target: headerTarget });
+  assert.equal(hooks.state.readerIdleTimer, null, 'active hover/press has no pending timeout before close');
+  const bottomTarget = { closest: selector => selector.includes('.reader-bottom-bar') ? hooks.elements.readerBottomBar : null };
+  readerOverlay.dispatch('pointerdown', { pointerType: 'touch', pointerId: 11, target: bottomTarget });
+  await hooks.closeReader();
+  assert.equal(hooks.state.readerIdleTimer, null, 'closing clears the paused reader idle timer');
+  document.dispatch('pointerup', { pointerType: 'mouse', pointerId: 10 });
+  document.dispatch('pointerup', { pointerType: 'touch', pointerId: 11 });
+  assert.equal(hooks.state.readerIdleTimer, null, 'late pointerup cannot restart the timer after close');
+  readerTopBar.dispatch('pointerleave', { pointerType: 'mouse', pointerId: 10 });
+  assert.equal(hooks.state.readerIdleTimer, null, 'late mouseleave cannot restart the timer after close');
+}
+console.log('PASS: header hover/press pauses idle chrome and restores normal timeout');
+
+// Bottom reader controls share the same pause/resume lifecycle as the top bar.
+{
+  const bottom = createRuntimeHarness();
+  const { hooks, document, clock } = bottom;
+  const { readerOverlay, readerBottomBar } = hooks.elements;
+  const sliderTarget = { closest: selector => selector.includes('.reader-bottom-bar') ? readerBottomBar : null };
+  readerOverlay.style.display = 'flex';
+  readerOverlay.classList.add('reader-idle');
+  readerBottomBar.dispatch('pointerenter', { pointerType: 'mouse', pointerId: 12 });
+  readerOverlay.dispatch('pointerdown', { pointerType: 'mouse', pointerId: 12, target: sliderTarget });
+  readerOverlay.dispatch('mousemove', {
+    buttons: 0, clientY: 799, target: { closest: () => null },
+  });
+  assert.equal(hooks.state.readerIdleTimer, null, 'edge mousemove cannot restart the timer while bottom controls are hovered/held');
+  clock.tick(3000);
+  assert.equal(readerOverlay.classList.contains('reader-idle'), false,
+    'bottom controls remain visible while mouse stays over a held slider');
+  document.dispatch('pointerup', { pointerType: 'mouse', pointerId: 12 });
+  assert.equal(hooks.state.readerIdleTimer, null, 'bottom pointerup stays paused during mouse hover');
+  readerBottomBar.dispatch('pointerleave', { pointerType: 'mouse', pointerId: 12 });
+  assert.notEqual(hooks.state.readerIdleTimer, null, 'bottom mouseleave restores the normal timeout');
+  clock.tick(2200);
+  assert.equal(readerOverlay.classList.contains('reader-idle'), true, 'bottom controls return to idle after the normal delay');
+}
+
+{
+  const touchBottom = createRuntimeHarness();
+  const { hooks, document, clock } = touchBottom;
+  const { readerOverlay, readerBottomBar } = hooks.elements;
+  const sliderTarget = { closest: selector => selector.includes('.reader-bottom-bar') ? readerBottomBar : null };
+  readerOverlay.style.display = 'flex';
+  readerOverlay.classList.add('reader-idle');
+  readerOverlay.dispatch('pointerdown', { pointerType: 'touch', pointerId: 13, target: sliderTarget });
+  clock.tick(3000);
+  assert.equal(readerOverlay.classList.contains('reader-idle'), false, 'bottom range touch long press keeps controls visible');
+  document.dispatch('pointerup', { pointerType: 'touch', pointerId: 13 });
+  assert.notEqual(hooks.state.readerIdleTimer, null, 'bottom range pointerup restores the normal timeout');
+  clock.tick(2200);
+  assert.equal(readerOverlay.classList.contains('reader-idle'), true, 'bottom range pointerup permits idle transition');
+
+  readerOverlay.dispatch('pointerdown', { pointerType: 'touch', pointerId: 14, target: sliderTarget });
+  clock.tick(3000);
+  assert.equal(readerOverlay.classList.contains('reader-idle'), false, 'bottom range remains visible during another long press');
+  document.dispatch('pointercancel', { pointerType: 'touch', pointerId: 14 });
+  assert.notEqual(hooks.state.readerIdleTimer, null, 'bottom range pointercancel restores the normal timeout');
+  clock.tick(2200);
+  assert.equal(readerOverlay.classList.contains('reader-idle'), true, 'bottom range pointercancel permits idle transition');
+}
+console.log('PASS: bottom control hover/press shares idle timeout protection');
 
 // Webtoon taps toggle chrome, while swipes (including a swipe that returns to
 // its start), cancelled touches, multi-touch and compatibility mouse movement

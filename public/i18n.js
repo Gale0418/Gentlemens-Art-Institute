@@ -75,7 +75,7 @@
 
   register({
     '無法儲存語言設定，請確認裝置有可用的儲存空間。': {
-      en: 'Could not save the language setting. Check the available storage on your device.',
+      en: "Could not save the language setting. Check available storage on this device.",
       ja: '言語設定を保存できませんでした。端末の空き容量を確認してください。',
     },
   });

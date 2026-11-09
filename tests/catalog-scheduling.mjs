@@ -3833,6 +3833,32 @@ console.log('Finder platform boundary tests passed');
   assert.equal(discovery.hooks.pickDiscoveryComic([candidates[0]], 'one', () => 0).id, 'one');
   assert.equal(discovery.hooks.pickDiscoveryComic([], null, () => 0), null);
   assert.equal(discovery.hooks.pickDiscoveryComic(candidates, null, () => 0.999).id, 'two');
+  const round = discovery.hooks.discoverySessionFor([
+    book('round-1', 'Shelf/R1'), book('round-2', 'Shelf/R2'), book('round-3', 'Shelf/R3'),
+  ]);
+  const walked = [];
+  for (let index = 0; index < 3; index += 1) {
+    const chosen = discovery.hooks.pickNextDiscoveryComic(round, () => 0);
+    walked.push(chosen.id);
+    round.seen.add(discovery.hooks.discoveryComicKey(chosen));
+  }
+  assert.equal(new Set(walked).size, 3, '同一輪每本成功作品只會出現一次');
+  const boundaryPick = discovery.hooks.pickNextDiscoveryComic(round, () => 0);
+  assert.notEqual(boundaryPick.id, walked.at(-1), '新一輪不會緊接上一冊');
+  const dynamicSession = discovery.hooks.discoverySessionFor([book('dyn-a', 'Shelf/DA'), book('dyn-b', 'Shelf/DB')]);
+  const dynAKey = [...dynamicSession.candidates.keys()][0];
+  dynamicSession.seen.add(dynAKey);
+  const dynamic = discovery.hooks.discoverySessionFor([book('dyn-b', 'Shelf/DB'), book('dyn-c', 'Shelf/DC')]);
+  assert.equal(dynamic, dynamicSession, '同一範圍動態批次更新沿用原 session');
+  assert.equal(dynamic.seen.has(dynAKey), false, '已刪作品會從成功集合剔除');
+  assert.equal(discovery.hooks.pickNextDiscoveryComic(dynamic, () => 0).id, 'dyn-b', '動態加入的作品可在尚未成功集合優先探索');
+  const beforeScopeChange = discovery.hooks.discoverySessionFor([book('scope-book', 'Shelf/Scope')]);
+  state.currentPath = 'Other';
+  const afterScopeChange = discovery.hooks.discoverySessionFor([book('scope-book', 'Shelf/Scope')]);
+  assert.notEqual(afterScopeChange, beforeScopeChange, '資料夾切換建立獨立的有界 session');
+  state.currentPath = 'Shelf';
+  const sameRuntimeDifferentSource = [book('shared-id', 'Shelf/A', { sourceId: 'local:A' }), book('shared-id', 'Shelf/A', { sourceId: 'local:B' })];
+  assert.equal(new Set(sameRuntimeDifferentSource.map(discovery.hooks.discoveryComicKey)).size, 2, '相同 runtime id 依來源／路徑隔離');
   state.filteredComics = [{ isDirectory: true, comicsCount: 2 }];
   discovery.hooks.syncDiscoveryButton();
   assert.equal(elements.libraryDiscoveryBtn.disabled, false, '目前資料夾的子資料夾有已載入作品也可探索');
@@ -3871,6 +3897,235 @@ console.log('Finder platform boundary tests passed');
   assert.equal(elements.libraryDiscoveryBtn.disabled, true);
 }
 
+// Reader「再翻一本」沿用同一個 openReader lifecycle，context 受 source/path 與 readerOperation 綁定。
+{
+  const episode = createHarness();
+  const { state, elements } = episode.hooks;
+  const make = (id, path) => ({ id, title: id, relativePath: path, sourceId: 'local:episode', series: 'Series' });
+  state.comics = [make('ep-one', 'Shelf/One'), make('ep-two', 'Shelf/Two'), make('ep-three', 'Shelf/Three')];
+  state.currentPath = 'Shelf';
+  state.currentSourceId = 'local:episode';
+  elements.searchInput.value = '';
+  episode.context.window.openedEpisode = [];
+  vm.runInContext(`openReader = async comic => {
+    window.openedEpisode.push(comic.id);
+    state.currentComic = comic;
+    state.pendingComicId = null;
+    state.readerOperation += 1;
+  };`, episode.context);
+  assert.equal(await episode.hooks.openDiscoveryComic(() => 0), true);
+  assert.equal(elements.readerDiscoveryNext.hidden, false, '探索入口開啟成功後顯示 reader 按鈕');
+  episode.document.activeElement = elements.readerDiscoveryNext;
+  vm.runInContext(`openReader = comic => new Promise(resolve => {
+    window.openedEpisode.push(comic.id);
+    window.finishEpisodeSwitch = () => {
+      state.currentComic = comic; state.pendingComicId = null; state.readerOperation += 1; resolve();
+    };
+  });`, episode.context);
+  const switchingEpisode = episode.hooks.openNextDiscoveryComic();
+  assert.equal(elements.readerDiscoveryNext.disabled, true);
+  assert.equal(elements.readerDiscoveryNext.getAttribute('aria-busy'), 'true');
+  assert.equal(await episode.hooks.openNextDiscoveryComic(), false, '快速連點 reader next 只能開一次');
+  episode.context.window.finishEpisodeSwitch();
+  assert.equal(await switchingEpisode, true);
+  assert.equal(episode.context.window.openedEpisode[0], 'ep-one');
+  assert.ok(['ep-two', 'ep-three'].includes(episode.context.window.openedEpisode[1]));
+  assert.notEqual(episode.context.window.openedEpisode[1], episode.context.window.openedEpisode[0]);
+  assert.equal(elements.readerDiscoveryNext.focusCalls, 1, 'reader 切換後焦點仍落在有效探索控制');
+  assert.equal(elements.readerDiscoveryNext.getAttribute('aria-busy'), 'false');
+  state.readerOperation += 1;
+  episode.hooks.syncDiscoveryReaderButton();
+  assert.equal(elements.readerDiscoveryNext.hidden, true, 'reader operation 變更會使 episode context 失效');
+
+  state.currentComic = null;
+  state.comics = [make('ep-one', 'Shelf/One')];
+  vm.runInContext(`openReader = async comic => {
+    state.currentComic = comic; state.pendingComicId = null; state.readerOperation += 1;
+  };`, episode.context);
+  assert.equal(await episode.hooks.openDiscoveryComic(() => 0), true);
+  assert.equal(elements.readerDiscoveryNext.hidden, true, '只有目前這本時不顯示無意義的 reader 下一本');
+}
+
+// 單本探索仍保留 episode identity；實際增量批次補入同 scope 候選後會排程恢復 reader action。
+{
+  const incrementalEpisode = createHarness();
+  const { state, elements } = incrementalEpisode.hooks;
+  const first = { id: 'incremental-first', title: 'incremental-first', relativePath: 'Shelf/First.cbz', sourceId: 'local:incremental-episode' };
+  const second = { id: 'incremental-second', title: 'incremental-second', relativePath: 'Shelf/Second.cbz', sourceId: 'local:incremental-episode' };
+  state.comics = [first];
+  state.currentPath = 'Shelf';
+  state.currentSourceId = 'local:incremental-episode';
+  elements.searchInput.value = '';
+  state.scanStatus = { generation: 41, isScanning: true };
+  const openedIds = [];
+  incrementalEpisode.context.window.electronAPI.openComic = async id => {
+    const comic = state.comics.find(item => item.id === id);
+    openedIds.push(id);
+    return {
+      id: comic.id, sourceId: comic.sourceId, relativePath: comic.relativePath, title: comic.title,
+      type: 'archive', isDir: false, pages: ['page-0.png'], progress: { currentPage: 0 },
+      historyToken: `history:${comic.id}`, sequenceFloor: 0, filenames: [],
+    };
+  };
+  incrementalEpisode.context.window.electronAPI.closeComic = async () => {};
+  vm.runInContext('applyFitMode = () => {}; renderPages = () => {}; requestVisibleDirectoryScan = () => {}; filterAndRenderGrid = () => {};',
+    incrementalEpisode.context);
+  assert.equal(await incrementalEpisode.hooks.openDiscoveryComic(() => 0), true);
+  assert.equal(elements.readerDiscoveryNext.hidden, true, '單一候選維持隱藏');
+  assert.equal(incrementalEpisode.hooks.applyIncrementalLibraryBatch({ generation: 41, items: [second], found: 2 }), true,
+    '使用實際 incremental batch 入口追加候選');
+  assert.equal(elements.readerDiscoveryNext.hidden, true, '按鈕在 coalesced sync 前維持隱藏');
+  incrementalEpisode.clock.tick(0);
+  assert.equal(elements.readerDiscoveryNext.hidden, false, '同 scope 新候選抵達後自動恢復按鈕');
+  assert.equal(await incrementalEpisode.hooks.openNextDiscoveryComic(), true, '恢復的按鈕可走 reader next 流程');
+  assert.deepEqual(openedIds, [first.id, second.id], '實際 openReader 由 incremental 候選開啟第二本');
+  state.currentPath = 'Elsewhere';
+  incrementalEpisode.hooks.syncDiscoveryReaderButton();
+  assert.equal(elements.readerDiscoveryNext.hidden, true, 'scope 改變會隱藏並清除舊 episode context');
+}
+
+// The native open_comic payload is authoritative for this identity. Exercise
+// the real openReader and closeReader functions, including progress-before-close.
+{
+  const nativePayload = createHarness();
+  const { state, elements } = nativePayload.hooks;
+  const comics = [
+    { id: 'native-a', title: 'Audit74 Native A', sourceId: 'local:native-contract', relativePath: 'Shelf/A.cbz', series: 'Audit74' },
+    { id: 'native-b', title: 'Audit74 Native B', sourceId: 'local:native-contract', relativePath: 'Shelf/B.cbz', series: 'Audit74' },
+  ];
+  state.comics = comics;
+  state.currentPath = 'Shelf';
+  state.currentSourceId = 'local:native-contract';
+  state.activeSeries = 'Audit74';
+  elements.seriesFilterSelect.value = 'Audit74';
+  elements.searchInput.value = 'Audit74';
+  const order = [];
+  const openedPayloads = [];
+  nativePayload.context.window.electronAPI.openComic = async id => {
+    const comic = comics.find(item => item.id === id);
+    openedPayloads.push({ id: comic.id, sourceId: comic.sourceId, relativePath: comic.relativePath });
+    order.push(`open:${comic.id}`);
+    return {
+      id: comic.id,
+      sourceId: comic.sourceId,
+      relativePath: comic.relativePath,
+      title: comic.title,
+      type: 'archive',
+      isDir: false,
+      pages: ['page-0.png'],
+      progress: { currentPage: 0 },
+      historyToken: `history:${comic.id}`,
+      sequenceFloor: 0,
+      filenames: [],
+    };
+  };
+  nativePayload.context.window.electronAPI.closeComic = async id => { order.push(`close:${id}`); };
+  nativePayload.context.window.electronAPI.saveProgress = async snapshot => {
+    order.push(`save:${snapshot.id}`);
+  };
+  vm.runInContext('applyFitMode = () => {}; renderPages = () => {}; requestVisibleDirectoryScan = () => {}; filterAndRenderGrid = () => {};', nativePayload.context);
+
+  assert.equal(await nativePayload.hooks.openDiscoveryComic(() => 0), true);
+  assert.equal(state.currentComic.id, 'native-a');
+  assert.equal(state.currentComic.relativePath, 'Shelf/A.cbz', 'actual openReader retains the native relativePath');
+  assert.equal(elements.readerDiscoveryNext.hidden, false, 'qualified native payload establishes discovery context');
+  assert.deepEqual(openedPayloads[0], {
+    id: 'native-a', sourceId: 'local:native-contract', relativePath: 'Shelf/A.cbz',
+  });
+
+  state.readerReadyPages.add(0);
+  state.readerLastReadyPageIndex = 0;
+  assert.equal(await nativePayload.hooks.openNextDiscoveryComic(), true);
+  assert.equal(state.currentComic.id, 'native-b');
+  assert.ok(order.indexOf('save:native-a') >= 0, 'switching readers flushes the closing comic progress');
+  assert.ok(order.indexOf('save:native-a') < order.indexOf('close:native-a'), 'progress save remains before native close');
+  assert.ok(order.indexOf('close:native-a') < order.indexOf('open:native-b'), 'next open waits for the existing close lifecycle');
+  assert.equal(state.readerReturnLibraryContext.searchQuery, 'Audit74');
+  assert.equal(state.readerReturnLibraryContext.currentPath, 'Shelf');
+  await nativePayload.hooks.closeReader();
+  assert.equal(state.currentPath, 'Shelf', 'closing the exploration episode restores the original folder');
+  assert.equal(state.activeSeries, 'Audit74', 'closing restores the original series selection');
+  assert.equal(elements.searchInput.value, 'Audit74', 'closing restores the original search');
+}
+
+// A missing path on a runtime-ID collision cannot establish identity from ID/source alone.
+{
+  const malformedPayload = createHarness();
+  const { state, elements } = malformedPayload.hooks;
+  const collisions = [
+    { id: 'shared-native-id', title: 'A', sourceId: 'local:A', relativePath: 'Shelf/A.cbz' },
+    { id: 'shared-native-id', title: 'B', sourceId: 'local:B', relativePath: 'Shelf/B.cbz' },
+  ];
+  state.comics = collisions;
+  state.currentPath = 'Shelf';
+  elements.searchInput.value = '';
+  malformedPayload.context.window.electronAPI.openComic = async () => ({
+    id: 'shared-native-id', sourceId: 'local:B', title: 'B', type: 'archive',
+    isDir: false, pages: ['page-0.png'], progress: { currentPage: 0 }, filenames: [],
+  });
+  vm.runInContext('applyFitMode = () => {}; renderPages = () => {};', malformedPayload.context);
+  assert.equal(await malformedPayload.hooks.openDiscoveryComic(() => 0), false, 'missing relativePath cannot qualify the chosen source target');
+  assert.equal(state.currentComic.sourceId, 'local:B');
+  assert.equal(elements.readerDiscoveryNext.hidden, true, 'id collision without path cannot create a reader episode');
+  assert.equal(malformedPayload.hooks.discoverySessionFor(collisions).seen.size, 0, 'malformed native identity does not consume a successful seen item');
+}
+
+{
+  const nativeSource = fs.readFileSync(new URL('../src-tauri/src/lib.rs', import.meta.url), 'utf8');
+  const start = nativeSource.indexOf('async fn open_comic(');
+  const end = nativeSource.indexOf('#[tauri::command]', start);
+  const openComic = nativeSource.slice(start, end);
+  assert.match(openComic, /"relativePath":\s*comic_info\.relative_path/, 'native open_comic returns its authoritative relative path');
+}
+
+{
+  const retry = createHarness();
+  const { state, elements } = retry.hooks;
+  elements.searchInput.value = '';
+  const only = { id: 'retry-book', title: 'retry-book', relativePath: 'Shelf/Retry', sourceId: 'local:retry' };
+  state.comics = [only];
+  vm.runInContext(`openReader = async comic => {
+    if (window.shouldFail) { window.shouldFail = false; state.currentComic = null; return; }
+    state.currentComic = comic; state.pendingComicId = null; state.readerOperation += 1;
+  }; window.shouldFail = true;`, retry.context);
+  assert.equal(await retry.hooks.openDiscoveryComic(() => 0), false);
+  assert.equal(await retry.hooks.openDiscoveryComic(() => 0), true, '失敗不消耗成功 seen，單本可再試');
+  assert.equal(elements.readerDiscoveryNext.getAttribute('aria-busy'), 'false');
+}
+
+{
+  const offline = createHarness();
+  const { state, elements } = offline.hooks;
+  state.comics = [{ id: 'gone', title: 'gone', relativePath: 'gone', sourceId: 'local:A' }];
+  elements.searchInput.value = 'gone';
+  state.catalogSearchItems.set(catalogSearchKey(offline.hooks, 'gone', 'local:A', 'gone'), {
+    runtimeId: 'gone', sourceId: 'local:A', relativePath: 'gone', offline: true,
+  });
+  state.filteredComics = [{ id: 'gone', offline: false }];
+  offline.hooks.syncDiscoveryButton();
+  assert.equal(elements.libraryDiscoveryBtn.disabled, true, '按鈕 disabled 與 metadata offline 後的實際候選一致');
+}
+
+{
+  const welcome = createHarness();
+  const { state, elements } = welcome.hooks;
+  elements.searchInput.value = '';
+  vm.runInContext(`window.welcomeOpened = [];
+    openReader = async comic => {
+      window.welcomeOpened.push(comic.id);
+      state.currentComic = comic;
+      state.pendingComicId = null;
+      state.readerOperation += 1;
+    };`, welcome.context);
+  assert.equal(await welcome.hooks.openWelcomeDemoEpisode(), true);
+  assert.equal(state.comics.filter(comic => comic.isBuiltInDemo).length, 8);
+  assert.match(welcome.context.window.welcomeOpened[0], /mountains$/);
+  assert.equal(elements.readerDiscoveryNext.hidden, false, '首用 CTA 進入探索 episode');
+  assert.equal(await welcome.hooks.openNextDiscoveryComic(), true);
+  assert.notEqual(welcome.context.window.welcomeOpened[0], welcome.context.window.welcomeOpened[1]);
+  assert.match(appSource, /if \(builtInDemo\) \{\s*openReader\(comic\);/, 'demo 單卡仍由一般 openReader 入口開啟');
+}
+
 {
   const html = fs.readFileSync(new URL('../public/index.html', import.meta.url), 'utf8');
   const startPanel = html.slice(html.indexOf('id="library-start-panel"'), html.indexOf('class="scan-recovery-panel"'));
@@ -3882,9 +4137,40 @@ console.log('Finder platform boundary tests passed');
   vm.runInNewContext(fs.readFileSync(new URL('../public/locales/reader-messages.js', import.meta.url), 'utf8'), {
     window: { GAIL10n: { register: entries => Object.assign(dictionary, entries) } },
   });
-  for (const message of ['自己的漫畫，打開資料夾就能讀。', '支援本機、外接硬碟與已掛載的 NAS；原始檔案留在原處。', '先試讀原創風景', '加入漫畫資料夾', '隨手翻一本', '從目前資料夾與篩選結果挑一本，再點會盡量換一本。', '目前範圍沒有可讀漫畫，試著換個資料夾或清除篩選。']) {
+  for (const message of ['自己的漫畫，打開資料夾就能讀。', '支援本機、外接硬碟與已掛載的 NAS；原始檔案留在原處。', '先試讀原創風景', '加入漫畫資料夾', '隨手翻一本', '再翻一本', '正在開啟…', '從目前資料夾與篩選結果挑一本，再點會盡量換一本。', '目前範圍沒有可讀漫畫，試著換個資料夾或清除篩選。']) {
     assert.ok(dictionary[message]?.en && dictionary[message]?.ja, `新增入口缺少翻譯：${message}`);
   }
+}
+
+{
+  const tagEpisode = createHarness();
+  const { state, elements } = tagEpisode.hooks;
+  const books = ['tag-a', 'tag-b', 'other-tag'].map((id, index) => ({
+    id, title: id, sourceId: 'local:tag-episode', relativePath: `Shelf/${id}`,
+  }));
+  state.comics = books;
+  state.currentPath = 'Shelf';
+  state.currentSourceId = 'local:tag-episode';
+  elements.searchInput.value = '';
+  const groupTargets = books.slice(0, 2).map(comic => ({
+    runtimeId: comic.id, sourceId: comic.sourceId, relativePath: comic.relativePath,
+  }));
+  tagEpisode.context.window.electronAPI.getDiscoveryTags = async () => [{
+    namespace: 'general', value: 'Adventure', targets: groupTargets, comicIds: ['tag-a', 'tag-b'],
+  }];
+  elements.libraryTagDiscoveryPanel.hidden = true;
+  await tagEpisode.hooks.toggleDiscoveryTags();
+  elements.discoveryTagSelect.value = '0';
+  vm.runInContext(`openReader = async comic => {
+    window.tagEpisodeOpened.push(comic.id);
+    state.currentComic = comic; state.pendingComicId = null; state.readerOperation += 1;
+  }; window.tagEpisodeOpened = [];`, tagEpisode.context);
+  await tagEpisode.hooks.openDiscoveryTag(false, () => 0);
+  assert.equal(elements.readerDiscoveryNext.hidden, false, '選定 tag 範圍有其他作品時顯示 reader next');
+  assert.equal(await tagEpisode.hooks.openNextDiscoveryComic(), true);
+  assert.ok(['tag-a', 'tag-b'].includes(tagEpisode.context.window.tagEpisodeOpened[0]));
+  assert.ok(['tag-a', 'tag-b'].includes(tagEpisode.context.window.tagEpisodeOpened[1]));
+  assert.ok(tagEpisode.context.window.tagEpisodeOpened.every(id => id !== 'other-tag'), 'tag episode 不可越出選定 TAG 目標集合');
 }
 console.log('discovery scope, repeat, rapid activation and first-use copy tests passed');
 

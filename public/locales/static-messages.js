@@ -375,9 +375,9 @@ window.GAIL10n.register({
     "en": "Place a manga image folder or",
     "ja": "漫画画像フォルダーまたは"
   },
-  "壓縮檔放入掃描目錄，然後點擊右上角的「重新整理」按鈕吧！": {
-    "en": "archive in the scan directory, then click the Refresh button in the upper-right corner!",
-    "ja": "圧縮ファイルをスキャン先に置き、右上の「更新」ボタンをクリックしてください！"
+  "壓縮檔放入掃描目錄，再點一下右上角的「重新整理」按鈕吧！": {
+    "en": "archive in the scan directory, then select the Refresh button in the upper-right corner!",
+    "ja": "圧縮ファイルをスキャン先に置き、右上の「更新」ボタンを押してください！"
   },
   "您可在設定中查看或變更掃描路徑。": {
     "en": "You can view or change the scan path in Settings.",
@@ -407,8 +407,8 @@ window.GAIL10n.register({
     "en": "Single-page mode",
     "ja": "単ページモード"
   },
-  "正在解碼...": {
-    "en": "Decoding...",
+  "正在解碼…": {
+    "en": "Decoding…",
     "ja": "デコード中…"
   },
   "第 0 / 0 頁": {
@@ -427,9 +427,9 @@ window.GAIL10n.register({
     "en": "Single",
     "ja": "単ページ"
   },
-  "雙頁模式 (第一頁封面單顯示)": {
-    "en": "Two-page mode (show the first cover alone)",
-    "ja": "見開きモード（最初の表紙は単独表示）"
+  "雙頁模式 (首頁封面單頁顯示)": {
+    "en": "Two-page mode (show cover page alone)",
+    "ja": "見開きモード（表紙を単独表示）"
   },
   "雙頁模式 (右至左)": {
     "en": "Two-page mode (right to left)",
@@ -456,12 +456,12 @@ window.GAIL10n.register({
     "ja": "見開き"
   },
   "雙頁日式 (右至左)": {
-    "en": "Japanese two-page (right to left)",
-    "ja": "日本式見開き（右から左）"
+    "en": "Two-page mode (RTL, right to left)",
+    "ja": "見開きモード（右開き・右から左）"
   },
   "雙頁 (日)": {
-    "en": "Two-page (JP)",
-    "ja": "見開き（日本式）"
+    "en": "Two-page (RTL)",
+    "ja": "見開き（右開き）"
   },
   "直捲條漫模式": {
     "en": "Vertical webtoon mode",
@@ -515,7 +515,7 @@ window.GAIL10n.register({
     "en": "Rotate right 90° (R key)",
     "ja": "右に90°回転（Rキー）"
   },
-  "銀利化模式 (S 鍵) - 進階清晰": {
+  "銳利化模式 (S 鍵) - 進階清晰": {
     "en": "Sharpen mode (S key) - enhanced clarity",
     "ja": "シャープ化（Sキー）- 高精細"
   },
@@ -751,9 +751,9 @@ window.GAIL10n.register({
     "en": "Catalog data exchange",
     "ja": "整理データの交換"
   },
-  "只交換手動 metadata 與 tag，不搬漫畫檔；匯入前一定先預覽衝突。": {
+  "只交換手動書目資料（metadata）與標籤，不搬動漫畫檔；匯入前一定先預覽衝突。": {
     "en": "Exchange only manual metadata and tags, never manga files; always preview conflicts before importing.",
-    "ja": "手動メタデータとタグだけを交換し、漫画ファイルは移動しません。インポート前に必ず競合をプレビューします。"
+    "ja": "手動メタデータとタグのみを交換し、漫画ファイルは移動しません。インポート前に必ず競合をプレビューします。"
   },
   "匯出 JSON": {
     "en": "Export JSON",
@@ -775,7 +775,7 @@ window.GAIL10n.register({
     "en": "API key",
     "ja": "API Key"
   },
-  "手動貼上，只保留本次執行階段": {
+  "手動貼上，只保留本次工作階段": {
     "en": "Paste manually; kept only for this session",
     "ja": "手動で貼り付け（このセッション中のみ保持）"
   },
@@ -849,7 +849,7 @@ window.GAIL10n.register({
   },
   "相簿目前不可用": {
     "en": "Album currently unavailable",
-    "ja": "アルバムを利用できません"
+    "ja": "現在アルバムを利用できません"
   },
   "這些相簿仍保持連結狀態；取消勾選後儲存即可解除，App 不會刪除原始照片。": {
     "en": "These albums remain linked; uncheck and save to unlink them. The app will not delete the original photos.",

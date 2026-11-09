@@ -1,6 +1,6 @@
 window.GAIL10n.register({
   "有 {count} 本漫畫的閱讀進度尚未保存。": {
-    "en": "Reading progress for {count} comic(s) is still pending.",
+    "en": "Reading progress has not been saved yet (comics: {count}).",
     "ja": "{count}作品の読書進捗がまだ保存されていません。"
   },
   "重試保存閱讀進度": {
@@ -48,16 +48,16 @@ window.GAIL10n.register({
     "ja": "一部の進捗はアプリで確認できなくなりました。作品を確認し、表示されたページに手動で戻してください。"
   },
   "要放棄全部 {count} 筆未保存的閱讀進度嗎？\n這些進度將無法重試；已保存的進度和漫畫檔案不會刪除。": {
-    "en": "Discard all {count} unsaved reading progress entries?\nYou cannot retry these entries. Saved progress and comic files will not be deleted.",
+    "en": "Discard all unsaved reading progress ({count})?\nThis cannot be retried. Saved progress and comic files will not be deleted.",
     "ja": "未保存の読書進捗 {count} 件をすべて破棄しますか？\nこれらの進捗は再試行できなくなります。保存済みの進捗と漫画ファイルは削除されません。"
   },
   "無法清除未保存進度，請確認裝置儲存空間後再試。": {
     "en": "Could not clear unsaved progress. Check your device storage and try again.",
     "ja": "未保存の進捗を消去できませんでした。端末の空き容量を確認してから再試行してください。"
   },
-  "此 App session 可重試，尚未可靠備份。": {
-    "en": "This app session can retry, but the progress is not reliably backed up yet.",
-    "ja": "このアプリセッションでは再試行できますが、進捗はまだ確実にバックアップされていません。"
+  "本次工作階段可重試，尚未完成可靠備份。": {
+    "en": "You can retry during this app session, but this progress is not reliably backed up yet.",
+    "ja": "このアプリセッション中は再試行できますが、進捗はまだ確実にバックアップされていません。"
   },
   "書架仍在掃描，候選可能變動。": {
     "en": "The shelf is still scanning; possible matches may change.",
@@ -116,7 +116,7 @@ window.GAIL10n.register({
     "ja": "読書進捗のシーケンスが無効です。"
   },
   "第 {pages} 頁載入失敗，請重試。": {
-    "en": "Page {pages} failed to load. Retry.",
+    "en": "Page {pages} failed to load. Please try again.",
     "ja": "{pages}ページ目の読み込みに失敗しました。再試行してください。"
   },
   "第 {pages} 頁載入失敗，點擊重試；若仍失敗，請關閉後重新開啟本書。": {
@@ -132,7 +132,7 @@ window.GAIL10n.register({
     "ja": "読み込み結果：成功 {success} 枚、失敗 {failed} 枚、未処理 {pending} 枚。"
   },
   "重試未匯入的 {count} 張": {
-    "en": "Retry {count} pending photos",
+    "en": "Retry pending photos ({count})",
     "ja": "未処理の写真 {count} 枚を再試行"
   },
   "已成功寫入的圖片會保留；請按「重試未匯入的圖片」再次處理失敗項。": {
@@ -140,7 +140,7 @@ window.GAIL10n.register({
     "ja": "正常に読み込めた写真は保持されます。再試行ボタンで失敗した項目を処理してください。"
   },
   "正在重試匯入 {count} 張圖片…": {
-    "en": "Retrying import of {count} photos…",
+    "en": "Retrying photo import ({count})…",
     "ja": "写真 {count} 枚の読み込みを再試行中…"
   },
   "購買功能需要 iOS 15 或更新版本": {
@@ -421,7 +421,7 @@ window.GAIL10n.register({
   },
   "{count} 張照片": {
     "en": "Photos: {count}",
-    "ja": "写真 {count} 枚"
+    "ja": "{count} 枚の写真"
   },
   "目前無法存取的相簿 {index}": {
     "en": "Unavailable album {index}",
@@ -437,11 +437,11 @@ window.GAIL10n.register({
   },
   "閱讀進度資料格式不正確。": {
     "en": "Invalid reading progress data.",
-    "ja": "読書進度データの形式が正しくありません。"
+    "ja": "読書進捗データの形式が正しくありません。"
   },
   "閱讀進度頁碼必須是有限數字。": {
-    "en": "The progress page number must be a finite number.",
-    "ja": "読書進度のページ番号には有限の数値が必要です。"
+    "en": "The reading progress page number must be a finite number.",
+    "ja": "読書進捗のページ番号には有限の数値が必要です。"
   },
   "NAS 設定格式不正確。": {
     "en": "Invalid NAS settings.",

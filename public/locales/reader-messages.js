@@ -51,13 +51,13 @@ window.GAIL10n.register({
     "en": "The comic's source location could not be verified. The operation was cancelled to avoid changing another file. Rescan the library and try again.",
     "ja": "漫画のソースの場所を確認できませんでした。別のファイルを変更しないよう操作を中止しました。ライブラリを再スキャンしてから再試行してください。"
   },
-  "同一漫畫 ID 對應多個來源；metadata 與 AI 整理已暫停，請先分開來源後再操作。": {
+  "同一漫畫 ID 對應多個來源；書目資料（metadata）與 AI 整理已暫停，請先分開來源後再操作。": {
     "en": "This comic ID belongs to multiple sources. Metadata and AI organization are paused to avoid changing the wrong source. Separate the sources before continuing.",
-    "ja": "同じ漫画 ID が複数のソースに存在します。誤ったソースを変更しないよう、metadata と AI 整理を停止しました。ソースを分けてから続行してください。"
+    "ja": "同じ漫画 ID が複数のソースに存在します。誤ったソースを変更しないよう、メタデータと AI 整理を停止しました。ソースを分けてから続行してください。"
   },
-  "無法驗證漫畫的穩定來源；metadata 與 AI 整理已暫停，請重新掃描後再試。": {
+  "無法驗證漫畫的穩定來源；書目資料（metadata）與 AI 整理已暫停，請重新掃描後再試。": {
     "en": "The comic's stable source could not be verified. Metadata and AI organization are paused; rescan the library and try again.",
-    "ja": "漫画の安定したソースを確認できないため、metadata と AI 整理を停止しました。ライブラリを再スキャンしてから再試行してください。"
+    "ja": "漫画の安定したソースを確認できないため、メタデータと AI 整理を停止しました。ライブラリを再スキャンしてから再試行してください。"
   },
   "同一漫畫 ID 對應多個來源；為避免誤改另一個來源，批次編輯已取消這筆選取。請先分開來源後再操作。": {
     "en": "This comic ID belongs to multiple sources. The selection was cancelled to avoid changing another source. Separate the sources before editing.",
@@ -75,13 +75,13 @@ window.GAIL10n.register({
     "en": "Choose a discovery tag",
     "ja": "探索するタグを選ぶ"
   },
-  "抽這個 TAG": {
+  "抽這個標籤": {
     "en": "Pick from this tag",
-    "ja": "このタグから一冊"
+    "ja": "このタグから選ぶ"
   },
-  "隨機 TAG": {
+  "隨機標籤": {
     "en": "Random tag",
-    "ja": "タグもおまかせ"
+    "ja": "ランダムタグ"
   },
   "開啟標籤工具": {
     "en": "Open tag tools",
@@ -91,9 +91,9 @@ window.GAIL10n.register({
     "en": "Finding tags in this shelf…",
     "ja": "現在の範囲のタグを探しています…"
   },
-  "選一個 TAG 抽一本，或讓運氣替你選類型。": {
-    "en": "Choose a tag for a random book, or let chance choose the tag too.",
-    "ja": "タグを選んで一冊おまかせにするか、タグもおまかせに。"
+  "選一個標籤抽一本，或讓運氣替你選類型。": {
+    "en": "Pick a book from a tag, or let luck choose a genre for you.",
+    "ja": "タグを1つ選んで1冊引くか、運に任せてジャンルを選びましょう。"
   },
   "目前範圍還沒有可用標籤。開啟標籤工具，先幫漫畫加一個吧！": {
     "en": "No tags are available in this shelf. Open tag tools to add one to a book.",
@@ -107,9 +107,9 @@ window.GAIL10n.register({
     "en": "This pick: {tag}",
     "ja": "今回のタグ：{tag}"
   },
-  "先選取漫畫，再輸入標籤；例如 general:冒險，套用後就能依 TAG 探索。": {
-    "en": "Select a book, then enter a tag such as general:Adventure. Apply it to explore by tag.",
-    "ja": "作品を選び、general:冒険 などのタグを入力して適用すると、タグから探せます。"
+  "先選取漫畫，再輸入標籤；例如 general:冒險，套用後就能依標籤探索。": {
+    "en": "Select comics first, then enter a tag such as general:adventure. Once applied, you can explore by tag.",
+    "ja": "先に作品を選択し、general:冒険 のようにタグを入力します。適用するとタグで探索できます。"
   }
 });
 window.GAIL10n.register({
@@ -136,6 +136,14 @@ window.GAIL10n.register({
   "隨手翻一本": {
     "en": "Surprise me",
     "ja": "おまかせで一冊"
+  },
+  "再翻一本": {
+    "en": "Another book",
+    "ja": "もう一冊"
+  },
+  "正在開啟…": {
+    "en": "Opening…",
+    "ja": "開いています…"
   },
   "這本暫時打不開，請換一本或檢查來源。": {
     "en": "This book could not be opened. Try another book or check its source.",
@@ -230,14 +238,14 @@ window.GAIL10n.register({
     "ja": "標準"
   },
   "小提示：點一下查看詳情，再點同一本開始閱讀；也可以用上方「匯入圖片」加入內容。✨": {
-    "en": "Tip: click once to inspect details, then click the same title to start reading. You can also use “Import images” above. ✨",
-    "ja": "ヒント：1回クリックで詳細を表示し、同じ作品をもう一度クリックすると読めます。上の「画像をインポート」も使えます。✨"
+    "en": "Tip: tap once to view details, then tap the same book to start reading. You can also use “Import images” above. ✨",
+    "ja": "ヒント：1回タップで詳細を表示し、同じ作品をもう一度タップすると読めます。上の「画像をインポート」も使えます。✨"
   },
-  "請點擊上方的「匯入圖片」按鈕，或透過檔案 App 匯入漫畫！✨": {
-    "en": "Click “Import images” above, or import comics through the Files app! ✨",
-    "ja": "上の「画像をインポート」をクリックするか、ファイルアプリから作品をインポートしてください！✨"
+  "請點一下上方的「匯入圖片」按鈕，或透過「檔案」App 匯入漫畫！✨": {
+    "en": "Tap “Import images” above, or import comics through the Files app! ✨",
+    "ja": "上の「画像をインポート」をタップするか、「ファイル」アプリから作品をインポートしてください！✨"
   },
-  "請稍候...": {
+  "請稍候…": {
     "en": "Please wait…",
     "ja": "しばらくお待ちください…"
   },
@@ -257,7 +265,7 @@ window.GAIL10n.register({
     "en": "Added: {name}. Rescanning now.",
     "ja": "追加しました：{name}。再スキャンしています。"
   },
-  "正在掃描新加入的漫畫來源...": {
+  "正在掃描新加入的漫畫來源…": {
     "en": "Scanning the newly added comic source…",
     "ja": "追加したコミックソースをスキャンしています…"
   },
@@ -285,27 +293,27 @@ window.GAIL10n.register({
     "en": "Could not add comic source: {error}",
     "ja": "コミックソースを追加できませんでした：{error}"
   },
-  "正在更新漫畫庫...": {
+  "正在更新漫畫庫…": {
     "en": "Updating the library…",
     "ja": "ライブラリを更新しています…"
   },
-  "正在從相簿匯入 {count} 張圖片...": {
-    "en": "Importing {count} images from Photos…",
+  "正在從相簿匯入 {count} 張圖片…": {
+    "en": "Importing images from Photos ({count})…",
     "ja": "写真から{count}枚の画像をインポートしています…"
   },
   "請勿關閉 App": {
     "en": "Please do not close the app",
     "ja": "アプリを終了しないでください"
   },
-  "正在匯入: {name}": {
+  "正在匯入：{name}": {
     "en": "Importing: {name}",
     "ja": "インポート中：{name}"
   },
-  "圖片匯入完成！正在整理書架...": {
+  "圖片匯入完成！正在整理書架…": {
     "en": "Images imported! Organizing the shelf…",
     "ja": "画像をインポートしました！本棚を整理しています…"
   },
-  "馬上就好囉...": {
+  "即將完成…": {
     "en": "Almost done…",
     "ja": "もうすぐ完了します…"
   },
@@ -321,11 +329,11 @@ window.GAIL10n.register({
     "en": "Choose a local, iCloud, or connected NAS folder from Files.",
     "ja": "ファイルからローカル、iCloud、または接続済みNASのフォルダーを選択できます。"
   },
-  "正在從 NAS 雲端下載漫畫...": {
+  "正在從 NAS 下載漫畫…": {
     "en": "Downloading comics from NAS…",
     "ja": "NASからコミックをダウンロードしています…"
   },
-  "網路傳輸中，請保持連線...": {
+  "網路傳輸中，請保持連線…": {
     "en": "Transferring over the network; keep the connection active…",
     "ja": "ネットワーク転送中です。接続を維持してください…"
   },
@@ -354,7 +362,7 @@ window.GAIL10n.register({
     "ja": "ピン留め済み"
   },
   "使用 {count} 次": {
-    "en": "Used {count} times",
+    "en": "Uses: {count}",
     "ja": "{count}回使用"
   },
   "已停用": {
@@ -410,7 +418,7 @@ window.GAIL10n.register({
     "ja": "フィールドまたはタグを1つ以上入力してください。"
   },
   "正在更新 {count} 本漫畫…": {
-    "en": "Updating {count} comics…",
+    "en": "Updating comics ({count})…",
     "ja": "{count}冊のコミックを更新しています…"
   },
   "選一本漫畫": {
@@ -485,9 +493,9 @@ window.GAIL10n.register({
     "en": "Image file",
     "ja": "画像ファイル"
   },
-  "批次整理 TAG 與書籍資料": {
-    "en": "Organize tags and comic data",
-    "ja": "タグと作品データを整理"
+  "批次整理標籤與書目資料": {
+    "en": "Batch organize tags and book info",
+    "ja": "タグと作品情報を一括整理"
   },
   "檔案管理": {
     "en": "File management",
@@ -544,10 +552,6 @@ window.GAIL10n.register({
   "正在讀取 SQLite metadata…": {
     "en": "Reading SQLite metadata…",
     "ja": "SQLiteメタデータを読み込んでいます…"
-  },
-  "正在處理中...": {
-    "en": "Processing…",
-    "ja": "処理中…"
   },
   "第 {page} / {total} 頁": {
     "en": "Page {page} / {total}",
@@ -681,11 +685,11 @@ window.GAIL10n.register({
     "en": "The API key for this session was cleared",
     "ja": "このセッションのAPIキーを消去しました"
   },
-  "正在套用新目錄並重新載入漫畫庫...": {
+  "正在套用新目錄並重新載入漫畫庫…": {
     "en": "Applying the new folder and reloading the library…",
     "ja": "新しいフォルダーを適用してライブラリを再読み込みしています…"
   },
-  "正在切換書庫位置...": {
+  "正在切換書庫位置…": {
     "en": "Changing library location…",
     "ja": "ライブラリの場所を変更しています…"
   },
@@ -697,7 +701,7 @@ window.GAIL10n.register({
     "en": "There are no other subfolders here",
     "ja": "このフォルダーにサブフォルダーはありません"
   },
-  "正在連線...": {
+  "正在連線…": {
     "en": "Connecting…",
     "ja": "接続中…"
   },
@@ -726,7 +730,7 @@ window.GAIL10n.register({
     "ja": "統合先を選択してください。"
   },
   "合併預覽\n\n{source}（{count} 部作品）\n→ {target}\n\n原始來源資料不會刪除，完成後可撤銷。": {
-    "en": "Merge preview\n\n{source} ({count} works)\n→ {target}\n\nThe original source data will remain and this can be undone.",
+    "en": "Merge preview\n\n{source} (works: {count})\n→ {target}\n\nThe original source data will remain and this can be undone.",
     "ja": "統合プレビュー\n\n{source}（{count}作品）\n→ {target}\n\n元のソースデータは削除されず、完了後に取り消せます。"
   },
   "目標標籤": {
@@ -926,8 +930,8 @@ window.GAIL10n.register({
     "ja": "関連タグの提案を読み込んでいます…"
   },
   "依收藏中的共同標籤提出；只有按下後才會套用。": {
-    "en": "Based on tags shared by your favorites; applied only after you click.",
-    "ja": "お気に入りに共通するタグに基づく提案です。クリック後にのみ適用されます。"
+    "en": "Suggested from tags shared across your favorites; applied only when selected.",
+    "ja": "お気に入りに共通するタグに基づく提案です。選択したときにのみ適用されます。"
   },
   "metadata 尚未建立：{error}": {
     "en": "Metadata has not been created: {error}",
@@ -957,9 +961,9 @@ window.GAIL10n.register({
     "en": "comics",
     "ja": "冊"
   },
-  "點擊點入": {
-    "en": "Click to enter",
-    "ja": "クリックして開く"
+  "點一下進入": {
+    "en": "Tap to open",
+    "ja": "タップして開く"
   },
   "開啟資料夾：{title}": {
     "en": "Open folder: {title}",
@@ -970,11 +974,11 @@ window.GAIL10n.register({
     "ja": "アルバム"
   },
   "共 {total} 頁": {
-    "en": "{total} pages",
+    "en": "Total pages: {total}",
     "ja": "全{total}ページ"
   },
   "共 {total} 張圖片": {
-    "en": "{total} images",
+    "en": "Total images: {total}",
     "ja": "画像{total}枚"
   },
   "1 張圖片": {
@@ -1001,7 +1005,7 @@ window.GAIL10n.register({
     "en": "This comic remains on the shelf, but its original disk location is unavailable. Remount the NAS or choose a new comic folder.",
     "ja": "このコミックは本棚に残っていますが、元のディスクにアクセスできません。NASを再接続するか、新しいコミックフォルダーを選択してください。"
   },
-  "正在準備頁面清單...": {
+  "正在準備頁面清單…": {
     "en": "Preparing the page list…",
     "ja": "ページ一覧を準備しています…"
   },
@@ -1021,8 +1025,8 @@ window.GAIL10n.register({
     "en": "Page 1 / {total}",
     "ja": "{total}ページ中 1ページ目"
   },
-  "🔄 即將為您開啟{direction}：{title}": {
-    "en": "🔄 Opening the {direction}: {title}",
+  "🔄 即將開啟{direction}：{title}": {
+    "en": "🔄 {direction}: Opening {title}",
     "ja": "🔄 {direction}を開きます：{title}"
   },
   "🔄 畫面已旋轉 {angle}°": {
@@ -1037,29 +1041,29 @@ window.GAIL10n.register({
     "en": "☀️ Brightness: {brightness}%",
     "ja": "☀️ 明るさ：{brightness}%"
   },
-  "📺 螢幕適應：自適應螢幕 (保持比例)": {
-    "en": "📺 Fit screen: contain",
+  "📺 螢幕適應：完整頁面 (保持比例)": {
+    "en": "📺 Fit to screen: fit page",
     "ja": "📺 画面に合わせる：全体表示"
   },
   "📺 螢幕適應：寬度適應 ↔️": {
-    "en": "📺 Fit screen: width",
-    "ja": "📺 画面に合わせる：幅"
+    "en": "📺 Fit to screen: fit width ↔️",
+    "ja": "📺 画面に合わせる：幅に合わせる ↔️"
   },
   "📺 螢幕適應：高度適應 ↕️": {
-    "en": "📺 Fit screen: height",
-    "ja": "📺 画面に合わせる：高さ"
+    "en": "📺 Fit to screen: fit height ↕️",
+    "ja": "📺 画面に合わせる：高さに合わせる ↕️"
   },
-  "螢幕適應：自適應螢幕 (M 鍵)": {
-    "en": "Fit screen: contain (M)",
-    "ja": "画面に合わせる：全体表示（M）"
+  "螢幕適應：完整頁面 (M 鍵)": {
+    "en": "Fit to screen: fit page (M key)",
+    "ja": "画面に合わせる：全体表示（Mキー）"
   },
   "螢幕適應：寬度適應 (M 鍵)": {
-    "en": "Fit screen: width (M)",
-    "ja": "画面に合わせる：幅（M）"
+    "en": "Fit to screen: fit width (M key)",
+    "ja": "画面に合わせる：幅に合わせる（Mキー）"
   },
   "螢幕適應：高度適應 (M 鍵)": {
-    "en": "Fit screen: height (M)",
-    "ja": "画面に合わせる：高さ（M）"
+    "en": "Fit to screen: fit height (M key)",
+    "ja": "画面に合わせる：高さに合わせる（Mキー）"
   },
   "書架整理完成": {
     "en": "Shelf organization complete",
@@ -1070,7 +1074,7 @@ window.GAIL10n.register({
     "ja": "本棚を更新しました。詳細情報は必要に応じて再インポートできます"
   },
   "正在整理書架 {processed} / {total} 本": {
-    "en": "Organizing shelf: {processed} / {total} books",
+    "en": "Organizing shelf ({processed} / {total})",
     "ja": "本棚を整理中：{processed} / {total}冊"
   },
   "暫時無法取得掃描狀態；仍在等待結果…": {
@@ -1090,11 +1094,11 @@ window.GAIL10n.register({
     "ja": "スキャン状態の待機がタイムアウトしました"
   },
   "正在掃描漫畫庫，已發現 {count} 本": {
-    "en": "Scanning the library; {count} comics found",
+    "en": "Scanning the library; comics found: {count}",
     "ja": "ライブラリをスキャン中。{count}冊見つかりました"
   },
   "已更新 {updated} 本，保留 {conflicts} 個本機衝突；可在整理列撤銷。": {
-    "en": "Updated {updated}; kept {conflicts} local conflicts. Undo is available in the organizer.",
+    "en": "Comics updated: {updated}; local conflicts kept: {conflicts}. Undo is available in the organizer bar.",
     "ja": "{updated}冊を更新し、ローカルの競合{conflicts}件を保持しました。整理バーから取り消せます。"
   },
   "無法預覽交換檔：{error}": {
@@ -1125,7 +1129,7 @@ window.GAIL10n.register({
     "en": "Source removed; old access will be released when the app closes.",
     "ja": "ソースを削除しました。古い権限はアプリ終了時に解放されます。"
   },
-  "移除成功，將為您重新掃描...": {
+  "移除成功，正在重新掃描…": {
     "en": "Removed successfully; rescanning now…",
     "ja": "削除しました。再スキャンしています…"
   },
@@ -1273,7 +1277,7 @@ window.GAIL10n.register({
     "en": "Cloud AI suggestions failed: {error}",
     "ja": "クラウドAIの提案に失敗しました：{error}"
   },
-  "漫畫庫正在寫入資料，AI 建議暫時存不進去。等掃描完成後再試一次喔。": {
+  "漫畫庫正在寫入資料，暫時無法儲存 AI 建議。請待掃描完成後再試。": {
     "en": "The comic library is busy saving data, so this AI suggestion could not be saved. Please try again after scanning finishes.",
     "ja": "コミックライブラリがデータを保存中のため、AI の提案を保存できませんでした。スキャン完了後にもう一度お試しください。"
   },
@@ -1306,7 +1310,7 @@ window.GAIL10n.register({
     "ja": "タグの更新に失敗しました：{error}"
   },
   "已合併標籤，{count} 部作品會顯示目標標籤；原始來源證據仍保留。": {
-    "en": "Tags merged; {count} works will show the target tag. Original source evidence remains.",
+    "en": "Tags merged; works showing the target tag: {count}. Original source evidence remains.",
     "ja": "タグを統合しました。{count}作品に対象タグが表示されます。元のソース証拠は保持されます。"
   },
   "標籤合併失敗：{error}": {
@@ -1315,7 +1319,7 @@ window.GAIL10n.register({
   },
   "{state} {tag}；可撤銷本次操作。": {
     "en": "{state} {tag}; this operation can be undone.",
-    "ja": "{state}{tag}。この操作は取り消せます。"
+    "ja": "{state}：{tag}。この操作は取り消せます。"
   },
   "標籤狀態更新失敗：{error}": {
     "en": "Could not update tag status: {error}",
@@ -1330,7 +1334,7 @@ window.GAIL10n.register({
     "ja": "タグ操作を取り消せませんでした：{error}"
   },
   "已更新 {count} 本；可撤銷本次操作。": {
-    "en": "Updated {count}; this operation can be undone.",
+    "en": "Comics updated: {count}; this operation can be undone.",
     "ja": "{count}冊を更新しました。この操作は取り消せます。"
   },
   "更新失敗：{error}": {
@@ -1350,7 +1354,7 @@ window.GAIL10n.register({
     "ja": "ルールを作成できませんでした：{error}"
   },
   "已重新匯入 {count} 本，產生 {diagnostics} 則診斷。": {
-    "en": "Reimported {count}; generated {diagnostics} diagnostics.",
+    "en": "Comics reimported: {count}; diagnostics generated: {diagnostics}.",
     "ja": "{count}冊を再インポートし、{diagnostics}件の診断を生成しました。"
   },
   "重新匯入失敗：{error}": {
@@ -1358,16 +1362,16 @@ window.GAIL10n.register({
     "ja": "再インポートに失敗しました：{error}"
   },
   "已還原 {count} 本漫畫。": {
-    "en": "Restored {count} comics.",
+    "en": "Comics restored: {count}.",
     "ja": "{count}冊のコミックを復元しました。"
   },
   "撤銷失敗：{error}": {
     "en": "Undo failed: {error}",
     "ja": "取り消しに失敗しました：{error}"
   },
-  "搜尋別名「{alias}」現在會對應 general:{canonical}，原始 tag 未改寫。": {
+  "搜尋別名「{alias}」現在會對應 general:{canonical}，原始標籤未改寫。": {
     "en": "Searching for alias “{alias}” now maps to general:{canonical}; the original tag is unchanged.",
-    "ja": "別名「{alias}」の検索はgeneral:{canonical}に対応します。元のタグは変更されません。"
+    "ja": "別名「{alias}」の検索は general:{canonical} に対応します。元のタグは変更されません。"
   },
   "別名儲存失敗：{error}": {
     "en": "Could not save the alias: {error}",
@@ -1377,7 +1381,7 @@ window.GAIL10n.register({
     "en": "Go to Settings to choose a comic folder again?",
     "ja": "設定に移動してコミックフォルダーを選び直しますか？"
   },
-  "正在背景整理漫畫庫...": {
+  "正在背景整理漫畫庫…": {
     "en": "Organizing the library in the background…",
     "ja": "バックグラウンドでライブラリを整理しています…"
   },
@@ -1385,12 +1389,12 @@ window.GAIL10n.register({
     "en": "You can continue using this screen.",
     "ja": "この画面は引き続き使用できます。"
   },
-  "正在讀取漫畫庫索引...": {
+  "正在讀取漫畫庫索引…": {
     "en": "Reading the library index…",
     "ja": "ライブラリのインデックスを読み込んでいます…"
   },
   "已載入 {count} 本正式漫畫": {
-    "en": "Loaded {count} library comics",
+    "en": "Library comics loaded: {count}",
     "ja": "ライブラリのコミックを{count}冊読み込みました"
   },
   "漫畫庫讀取失敗": {
@@ -1531,10 +1535,10 @@ window.GAIL10n.register({
   },
   "使用本機 Keychain 記住這個 Key（只保存一個供應商；儲存另一家會取代既有 Key）": {
     "en": "Remember this key in the device Keychain (one provider at a time; saving another replaces the existing key)",
-    "ja": "このキーをデバイス Keychain に保存（保存できる供給元は1つだけ；別のキーを保存すると既存のキーを置き換えます）"
+    "ja": "このキーをデバイス Keychain に保存（保存できるプロバイダーは1社のみ。別のキーを保存すると既存のキーを置き換えます）"
   },
   "顯示前 {count} 頁": {
-    "en": "Show previous {count} pages",
+    "en": "Show previous pages ({count})",
     "ja": "前の{count}ページを表示"
   },
   "顯示第 {start}–{end} / {total} 頁": {
@@ -1542,7 +1546,7 @@ window.GAIL10n.register({
     "ja": "{start}～{end} / {total}ページを表示"
   },
   "顯示後 {count} 頁": {
-    "en": "Show next {count} pages",
+    "en": "Show next pages ({count})",
     "ja": "次の{count}ページを表示"
   },
   "使用已儲存金鑰": {
@@ -1550,16 +1554,16 @@ window.GAIL10n.register({
     "ja": "保存済みキーを使用"
   },
   "尚未設定艦載 AI。Key 預設只保留本次工作階段。": {
-    "en": "Embedded AI is not configured. Keys stay in this session by default.",
-    "ja": "搭載 AI は未設定です。キーは既定でこのセッションだけ保持されます。"
+    "en": "Cloud AI is not configured. Keys stay in this session by default.",
+    "ja": "クラウドAIは未設定です。キーは既定でこのセッションにのみ保持されます。"
   },
   "已啟用 {label} · {model}；暫時無法查詢本機 Keychain，已儲存 Key 狀態未知。": {
     "en": "Enabled {label} · {model}; the device Keychain is temporarily unavailable, so saved-key status is unknown.",
-    "ja": "{label} · {model} を有効化中。デバイス Keychain を一時的に確認できないため、保存済みキーの状態は不明です。"
+    "ja": "{label} · {model} を有効化しました。デバイス Keychain を一時的に確認できないため、保存済みキーの状態は不明です。"
   },
   "暫時無法查詢本機 Keychain，已儲存 Key 狀態未知。請解鎖裝置後重開設定，或選擇供應商並重試還原。": {
-    "en": "The device Keychain is temporarily unavailable, so saved-key status is unknown. Unlock the device and reopen settings, or select a provider and retry restore.",
-    "ja": "デバイス Keychain を一時的に確認できず、保存済みキーの状態は不明です。デバイスのロックを解除して設定を開き直すか、供給元を選んで復元を再試行してください。"
+    "en": "The device Keychain is temporarily unavailable, so saved-key status is unknown. Unlock the device and reopen Settings, or select a provider and retry restore.",
+    "ja": "デバイス Keychain を一時的に確認できず、保存済みキーの状態は不明です。デバイスのロックを解除して設定を開き直すか、プロバイダーを選んで復元を再試行してください。"
   },
   "已啟用 {label} · {model}{storage}": {
     "en": "Enabled {label} · {model}{storage}",
@@ -1582,8 +1586,8 @@ window.GAIL10n.register({
     "ja": "；キーはこのセッションだけ保持"
   },
   "艦載 AI 已啟用；Key 已由本機 Keychain 記住": {
-    "en": "Embedded AI enabled; the key is remembered in the device Keychain",
-    "ja": "搭載 AI を有効化しました。キーはデバイス Keychain に保存されます"
+    "en": "Cloud AI enabled; the key is remembered in the device Keychain",
+    "ja": "クラウドAIを有効化しました。キーはデバイス Keychain に保存されます"
   },
   "使用已儲存金鑰前，請先勾選本次第三方 AI 資料分享同意。": {
     "en": "Before using the saved key, check consent for third-party AI data sharing this session.",
@@ -1591,66 +1595,66 @@ window.GAIL10n.register({
   },
   "請先切換回已儲存 Key 所屬的供應商：{provider}": {
     "en": "Switch back to the provider that owns the saved key first: {provider}",
-    "ja": "保存済みキーの供給元に戻してください：{provider}"
+    "ja": "先に保存済みキーのプロバイダーに切り替えてください：{provider}"
   },
   "已從本機 Keychain 還原艦載 AI；本次同意只適用於目前工作階段。": {
-    "en": "Embedded AI restored from the device Keychain; this consent applies only to the current session.",
-    "ja": "搭載 AI をデバイス Keychain から復元しました。この同意は現在のセッションだけに適用されます。"
+    "en": "Cloud AI restored from the device Keychain; this consent applies only to the current session.",
+    "ja": "クラウドAIをデバイス Keychain から復元しました。この同意は現在のセッションにのみ適用されます。"
   },
   "還原艦載 AI 失敗：{error}": {
-    "en": "Could not restore embedded AI: {error}",
-    "ja": "搭載 AI の復元に失敗しました：{error}"
+    "en": "Could not restore Cloud AI: {error}",
+    "ja": "クラウドAIの復元に失敗しました：{error}"
   },
   "已清除工作階段 API Key 與本機 Keychain 記錄": {
     "en": "Session API key and device Keychain record cleared",
     "ja": "セッション API キーとデバイス Keychain の記録を消去しました"
   },
   "清除艦載 AI 失敗：{error}": {
-    "en": "Could not clear embedded AI: {error}",
-    "ja": "搭載 AI の消去に失敗しました：{error}"
+    "en": "Could not clear Cloud AI: {error}",
+    "ja": "クラウドAIの消去に失敗しました：{error}"
   },
   "本機 Keychain 有已儲存 Key，但目前版本無法確認所屬供應商；請先更新 App。": {
     "en": "The device Keychain has a saved key, but this app version cannot identify its provider. Update the app first.",
-    "ja": "デバイス Keychain に保存済みキーがありますが、このバージョンでは供給元を確認できません。先にアプリを更新してください。"
+    "ja": "デバイス Keychain に保存済みキーがありますが、このバージョンではプロバイダーを確認できません。先にアプリを更新してください。"
   },
   "目前版本無法確認已儲存 Key 所屬供應商，請先更新 App。": {
     "en": "This app version cannot identify the saved key's provider. Update the app first.",
-    "ja": "このバージョンでは保存済みキーの供給元を確認できません。先にアプリを更新してください。"
+    "ja": "このバージョンでは保存済みキーのプロバイダーを確認できません。先にアプリを更新してください。"
   },
   "正在撤銷上一家供應商的艦載 AI 工作階段…": {
-    "en": "Revoking the previous provider's embedded AI session…",
-    "ja": "前の供給元の搭載 AI セッションを取り消しています…"
+    "en": "Revoking the previous provider's Cloud AI session…",
+    "ja": "前のプロバイダーのクラウドAIセッションを取り消しています…"
   },
   "切換供應商失敗：目前版本無法撤銷舊的艦載 AI 工作階段。": {
-    "en": "Provider switch failed: this app version cannot revoke the old embedded AI session.",
-    "ja": "供給元の切り替えに失敗しました。このバージョンでは以前の搭載 AI セッションを取り消せません。"
+    "en": "Provider switch failed: this app version cannot revoke the previous Cloud AI session.",
+    "ja": "プロバイダーの切り替えに失敗しました。このバージョンでは以前のクラウドAIセッションを取り消せません。"
   },
   "切換供應商失敗，已暫停 AI 操作；請先更新 App。": {
     "en": "Provider switch failed. AI actions are paused; update the app first.",
-    "ja": "供給元の切り替えに失敗したため、AI 操作を停止しました。先にアプリを更新してください。"
+    "ja": "プロバイダーの切り替えに失敗したため、AI 操作を停止しました。先にアプリを更新してください。"
   },
   "切換供應商失敗：{error} AI 操作已暫停。": {
     "en": "Provider switch failed: {error}. AI actions are paused.",
-    "ja": "供給元の切り替えに失敗しました：{error}。AI 操作を停止しました。"
+    "ja": "プロバイダーの切り替えに失敗しました：{error}。AI 操作を停止しました。"
   },
   "切換供應商失敗，已暫停 AI 操作。": {
     "en": "Provider switch failed. AI actions are paused.",
-    "ja": "供給元の切り替えに失敗したため、AI 操作を停止しました。"
+    "ja": "プロバイダーの切り替えに失敗したため、AI 操作を停止しました。"
   },
   "目前正在變更艦載 AI 設定，請稍後再切換供應商。": {
-    "en": "Embedded AI settings are changing. Switch providers shortly.",
-    "ja": "搭載 AI の設定を変更中です。少し待ってから供給元を切り替えてください。"
+    "en": "Cloud AI settings are changing. Switch providers shortly.",
+    "ja": "クラウドAIの設定を変更中です。少し待ってからプロバイダーを切り替えてください。"
   },
   "艦載 AI 工作階段正在切換，請稍後再試。": {
-    "en": "The embedded AI session is switching providers. Try again shortly.",
-    "ja": "搭載 AI セッションの供給元を切り替えています。少し待ってから再試行してください。"
+    "en": "The Cloud AI session is switching providers. Try again shortly.",
+    "ja": "クラウドAIセッションのプロバイダーを切り替えています。少し待ってから再試行してください。"
   },
   "{count} 作品使用": {
-    "en": "Used by {count} works",
+    "en": "Used by works: {count}",
     "ja": "{count}作品で使用中"
   },
   "{count} 部": {
-    "en": "{count} works",
+    "en": "Works: {count}",
     "ja": "{count}作品"
   },
   "信心 {value}": {
@@ -1658,7 +1662,7 @@ window.GAIL10n.register({
     "ja": "信頼度 {value}"
   },
   "{count} 本候選": {
-    "en": "{count} possible duplicates",
+    "en": "Possible duplicates: {count}",
     "ja": "重複候補 {count}件"
   },
   "指紋 {value}": {
@@ -1781,8 +1785,8 @@ window.GAIL10n.register({
     "ja": "接続テストの前に API キーを入力し、AI を有効にしてください。"
   },
   "請勾選本次資料分享同意，再按「使用已儲存金鑰」啟用艦載 AI。": {
-    "en": "Consent to data sharing for this session, then tap Use Saved Key to enable AI.",
-    "ja": "このセッションのデータ共有に同意してから、「保存済みのキーを使用」をタップして AI を有効にしてください。"
+    "en": "Consent to data sharing for this session, then select “Use saved key” to enable Cloud AI.",
+    "ja": "このセッションのデータ共有に同意してから、「保存済みキーを使用」を選択してクラウドAIを有効にしてください。"
   },
   "還原艦載 AI 失敗，請確認設定後再試。": {
     "en": "Could not restore AI. Check the settings and try again.",
@@ -1824,4 +1828,77 @@ window.GAIL10n.register({
     "en": "Expand library root",
     "ja": "ライブラリのルートを開く"
   }
+,
+  "已恢復": {
+    en: "Restored",
+    ja: "復元しました",
+  },
+  "加入收藏": {
+    en: "Add to favorites",
+    ja: "お気に入りに追加",
+  },
+  "取消收藏": {
+    en: "Remove from favorites",
+    ja: "お気に入りから解除",
+  },
+  "⌗ 已非破壞式裁切頁面外緣 2%": {
+    en: "⌗ Cropped 2% of page edges (non-destructive)",
+    ja: "⌗ ページ外周を2%トリミング表示中（非破壊）",
+  },
+  "⌗ 已顯示完整頁面": {
+    en: "⌗ Showing full page",
+    ja: "⌗ ページ全体を表示中",
+  },
+  "開啟書庫根目錄": {
+    en: "Open library root",
+    ja: "ライブラリのルートを開く",
+  },
+  "漫畫標題名稱": {
+    en: "Comic title",
+    ja: "作品タイトル",
+  },
+  "層疊群山": {
+    en: "Layered Mountains",
+    ja: "重なる連峰",
+  },
+  "蜿蜒河谷": {
+    en: "Winding River Valley",
+    ja: "蛇行する渓谷",
+  },
+  "潮汐海岸": {
+    en: "Tidal Coast",
+    ja: "潮騒の海岸",
+  },
+  "森林光影": {
+    en: "Forest Light and Shadow",
+    ja: "森の光と影",
+  },
+  "靜謐湖泊": {
+    en: "Tranquil Lake",
+    ja: "静寂の湖",
+  },
+  "沙丘遠行": {
+    en: "Dune Journey",
+    ja: "砂丘の旅路",
+  },
+  "雪原極光": {
+    en: "Snowfield Aurora",
+    ja: "雪原のオーロラ",
+  },
+  "宇宙星空": {
+    en: "Cosmic Starfield",
+    ja: "宇宙の星空",
+  },
+  "📁 外部裝置": {
+    en: "📁 External Devices",
+    ja: "📁 外部デバイス",
+  },
+  "相簿目前不可用（有限存取）": {
+    en: "Album unavailable (limited access)",
+    ja: "アルバムを利用できません（制限付きアクセス）",
+  },
+  "照片圖庫": {
+    en: "Photo Library",
+    ja: "写真ライブラリ",
+  },
 });

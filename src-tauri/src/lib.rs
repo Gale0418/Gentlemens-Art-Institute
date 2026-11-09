@@ -2123,6 +2123,7 @@ async fn open_comic(
     Ok(serde_json::json!({
         "id": id,
         "sourceId": comic_info.source_id,
+        "relativePath": comic_info.relative_path,
         "type": r#type,
         "title": title,
         "isDir": is_dir,

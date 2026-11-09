@@ -118,6 +118,10 @@ function extractSection(source, startMarker, endMarker) {
   const context = {
     READING_PROGRESS_FAILURES_KEY: 'gai:readingProgressFailures',
     READING_PROGRESS_SEQUENCE_KEY: 'gai:readingProgressSequence',
+    discoveryOpening: false,
+    discoveryReaderContext: null,
+    syncDiscoveryReaderButton() {},
+    resetReaderControlsPointerActivity() {},
     readingProgressSaveSequence: 0,
     sessionStorage: { setItem() {} },
     readingProgressFailuresLoaded: true,
@@ -342,6 +346,8 @@ function extractSection(source, startMarker, endMarker) {
   const openReader = extractFunction(appSource, 'openReader');
   const alerts = [];
   const context = {
+    discoveryOpening: false,
+    discoveryReaderContext: null,
     readingHistoryRecordGeneration: 0,
     readingHistoryRecordInFlight: null,
     readingHistoryRecordRetryTimer: null,

@@ -83,6 +83,9 @@ for (const file of ['static-messages.js', 'reader-messages.js', 'feature-message
   } } } });
 }
 const html = fs.readFileSync('public/index.html', 'utf8');
+assert.match(html, /<div class="reader-title" id="reader-comic-title">漫畫標題名稱<\/div>/);
+assert.doesNotMatch(html, /id="reader-comic-title"[^>]*data-i18n=/,
+  'the dynamic reader title must not be rebound by the static localization pass');
 const decode = value => value.replace(/&quot;/g, '"').replace(/&#39;|&apos;/g, "'").replace(/&lt;/g, '<').replace(/&gt;/g, '>').replace(/&amp;/g, '&');
 for (const match of html.matchAll(/data-i18n(?:-title|-placeholder|-aria-label|-content)?="([^"]*)"/g)) {
   assert.ok(dictionaries[decode(match[1])], `Untranslated static UI: ${decode(match[1])}`);
@@ -110,9 +113,9 @@ console.log(`PASS: locale selection, persistence, private-content boundaries, sa
     { window: { GAIL10n: { locale: 'en' } } },
   );
   assert.equal(localized, 'The file is not available.', 'wrapped native codes should use the selected UI locale');
-  const translateNative = raw => vm.runInNewContext(
+  const translateNative = (raw, locale = 'en') => vm.runInNewContext(
     `${mapSource[0]}\n${resolver[0]}\nlocalizedNativeError(${JSON.stringify(raw)})`,
-    { window: { GAIL10n: { locale: 'en' } } },
+    { window: { GAIL10n: { locale } } },
   );
   assert.equal(translateNative('照片相簿目前不可用').message, 'The photo album is not accessible.');
   const smbCodes = [
@@ -128,8 +131,19 @@ console.log(`PASS: locale selection, persistence, private-content boundaries, sa
       assert.ok(nativeErrors[code]?.[locale], `${code} is missing ${locale} text`);
     }
   }
+  const staticRows = Object.entries(nativeErrors.staticNativeErrorMessages);
+  assert.equal(staticRows.length, 14, 'all approved static raw native messages should remain in the display map');
+  for (const [raw, translations] of staticRows) {
+    for (const locale of ['zh-Hant', 'en', 'ja']) {
+      const result = translateNative(raw, locale);
+      assert.equal(result.message, translations[locale], `${locale} raw native display message: ${raw}`);
+      assert.equal(result.nativeMessage, raw, `raw diagnostic must be preserved: ${raw}`);
+      assert.equal(result.code, undefined, `static display mapping must not invent a protocol code: ${raw}`);
+    }
+  }
   assert.equal(translateNative('SMB_DOWNLOAD_INCOMPLETE').message, 'The SMB transfer did not complete. Reopen the comic.');
   assert.equal(translateNative('未識別的原生錯誤'), '未識別的原生錯誤', 'unknown native text must remain available for diagnosis');
+  assert.equal(translateNative('toString'), 'toString', 'prototype property names must not become native error translations');
   const rateLimit = vm.runInNewContext(
     `${mapSource[0]}\n${resolver[0]}\nlocalizedNativeError('Luna 拒絕請求（HTTP 429）：quota exceeded')`,
     { window: { GAIL10n: { locale: 'en' } } },
@@ -157,7 +171,27 @@ console.log(`PASS: locale selection, persistence, private-content boundaries, sa
     }
   }
 }
-console.log('PASS: native folder, photo and AI key errors have three-language bridge messages');
+console.log('PASS: native folder, photo and AI errors retain raw diagnostics and localize in three languages');
+
+{
+  const app = fs.readFileSync('public/app.js', 'utf8');
+  const titleAssignment = app.match(/elements\.readerComicTitle\.textContent = (isBuiltInDemoComic\(data\) \? readerText\(data\.title\) : data\.title);/);
+  assert.ok(titleAssignment, 'reader display should translate only built-in demo titles');
+  const renderTitle = (data, locale) => vm.runInNewContext(titleAssignment[1], {
+    data,
+    isBuiltInDemoComic: value => value.isBuiltInDemo === true,
+    readerText: key => locale === 'zh-Hant' ? key : dictionaries[key]?.[locale] ?? key,
+  });
+  for (const locale of ['zh-Hant', 'en', 'ja']) {
+    const builtIn = { title: '層疊群山', isBuiltInDemo: true };
+    const ordinary = { title: '層疊群山', isBuiltInDemo: false };
+    const canonicalTitle = builtIn.title;
+    assert.equal(renderTitle(builtIn, locale), locale === 'zh-Hant' ? canonicalTitle : dictionaries[canonicalTitle][locale]);
+    assert.equal(builtIn.title, canonicalTitle, 'display translation must not mutate canonical built-in data');
+    assert.equal(renderTitle(ordinary, locale), ordinary.title, 'same-name user comic titles must remain unchanged');
+  }
+}
+console.log('PASS: built-in reader titles localize only at display time; canonical and same-name user titles stay unchanged');
 
 for (const file of [
   'src-tauri/tauri-plugin-ios-folder/ios/Sources/CommercePlugin.swift',

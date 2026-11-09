@@ -904,7 +904,7 @@ console.log('PASS: stale AI status refresh cannot overwrite a newer mutation');
   // identity dependency, so execute the complete helper set in one context.
   vm.runInNewContext(`${sourceHelpers}\nglobalThis.load = loadInspectorMetadata;`, context);
   await context.load(first);
-  assert.match(target.innerHTML, /metadata 與 AI 整理已暫停/);
+  assert.match(target.innerHTML, /書目資料（metadata）與 AI 整理已暫停/);
 
   let metadataCalls = 0;
   context.state.comics = [first];
@@ -974,7 +974,7 @@ console.log('PASS: stale AI status refresh cannot overwrite a newer mutation');
   context.render([{ field: 'summary', value: 'wrong source', confidence: 0.9 }], first, result, { comicId: 'stable-A', sourceId: 'local:A' });
   await applyButton.click();
   assert.equal(applyCalls, 0, 'ambiguous AI candidate must not call id-only apply');
-  assert.match(result.textContent, /metadata 與 AI 整理已暫停/);
+  assert.match(result.textContent, /書目資料（metadata）與 AI 整理已暫停/);
 
   context.state.comics = [first];
   result.innerHTML = '';

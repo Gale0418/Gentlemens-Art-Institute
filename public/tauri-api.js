@@ -168,8 +168,8 @@ const nativeErrorMessages = Object.freeze({
   },
   PHOTO_IMAGE_ENCODING_FAILED: {
     'zh-Hant': '無法處理照片影像。',
-    en: 'Could not encode the photo image.',
-    ja: '写真画像をエンコードできません。',
+    en: 'Could not process the photo image.',
+    ja: '写真画像を処理できませんでした。',
   },
   PHOTO_LIBRARY_IOS_VERSION_UNSUPPORTED: {
     'zh-Hant': '照片圖庫需要 iOS 15 或更新版本。',
@@ -216,11 +216,84 @@ const nativeErrorMessages = Object.freeze({
     en: 'The SMB transfer did not complete. Reopen the comic.',
     ja: 'SMB 転送が完了しませんでした。作品をもう一度開いてください。',
   },
+    staticNativeErrorMessages: Object.freeze({
+      "無法取得商店狀態，請稍後再試": {
+        'zh-Hant': "無法取得商店狀態，請稍後再試。",
+        en: "Could not check store status. Please try again later.",
+        ja: "ストアの状態を確認できませんでした。後でもう一度お試しください。",
+      },
+      "無法連線到 Apple 商店，請稍後再試": {
+        'zh-Hant': "無法連線到 App Store，請稍後再試。",
+        en: "Could not connect to the App Store. Please try again later.",
+        ja: "App Store に接続できませんでした。後でもう一度お試しください。",
+      },
+      "商店回覆格式不正確": {
+        'zh-Hant': "商店回應格式不正確。",
+        en: "Received an invalid response from the store.",
+        ja: "ストアからの応答形式が正しくありません。",
+      },
+      "商店商品與此版本不符": {
+        'zh-Hant': "商店商品與目前版本不符。",
+        en: "The store product does not match this app version.",
+        ja: "ストアの商品がこのアプリのバージョンと一致しません。",
+      },
+      "此版本未提供 App Store 購買，桌面功能維持可用": {
+        'zh-Hant': "此版本未提供 App Store 購買；桌面版功能維持可用。",
+        en: "App Store purchases are not offered in this version; desktop features remain available.",
+        ja: "このバージョンでは App Store での購入に対応していません。デスクトップ版の機能は引き続き利用できます。",
+      },
+      "暫時無法確認 Pro 權益，請稍後再試": {
+        'zh-Hant': "暫時無法確認 Pro 權益，請稍後再試。",
+        en: "Could not verify Pro access right now. Please try again later.",
+        ja: "現在 Pro の利用権を確認できません。後でもう一度お試しください。",
+      },
+      "SMB 連線逾時（10 秒）": {
+        'zh-Hant': "SMB 連線逾時（10 秒）",
+        en: "SMB connection timed out (10 s)",
+        ja: "SMB 接続がタイムアウトしました（10 秒）",
+      },
+      "SMB 共用資料夾連線逾時（10 秒）": {
+        'zh-Hant': "SMB 共用資料夾連線逾時（10 秒）",
+        en: "SMB shared folder connection timed out (10 s)",
+        ja: "SMB 共有フォルダーへの接続がタイムアウトしました（10 秒）",
+      },
+      "圖片超過 64 MiB 安全上限": {
+        'zh-Hant': "圖片超過 64 MiB 安全上限",
+        en: "Image exceeds the 64 MiB safety limit",
+        ja: "画像が 64 MiB の安全上限を超えています",
+      },
+      "目的地已有同名檔案或資料夾": {
+        'zh-Hant': "目的地已有同名檔案或資料夾。",
+        en: "A file or folder with the same name already exists at the destination.",
+        ja: "移動先に同じ名前のファイルまたはフォルダーが既に存在します。",
+      },
+      "漫畫位置已變更，請重新整理後再操作": {
+        'zh-Hant': "漫畫位置已變更，請重新整理後再操作。",
+        en: "The comic location has changed. Refresh the shelf and try again.",
+        ja: "作品の場所が変更されています。本棚を更新してからもう一度操作してください。",
+      },
+      "此檔案操作已撤銷或目前不可撤銷": {
+        'zh-Hant': "此檔案操作已撤銷或目前無法撤銷。",
+        en: "This file operation has already been undone or cannot be undone right now.",
+        ja: "このファイル操作は既に取り消されているか、現在取り消せません。",
+      },
+      "無法刪除壓縮檔內的單一頁面！": {
+        'zh-Hant': "無法刪除壓縮檔內的單一頁面。",
+        en: "Cannot delete a single page inside an archive.",
+        ja: "圧縮ファイル内の単一ページは削除できません。",
+      },
+      "外部漫畫來源已移除，請重新加入資料夾": {
+        'zh-Hant': "外部漫畫來源已移除，請重新加入資料夾。",
+        en: "The external comic source was removed. Please add the folder again.",
+        ja: "外部コミックソースが削除されています。フォルダーをもう一度追加してください。",
+      },
+    }),
 });
 
 function localizedNativeError(error) {
   const raw = typeof error === 'string' ? error : error?.message;
   if (typeof raw !== 'string' || /^PRO_REQUIRED\s*:/i.test(raw)) return error;
+
   const legacyPhotoCodes = {
     '找不到照片相簿，請重新整理照片圖庫': 'PHOTO_ALBUM_NOT_LINKED',
     '照片相簿識別碼無效': 'PHOTO_LIBRARY_INVALID_ARGUMENTS',
@@ -229,11 +302,13 @@ function localizedNativeError(error) {
   const code = raw.trim().match(/((?:FOLDER|AI|PHOTO|IOS_FOLDER|SMB)_[A-Z0-9_]+)$/)?.[1]
     || legacyPhotoCodes[raw.trim()]
     || '';
-  const messages = nativeErrorMessages[code];
+  const staticMessages = Object.prototype.hasOwnProperty.call(nativeErrorMessages.staticNativeErrorMessages, raw)
+    ? nativeErrorMessages.staticNativeErrorMessages[raw] : null;
+  const messages = staticMessages || nativeErrorMessages[code];
   if (!messages) return error;
   const locale = window.GAIL10n?.locale;
   const localized = new Error(messages[locale] || messages.en);
-  localized.code = code;
+  if (code) localized.code = code;
   Object.defineProperty(localized, 'nativeMessage', { value: raw });
   return localized;
 }
@@ -260,7 +335,7 @@ const VIRTUAL_PHOTO_TITLES = Object.freeze({
 function localizeVirtualPhotoItem(item) {
   if (item?.type !== 'photo-album') return item;
   if (item.title === '相簿目前不可用' || item.title === '相簿目前不可用（有限存取）') {
-    return { ...item, title: bridgeText('相簿目前不可用') };
+    return { ...item, title: bridgeText(item.title) };
   }
   const title = VIRTUAL_PHOTO_TITLES[item.id];
   return title ? { ...item, title: bridgeText(title) } : item;

@@ -14,6 +14,8 @@
     }
   </script>
   <link rel="stylesheet" href="style.css">
+  <link rel="stylesheet" href="reader-interface.css">
+  <link rel="stylesheet" href="activity-progress.css">
 </head>
 <body>
 
@@ -97,6 +99,7 @@
       <aside class="sidebar" id="library-sidebar" aria-label="漫畫資料夾" data-i18n-aria-label="漫畫資料夾">
         <div class="sidebar-section">
           <h3><i class="fa-solid fa-folder-tree" aria-hidden="true"></i><span data-i18n="漫畫資料夾">漫畫資料夾</span></h3>
+          <span id="library-background-activity" class="library-background-activity" aria-hidden="true" hidden></span>
           <div class="folder-tree-current-path" id="folder-tree-current-path" aria-live="polite">
             <span class="folder-tree-current-path-label" data-i18n="目前路徑">目前路徑</span>
             <span class="folder-tree-current-path-value" data-i18n="書庫根目錄">書庫根目錄</span>
@@ -359,16 +362,68 @@
     <div class="reader-discovery-hint" id="reader-discovery-hint" role="status" aria-live="polite" hidden data-i18n="點一下畫面可顯示閱讀控制">點一下畫面可顯示閱讀控制</div>
     <!-- 頂部浮動標題列 (滑鼠靠近時顯示) -->
     <div class="reader-top-bar" id="reader-top-bar">
-      <div class="reader-top-actions">
-        <button class="back-btn" id="reader-back-btn" aria-label="返回漫畫書架" data-i18n-aria-label="返回漫畫書架">
+      <div class="reader-top-actions"><button class="back-btn" id="reader-back-btn" aria-label="返回漫畫書架" data-i18n-aria-label="返回漫畫書架">
           <i class="fa-solid fa-arrow-left"></i><span data-i18n="返回書架">返回書架</span>
-        </button>
+        </button></div>
+      <div class="reader-title" id="reader-comic-title">漫畫標題名稱</div>
+      <div class="reader-toolbar-actions">
+        <button type="button" class="reader-toolbar-button reader-mode-toggle" data-reader-panel-toggle="modes" aria-controls="reader-modes-panel" aria-expanded="false" aria-haspopup="dialog" aria-label="閱讀模式" data-i18n-aria-label="ui.readingMode" aria-describedby="reader-mode-indicator"><span class="reader-mode-indicator" id="reader-mode-indicator" data-i18n="單頁模式">單頁模式</span><i class="fa-solid fa-chevron-down" aria-hidden="true"></i></button>
         <button class="reader-discovery-next" id="reader-discovery-next" type="button" hidden aria-busy="false">
           <i class="fa-solid fa-shuffle" aria-hidden="true"></i><span data-i18n="再翻一本">再翻一本</span>
         </button>
+        <button type="button" class="reader-toolbar-button" data-reader-panel-toggle="display" aria-controls="reader-display-panel" aria-expanded="false" aria-haspopup="dialog"><i class="fa-solid fa-sliders" aria-hidden="true"></i><span data-i18n="ui.readerTuning">畫面調校</span></button>
+        <button id="reader-ai-toggle" type="button" class="reader-toolbar-button" data-reader-panel-toggle="ai" aria-controls="reader-ai-tools-panel" aria-expanded="false" aria-haspopup="dialog"><i class="fa-solid fa-wand-sparkles" aria-hidden="true"></i><span data-i18n="ui.readerAi">AI 工具</span></button>
       </div>
-      <div class="reader-title" id="reader-comic-title">漫畫標題名稱</div>
-      <div class="reader-mode-indicator" id="reader-mode-indicator" data-i18n="單頁模式">單頁模式</div>
+      <section class="reader-popover reader-modes-popover" id="reader-modes-panel" data-reader-panel="modes" role="dialog" aria-labelledby="reader-modes-title" hidden>
+        <div class="reader-popover-heading"><h3 id="reader-modes-title" data-i18n="ui.readingMode">閱讀模式</h3><button type="button" class="reader-panel-close" data-reader-panel-close aria-label="關閉" data-i18n-aria-label="ui.closeTuning"><i class="fa-solid fa-xmark" aria-hidden="true"></i></button></div><div class="btn-group">
+          <button class="mode-btn active" id="btn-mode-single" aria-pressed="true" title="單頁模式 (寬高自適應)" data-i18n-title="單頁模式 (寬高自適應)"><i class="fa-solid fa-file"></i><span data-i18n="單頁">單頁</span></button>
+          <button class="mode-btn" id="btn-mode-double" aria-pressed="false" title="雙頁模式 (首頁封面單頁顯示)" data-i18n-title="雙頁模式 (首頁封面單頁顯示)"><i class="fa-solid fa-book-open"></i><span data-i18n="雙頁">雙頁</span></button>
+          <div class="double-mode-controls" id="double-mode-controls">
+            <button class="mode-sub-btn" id="btn-double-direction" type="button" aria-pressed="false" aria-label="切換為右至左雙頁" data-i18n-aria-label="切換為右至左雙頁" title="切換為右至左雙頁" data-i18n-title="切換為右至左雙頁"><i class="fa-solid fa-arrows-left-right" aria-hidden="true"></i><span data-i18n="切換雙頁方向">切換雙頁方向</span></button>
+            <button class="mode-sub-btn" id="btn-double-shift" type="button" aria-label="雙頁往後移一頁" data-i18n-aria-label="雙頁往後移一頁" title="雙頁往後移一頁" data-i18n-title="雙頁往後移一頁"><i class="fa-solid fa-forward-step" aria-hidden="true"></i><span data-i18n="雙頁往後移一頁">雙頁往後移一頁</span></button>
+          </div>
+          <button class="mode-btn" id="btn-mode-webtoon" aria-pressed="false" title="直捲條漫模式" data-i18n-title="直捲條漫模式"><i class="fa-solid fa-arrows-up-down"></i><span data-i18n="條漫">條漫</span></button>
+          <button class="mode-btn" id="btn-mode-catalog" aria-pressed="false" title="目錄縮圖模式" data-i18n-title="目錄縮圖模式"><i class="fa-solid fa-grip"></i><span data-i18n="目錄模式">目錄</span></button>
+        </div>
+      </section>
+      <section class="reader-popover" id="reader-display-panel" data-reader-panel="display" role="dialog" aria-labelledby="reader-display-title" hidden>
+        <div class="reader-popover-heading"><h3 id="reader-display-title" data-i18n="ui.readerTuning">畫面調校</h3><button type="button" class="reader-panel-close" data-reader-panel-close aria-label="關閉" data-i18n-aria-label="ui.closeTuning"><i class="fa-solid fa-xmark" aria-hidden="true"></i></button></div>
+        <div class="reader-setting-row"><label for="btn-fit-mode" data-i18n="ui.fitMode">適應模式</label><select id="btn-fit-mode" class="reader-setting-select" aria-label="適應模式" data-i18n-aria-label="ui.fitMode"><option value="contain" data-i18n="ui.fitContain">完整頁面</option><option value="width" data-i18n="ui.fitWidth">適應寬度</option><option value="height" data-i18n="ui.fitHeight">適應高度</option></select></div>
+        <div class="reader-setting-group"><div class="reader-setting-caption"><span data-i18n="ui.rotation">旋轉</span><output id="reader-rotation-value" aria-live="off">0°</output></div><div class="reader-rotation-controls"><button class="control-action-btn" id="btn-rotate-left" type="button" aria-label="向左旋轉 90 度" data-i18n-aria-label="向左旋轉 90 度" title="向左旋轉 90° (L 鍵)" data-i18n-title="向左旋轉 90° (L 鍵)">
+          <svg class="reader-rotate-icon" viewBox="0 0 24 24" aria-hidden="true">
+            <path d="M3 12a9 9 0 1 0 3-6.7M3 3v5h5"></path>
+          </svg>
+        <span data-i18n="ui.rotateLeft">向左旋轉</span></button><button class="control-action-btn" id="btn-rotate-right" type="button" aria-label="向右旋轉 90 度" data-i18n-aria-label="向右旋轉 90 度" title="向右旋轉 90° (R 鍵)" data-i18n-title="向右旋轉 90° (R 鍵)">
+          <svg class="reader-rotate-icon" viewBox="0 0 24 24" aria-hidden="true">
+            <path d="M21 12a9 9 0 1 1-3-6.7M21 3v5h-5"></path>
+          </svg>
+        <span data-i18n="ui.rotateRight">向右旋轉</span></button></div></div>
+        <div class="reader-setting-group"><div class="reader-setting-caption"><label for="btn-brightness" data-i18n="ui.brightness">亮度</label><output id="reader-brightness-value" aria-live="off">100%</output></div><input type="range" class="reader-setting-range" id="btn-brightness" min="70" max="115" step="5" value="100" aria-label="亮度" data-i18n-aria-label="ui.brightness"></div>
+        <div class="reader-setting-group"><div class="reader-setting-caption"><label for="btn-sharpen" data-i18n="ui.sharpness">銳利化</label><output id="reader-sharpen-value" aria-live="off">關閉</output></div><input type="range" class="reader-setting-range" id="btn-sharpen" min="0" max="3" step="1" value="0" aria-label="銳利化" data-i18n-aria-label="ui.sharpness"></div>
+        <div class="reader-setting-row reader-crop-row"><button class="control-action-btn" id="btn-crop" aria-pressed="false" title="裁切頁面邊緣 (C 鍵)" data-i18n-title="裁切頁面邊緣 (C 鍵)">
+          <i class="fa-solid fa-crop-simple"></i>
+        <span data-i18n="ui.cropEdges">裁切邊緣 (2%)</span><i class="fa-solid fa-check reader-setting-check" aria-hidden="true"></i></button></div>
+        <div class="reader-setting-row"><span data-i18n="ui.zoom">縮放</span><div class="zoom-controls" id="zoom-controls-container">
+          <button class="zoom-btn" id="btn-zoom-out" title="縮小" data-i18n-title="縮小"><i class="fa-solid fa-magnifying-glass-minus"></i></button>
+          <span class="zoom-value" id="zoom-value">100%</span>
+          <button class="zoom-btn" id="btn-zoom-in" title="放大檢視" data-i18n-title="放大檢視"><i class="fa-solid fa-magnifying-glass-plus"></i></button>
+        </div></div>
+        <div class="reader-setting-row reader-fullscreen-row"><button class="control-action-btn" id="btn-fullscreen" title="切換全螢幕 (F 鍵)" data-i18n-title="切換全螢幕 (F 鍵)">
+          <i class="fa-solid fa-expand"></i>
+        <span data-i18n="ui.fullscreen">全螢幕</span></button></div>
+      </section>
+      <section class="reader-popover reader-ai-tools-popover" id="reader-ai-tools-panel" data-reader-panel="ai" role="dialog" aria-labelledby="reader-ai-tools-title" hidden>
+        <div class="reader-popover-heading"><h3 id="reader-ai-tools-title" data-i18n="ui.readerAi">AI 工具</h3><button type="button" class="reader-panel-close" data-reader-panel-close aria-label="關閉" data-i18n-aria-label="ui.closeReaderAi"><i class="fa-solid fa-xmark" aria-hidden="true"></i></button></div><button class="control-action-btn ai-page-btn" id="btn-ai-explain" title="請艦載 AI 說明目前頁面" data-i18n-title="請艦載 AI 說明目前頁面">
+          <i class="fa-solid fa-wand-sparkles"></i>
+          <span data-i18n="ui.readerAiExplain">說明本頁</span>
+        </button><button class="control-action-btn ai-page-btn" id="btn-ai-auto-explain" type="button" aria-pressed="false" title="開啟全書隨讀翻譯；只分析實際翻到的頁面" data-i18n-title="開啟全書隨讀翻譯；只分析實際翻到的頁面">
+          <svg class="ai-auto-icon" viewBox="0 0 24 24" aria-hidden="true">
+            <path d="M4 5h9M8.5 3v2M6 5c.6 3 2.2 5.2 5 6.5M11 5c-.7 3.4-3 6.2-6.5 8"></path>
+            <path d="M14 19l3.5-8 3.5 8M15.2 16h4.6"></path>
+          </svg>
+          <span data-i18n="ui.readerAiAuto">隨讀說明</span>
+        </button><p class="reader-panel-note" id="reader-ai-hint" hidden></p>
+      </section>
     </div>
 
     <!-- 隱形左右翻頁熱區；觸控可滑動，鍵盤可使用方向鍵。 -->
@@ -389,80 +444,8 @@
 
     <!-- 底部懸浮控制面版 -->
     <div class="reader-bottom-bar" id="reader-bottom-bar">
-      <div class="bottom-bar-left">
-        <span class="page-counter" id="page-counter" data-i18n="第 0 / 0 頁">第 0 / 0 頁</span>
-      </div>
-
-      <!-- 進度拉條 -->
-      <div class="bottom-bar-center">
-        <input type="range" class="progress-slider" id="progress-slider" min="1" max="100" value="1" aria-label="目前頁面" data-i18n-aria-label="目前頁面">
-      </div>
-
-      <div class="bottom-bar-right">
-        <!-- 閱讀模式切換 -->
-        <div class="btn-group">
-          <button class="mode-btn active" id="btn-mode-single" aria-pressed="true" title="單頁模式 (寬高自適應)" data-i18n-title="單頁模式 (寬高自適應)"><i class="fa-solid fa-file"></i><span data-i18n="單頁">單頁</span></button>
-          <button class="mode-btn" id="btn-mode-double" aria-pressed="false" title="雙頁模式 (首頁封面單頁顯示)" data-i18n-title="雙頁模式 (首頁封面單頁顯示)"><i class="fa-solid fa-book-open"></i><span data-i18n="雙頁">雙頁</span></button>
-          <div class="double-mode-controls" id="double-mode-controls">
-            <button class="mode-sub-btn" id="btn-double-direction" type="button" aria-pressed="false" aria-label="切換為右至左雙頁" data-i18n-aria-label="切換為右至左雙頁" title="切換為右至左雙頁" data-i18n-title="切換為右至左雙頁"><i class="fa-solid fa-arrows-left-right" aria-hidden="true"></i></button>
-            <button class="mode-sub-btn" id="btn-double-shift" type="button" aria-label="雙頁往後移一頁" data-i18n-aria-label="雙頁往後移一頁" title="雙頁往後移一頁" data-i18n-title="雙頁往後移一頁"><i class="fa-solid fa-forward-step" aria-hidden="true"></i></button>
-          </div>
-          <button class="mode-btn" id="btn-mode-webtoon" aria-pressed="false" title="直捲條漫模式" data-i18n-title="直捲條漫模式"><i class="fa-solid fa-arrows-up-down"></i><span data-i18n="條漫">條漫</span></button>
-          <button class="mode-btn" id="btn-mode-catalog" aria-pressed="false" title="目錄縮圖模式" data-i18n-title="目錄縮圖模式"><i class="fa-solid fa-grip"></i><span data-i18n="目錄模式">目錄</span></button>
-        </div>
-
-        <!-- 縮放工具 -->
-        <div class="zoom-controls" id="zoom-controls-container">
-          <button class="zoom-btn" id="btn-zoom-out" title="縮小" data-i18n-title="縮小"><i class="fa-solid fa-magnifying-glass-minus"></i></button>
-          <span class="zoom-value" id="zoom-value">100%</span>
-          <button class="zoom-btn" id="btn-zoom-in" title="放大檢視" data-i18n-title="放大檢視"><i class="fa-solid fa-magnifying-glass-plus"></i></button>
-        </div>
-
-        <button class="control-action-btn" id="btn-fit-mode" title="螢幕適應模式 (M 鍵)" data-i18n-title="螢幕適應模式 (M 鍵)">
-          <i class="fa-solid fa-compress"></i>
-        </button>
-
-        <button class="control-action-btn" id="btn-rotate-left" type="button" aria-label="向左旋轉 90 度" data-i18n-aria-label="向左旋轉 90 度" title="向左旋轉 90° (L 鍵)" data-i18n-title="向左旋轉 90° (L 鍵)">
-          <svg class="reader-rotate-icon" viewBox="0 0 24 24" aria-hidden="true">
-            <path d="M3 12a9 9 0 1 0 3-6.7M3 3v5h5"></path>
-          </svg>
-        </button>
-
-        <button class="control-action-btn" id="btn-rotate-right" type="button" aria-label="向右旋轉 90 度" data-i18n-aria-label="向右旋轉 90 度" title="向右旋轉 90° (R 鍵)" data-i18n-title="向右旋轉 90° (R 鍵)">
-          <svg class="reader-rotate-icon" viewBox="0 0 24 24" aria-hidden="true">
-            <path d="M21 12a9 9 0 1 1-3-6.7M21 3v5h-5"></path>
-          </svg>
-        </button>
-
-        <button class="control-action-btn" id="btn-sharpen" title="銳利化模式 (S 鍵) - 進階清晰" data-i18n-title="銳利化模式 (S 鍵) - 進階清晰">
-          <i class="fa-solid fa-wand-magic-sparkles"></i>
-        </button>
-
-        <button class="control-action-btn" id="btn-crop" aria-pressed="false" title="裁切頁面邊緣 (C 鍵)" data-i18n-title="裁切頁面邊緣 (C 鍵)">
-          <i class="fa-solid fa-crop-simple"></i>
-        </button>
-
-        <button class="control-action-btn" id="btn-brightness" title="循環調整亮度 (B 鍵)" data-i18n-title="循環調整亮度 (B 鍵)">
-          <i class="fa-solid fa-sun"></i>
-        </button>
-
-        <button class="control-action-btn ai-page-btn" id="btn-ai-explain" title="請艦載 AI 說明目前頁面" data-i18n-title="請艦載 AI 說明目前頁面">
-          <i class="fa-solid fa-wand-sparkles"></i>
-          <span data-i18n="這頁在說什麼？">這頁在說什麼？</span>
-        </button>
-
-        <button class="control-action-btn ai-page-btn" id="btn-ai-auto-explain" type="button" aria-pressed="false" title="開啟全書隨讀翻譯；只分析實際翻到的頁面" data-i18n-title="開啟全書隨讀翻譯；只分析實際翻到的頁面">
-          <svg class="ai-auto-icon" viewBox="0 0 24 24" aria-hidden="true">
-            <path d="M4 5h9M8.5 3v2M6 5c.6 3 2.2 5.2 5 6.5M11 5c-.7 3.4-3 6.2-6.5 8"></path>
-            <path d="M14 19l3.5-8 3.5 8M15.2 16h4.6"></path>
-          </svg>
-          <span data-i18n="全書隨讀">全書隨讀</span>
-        </button>
-
-        <button class="control-action-btn" id="btn-fullscreen" title="切換全螢幕 (F 鍵)" data-i18n-title="切換全螢幕 (F 鍵)">
-          <i class="fa-solid fa-expand"></i>
-        </button>
-      </div>
+      <div class="bottom-bar-left"><span class="page-counter" id="page-counter" data-i18n="第 0 / 0 頁">第 0 / 0 頁</span></div>
+      <div class="bottom-bar-center"><input type="range" class="progress-slider" id="progress-slider" min="1" max="100" value="1" aria-label="目前頁面" data-i18n-aria-label="目前頁面"></div>
     </div>
 
     <aside class="ai-page-panel" id="ai-page-panel" aria-live="polite" aria-labelledby="ai-page-title" hidden>
@@ -790,6 +773,8 @@
   <script src="locales/static-messages.js"></script>
   <script src="locales/reader-messages.js"></script>
   <script src="locales/feature-messages.js"></script>
+  <script src="locales/interface-messages.js"></script>
+  <script src="reader-panels.js"></script>
   <script src="tauri-api.js"></script>
   <script src="commerce.js"></script>
   <script src="app.js"></script>

@@ -30,7 +30,7 @@
 
   function t(source, variables = {}) {
     const locale = currentLocale();
-    const translated = locale === 'zh-Hant' ? source : messages[source]?.[locale];
+    const translated = messages[source]?.[locale];
     return String(translated ?? source).replace(/\{(\w+)\}/g, (token, key) =>
       Object.prototype.hasOwnProperty.call(variables, key) ? String(variables[key]) : token);
   }
@@ -38,7 +38,7 @@
   function register(entries) {
     for (const [source, translations] of Object.entries(entries)) {
       const entry = messages[source] || (messages[source] = Object.create(null));
-      for (const locale of ['en', 'ja']) {
+      for (const locale of ['zh-Hant', 'en', 'ja']) {
         if (typeof translations[locale] === 'string') entry[locale] = translations[locale];
       }
     }

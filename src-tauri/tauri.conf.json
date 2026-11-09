@@ -35,12 +35,12 @@
       "debugApplicationIdSuffix": ".debug"
     },
     "macOS": {
-      "bundleVersion": "74",
+      "bundleVersion": "75",
       "signingIdentity": "-"
     },
     "iOS": {
       "minimumSystemVersion": "15.0",
-      "bundleVersion": "74"
+      "bundleVersion": "75"
     }
   }
 }

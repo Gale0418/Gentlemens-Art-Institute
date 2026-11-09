@@ -67,7 +67,7 @@ assert.equal(denied.select.value, 'auto');
 assert.ok(denied.elements.some(element => element.id === 'app-language-status' && element.textContent));
 
 const dictionaries = {};
-for (const file of ['static-messages.js', 'reader-messages.js', 'feature-messages.js']) {
+for (const file of ['static-messages.js', 'reader-messages.js', 'feature-messages.js', 'interface-messages.js']) {
   const source = fs.readFileSync(`public/locales/${file}`, 'utf8');
   vm.runInNewContext(source, { window: { GAIL10n: { register(entries) {
     for (const [key, translations] of Object.entries(entries)) {
@@ -221,3 +221,14 @@ console.log('PASS: all three store locales are complete and Traditional Chinese 
   const retryKeys = [...fs.readFileSync('public/app.js', 'utf8').matchAll(/retry \? '([^']+)'/g)].map(match => match[1]);
   for (const key of retryKeys) assert.ok(dictionaries[key], `retry message needs an exact registered key: ${key}`);
 }
+
+// Context keys must distinguish a close action from an off state without changing literal user text.
+for (const language of ['zh-TW', 'en-US', 'ja-JP']) {
+  const localized = boot({ languages: [language] });
+  vm.runInNewContext(fs.readFileSync('public/locales/interface-messages.js', 'utf8'), localized.context);
+  const expected = language === 'zh-TW' ? ['關閉', '關閉'] : language === 'en-US' ? ['Close', 'Off'] : ['閉じる', 'オフ'];
+  assert.equal(localized.api.t('ui.closeTuning'), expected[0]);
+  assert.equal(localized.api.t('ui.sharpenOff'), expected[1]);
+  assert.equal(localized.api.t('unchanged personal title'), 'unchanged personal title');
+}
+console.log('PASS: contextual interface keys resolve all three languages without changing literal content');

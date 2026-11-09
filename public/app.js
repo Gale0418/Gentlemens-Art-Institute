@@ -1055,6 +1055,7 @@ function applyIncrementalLibraryBatch(payload) {
   }
   state.libraryRefreshPending = true;
   queueIncrementalLibraryRender();
+  syncLibraryBackgroundActivity();
   if (addedComic) queueDiscoveryReaderButtonSync();
   return true;
 }
@@ -1603,6 +1604,7 @@ const elements = {
   readerBottomBar: document.getElementById('reader-bottom-bar'),
   readerComicTitle: document.getElementById('reader-comic-title'),
   readerModeIndicator: document.getElementById('reader-mode-indicator'),
+  readerAiToggle: document.getElementById('reader-ai-toggle'),
   readerViewport: document.getElementById('reader-viewport'),
   pagesContainer: document.getElementById('pages-container'),
   readerStatusPanel: document.getElementById('reader-status-panel'),
@@ -2248,7 +2250,18 @@ function handleRamCacheProgress(data) {
   }
 }
 
+let readerPanels = null;
+
 function bindEvents() {
+  readerPanels = window.GAIReaderPanels?.create?.({
+    root: elements.readerOverlay,
+    onChange(name) {
+      elements.readerOverlay.classList.toggle('reader-panel-open', Boolean(name));
+      syncReaderTuningControls();
+      triggerControlsActive();
+    },
+  }) || null;
+
   document.querySelectorAll('.header-actions .action-btn').forEach(button => {
     const accessibleName = button.getAttribute('title') || button.textContent.trim();
     if (accessibleName) button.setAttribute('aria-label', accessibleName);
@@ -2276,6 +2289,7 @@ function bindEvents() {
   });
   window.addEventListener('gai:photo-library-changed', requestDeferredLibraryRefresh);
   document.addEventListener('visibilitychange', () => {
+    syncLibraryBackgroundActivity();
     if (document.visibilityState === 'visible' && isIOSLibraryDevice()) {
       requestDeferredLibraryRefresh();
     }
@@ -2560,19 +2574,23 @@ function bindEvents() {
   elements.btnZoomOut.addEventListener('click', () => adjustZoom(-10));
 
   // 螢幕適應模式切換
-  elements.btnFitMode.addEventListener('click', toggleFitMode);
+  elements.btnFitMode.addEventListener('change', event => setReaderFitMode(event.target.value));
 
   // 旋轉控制
   elements.btnRotateLeft.addEventListener('click', () => rotateImage(-90));
   elements.btnRotateRight.addEventListener('click', () => rotateImage(90));
 
   // 🪄 銀利化切換
-  elements.btnSharpen.addEventListener('click', toggleSharpen);
+  elements.btnSharpen.addEventListener('input', event => setReaderSharpenLevel(event.target.value));
   elements.btnCrop.addEventListener('click', toggleCropEdges);
-  elements.btnBrightness.addEventListener('click', cycleBrightness);
+  elements.btnBrightness.addEventListener('input', event => setReaderBrightness(event.target.value));
 
   // 全螢幕切換
   elements.btnFullscreen.addEventListener('click', toggleFullscreen);
+  for (const button of [elements.btnModeSingle, elements.btnModeDouble, elements.btnModeWebtoon, elements.btnModeCatalog]) {
+    button.addEventListener('click', () => readerPanels?.close());
+  }
+  elements.btnAiExplain?.addEventListener('click', () => readerPanels?.close({ restoreFocus: false }));
 
   // 進度拉條滑動
   elements.progressSlider.addEventListener('input', (e) => {
@@ -2865,20 +2883,14 @@ function bindEvents() {
 
     if (window.electronAPI.onSmbDownloadStart) {
       window.electronAPI.onSmbDownloadStart((data) => {
+        startSmbDownloadActivity(data);
         showLoader(readerText("正在從 NAS 下載漫畫…"), { progress: null, detail: readerText("網路傳輸中，請保持連線…") });
-        // 🔧 BUG-FIX：30 秒安全鈵，如果 SMB 事件沒有回來，強制解除 Loader
-        state._smbLoaderTimer = setTimeout(() => {
-          console.warn('[SMB] 等待逾時（30 秒），強制關閉 Loader');
-          forceHideLoader();
-        }, 30000);
       });
     }
 
     if (window.electronAPI.onSmbDownloadEnd) {
       window.electronAPI.onSmbDownloadEnd((data) => {
-        clearTimeout(state._smbLoaderTimer);
-        state._smbLoaderTimer = null;
-        hideLoader();
+        if (finishSmbDownloadActivity(data)) hideLoader();
       });
     }
   }
@@ -3369,6 +3381,10 @@ async function undoLastTagOperation() {
 
 function setOrganizeMode(enabled) {
   state.organizeMode = Boolean(enabled);
+  state.inspectorManagementExpanded = state.organizeMode;
+  document.querySelectorAll('[data-inspector-management]').forEach(details => {
+    details.open = state.organizeMode;
+  });
   if (!state.organizeMode) {
     state.organizeSelection.clear();
     state.organizeSelectionSources.clear();
@@ -4238,6 +4254,7 @@ function isComicOfflineForSearch(comic, metadata) {
 }
 
 function updateLibraryStartPanel() {
+  syncLibraryBackgroundActivity();
   const hasFormalComic = state.comics.some(comic => comic && !isBuiltInDemoComic(comic));
   if (elements.libraryStartPanel) elements.libraryStartPanel.hidden = hasFormalComic;
   const isWelcome = !hasFormalComic && !state.currentPath;
@@ -4409,6 +4426,7 @@ async function performLibraryFetch({ background = false } = {}) {
         }
         scanStillRunning = Boolean(latestScanStatus?.isScanning);
         state.scanStatus = latestScanStatus;
+        syncLibraryBackgroundActivity();
         updateScanRecovery(state.scanStatus);
         requestPriorityLibraryScan(state.scanStatus, nextFavorites);
         if (scanStillRunning) {
@@ -5495,7 +5513,6 @@ function inspectorRenderSignature(comic) {
     progress.percent,
     isComicOffline(comic) ? 'offline' : 'online',
     isFavoriteId(comic.id) ? 'favorite' : '',
-    state.organizeMode ? 'organize' : 'browse',
   ].join(':');
 }
 
@@ -5669,13 +5686,16 @@ function renderComicInspector(comic, options = {}) {
       </div>
     `}
     <div class="inspector-body">
-      ${builtInDemo || photoAlbum ? '' : `<button class="organize-toggle inspector-organize-action ${state.organizeMode ? 'active' : ''}" type="button" data-inspector-action="organize" aria-pressed="${state.organizeMode}" title="${readerText("批次整理標籤與書目資料")}">
-        <i class="fa-solid fa-tags" aria-hidden="true"></i>
-        ${readerText("批次整理標籤與書目資料")}
-      </button>`}
-      <span class="section-kicker">${format}</span>
       <h3 title="${escapeHtml(displayTitle)}">${escapeHtml(displayTitle)}</h3>
+      <div class="inspector-tags" data-inspector-readonly-tags>
+        ${(Array.isArray(comic.metadataTags) ? comic.metadataTags : (state.catalogSearchItems.get(getCatalogSearchKey(comic.id, getComicSourceId(comic), comic.relativePath ?? comic.relative_path))?.tags || [])).map(tag => {
+          const normalized = String(tag.value).normalize('NFKC').toLocaleLowerCase();
+          const inventory = state.tagInventoryItems.find(item => item.namespace === tag.namespace && item.normalizedValue === normalized);
+          return `<span class="metadata-tag-chip" data-tag-color="${tagColorKey(inventory || tag)}">${escapeHtml(tag.namespace)}:${escapeHtml(tag.value)}</span>`;
+        }).join('')}
+      </div>
       <div class="inspector-tags">
+        <span>${format}</span>
         <span>${escapeHtml(photoAlbum && comic.series === '照片圖庫' ? readerText('照片圖庫') : comic.series || readerText('未分類'))}</span>
         <span>${formatPageCount(progress.totalPages || comic.comicsCount || '---')}</span>
         <span>${builtInDemo ? readerText('不寫入收藏') : sourceOffline ? readerText('來源離線') : progress.isFinished ? readerText('已看完') : progress.hasProgress ? readerText('閱讀中') : readerText('未讀')}</span>
@@ -5699,6 +5719,13 @@ function renderComicInspector(comic, options = {}) {
         `}
       </div>
       ${isDirectory || builtInDemo || photoAlbum ? '' : `
+        <details class="inspector-management" data-inspector-management ${state.organizeMode || state.inspectorManagementExpanded ? 'open' : ''}>
+          <summary>${readerText('ui.inspectorManage')}</summary>
+          <div class="inspector-management-content">
+            <button class="organize-toggle inspector-organize-action ${state.organizeMode ? 'active' : ''}" type="button" data-inspector-action="organize" aria-pressed="${state.organizeMode}" title="${readerText("批次整理標籤與書目資料")}">
+              <i class="fa-solid fa-tags" aria-hidden="true"></i>
+              ${readerText("批次整理標籤與書目資料")}
+            </button>
         <button class="inspector-file-toggle" type="button" data-inspector-action="files" aria-expanded="false">
           <i class="fa-solid fa-folder-tree" aria-hidden="true"></i>
           <span><strong>${readerText('檔案管理')}</strong><small>${readerText('開啟位置、改名、移動或可復原移除')}</small></span>
@@ -5721,7 +5748,9 @@ function renderComicInspector(comic, options = {}) {
         </button>
         <div class="inspector-ai-results" role="status" aria-live="polite" hidden></div>
       `}
-      ${isDirectory || builtInDemo || photoAlbum ? '' : `<section class="metadata-section" id="inspector-metadata"><p class="metadata-loading">${readerText('正在讀取 SQLite metadata…')}</p></section>`}
+      ${isDirectory || builtInDemo || photoAlbum ? '' : `<section class="metadata-section" id="inspector-metadata"><p class="metadata-loading">${readerText('正在讀取 SQLite metadata…')}</p></section>
+          </div>
+        </details>`}
     </div>
   `;
 
@@ -5775,7 +5804,35 @@ function renderComicInspector(comic, options = {}) {
       }
     };
   }
-  if (!isDirectory && !builtInDemo && !photoAlbum) loadInspectorMetadata(comic);
+  bindInspectorManagementDisclosure(comic);
+  if (!isDirectory && !builtInDemo && !photoAlbum) loadInspectorMetadata(comic, true);
+}
+
+function bindInspectorManagementDisclosure(comic) {
+  const management = elements.comicInspector.querySelector('[data-inspector-management]');
+  if (!management) return;
+  let relatedRequested = false;
+  const summary = management.querySelector('summary');
+  const sync = () => {
+    if (management.isConnected === false || !isSelectedComic(comic)) return;
+    state.inspectorManagementExpanded = management.open;
+    if (management.open && !relatedRequested) {
+      relatedRequested = true;
+      requestInspectorRelatedMetadata(comic, management);
+    }
+    if (!management.open && management.contains(document.activeElement)) summary?.focus({ preventScroll: true });
+  };
+  management.addEventListener('toggle', sync);
+  sync();
+}
+
+function requestInspectorRelatedMetadata(comic, management) {
+  if (management.isConnected === false || !isSelectedComic(comic)) return false;
+  const target = management.querySelector('#inspector-metadata');
+  if (!target) return false;
+  target._inspectorRelatedRequested = true;
+  target._requestInspectorRelatedTags?.();
+  return true;
 }
 
 async function prepareInspectorFilePanel(comic, panel) {
@@ -5877,7 +5934,7 @@ function formatReadingDirection(direction) {
 
 let inspectorMetadataRequestGeneration = 0;
 
-async function loadInspectorMetadata(comic) {
+async function loadInspectorMetadata(comic, deferRelated = false) {
   const requestedId = comic?.id;
   const requestedSourceId = getComicSourceId(comic);
   const requestToken = ++inspectorMetadataRequestGeneration;
@@ -5908,6 +5965,14 @@ async function loadInspectorMetadata(comic) {
     }
     const creators = Object.entries(metadata.creators || {}).flatMap(([role, names]) => names.map(name => `${role}:${name}`));
     const tags = metadata.tags || [];
+    const readonlyTags = elements.comicInspector?.querySelector('[data-inspector-readonly-tags]');
+    if (readonlyTags) {
+      readonlyTags.innerHTML = tags.map(tag => {
+        const normalized = String(tag.value).normalize('NFKC').toLocaleLowerCase();
+        const inventory = state.tagInventoryItems.find(item => item.namespace === tag.namespace && item.normalizedValue === normalized);
+        return `<span class="metadata-tag-chip" data-tag-color="${tagColorKey(inventory || tag)}">${escapeHtml(tag.namespace)}:${escapeHtml(tag.value)}</span>`;
+      }).join('');
+    }
     const sourceNames = [...new Set((metadata.candidates || []).map(candidate => candidate.parserId))];
     const lock = field => (metadata.lockedFields || []).includes(field) ? ` <span class="metadata-lock" title="${readerText('使用者覆寫')}">${readerText('鎖定')}</span>` : '';
     const rows = [
@@ -5987,14 +6052,24 @@ async function loadInspectorMetadata(comic) {
       });
       return true;
     };
-    if (!renderMetadata([], eAPI?.listRelatedTags ? 'loading' : 'unavailable')) return;
-    if (eAPI?.listRelatedTags) {
-      // Do not make metadata availability depend on an optional suggestions query.
+    let relatedRequested = false;
+    target._requestInspectorRelatedTags = () => {
+      if (relatedRequested || !requestIsCurrent() || target.isConnected === false) return;
+      relatedRequested = true;
+      if (!eAPI?.listRelatedTags) {
+        renderMetadata([], 'unavailable');
+        return;
+      }
+      renderMetadata([], 'loading');
+      // The read-only tag summary and management share this one metadata snapshot.
       Promise.resolve()
-        .then(() => eAPI.listRelatedTags(mutationTarget.comicId, 8))
+        .then(() => requestIsCurrent() && target.isConnected !== false
+          ? eAPI.listRelatedTags(mutationTarget.comicId, 8) : [])
         .then(suggestions => { renderMetadata(suggestions, 'ready'); })
         .catch(() => { renderMetadata([], 'unavailable'); });
-    }
+    };
+    if (!renderMetadata([], deferRelated ? 'deferred' : eAPI?.listRelatedTags ? 'loading' : 'unavailable')) return;
+    if (!deferRelated || target._inspectorRelatedRequested) target._requestInspectorRelatedTags();
   } catch (error) {
     if (!requestIsCurrent()) return;
     const currentTarget = elements.comicInspector?.querySelector('#inspector-metadata');
@@ -7460,6 +7535,8 @@ async function openReader(comicOrId, { returnToComicFolder = false } = {}) {
     releasePreloadedImages();
 
     const demoReader = isBuiltInDemoComic(data);
+    const aiToggle = elements.readerAiToggle;
+    if (aiToggle) aiToggle.hidden = demoReader;
     if (elements.btnAiExplain) elements.btnAiExplain.hidden = demoReader;
     if (elements.btnAiAutoExplain) elements.btnAiAutoExplain.hidden = demoReader;
     if (demoReader) setAutoPageExplanation(false);
@@ -7469,6 +7546,7 @@ async function openReader(comicOrId, { returnToComicFolder = false } = {}) {
     applyFitMode();
 
     elements.readerOverlay.style.display = 'flex';
+    document.body?.classList?.add('reader-visible');
     elements.readerOverlay.setAttribute('aria-hidden', 'false');
     elements.readerOverlay.classList.remove('reader-idle');
     showReaderDiscoveryHint();
@@ -7493,6 +7571,7 @@ async function openReader(comicOrId, { returnToComicFolder = false } = {}) {
     // openComic 可能在 overlay 已呈現或上一輪清理尚未完成時失敗；這裡
     // 明確收回 modal 與 body scroll lock，避免失敗後留下不可互動的遮罩。
     elements.readerOverlay.style.display = 'none';
+    document.body?.classList?.remove('reader-visible');
     elements.readerOverlay.setAttribute('aria-hidden', 'true');
     clearReaderPageNotice();
     document.body.style.overflow = 'auto';
@@ -7507,9 +7586,14 @@ async function openReader(comicOrId, { returnToComicFolder = false } = {}) {
       alert(readerText('讀取漫畫資料失敗：{error}', { error: message }));
     }
   } finally {
-    clearTimeout(state._smbLoaderTimer);
-    state._smbLoaderTimer = null;
     if (operation === state.readerOperation) {
+      clearTimeout(state._smbLoaderTimer);
+      state._smbLoaderTimer = null;
+      state.smbDownloadActive = false;
+      state.smbDownloadId = '';
+      state.smbDownloadCount = 0;
+      state.smbActivityGeneration = (state.smbActivityGeneration || 0) + 1;
+      syncLibraryBackgroundActivity();
       hideLoader();
       // openComic failures clear pendingComicId in the catch path without
       // going through closeReader. Resume covers here once that failed
@@ -7613,6 +7697,7 @@ async function flushReadingProgressBeforeClose(queue, snapshot) {
 
 // 關閉閱讀器
 async function closeReader({ switchingComic = false } = {}) {
+  if (typeof readerPanels !== 'undefined') readerPanels?.close({ restoreFocus: false });
   resetReaderControlsPointerActivity();
   discoveryReaderContext = null;
   elements.readerOverlay.classList.remove('reader-keyboard-controls');
@@ -7675,6 +7760,7 @@ async function closeReader({ switchingComic = false } = {}) {
     document.exitFullscreen().catch(() => {});
   }
   elements.readerOverlay.style.display = 'none';
+  document.body?.classList?.remove('reader-visible');
   elements.readerOverlay.setAttribute('aria-hidden', 'true');
   if (closingPendingOpen) hideLoader();
   clearReaderPageNotice();
@@ -7829,6 +7915,7 @@ function focusReaderEntry() {
 function trapReaderFocus(event) {
   if (elements.readerOverlay.style.display === 'none' || event.key !== 'Tab') return;
   elements.readerOverlay.classList.add('reader-keyboard-controls');
+  triggerControlsActive();
   const focusables = getReaderFocusableElements();
   if (!focusables.length) {
     event.preventDefault();
@@ -9991,7 +10078,7 @@ function setReadingMode(mode) {
 
 // 調整縮放
 function adjustZoom(amount) {
-  if (state.readingMode === 'webtoon') return;
+  if (state.readingMode === 'webtoon' || state.readingMode === 'catalog') return;
 
   state.zoomPercentage = Math.max(50, Math.min(250, state.zoomPercentage + amount));
   elements.zoomValue.textContent = `${state.zoomPercentage}%`;
@@ -10004,13 +10091,15 @@ function adjustZoom(amount) {
 function toggleFullscreen() {
   if (!document.fullscreenElement) {
     elements.readerOverlay.requestFullscreen().then(() => {
-      elements.btnFullscreen.innerHTML = '<i class="fa-solid fa-compress"></i>';
+      const icon = elements.btnFullscreen.querySelector('i');
+      if (icon) icon.className = 'fa-solid fa-compress';
     }).catch(err => {
       console.error('全螢幕啟用失敗', err);
     });
   } else {
     document.exitFullscreen().then(() => {
-      elements.btnFullscreen.innerHTML = '<i class="fa-solid fa-expand"></i>';
+      const icon = elements.btnFullscreen.querySelector('i');
+      if (icon) icon.className = 'fa-solid fa-expand';
     });
   }
 }
@@ -10022,6 +10111,13 @@ function handleKeyDown(e) {
   // 設定視窗與文字輸入擁有鍵盤事件；不能在輸入 Key 時翻頁或旋轉。
   if (typeof getActiveLibraryModal === 'function' && getActiveLibraryModal()) return;
   const target = e.target;
+  // WebKit 的滑鼠操作可能把焦點留在 overlay；面板開啟時，導覽鍵
+  // 一律由面板／原生元件處理，不能穿透成翻頁。
+  if (typeof readerPanels !== 'undefined' && readerPanels?.isOpen()
+    && ['ArrowLeft', 'ArrowRight', 'ArrowUp', 'ArrowDown', 'Home', 'End', 'PageUp', 'PageDown', ' ', 'Spacebar'].includes(e.key)) return;
+  if (target?.closest?.('button') && [' ', 'Spacebar', 'Enter'].includes(e.key)) return;
+  if (target?.closest?.('[data-reader-panel]')
+    && ['ArrowLeft', 'ArrowRight', 'ArrowUp', 'ArrowDown', 'Home', 'End', 'PageUp', 'PageDown', ' ', 'Spacebar'].includes(e.key)) return;
   if (target !== elements.progressSlider && (
     target?.isContentEditable
     || ['INPUT', 'TEXTAREA', 'SELECT'].includes(String(target?.tagName || '').toUpperCase())
@@ -10105,6 +10201,7 @@ function handleKeyDown(e) {
 
 // 更新浮動按鈕控制面板樣式
 function updateReaderUiControls() {
+  if (typeof syncReaderTuningControls === 'function') syncReaderTuningControls();
   syncDiscoveryReaderButton();
   const mode = state.readingMode;
   elements.btnModeSingle.classList.toggle('active', mode === 'single');
@@ -10123,11 +10220,11 @@ function updateReaderUiControls() {
   elements.btnCrop.classList.toggle('active', state.cropEdges);
   elements.btnCrop.setAttribute('aria-pressed', String(state.cropEdges));
   elements.btnBrightness.classList.toggle('active', state.brightness !== 100);
-  elements.btnBrightness.setAttribute('aria-label', readerText('目前亮度 {brightness}%，按下切換', { brightness: state.brightness }));
+  elements.btnBrightness.setAttribute('aria-valuetext', `${state.brightness}%`);
 
   // 條漫與目錄模式都沒有可套用 fit/rotate 的單頁圖片，控制項必須真的停用。
   const imageTransformDisabled = mode === 'webtoon' || mode === 'catalog';
-  const imageTransformControls = [elements.btnFitMode, elements.btnRotateLeft, elements.btnRotateRight];
+  const imageTransformControls = [elements.btnFitMode, elements.btnRotateLeft, elements.btnRotateRight, elements.btnZoomOut, elements.btnZoomIn];
   imageTransformControls.forEach(button => {
     if (!button) return;
     button.disabled = imageTransformDisabled;
@@ -10185,15 +10282,16 @@ function applyFitMode() {
   // 更新按鈕圖標與 title 說明
   const icon = elements.btnFitMode.querySelector('i');
   if (state.fitMode === 'contain') {
-    icon.className = 'fa-solid fa-compress';
+    if (icon) icon.className = 'fa-solid fa-compress';
     elements.btnFitMode.title = readerText("螢幕適應：完整頁面 (M 鍵)");
   } else if (state.fitMode === 'width') {
-    icon.className = 'fa-solid fa-arrows-left-right';
+    if (icon) icon.className = 'fa-solid fa-arrows-left-right';
     elements.btnFitMode.title = readerText('螢幕適應：寬度適應 (M 鍵)');
   } else if (state.fitMode === 'height') {
-    icon.className = 'fa-solid fa-arrows-up-down';
+    if (icon) icon.className = 'fa-solid fa-arrows-up-down';
     elements.btnFitMode.title = readerText('螢幕適應：高度適應 (M 鍵)');
   }
+  if (typeof syncReaderTuningControls === 'function') syncReaderTuningControls();
   scheduleReaderImageTransformRefresh();
 }
 
@@ -10228,6 +10326,7 @@ function toggleSharpen() {
 
 // 套用銳利化濾鏡到當前所有閱讀器圖片
 function applySharpenFilter() {
+  if (typeof syncReaderTuningControls === 'function') syncReaderTuningControls();
   const renderingMap = {
     0: 'auto',
     1: 'auto',
@@ -10268,12 +10367,7 @@ function toggleCropEdges() {
 function cycleBrightness() {
   const levels = [100, 85, 70, 115];
   const current = levels.indexOf(state.brightness);
-  state.brightness = levels[(current + 1) % levels.length];
-  localStorage.setItem('readerBrightness', String(state.brightness));
-  elements.btnBrightness.classList.toggle('active', state.brightness !== 100);
-  elements.btnBrightness.setAttribute('aria-label', readerText('目前亮度 {brightness}%，按下切換', { brightness: state.brightness }));
-  elements.pagesContainer.querySelectorAll('img').forEach(applyImageEffects);
-  showReaderToast(readerText('☀️ 亮度：{brightness}%', { brightness: state.brightness }));
+  setReaderBrightness(levels[(current + 1) % levels.length], true);
 }
 
 // 💬 顯示精緻的微提示 (Toast)
@@ -10349,6 +10443,109 @@ function showReaderPageNotice() {
   }, 1500);
 }
 
+function syncReaderTuningControls() {
+  const brightness = document.getElementById('reader-brightness-value');
+  const sharpen = document.getElementById('reader-sharpen-value');
+  const rotation = document.getElementById('reader-rotation-value');
+  const sharpenLabel = readerText(['ui.sharpenOff', 'ui.sharpenLow', 'ui.sharpenMedium', 'ui.sharpenHigh'][state.sharpenLevel] || 'ui.sharpenOff');
+  if (brightness) brightness.textContent = `${state.brightness}%`;
+  if (sharpen) sharpen.textContent = sharpenLabel;
+  if (rotation) rotation.textContent = `${normalizedRotationAngle()}°`;
+  if (elements.btnBrightness) {
+    elements.btnBrightness.value = state.brightness;
+    elements.btnBrightness.setAttribute('aria-valuetext', `${state.brightness}%`);
+  }
+  if (elements.btnSharpen) {
+    elements.btnSharpen.value = state.sharpenLevel;
+    elements.btnSharpen.setAttribute('aria-valuetext', sharpenLabel);
+  }
+  if (elements.btnFitMode) elements.btnFitMode.value = state.fitMode;
+  const hint = document.getElementById('reader-ai-hint');
+  if (hint) {
+    hint.hidden = !elements.btnAiExplain?.disabled;
+    hint.textContent = hint.hidden ? '' : elements.btnAiExplain.title;
+  }
+}
+
+function setReaderBrightness(value, announce = false) {
+  const next = Number(value);
+  if (!Number.isFinite(next)) return false;
+  state.brightness = Math.max(70, Math.min(115, Math.round(next / 5) * 5));
+  localStorage.setItem('readerBrightness', String(state.brightness));
+  elements.btnBrightness.classList.toggle('active', state.brightness !== 100);
+  elements.pagesContainer.querySelectorAll('img').forEach(applyImageEffects);
+  syncReaderTuningControls();
+  if (announce) showReaderToast(readerText('☀️ 亮度：{brightness}%', { brightness: state.brightness }));
+  return true;
+}
+
+function setReaderSharpenLevel(value) {
+  const next = Number(value);
+  if (!Number.isFinite(next)) return false;
+  state.sharpenLevel = Math.max(0, Math.min(3, Math.round(next)));
+  applySharpenFilter();
+  return true;
+}
+
+function setReaderFitMode(value) {
+  if (!['contain', 'width', 'height'].includes(value)
+    || state.readingMode === 'webtoon' || state.readingMode === 'catalog') return false;
+  state.fitMode = value;
+  localStorage.setItem('readerFitMode', value);
+  applyFitMode();
+  return true;
+}
+
+function startSmbDownloadActivity(data) {
+  const id = String(data?.id ?? '');
+  const sameDownload = state.smbDownloadActive && state.smbDownloadId === id;
+  state.smbDownloadCount = sameDownload ? (state.smbDownloadCount || 0) + 1 : 1;
+  state.smbDownloadId = id;
+  state.smbDownloadActive = true;
+  const generation = (state.smbActivityGeneration || 0) + 1;
+  state.smbActivityGeneration = generation;
+  const operation = state.readerOperation;
+  clearTimeout(state._smbLoaderTimer);
+  state._smbLoaderTimer = setTimeout(() => {
+    if (generation !== state.smbActivityGeneration) return;
+    state._smbLoaderTimer = null;
+    state.smbDownloadActive = false;
+    state.smbDownloadId = '';
+    state.smbDownloadCount = 0;
+    state.smbActivityGeneration += 1;
+    syncLibraryBackgroundActivity();
+    // A stale transfer timeout must not hide another operation's foreground UI.
+    if (operation === state.readerOperation) forceHideLoader();
+  }, 30000);
+  syncLibraryBackgroundActivity();
+}
+
+function finishSmbDownloadActivity(data) {
+  if (!state.smbDownloadActive || String(data?.id ?? '') !== state.smbDownloadId) return false;
+  state.smbDownloadCount = Math.max(0, (state.smbDownloadCount || 1) - 1);
+  if (state.smbDownloadCount) return false;
+  clearTimeout(state._smbLoaderTimer);
+  state._smbLoaderTimer = null;
+  state.smbDownloadActive = false;
+  state.smbDownloadId = '';
+  state.smbActivityGeneration = (state.smbActivityGeneration || 0) + 1;
+  syncLibraryBackgroundActivity();
+  return true;
+}
+
+function syncLibraryBackgroundActivity(status = state.scanStatus) {
+  const scan = status || {};
+  const phase = String(scan.phase || '').toLowerCase();
+  const scanning = scan.isScanning === true && !scan.pollError && !['error', 'complete', 'cancelled'].includes(phase);
+  const active = scanning || Boolean(state.smbDownloadActive);
+  const indicator = document.getElementById('library-background-activity');
+  if (indicator) indicator.hidden = !active;
+  document.body?.classList?.toggle('library-background-activity-active', active);
+  if (document.hidden || document.visibilityState === 'hidden') document.body?.setAttribute?.('data-document-hidden', 'true');
+  else document.body?.removeAttribute?.('data-document-hidden');
+}
+
+
 const readerControlsHoveredBars = new Set();
 const readerControlsPressPointerIds = new Set();
 
@@ -10358,7 +10555,8 @@ function clearReaderIdleTimer() {
 }
 
 function readerControlsPointerActive() {
-  return readerControlsHoveredBars.size > 0 || readerControlsPressPointerIds.size > 0;
+  return (typeof readerPanels !== 'undefined' && readerPanels?.isOpen())
+    || readerControlsHoveredBars.size > 0 || readerControlsPressPointerIds.size > 0;
 }
 
 function resetReaderControlsPointerActivity() {
@@ -10476,6 +10674,7 @@ function updateLoaderScanProgress(status) {
     return;
   }
   state.scanStatus = { ...(state.scanStatus || {}), ...status };
+  syncLibraryBackgroundActivity(status);
   updateScanRecovery(status);
   updateLibraryStartPanel();
   if (!status.pollError && !status.error) {
@@ -10547,6 +10746,7 @@ function startScanStatusPolling() {
   stopScanStatusPolling();
   failedCoverIds.clear();
   state.scanStatus = { ...(state.scanStatus || {}), isScanning: true };
+  syncLibraryBackgroundActivity();
   const generation = ++scanPollGeneration;
   let attempts = 0;
   let consecutiveFailures = 0;
@@ -11551,6 +11751,7 @@ async function currentPageDataUrl() {
 }
 
 function syncReaderRotationUi() {
+  if (typeof syncReaderTuningControls === 'function') syncReaderTuningControls();
   const angle = normalizedRotationAngle();
   elements.readerOverlay.style.setProperty('--reader-rotation', `${angle}deg`);
   elements.readerOverlay.dataset.readerRotation = String(angle);

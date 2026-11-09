@@ -567,7 +567,7 @@ for (const prerequisite of ['poll-error', 'missing-generation', 'null-generation
       },
     },
   };
-  for (const name of ['showLoader', 'setLoaderProgress', 'startScanStatusPolling', 'stopScanStatusPolling',
+  for (const name of ['syncLibraryBackgroundActivity', 'showLoader', 'setLoaderProgress', 'startScanStatusPolling', 'stopScanStatusPolling',
     'requestPriorityLibraryScan', 'updateScanRecovery', 'sanitizeOrganizerSelection',
     'invalidateComicNavigationCache', 'setFavorites', 'filterAndRenderGrid', 'renderSidebar',
     'renderContinueStrip', 'renderReadingProgressRecovery', 'restoreLibraryRefreshFocus', 'updateStats',

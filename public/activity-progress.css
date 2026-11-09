@@ -1,0 +1,75 @@
+/* Quiet feedback for real library scans and NAS transfers. */
+.library-background-activity {
+  position: relative;
+  display: block;
+  height: 2px;
+  margin: 8px 0 2px;
+  overflow: hidden;
+  border-radius: 999px;
+  background: var(--card-border);
+  background: color-mix(in srgb, var(--accent-color) 9%, transparent);
+  isolation: isolate;
+}
+
+.library-background-activity[hidden] {
+  display: none;
+}
+
+.library-background-activity::before {
+  position: absolute;
+  inset: 0 auto 0 0;
+  width: 28%;
+  border-radius: inherit;
+  background: linear-gradient(90deg, transparent, var(--accent-color), transparent);
+  background: linear-gradient(
+    90deg,
+    transparent,
+    color-mix(in srgb, var(--accent-color) 35%, transparent),
+    color-mix(in srgb, var(--accent-color) 58%, transparent),
+    transparent
+  );
+  content: "";
+  opacity: 0.72;
+  transform: translate3d(-145%, 0, 0);
+}
+
+body.library-background-activity-active .library-background-activity:not([hidden])::before {
+  animation: library-background-activity-sheen 1.9s cubic-bezier(0.45, 0, 0.55, 1) infinite;
+}
+
+@keyframes library-background-activity-sheen {
+  0% {
+    opacity: 0.28;
+    transform: translate3d(-145%, 0, 0);
+  }
+  45%, 60% {
+    opacity: 0.72;
+  }
+  100% {
+    opacity: 0.28;
+    transform: translate3d(410%, 0, 0);
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  body.library-background-activity-active .library-background-activity:not([hidden])::before {
+    animation: none;
+    opacity: 0.58;
+    transform: translate3d(0, 0, 0);
+  }
+}
+
+/* Keep hidden documents and collapsed sidebars from running offscreen motion. */
+body[data-document-hidden="true"] .library-background-activity::before,
+.main-layout.sidebar-collapsed .library-background-activity::before {
+  animation: none;
+}
+
+.main-layout.sidebar-collapsed .library-background-activity {
+  visibility: hidden;
+}
+
+body.library-background-activity-active[data-document-hidden="true"] .library-background-activity:not([hidden])::before,
+body.library-background-activity-active.reader-visible .library-background-activity:not([hidden])::before {
+  animation: none;
+}

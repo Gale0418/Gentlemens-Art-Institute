@@ -611,6 +611,10 @@ window.GAIL10n.register({
     "en": "Choose library theme",
     "ja": "書庫テーマを選択"
   },
+  "亞歷山大": {
+    "en": "Alexandria",
+    "ja": "アレクサンドリア"
+  },
   "赤晶戰殿": {
     "en": "Crimson Crystal Citadel",
     "ja": "赤晶戦殿"

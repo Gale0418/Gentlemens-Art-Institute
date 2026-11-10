@@ -1,0 +1,174 @@
+/* Theme colors, photographic library backgrounds, and the compact theme picker. */
+:root,
+html[data-theme="midnight"] {
+  --library-veil: rgba(20, 5, 8, 0.76);
+  --library-veil-edge: rgba(20, 5, 8, 0.88);
+  --library-panel-tint: rgba(20, 5, 8, 0.2);
+  --library-background-url: url("./assets/library-backgrounds/crimson-mac.jpg");
+}
+
+html[data-theme="sakura"] {
+  --library-veil: rgba(5, 5, 6, 0.64);
+  --library-veil-edge: rgba(5, 5, 6, 0.84);
+  --library-panel-tint: rgba(5, 5, 6, 0.2);
+  --library-background-url: url("./assets/library-backgrounds/obsidian-mac.jpg");
+}
+
+html[data-theme="ink"] {
+  --library-veil: rgba(3, 20, 13, 0.72);
+  --library-veil-edge: rgba(1, 10, 6, 0.88);
+  --library-panel-tint: rgba(3, 20, 13, 0.2);
+  --library-background-url: url("./assets/library-backgrounds/emerald-mac.jpg");
+}
+
+html[data-theme="aurora"] {
+  --library-veil: rgba(18, 13, 5, 0.64);
+  --library-veil-edge: rgba(9, 6, 2, 0.84);
+  --library-panel-tint: rgba(22, 16, 4, 0.2);
+  --library-background-url: url("./assets/library-backgrounds/gilded-throne-mac.jpg");
+}
+
+html[data-theme="alexandria"] {
+  color-scheme: dark;
+  --bg-color: #17130e;
+  --card-bg: rgba(38, 30, 21, 0.9);
+  --panel-bg: rgba(20, 16, 12, 0.97);
+  --card-border: rgba(205, 158, 105, 0.2);
+  --card-hover-border: rgba(218, 169, 113, 0.82);
+  --accent-color: #c28b58;
+  --accent-hover: #d5a574;
+  --accent-grad: linear-gradient(110deg, #bc895b 0%, #d6ac80 38%, #e3bd91 72%, #c69b6b 100%);
+  --accent: #c28b58;
+  --on-accent: #21170d;
+  --text-main: #f6eee2;
+  --text-muted: #d3c2aa;
+  --text-dark: #baa487;
+  --text-light: #f6eee2;
+  --bg-hover: rgba(205, 158, 105, 0.1);
+  --border: rgba(205, 158, 105, 0.2);
+  --shadow-sm: 0 7px 20px rgba(8, 5, 2, 0.38);
+  --shadow-md: 0 20px 44px rgba(8, 5, 2, 0.5);
+  --shadow-lg: 0 34px 76px rgba(8, 5, 2, 0.68);
+  --shadow-glow: 0 18px 46px rgba(194, 139, 88, 0.12);
+  --radius-sm: 9px;
+  --radius-md: 15px;
+  --radius-lg: 22px;
+  --theme-bg: #17130e;
+  --theme-bg-deep: #0b0907;
+  --theme-header: rgba(23, 19, 14, 0.96);
+  --theme-sidebar: rgba(15, 12, 9, 0.94);
+  --theme-surface: #251e16;
+  --theme-surface-raised: #33271b;
+  --theme-soft: rgba(205, 158, 105, 0.08);
+  --theme-line: rgba(205, 158, 105, 0.2);
+  --theme-pattern: rgba(205, 158, 105, 0.38);
+  --material-panel: linear-gradient(138deg, rgba(61, 43, 27, 0.98), rgba(19, 15, 11, 0.98) 44%, rgba(78, 54, 32, 0.96));
+  --material-raised: linear-gradient(145deg, rgba(98, 69, 42, 0.78), rgba(31, 24, 17, 0.96) 58%, rgba(194, 139, 88, 0.14));
+  --material-sheen: rgba(241, 211, 174, 0.44);
+  --material-edge: rgba(205, 158, 105, 0.54);
+  --library-veil: rgba(23, 19, 14, 0.8);
+  --library-veil-edge: rgba(11, 9, 7, 0.9);
+  --library-panel-tint: rgba(23, 19, 14, 0.22);
+  --library-background-url: url("./assets/library-backgrounds/alexandria-mac.jpg");
+  --focus-ring: #dfb887;
+}
+
+html,
+body {
+  background: var(--theme-bg);
+}
+
+.app-container {
+  background-color: var(--surface-canvas);
+  background-image: linear-gradient(var(--library-veil), var(--library-veil) 30%, var(--library-veil-edge)), var(--library-background-url);
+  background-position: center;
+  background-repeat: no-repeat;
+  background-size: cover;
+}
+
+@media (orientation: landscape) and (max-aspect-ratio: 3/2) {
+  :root,
+  html[data-theme="midnight"] { --library-background-url: url("./assets/library-backgrounds/crimson-ipad-landscape.jpg"); }
+  html[data-theme="sakura"] { --library-background-url: url("./assets/library-backgrounds/obsidian-ipad-landscape.jpg"); }
+  html[data-theme="ink"] { --library-background-url: url("./assets/library-backgrounds/emerald-ipad-landscape.jpg"); }
+  html[data-theme="aurora"] { --library-background-url: url("./assets/library-backgrounds/gilded-throne-ipad-landscape.jpg"); }
+  html[data-theme="alexandria"] { --library-background-url: url("./assets/library-backgrounds/alexandria-ipad-landscape.jpg"); }
+}
+
+@media (orientation: portrait) {
+  :root,
+  html[data-theme="midnight"] { --library-background-url: url("./assets/library-backgrounds/crimson-ipad-portrait.jpg"); }
+  html[data-theme="sakura"] { --library-background-url: url("./assets/library-backgrounds/obsidian-ipad-portrait.jpg"); }
+  html[data-theme="ink"] { --library-background-url: url("./assets/library-backgrounds/emerald-ipad-portrait.jpg"); }
+  html[data-theme="aurora"] { --library-background-url: url("./assets/library-backgrounds/gilded-throne-ipad-portrait.jpg"); }
+  html[data-theme="alexandria"] { --library-background-url: url("./assets/library-backgrounds/alexandria-ipad-portrait.jpg"); }
+}
+
+/* The background spans the header and docked side panels. Mobile drawers stay opaque. */
+.app-header,
+.continue-panel,
+.main-layout:not(.library-panels-narrow) .sidebar,
+.main-layout:not(.library-panels-narrow) .comic-inspector {
+  background: var(--library-panel-tint) !important;
+}
+
+.app-header {
+  backdrop-filter: none;
+  -webkit-backdrop-filter: none;
+}
+
+html[data-theme="alexandria"] .theme-option {
+  color: var(--text-main);
+}
+
+.theme-picker {
+  grid-template-columns: repeat(auto-fit, minmax(min(100%, 112px), 1fr));
+}
+
+.theme-option {
+  min-height: 44px;
+  color: var(--text-main);
+}
+
+.theme-option:focus-visible {
+  outline: 2px solid var(--focus-ring);
+  outline-offset: 2px;
+}
+
+.theme-option strong {
+  line-height: 1.35;
+}
+
+.theme-option small {
+  display: none;
+}
+
+.theme-preview {
+  display: block;
+  height: auto;
+  aspect-ratio: 16 / 10;
+  padding: 0;
+  background: var(--theme-bg-deep);
+}
+
+.theme-preview::before,
+.theme-preview i {
+  display: none;
+}
+
+.theme-preview img {
+  display: block;
+  width: 100%;
+  height: 100%;
+  object-fit: cover;
+}
+
+html[data-theme="sakura"] { --focus-ring: #ffffff; }
+html[data-theme="ink"] { --focus-ring: #75ffb5; }
+html[data-theme="aurora"] { --focus-ring: #ffe66b; }
+
+@media (max-width: 720px) {
+  .theme-picker {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+}

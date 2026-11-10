@@ -11,6 +11,9 @@ colors:
   text-secondary: "#d8aaa9"
   text-tertiary: "#c08d8f"
   line-subtle: "rgba(255, 151, 157, 0.18)"
+  alexandria-canvas: "#17130e"
+  alexandria-accent: "#c28b58"
+  alexandria-on-accent: "#21170d"
 typography:
   display:
     fontFamily: "Songti TC, Noto Serif TC, YuMincho, serif"
@@ -61,7 +64,7 @@ components:
 
 **Creative North Star: "深夜私人藏書室"**
 
-紳士藝術研究所 Gentlemen's Art Institute 把大型私人收藏呈現成一座安靜但有生命的深夜藏書室：內容永遠是主體，控制區則像可靠的整理桌。預設 Midnight 主題以酒紅黑、暖紅主操作與低亮度文字層級維持沉浸感；Sakura、Ink 與 Aurora 是同一結構的換裝，而不是各自另造元件。
+紳士藝術研究所 Gentlemen's Art Institute 把大型私人收藏呈現成一座安靜但有生命的深夜藏書室：內容永遠是主體，控制區則像可靠的整理桌。預設 Midnight 主題以酒紅黑、暖紅主操作與低亮度文字層級維持沉浸感；Sakura、Ink、Aurora 與 Alexandria 共用同一結構和操作元件。
 
 介面密度偏工作型，但群組、標題和狀態要清楚。整理模式直接延伸既有書架，批次列貼近選取內容，metadata inspector 沿用右側閱讀順序。
 
@@ -107,6 +110,20 @@ components:
 ## Layout
 
 桌面以頂部工具列、左側收藏導覽、中央書架和右側 inspector 組成。書架卡片採響應式網格；整理模式的批次列固定在內容底部，1280px 以下轉為單欄，760px 以下縮到安全邊界，粗指標裝置的控制高度至少 44px。內容可分頁或虛擬化，不得同時掛載整個五千本書架。
+
+### 藏書庫背景
+
+| 儲存鍵 | 主題 | 圖片前綴 |
+| --- | --- | --- |
+| `midnight` | 赤晶戰殿 | `crimson` |
+| `sakura` | 黑鉻指揮艙 | `obsidian` |
+| `ink` | 翡翠反應爐 | `emerald` |
+| `aurora` | 鎏金王座 | `gilded-throne` |
+| `alexandria` | 亞歷山大 | `alexandria` |
+
+`public/library-ambience.css` 管理五套配色與照片取景；資產位於 `public/assets/library-backgrounds/`。每套使用 Mac、iPad 橫向、iPad 直向三張獨立構圖，以視窗比例選取。照片覆蓋整個書架視窗，頂欄與固定側欄透出相同底圖；窄螢幕的浮動抽屜保留不透明底色。深色漸層壓低場景亮度，封面與主要文字維持視覺優先，閱讀器維持黑底。
+
+背景只使用靜態 JPG，沒有連續動畫、模糊濾鏡或整組全尺寸圖片預載。主題選擇器使用小型照片預覽、單一 Tab 停駐點及方向鍵／Home／End 操作。既有四種儲存鍵保持相容；Alexandria 新增暖石色與銅金色語意 tokens，其主按鈕漸層各色階與文字的對比至少 4.5:1。
 
 ## Elevation & Depth
 

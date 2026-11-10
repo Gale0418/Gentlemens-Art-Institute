@@ -1490,7 +1490,7 @@ function requestPriorityLibraryScan(status = state.scanStatus, favorites = state
 }
 
 const THEME_STORAGE_KEY = 'gai:theme';
-const THEMES = new Set(['midnight', 'sakura', 'ink', 'aurora']);
+const THEMES = new Set(['midnight', 'sakura', 'ink', 'aurora', 'alexandria']);
 const LIBRARY_CARD_SIZE_STORAGE_KEY = 'gai:libraryCardSize';
 const SIDEBAR_COLLAPSED_STORAGE_KEY = 'gai:sidebarCollapsed';
 const INSPECTOR_COLLAPSED_STORAGE_KEY = 'gai:inspectorCollapsed';
@@ -1501,7 +1501,8 @@ const THEME_COLORS = {
   midnight: '#140508',
   sakura: '#050506',
   ink: '#03140d',
-  aurora: '#161004'
+  aurora: '#161004',
+  alexandria: '#17130e'
 };
 
 // 元素選取器
@@ -1857,9 +1858,31 @@ function applyTheme(theme, { persist = true } = {}) {
     const selected = button.dataset.themeOption === nextTheme;
     button.classList.toggle('active', selected);
     button.setAttribute('aria-checked', String(selected));
+    button.tabIndex = selected ? 0 : -1;
   });
 
   if (persist) localStorage.setItem(THEME_STORAGE_KEY, nextTheme);
+}
+
+function handleThemePickerKeydown(event) {
+  const options = Array.from(elements.themePicker?.querySelectorAll('[data-theme-option]') || []);
+  if (!options.length) return;
+
+  const currentIndex = options.indexOf(event.target.closest('[data-theme-option]'));
+  if (currentIndex < 0) return;
+
+  let nextIndex;
+  if (event.key === 'ArrowRight' || event.key === 'ArrowDown') nextIndex = (currentIndex + 1) % options.length;
+  else if (event.key === 'ArrowLeft' || event.key === 'ArrowUp') nextIndex = (currentIndex - 1 + options.length) % options.length;
+  else if (event.key === 'Home') nextIndex = 0;
+  else if (event.key === 'End') nextIndex = options.length - 1;
+  else return;
+
+  event.preventDefault();
+  event.stopPropagation();
+  const nextOption = options[nextIndex];
+  nextOption.focus();
+  applyTheme(nextOption.dataset.themeOption);
 }
 
 function normalizeLibraryCardSize(value) {
@@ -2799,6 +2822,7 @@ function bindEvents() {
     const option = event.target.closest('[data-theme-option]');
     if (option) applyTheme(option.dataset.themeOption);
   });
+  elements.themePicker?.addEventListener('keydown', handleThemePickerKeydown);
   elements.libraryCardSize?.addEventListener('input', event => {
     applyLibraryCardSize(event.currentTarget.value);
   });

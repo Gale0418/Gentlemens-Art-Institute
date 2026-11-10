@@ -7524,31 +7524,74 @@ html:not([data-i18n-ready]) body {
   }
 }
 
-/* 靜態圖書館紋理：只在書庫內容區呈現。 */
-.content-area {
-  position: relative;
-  isolation: isolate;
+/* 全視窗共用一張靜態藏書庫，閱讀器仍由既有不透明覆層呈現。 */
+:root,
+html[data-theme="midnight"] {
+  --library-veil: rgba(20, 5, 8, 0.76);
+  --library-veil-edge: rgba(20, 5, 8, 0.88);
+  --library-panel-tint: rgba(20, 5, 8, 0.22);
 }
 
-.content-area::before {
-  position: absolute;
-  inset: 0;
-  z-index: -1;
-  background-color: var(--accent-color);
-  content: "";
-  opacity: 0.075;
-  pointer-events: none;
-  -webkit-mask-image: url("./assets/ambient-library.svg");
-  mask-image: url("./assets/ambient-library.svg");
-  mask-repeat: no-repeat;
-  mask-position: right bottom;
-  mask-size: min(100%, 980px) auto;
+html[data-theme="sakura"] {
+  --library-veil: rgba(5, 5, 6, 0.76);
+  --library-veil-edge: rgba(5, 5, 6, 0.88);
+  --library-panel-tint: rgba(5, 5, 6, 0.22);
+}
+
+html[data-theme="ink"] {
+  --library-veil: rgba(3, 20, 13, 0.76);
+  --library-veil-edge: rgba(3, 20, 13, 0.88);
+  --library-panel-tint: rgba(3, 20, 13, 0.22);
+}
+
+html[data-theme="aurora"] {
+  --library-veil: rgba(22, 16, 4, 0.76);
+  --library-veil-edge: rgba(22, 16, 4, 0.88);
+  --library-panel-tint: rgba(22, 16, 4, 0.22);
+}
+
+.aurora-bg {
+  display: none;
+}
+
+.app-container {
+  background-color: var(--surface-canvas);
+  background-image:
+    linear-gradient(var(--library-veil), var(--library-veil) 32%, var(--library-veil-edge)),
+    url("./assets/ambient-library-grand.jpg");
+  background-position: center;
+  background-size: cover;
+  background-repeat: no-repeat;
+}
+
+.content-area {
+  position: relative;
+}
+
+/* 並排側欄延續底圖；窄螢幕抽屜保留既有實色，避免透出下面的書名。 */
+.app-header,
+.continue-panel,
+.main-layout:not(.library-panels-narrow) .sidebar,
+.main-layout:not(.library-panels-narrow) .comic-inspector {
+  background: var(--library-panel-tint) !important;
+}
+
+/* 保留木紋連續性，不讓舊的玻璃模糊把頂欄抹成實色。 */
+.app-header {
+  backdrop-filter: none;
+  -webkit-backdrop-filter: none;
+}
+
+@media (orientation: portrait) {
+  .app-container {
+    background-position: 28% center;
+  }
 }
 
 @media (max-width: 760px) {
-  .content-area::before {
-    opacity: 0.05;
-    mask-position: right -16% bottom;
-    mask-size: 112% auto;
+  .app-container {
+    background-image:
+      linear-gradient(var(--library-veil-edge), var(--library-veil-edge)),
+      url("./assets/ambient-library-grand.jpg");
   }
 }

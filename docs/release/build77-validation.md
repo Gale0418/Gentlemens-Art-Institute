@@ -1,8 +1,8 @@
-# 第77版：寫實藏書庫背景驗證
+# 第77版歷史紀錄：寫實藏書庫背景驗證
 
 版本：`1.0.4 (77)`。日期：2026-11-10。基底：`f345e2c`。
 
-目前狀態：Mac 最新候選已完成實機驗收；iPad 頂欄修正版已建置及驗簽，但裝置鎖定且傳輸曾中斷，尚未安裝及完成橫直畫面驗收。尚未推送 GitHub main。
+範圍註記：以下記錄第77版當時的驗證與交付狀態，不代表目前第78版狀態，也不構成等待 iPad 驗收後才能交付的條件。依使用者本輪最新安排，第78版採 Mac 單獨交付，iPad 延後處理；見[第78版紀錄](build78-validation.md)。
 
 ## 變更範圍
 
@@ -25,7 +25,7 @@
 | iPad 安裝保留 | 較早候選已安裝77版，更新前後241筆完整進度、57筆完整歷史完全一致；不代表最新頂欄候選已安裝 |
 | iPad 最新候選 | IPA建置／簽章／版本／CSS與JPEG驗證通過；安裝因裝置連線中斷失敗，新WDA目前明確等待解鎖，橫直、換書與冷啟動尚待驗收 |
 
-Mac 測試使用自製風景 CBZ，完成後還原自動語言、紅色主題、150px封面與 `/Volumes/NASDisk/H`。NAS 根目錄及原有續讀已顯示，使用者確認的第4頁仍保留；不宣稱已量測完整 NAS 掃描時間。
+Mac 測試使用自製風景 CBZ，完成後還原自動語言、紅色主題、150px封面與既有 NAS 來源。NAS 根目錄及原有續讀已顯示，使用者確認的第4頁仍保留；不宣稱已量測完整 NAS 掃描時間。
 
 Mac 的 ad hoc 更新曾遇 Documents 授權 code requirement 不匹配，系統記錄進入 prompting，讀檔停在 `open(2)`；沒有明確 deny 或 Rust deadlock 證據。原生選擇器重選該資料夾後立即列出書目。同一程式、同一份 CBZ 放入不受 Documents 限制的 Caches 後，索引、封面、換書與冷啟動正常。沒有因此擴大磁碟權限或修改產品邏輯。
 
@@ -35,7 +35,7 @@ Mac 的 ad hoc 更新曾遇 Documents 授權 code requirement 不匹配，系統
 
 最終來源 manifest SHA-256：`791d183c6993d430b6aba39f57ebf6390ff154d494ecee8447275cf128c8b5d2`（102 runtime、25 test files；iOS 產生的 Xcode metadata 另列生成例外並做語意驗證）。Mac 最終 binary SHA-256：`9f8e69f00b98d1edc8ec677d3693048d6d7ad3f9b92227663f53bf2cdd823197`。
 
-iPad 最新 IPA SHA-256：`f1a084ea327fcadc7cde91be95911486e2d63349a0cd1cde3b9f60e6c43d97dd`。目前仍需連線並解鎖 iPad，完成最新候選安裝、實機驗收與最後獨立複審，才會推送 main。
+iPad 最新 IPA SHA-256：`f1a084ea327fcadc7cde91be95911486e2d63349a0cd1cde3b9f60e6c43d97dd`。在第77版紀錄完成時，該候選尚未安裝及完成實機驗收；這是當時的狀態，不是第78版 Mac 交付的前置條件。
 
 本輪目標為兩平台本機安裝與 GitHub main 交付，未送 App Store Connect 或 TestFlight。Mac 使用既有本機 ad hoc 簽章；不代表完成 notarization 或商店發布。
 

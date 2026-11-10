@@ -5,7 +5,7 @@
   <meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover">
   <meta name="description" content="Gentlemen's Art Institute, an immersive local manga reader for your private collection." data-i18n-content="紳士藝術研究所，專為私人漫畫收藏打造的本機閱讀器。">
   <meta name="theme-color" content="#140508">
-  <title data-i18n="紳士藝術研究所 Gentlemen's Art Institute | 本機漫畫閱讀器">Gentlemen's Art Institute | Local Manga Reader</title>
+  <title data-i18n="紳士藝術研究所 · GAI">紳士藝術研究所 · GAI</title>
   <script>
     try {
       document.documentElement.dataset.theme = localStorage.getItem('gai:theme') || 'midnight';
@@ -63,7 +63,7 @@
       <div class="logo">
         <span class="logo-emoji">✦</span>
         <div class="logo-text">
-          <h1 data-i18n="紳士藝術研究所 Gentlemen's Art Institute">紳士藝術研究所 Gentlemen's Art Institute</h1>
+          <h1 data-i18n="紳士藝術研究所 · GAI">紳士藝術研究所 · GAI</h1>
           <p data-i18n="本機與 NAS 漫畫閱讀器">本機與 NAS 漫畫閱讀器</p>
         </div>
       </div>
@@ -413,15 +413,17 @@
         <span data-i18n="ui.fullscreen">全螢幕</span></button></div>
       </section>
       <section class="reader-popover reader-ai-tools-popover" id="reader-ai-tools-panel" data-reader-panel="ai" role="dialog" aria-labelledby="reader-ai-tools-title" hidden>
-        <div class="reader-popover-heading"><h3 id="reader-ai-tools-title" data-i18n="ui.readerAi">AI 工具</h3><button type="button" class="reader-panel-close" data-reader-panel-close aria-label="關閉" data-i18n-aria-label="ui.closeReaderAi"><i class="fa-solid fa-xmark" aria-hidden="true"></i></button></div><button class="control-action-btn ai-page-btn" id="btn-ai-explain" title="請艦載 AI 說明目前頁面" data-i18n-title="請艦載 AI 說明目前頁面">
-          <i class="fa-solid fa-wand-sparkles"></i>
-          <span data-i18n="ui.readerAiExplain">說明本頁</span>
-        </button><button class="control-action-btn ai-page-btn" id="btn-ai-auto-explain" type="button" aria-pressed="false" title="開啟全書隨讀翻譯；只分析實際翻到的頁面" data-i18n-title="開啟全書隨讀翻譯；只分析實際翻到的頁面">
+        <div class="reader-popover-heading"><h3 id="reader-ai-tools-title" data-i18n="ui.readerAi">AI 工具</h3><button type="button" class="reader-panel-close" data-reader-panel-close aria-label="關閉" data-i18n-aria-label="ui.closeReaderAi"><i class="fa-solid fa-xmark" aria-hidden="true"></i></button></div><button class="control-action-btn ai-page-btn" id="btn-ai-explain" title="精簡意譯目前頁面的對白與重點內容。" data-i18n-title="精簡意譯目前頁面的對白與重點內容。">
+          <svg class="ai-auto-icon" viewBox="0 0 24 24" aria-hidden="true">
+            <path d="m4 19 11-11 4 4L8 23ZM13 10l4 4M5 3v6M2 6h6M19 2v4M17 4h4"></path>
+          </svg>
+          <span data-i18n="ui.readerAiExplain">翻譯本頁</span>
+        </button><button class="control-action-btn ai-page-btn" id="btn-ai-auto-explain" type="button" aria-pressed="false" title="自動翻譯實際翻到的頁面。" data-i18n-title="自動翻譯實際翻到的頁面。">
           <svg class="ai-auto-icon" viewBox="0 0 24 24" aria-hidden="true">
             <path d="M4 5h9M8.5 3v2M6 5c.6 3 2.2 5.2 5 6.5M11 5c-.7 3.4-3 6.2-6.5 8"></path>
             <path d="M14 19l3.5-8 3.5 8M15.2 16h4.6"></path>
           </svg>
-          <span data-i18n="ui.readerAiAuto">隨讀說明</span>
+          <span data-i18n="ui.readerAiAuto">隨讀翻譯</span>
         </button><p class="reader-panel-note" id="reader-ai-hint" hidden></p>
       </section>
     </div>
@@ -449,8 +451,8 @@
     </div>
 
     <aside class="ai-page-panel" id="ai-page-panel" aria-live="polite" aria-labelledby="ai-page-title" hidden>
+      <h3 id="ai-page-title" class="visually-hidden"><span data-i18n="艦載 AI">艦載 AI</span></h3>
       <div class="ai-page-panel-header">
-        <h3 id="ai-page-title"><i class="fa-solid fa-wand-sparkles"></i><span data-i18n="艦載 AI">艦載 AI</span></h3>
         <button id="ai-page-close" aria-label="關閉艦載 AI 面板" data-i18n-aria-label="關閉艦載 AI 面板"><i class="fa-solid fa-xmark"></i></button>
       </div>
       <p id="ai-page-result" data-i18n="按下 AI 按鈕後，只會送出目前這一頁；整理候選必須由你逐筆套用。">按下 AI 按鈕後，只會送出目前這一頁；整理候選必須由你逐筆套用。</p>

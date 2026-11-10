@@ -1404,6 +1404,7 @@ let state = {
   brightness: Number(readStoredSetting('readerBrightness')) || 100,
   aiAutoExplain: false,
   aiExplainCache: new Map(),
+  aiExplainDisplayedKey: '',
   aiExplainInFlight: false,
   aiExplainActiveRequest: null,
   aiExplainPendingPage: null,
@@ -11471,8 +11472,8 @@ function setAiSessionActionAvailability() {
     button.setAttribute('aria-disabled', String(mutationBlocked));
     const hint = readerText('請先到設定輸入 API Key 並啟用艦載 AI。');
     const defaultTitle = button === elements.btnAiAutoExplain
-      ? readerText('開啟全書隨讀翻譯；只分析實際翻到的頁面')
-      : readerText('請艦載 AI 說明目前頁面');
+      ? readerText('自動翻譯實際翻到的頁面。')
+      : readerText('精簡意譯目前頁面的對白與重點內容。');
     button.title = mutationBlocked ? hint : (configured ? defaultTitle : `${defaultTitle} · ${hint}`);
     button.dataset.aiDisabledHint = configured ? '' : hint;
   });
@@ -11832,6 +11833,9 @@ function syncReaderRotationUi() {
 
 function setAiPagePanelVisible(visible) {
   elements.aiPagePanel.hidden = !visible;
+  state.aiExplainDisplayedKey = visible && state.currentComic
+    ? aiExplainCacheKey(state.currentComic.id, state.currentPageIndex, getAiExplainLocale(), getComicSourceId(state.currentComic))
+    : '';
   elements.readerOverlay.classList.toggle('ai-panel-open', visible);
   scheduleReaderImageTransformRefresh();
 }
@@ -11875,8 +11879,31 @@ function toggleAutoPageExplanation() {
 }
 
 function scheduleAutoPageExplanation() {
-  if (!state.aiAutoExplain || !state.currentComicPages.length) return;
   clearTimeout(state.aiExplainTimer);
+  state.aiExplainTimer = null;
+  if (!state.currentComic || !state.currentComicPages.length) {
+    if (!elements.aiPagePanel.hidden) setAiPagePanelVisible(false);
+    return;
+  }
+  const key = aiExplainCacheKey(state.currentComic.id, state.currentPageIndex, getAiExplainLocale(), getComicSourceId(state.currentComic));
+  if (!state.aiAutoExplain) {
+    // Repainting the same page keeps its manual result; a new page cannot show old text.
+    if (!elements.aiPagePanel.hidden && state.aiExplainDisplayedKey !== key) setAiPagePanelVisible(false);
+    return;
+  }
+  const cached = state.aiExplainCache.get(key);
+  if (cached) {
+    setAiPagePanelVisible(true);
+    elements.aiPageResult.textContent = cached;
+    return;
+  }
+  if (!state.aiSessionStatus?.configured || isBuiltInDemoComic(state.currentComic)
+    || state.aiSessionSwitchPending || state.aiSessionMutationPending || state.aiSessionRevocationFailed) {
+    if (!elements.aiPagePanel.hidden) setAiPagePanelVisible(false);
+    return;
+  }
+  setAiPagePanelVisible(true);
+  elements.aiPageResult.textContent = readerText('正在翻譯第 {page} 頁⋯', { page: state.currentPageIndex + 1 });
   state.aiExplainTimer = setTimeout(() => requestPageExplanation(state.currentPageIndex, true), 420);
 }
 
@@ -11892,6 +11919,9 @@ function aiExplainCacheKey(comicId, pageIndex, locale = getAiExplainLocale(), so
 
 function localizeAiExplainError(error) {
   const message = error?.nativeMessage || error?.message || String(error);
+  if (/^AI_OUTPUT_INCOMPLETE:/i.test(message)) {
+    return readerText('ui.readerAiIncomplete');
+  }
   if (/請先到設定輸入艦載 AI API Key|API key.*設定|API key.*config|not configured/i.test(message)) {
     return readerText('請先到設定輸入艦載 AI API Key');
   }
@@ -11925,6 +11955,7 @@ async function requestPageExplanation(pageIndex, automatic = false) {
   const comicId = state.currentComic.id;
   const sourceId = getComicSourceId(state.currentComic);
   const locale = getAiExplainLocale();
+  const readerOperation = state.readerOperation;
   const cacheKey = aiExplainCacheKey(comicId, pageIndex, locale, sourceId);
   const cached = state.aiExplainCache.get(cacheKey);
   if (cached) {
@@ -11941,47 +11972,59 @@ async function requestPageExplanation(pageIndex, automatic = false) {
   if (state.aiExplainInFlight) {
     const active = state.aiExplainActiveRequest;
     if (active?.comicId !== comicId || active.sourceId !== sourceId
-      || active.pageIndex !== pageIndex || active.locale !== locale) {
-      state.aiExplainPendingRequest = { comicId, sourceId, pageIndex, locale, automatic };
+      || active.pageIndex !== pageIndex || active.locale !== locale
+      || active.readerOperation !== readerOperation) {
+      state.aiExplainPendingRequest = { comicId, sourceId, pageIndex, locale, automatic, readerOperation };
       state.aiExplainPendingPage = pageIndex;
     }
     return;
   }
 
   state.aiExplainInFlight = true;
-  state.aiExplainActiveRequest = { comicId, sourceId, pageIndex, locale, automatic };
+  state.aiExplainActiveRequest = { comicId, sourceId, pageIndex, locale, automatic, readerOperation };
   const sessionGeneration = state.aiSessionSwitchGeneration;
   const mutationGeneration = state.aiSessionMutationGeneration;
   state.aiExplainPendingPage = null;
   state.aiExplainPendingRequest = null;
   setAiPagePanelVisible(true);
-  elements.aiPageResult.textContent = readerText('艦載 AI 正在閱讀第 {page} 頁…', { page: pageIndex + 1 });
+  elements.aiPageResult.textContent = readerText('正在翻譯第 {page} 頁⋯', { page: pageIndex + 1 });
   elements.btnAiExplain.disabled = true;
   syncReaderRotationUi();
   try {
     const dataUrl = await pageDataUrl(state.currentComicPages[pageIndex]);
     if (sessionGeneration !== state.aiSessionSwitchGeneration
-      || mutationGeneration !== state.aiSessionMutationGeneration) return;
+      || mutationGeneration !== state.aiSessionMutationGeneration
+      || readerOperation !== state.readerOperation
+      || state.currentComic?.id !== comicId
+      || getComicSourceId(state.currentComic) !== sourceId
+      || state.currentPageIndex !== pageIndex
+      || getAiExplainLocale() !== locale
+      || (automatic && !state.aiAutoExplain)) return;
     const explanation = await eAPI.explainPage({ dataUrl, targetLocale: locale });
     if (sessionGeneration !== state.aiSessionSwitchGeneration
-      || mutationGeneration !== state.aiSessionMutationGeneration) return;
+      || mutationGeneration !== state.aiSessionMutationGeneration
+      || readerOperation !== state.readerOperation) return;
     state.aiExplainCache.set(cacheKey, explanation);
     if (state.currentComic?.id === comicId
       && getComicSourceId(state.currentComic) === sourceId
       && state.currentPageIndex === pageIndex
-      && getAiExplainLocale() === locale) {
+      && getAiExplainLocale() === locale
+      && readerOperation === state.readerOperation) {
       elements.aiPageResult.textContent = explanation;
     }
   } catch (error) {
     if (sessionGeneration !== state.aiSessionSwitchGeneration
-      || mutationGeneration !== state.aiSessionMutationGeneration) return;
+      || mutationGeneration !== state.aiSessionMutationGeneration
+      || readerOperation !== state.readerOperation) return;
     if (state.currentComic?.id === comicId
       && getComicSourceId(state.currentComic) === sourceId
       && state.currentPageIndex === pageIndex
       && getAiExplainLocale() === locale) {
       const rawMessage = error?.nativeMessage || error?.message || String(error);
       const message = localizeAiExplainError(error);
-      if (/^PRO_REQUIRED:/i.test(rawMessage)) {
+      if (/^AI_OUTPUT_INCOMPLETE:/i.test(rawMessage)) {
+        elements.aiPageResult.textContent = message;
+      } else if (/^PRO_REQUIRED:/i.test(rawMessage)) {
         setAutoPageExplanation(false);
         elements.aiPageResult.textContent = readerText('Pro 權益目前不可用，已停止全書隨讀；已完成的解說仍保留。');
         if (!automatic) window.GaiCommerce?.handleError(error);
@@ -12005,6 +12048,7 @@ async function requestPageExplanation(pageIndex, automatic = false) {
       && pendingRequest.comicId === state.currentComic?.id
       && pendingRequest.sourceId === getComicSourceId(state.currentComic)
       && pendingRequest.pageIndex === state.currentPageIndex
+      && pendingRequest.readerOperation === state.readerOperation
       && (!pendingRequest.automatic || state.aiAutoExplain)) {
       // Retry a same-page request when its locale changed while the previous
       // request was in flight; this is deliberately explicit for manual mode.

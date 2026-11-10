@@ -6345,15 +6345,6 @@ select:focus-visible,
   .tag-library-editor input,
   .tag-library-editor select { min-height: 44px; }
 }
-.ai-page-btn {
-  flex: 0 0 auto;
-  width: auto !important;
-  min-width: max-content;
-  gap: 0.4rem;
-  padding-inline: 0.75rem !important;
-  white-space: nowrap;
-}
-
 .ai-page-panel {
   position: absolute;
   z-index: 1004;
@@ -6413,15 +6404,8 @@ select:focus-visible,
   gap: 0.75rem;
 }
 
-.ai-page-panel-header h3 { margin: 0; }
-.ai-page-panel-header h3,
-.ai-page-panel p {
-  color: #fff;
-  font-weight: 800;
-  -webkit-text-stroke: 3px rgba(0, 0, 0, 0.96);
-  paint-order: stroke fill;
-  text-shadow: 0 2px 2px rgba(0, 0, 0, 0.9);
-}
+.ai-page-panel-header { justify-content: flex-end; }
+.ai-page-panel p { color: var(--text-main); font-size: 1rem; font-weight: 400; line-height: 1.75; }
 .ai-page-panel-header button {
   pointer-events: auto;
   color: #fff;
@@ -6432,7 +6416,7 @@ select:focus-visible,
 .ai-page-panel .ai-candidate-apply { pointer-events: auto; }
 #ai-page-result,
 .ai-candidate-list { pointer-events: auto; }
-.ai-page-panel p { white-space: pre-wrap; line-height: 1.7; }
+.ai-page-panel p { white-space: pre-wrap; }
 .ai-candidate-note { display: block; color: var(--text-muted); margin-top: .25rem; }
 .ai-candidate-list { display: grid; gap: .6rem; margin-top: .7rem; }
 .ai-candidate { display: grid; grid-template-columns: minmax(0,1fr) auto; gap: .6rem; align-items: center; padding: .6rem; border: 1px solid var(--border); border-radius: .7rem; }
@@ -6576,7 +6560,6 @@ select:focus-visible,
 }
 
 @media (max-width: 760px) {
-  .ai-page-btn span { display: none; }
   .reader-overlay { --ai-panel-side-width: 0px; }
   .reader-overlay.ai-panel-open .reader-viewport { padding-right: 0; }
   .ai-page-panel:not(.reader-rotated) {

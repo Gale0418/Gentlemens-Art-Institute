@@ -86,14 +86,14 @@ window.GAIL10n.register({
     "ja": "AI ツール"
   },
   "ui.readerAiExplain": {
-    "zh-Hant": "說明本頁",
-    "en": "Explain Page",
-    "ja": "ページ解説"
+    "zh-Hant": "翻譯本頁",
+    "en": "Translate Page",
+    "ja": "このページを翻訳"
   },
   "ui.readerAiAuto": {
-    "zh-Hant": "隨讀說明",
-    "en": "Auto Explain",
-    "ja": "自動解説"
+    "zh-Hant": "隨讀翻譯",
+    "en": "Auto-Translate",
+    "ja": "自動翻訳"
   },
   "ui.pageOverviewButton": {
     "zh-Hant": "頁面",
@@ -164,5 +164,10 @@ window.GAIL10n.register({
     "zh-Hant": "全螢幕",
     "en": "Fullscreen",
     "ja": "全画面表示"
+  },
+  "ui.readerAiIncomplete": {
+    "zh-Hant": "本頁翻譯未完成，請重試。",
+    "en": "Translation of this page did not complete. Please try again.",
+    "ja": "このページの翻訳が完了しませんでした。もう一度お試しください。"
   }
 });

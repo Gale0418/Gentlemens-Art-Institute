@@ -1,23 +1,19 @@
 window.GAIL10n.register({
   "紳士藝術研究所，專為私人漫畫收藏打造的本機閱讀器。": {
     "en": "Gentlemen's Art Institute, an immersive local manga reader for your private collection.",
-    "ja": "紳士藝術研究所は、プライベートな漫画コレクションのためのローカル閲覧アプリです。"
+    "ja": "紳士芸術研究所は、プライベートな漫画コレクションのためのローカル閲覧アプリです。"
   },
   "Google · Gemma 4 26B／31B（雲端 BYOK）": {
     "en": "Google · Gemma 4 26B / 31B (cloud BYOK)",
     "ja": "Google · Gemma 4 26B／31B（クラウド BYOK）"
   },
-  "紳士藝術研究所 Gentlemen's Art Institute | 本機漫畫閱讀器": {
-    "en": "Gentlemen's Art Institute | Local Manga Reader",
-    "ja": "紳士藝術研究所 Gentlemen's Art Institute | ローカル漫画リーダー"
-  },
   "跳到漫畫書架": {
     "en": "Skip to manga shelf",
     "ja": "漫画本棚へ移動"
   },
-  "紳士藝術研究所 Gentlemen's Art Institute": {
-    "en": "Gentlemen's Art Institute",
-    "ja": "紳士藝術研究所 Gentlemen's Art Institute"
+  "紳士藝術研究所 · GAI": {
+    "en": "Gentlemen's Art Institute · GAI",
+    "ja": "紳士芸術研究所 · GAI"
   },
   "本機與 NAS 漫畫閱讀器": {
     "en": "Comics from your device and NAS",
@@ -527,17 +523,17 @@ window.GAIL10n.register({
     "en": "Cycle brightness (B key)",
     "ja": "明るさを切り替え（Bキー）"
   },
-  "請艦載 AI 說明目前頁面": {
-    "en": "Ask cloud AI to explain this page",
-    "ja": "クラウドAIにこのページの説明を依頼"
+  "精簡意譯目前頁面的對白與重點內容。": {
+    "en": "Concisely translate the dialogue and key content on this page.",
+    "ja": "現在のページのセリフや要点を簡潔に翻訳します。"
   },
   "這頁在說什麼？": {
     "en": "What is happening on this page?",
     "ja": "このページは何を描いている？"
   },
-  "開啟全書隨讀翻譯；只分析實際翻到的頁面": {
-    "en": "Enable on-demand translation for the whole book; analyze only pages you actually view",
-    "ja": "本全体のオンデマンド翻訳を有効化。実際に開いたページだけを解析"
+  "自動翻譯實際翻到的頁面。": {
+    "en": "Automatically translate only the pages you open.",
+    "ja": "実際に開いたページを自動で翻訳します。"
   },
   "全書隨讀": {
     "en": "On-demand translation",

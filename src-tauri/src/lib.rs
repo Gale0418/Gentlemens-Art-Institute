@@ -2946,18 +2946,17 @@ fn default_explain_page_locale() -> String {
     "zh-Hant".to_string()
 }
 
-/// Production prompt for page explanation. Keep the requested output language
-/// explicit so the model translates dialogue before giving a short summary.
+/// Explain written dialogue and narration without adding visual commentary.
 fn explain_page_prompt(target_locale: &str) -> Result<&'static str, String> {
     match target_locale {
         "zh-Hant" => Ok(
-            "請逐句辨識並列出圖片中看見的對話原文，再提供對應的自然、簡潔繁體中文（台灣用語）翻譯；保留完整詞彙語意，不要逐字拆解，不確定處要標註。接著簡要說明這一頁漫畫在講什麼。摘要只能根據明確可見內容，不要推定角色身分，不要補上未顯示的動作、先後或因果，也不要把請求當成已發生事件；沒有對白時要明說。看不清楚或無法確定的地方要明說，不要杜撰。",
+            "請只針對本頁圖片中的「文字部分」（對白與敘事），依漫畫閱讀順序按各個對話或敘事段落提煉主要意思，以繁體中文（台灣）分短段呈現。請確保每個主要文字段落的重點都有交代，避免將整頁濃縮成單一句話而遺漏情節。讀者自己看得到畫面，不要額外描述圖像的背景、動作、外觀或構圖；若對白或敘事文字本身提到這些內容，仍要轉述其意思。可合併重複與贅詞、不需逐字翻譯，但必須保留文字中的重要數字、條件、限制、角色立場與語氣，不可虛構人物關係或因果；角色名稱可保留原名，無關的裝飾文字可略過。不設固定字數限制，僅輸出純文字短段，不附原文、不加清單編號、不使用任何 Markdown 格式。文字模糊處請簡短標記「[看不清楚]」，切勿杜撰；若本頁無文字可處理，請簡短說明「本頁無可翻譯文字」。\n輸出全文只能使用繁體中文（台灣用語）；除了角色姓名或作品專有名詞，不得留下日文原句。請特別核對誰受到能力影響、誰能看見誰，以及條件的否定或例外；文字沒有說的事情不要補上，無法辨識就標記，不要猜出另一個能力名稱。",
         ),
         "en" => Ok(
-            "Identify and list the visible dialogue line by line in its original wording, then provide a corresponding natural, concise English translation. Preserve the complete meaning of each word or phrase; do not split it into literal word-by-word fragments, and mark uncertain readings. Then briefly explain what this comic page is about. Base the summary only on clearly visible content; do not infer character identities or add actions, order, or causality that is not shown, and do not treat a request as an event that already happened. If there is no dialogue, say so. Clearly say when text or details are unclear or uncertain; do not invent content.",
+            "Focus strictly on the written text (dialogue and narration) on this comic page and convey the key meaning of each dialogue or narration block in short, natural English paragraphs following the reading order—like helping the reader smoothly understand what is written without translating word for word or sentence by sentence. The reader can already see the artwork, so do not add visual descriptions of actions, expressions, clothing, backgrounds, or composition; preserve these details when the written dialogue or narration itself mentions them. You may merge repetition and trim wordiness, but always preserve important numbers, conditions, restrictions, character stances, and tone without inventing relationships or cause-and-effect. Character names may be kept as-is, and irrelevant decorative text can be ignored. Do not impose a fixed word limit; output plain text only without source text, numbering, or Markdown formatting. Briefly mark illegible text as '[illegible]' without guessing; if there is no text on the page, briefly state 'No translatable text on this page.' Output entirely in English, apart from proper names. Check who affects whom, negations, exceptions, numbers, and limits; mark uncertain text instead of guessing another ability name.",
         ),
         "ja" => Ok(
-            "画像内で読める会話を一文ずつ原文のまま示し、その後に対応する自然で簡潔な日本語訳を示してください。各語句の完全な意味を保ち、逐語的に分解せず、読み取りに確信がない箇所は明記してください。続けて、この漫画ページの内容を短く説明してください。あらすじは明確に見えている内容だけに基づき、登場人物の身元を推測したり、表示されていない動作・順序・因果関係を補ったり、依頼をすでに起きた出来事として扱ったりしないでください。会話がない場合はその旨を明記してください。文字や内容が読めない、または確信できない場合はその旨を明記し、内容を推測して創作しないでください。",
+            "このページの画像内の「文字部分」（セリフやナレーション）のみを対象とし、漫画の読み順に沿って、各会話や叙述のまとまりの要点を、短い段落に分けて自然な日本語でわかりやすく伝えてください。一語一句の逐語訳や文ごとの対訳ではなく、読者が文字の内容をスムーズに理解できるよう転述してください。絵は読者自身が見ているため、背景、動作、外見、構図などを絵から推測して付け加えないでください。ただし、セリフや叙述自体に書かれている内容は省かないでください。重複や冗長な表現はまとめて構いませんが、文字に含まれる重要な数値、条件、制約、キャラクターの立場や口調は必ず残し、人間関係や因果関係を創作しないでください。人名は原表記のままで構わず、無関係な装飾文字は省いてください。固定の文字数制限は設けず、プレーンテキストのみを出力し、原文の併記、番号付け、Markdown記法は一切使用しないでください。不鮮明な文字は推測せず短く「[判読不能]」と記し、対象となる文字がない場合は「このページに翻訳可能な文字はありません」と短く記載してください。 固有名詞を除き、出力はすべて日本語にしてください。誰が誰に影響するか、否定、例外、数値や条件を確認し、不確かな能力名を創作しないでください。",
         ),
         unknown => Err(format!("不支援的 AI 輸出語言：{unknown}")),
     }
@@ -3135,8 +3134,16 @@ fn macos_ai_keychain_load(provider: &str) -> Result<String, String> {
 
 #[cfg(target_os = "macos")]
 fn macos_ai_keychain_has(provider: &str) -> Result<bool, String> {
-    match security_framework::passwords::get_generic_password(MACOS_AI_KEYCHAIN_SERVICE, provider) {
-        Ok(_) => Ok(true),
+    // Presence checks return item attributes only; they do not read the secret.
+    let mut options = security_framework::item::ItemSearchOptions::new();
+    options
+        .class(security_framework::item::ItemClass::generic_password())
+        .service(MACOS_AI_KEYCHAIN_SERVICE)
+        .account(provider)
+        .load_attributes(true)
+        .limit(1);
+    match options.search() {
+        Ok(items) => Ok(!items.is_empty()),
         Err(error) if error.code() == MACOS_ERR_SEC_ITEM_NOT_FOUND => Ok(false),
         Err(error) => Err(format!("macOS Keychain 查詢 AI API Key 失敗：{error}")),
     }
@@ -3450,40 +3457,76 @@ async fn revoke_ai_session_config(state: State<'_, Arc<AppState>>) -> Result<(),
     Ok(())
 }
 
+const AI_OUTPUT_INCOMPLETE_PREFIX: &str = "AI_OUTPUT_INCOMPLETE:";
+
 fn response_text(value: &serde_json::Value) -> Option<String> {
-    value
-        .get("output")?
-        .as_array()?
-        .iter()
-        .flat_map(|item| {
-            item.get("content")
-                .and_then(serde_json::Value::as_array)
-                .into_iter()
-                .flatten()
-        })
-        .find(|item| {
-            matches!(
-                item.get("type").and_then(serde_json::Value::as_str),
-                Some("output_text" | "refusal")
-            )
-        })
-        .and_then(|item| {
-            item.get("text")
-                .or_else(|| item.get("refusal"))
-                .and_then(serde_json::Value::as_str)
-        })
-        .map(str::to_string)
+    let content = value.get("output")?.as_array()?.iter().flat_map(|item| {
+        item.get("content")
+            .and_then(serde_json::Value::as_array)
+            .into_iter()
+            .flatten()
+    });
+    let mut text = String::new();
+    let mut found_text = false;
+    for item in content {
+        match item.get("type").and_then(serde_json::Value::as_str) {
+            Some("output_text") => {
+                if let Some(segment) = item.get("text").and_then(serde_json::Value::as_str) {
+                    text.push_str(segment);
+                    found_text = true;
+                }
+            }
+            Some("refusal") if !found_text => {
+                if let Some(refusal) = item.get("refusal").and_then(serde_json::Value::as_str) {
+                    return Some(refusal.to_string());
+                }
+            }
+            _ => {}
+        }
+    }
+    (found_text && !text.trim().is_empty()).then_some(text)
+}
+
+fn openai_response_text(value: &serde_json::Value) -> Result<Option<String>, String> {
+    match value.pointer("/status").and_then(serde_json::Value::as_str) {
+        Some("incomplete") => Err(format!(
+            "{AI_OUTPUT_INCOMPLETE_PREFIX}OpenAI response status is incomplete"
+        )),
+        Some("completed") => Ok(response_text(value)),
+        _ => Ok(None),
+    }
 }
 
 fn gemma_response_text(value: &serde_json::Value) -> Option<String> {
-    value
+    let mut text = String::new();
+    let mut found_text = false;
+    for part in value
         .pointer("/candidates/0/content/parts")?
         .as_array()?
         .iter()
         .filter(|part| part.get("thought").and_then(serde_json::Value::as_bool) != Some(true))
-        .filter_map(|part| part.get("text").and_then(serde_json::Value::as_str))
-        .next_back()
-        .map(str::to_string)
+    {
+        if let Some(segment) = part.get("text").and_then(serde_json::Value::as_str) {
+            text.push_str(segment);
+            found_text = true;
+        }
+    }
+    (found_text && !text.trim().is_empty()).then_some(text)
+}
+
+fn gemma_response_result(value: &serde_json::Value) -> Result<Option<String>, String> {
+    let finish_reason = value
+        .pointer("/candidates/0/finishReason")
+        .and_then(serde_json::Value::as_str);
+    match finish_reason {
+        Some("MAX_TOKENS") => Err(format!(
+            "{AI_OUTPUT_INCOMPLETE_PREFIX}Gemma 4 reached its output token limit"
+        )),
+        Some("STOP") => Ok(gemma_response_text(value)),
+        // Safety and other non-terminal finishes must not expose partial text.
+        // The caller retains its existing reason-based display for these cases.
+        _ => Ok(None),
+    }
 }
 
 fn gemma_model_order(request_number: u64) -> [&'static str; 2] {
@@ -3559,11 +3602,19 @@ async fn call_ai(
     expected_generation: u64,
     images: &[(&str, &str)],
     prompt: &str,
+    reasoning_effort: &str,
 ) -> Result<AiCompletion, String> {
     let api_key = config.api_key.clone();
-    call_ai_inner(state, config, expected_generation, images, prompt)
-        .await
-        .map_err(|error| redact_ai_error(error, &api_key))
+    call_ai_inner(
+        state,
+        config,
+        expected_generation,
+        images,
+        prompt,
+        reasoning_effort,
+    )
+    .await
+    .map_err(|error| redact_ai_error(error, &api_key))
 }
 
 async fn call_ai_inner(
@@ -3572,6 +3623,7 @@ async fn call_ai_inner(
     expected_generation: u64,
     images: &[(&str, &str)],
     prompt: &str,
+    reasoning_effort: &str,
 ) -> Result<AiCompletion, String> {
     let _permit = state
         .ai_request_gate
@@ -3605,9 +3657,8 @@ async fn call_ai_inner(
                 .bearer_auth(&config.api_key)
                 .json(&serde_json::json!({
                     "model": &config.model,
-                    "reasoning": { "effort": "low" },
-                    "input": [{ "role": "user", "content": content }],
-                    "max_output_tokens": 700
+                    "reasoning": { "effort": reasoning_effort },
+                    "input": [{ "role": "user", "content": content }]
                 })),
             "Luna 連線失敗：",
         )
@@ -3623,7 +3674,7 @@ async fn call_ai_inner(
                     .unwrap_or("未知錯誤")
             ));
         }
-        response_text(&value)
+        openai_response_text(&value)?
             .map(|text| AiCompletion {
                 text,
                 model: config.model,
@@ -3649,7 +3700,6 @@ async fn call_ai_inner(
                     .json(&serde_json::json!({
                         "contents": [{ "role": "user", "parts": parts.clone() }],
                         "generationConfig": {
-                            "maxOutputTokens": 700,
                             "thinkingConfig": { "thinkingLevel": "minimal" }
                         }
                     })),
@@ -3658,7 +3708,7 @@ async fn call_ai_inner(
             .await?;
             let (status, value) = limited_ai_json_response(response).await?;
             if status.is_success() {
-                return gemma_response_text(&value)
+                return gemma_response_result(&value)?
                     .map(|text| AiCompletion {
                         text,
                         model: model.to_string(),
@@ -3723,6 +3773,7 @@ async fn test_ai_session(
         generation,
         &[],
         "請只回答：艦載 AI 連線成功。不要補充其他內容。",
+        "low",
     )
     .await
     .map(|response| response.text)
@@ -3742,7 +3793,7 @@ async fn explain_page(
     }
     let prompt = explain_page_prompt(&data.target_locale)?;
     let images = [(mime, encoded)];
-    call_ai(state.inner(), config, generation, &images, prompt)
+    call_ai(state.inner(), config, generation, &images, prompt, "medium")
         .await
         .map(|response| response.text)
 }
@@ -3935,7 +3986,7 @@ async fn suggest_comic_metadata(
     let images = validate_metadata_images(&data.data_urls)?;
     let prompt = metadata_prompt(&data.target_locale)?;
     let provider = config.provider.clone();
-    let response = call_ai(state.inner(), config, generation, &images, prompt)
+    let response = call_ai(state.inner(), config, generation, &images, prompt, "low")
         .await
         .map_err(metadata_ai_error)?;
     let suggestions = parse_ai_metadata_suggestions(&response.text)?;
@@ -8782,16 +8833,14 @@ mod tests {
     }
 
     #[test]
-    fn explain_page_prompts_translate_then_summarize_without_inventing() {
-        for locale in ["zh-Hant", "en", "ja"] {
+    fn explain_page_prompts_focus_on_written_meaning_in_the_selected_language() {
+        for (locale, language) in [("zh-Hant", "繁體中文"), ("en", "English"), ("ja", "日本語")]
+        {
             let prompt = explain_page_prompt(locale).unwrap();
+            assert!(prompt.contains(language));
+            assert!(prompt.contains("Markdown"));
             assert!(
-                prompt.contains("summary")
-                    || prompt.contains("摘要")
-                    || prompt.contains("あらすじ")
-            );
-            assert!(
-                prompt.contains("invent") || prompt.contains("杜撰") || prompt.contains("創作")
+                prompt.contains("杜撰") || prompt.contains("guessing") || prompt.contains("創作")
             );
         }
         assert!(explain_page_prompt("fr").is_err());
@@ -9356,13 +9405,16 @@ mod tests {
                 "content": {
                     "parts": [
                         { "thought": true, "text": "internal reasoning" },
-                        { "text": "艦載 AI 連線成功。" }
+                        { "text": "艦載 AI " },
+                        { "thought": true, "text": "more internal reasoning" },
+                        { "text": "連線成功。" }
                     ]
-                }
+                },
+                "finishReason": "STOP"
             }]
         });
         assert_eq!(
-            gemma_response_text(&response).as_deref(),
+            gemma_response_result(&response).unwrap().as_deref(),
             Some("艦載 AI 連線成功。")
         );
         assert!(should_try_gemma_fallback(
@@ -9373,6 +9425,33 @@ mod tests {
         ));
         assert!(!should_try_gemma_fallback(reqwest::StatusCode::BAD_REQUEST));
         assert!(!should_try_gemma_fallback(reqwest::StatusCode::FORBIDDEN));
+    }
+
+    #[test]
+    fn gemma_max_tokens_rejects_partial_text_and_other_finish_reasons_keep_text() {
+        let truncated = serde_json::json!({
+            "candidates": [{
+                "content": { "parts": [{ "text": "半句未完成" }] },
+                "finishReason": "MAX_TOKENS"
+            }]
+        });
+        let error = gemma_response_result(&truncated).unwrap_err();
+        assert!(error.starts_with(AI_OUTPUT_INCOMPLETE_PREFIX));
+
+        let blocked = serde_json::json!({
+            "candidates": [{
+                "content": { "parts": [{ "text": "安全拒答" }] },
+                "finishReason": "SAFETY"
+            }]
+        });
+        assert_eq!(gemma_response_result(&blocked).unwrap().as_deref(), None);
+        let empty_stop = serde_json::json!({
+            "candidates": [{
+                "content": { "parts": [{ "text": " \n" }] },
+                "finishReason": "STOP"
+            }]
+        });
+        assert_eq!(gemma_response_result(&empty_stop).unwrap(), None);
     }
 
     #[test]
@@ -9417,6 +9496,47 @@ mod tests {
             response_text(&refusal).as_deref(),
             Some("The sample is too blurry to read.")
         );
+    }
+
+    #[test]
+    fn openai_completed_response_collects_all_text_and_skips_reasoning() {
+        let response = serde_json::json!({
+            "status": "completed",
+            "output": [
+                { "type": "reasoning", "content": [{ "type": "reasoning_text", "text": "hidden" }] },
+                { "type": "message", "content": [
+                    { "type": "output_text", "text": "完整" },
+                    { "type": "reasoning", "text": "hidden too" },
+                    { "type": "output_text", "text": "翻譯。" }
+                ] }
+            ]
+        });
+        assert_eq!(
+            openai_response_text(&response).unwrap().as_deref(),
+            Some("完整翻譯。")
+        );
+        let whitespace = serde_json::json!({
+            "status": "completed",
+            "output": [{ "content": [{ "type": "output_text", "text": " \n\t" }] }]
+        });
+        assert_eq!(openai_response_text(&whitespace).unwrap(), None);
+    }
+
+    #[test]
+    fn openai_incomplete_response_rejects_partial_text_and_failed_status_is_not_success() {
+        let incomplete = serde_json::json!({
+            "status": "incomplete",
+            "incomplete_details": { "reason": "max_output_tokens" },
+            "output": [{ "content": [{ "type": "output_text", "text": "半句未完成" }] }]
+        });
+        let error = openai_response_text(&incomplete).unwrap_err();
+        assert!(error.starts_with(AI_OUTPUT_INCOMPLETE_PREFIX));
+
+        let failed = serde_json::json!({
+            "status": "failed",
+            "output": [{ "content": [{ "type": "output_text", "text": "供應商失敗回覆" }] }]
+        });
+        assert_eq!(openai_response_text(&failed).unwrap().as_deref(), None);
     }
 
     #[test]

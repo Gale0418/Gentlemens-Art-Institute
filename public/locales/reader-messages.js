@@ -1177,9 +1177,9 @@ window.GAIL10n.register({
     "en": "Continuous reading is on: only viewed pages are analyzed, and each page is billed once.",
     "ja": "全書リーディングを開始しました。実際に開いたページだけを分析し、同じページは一度だけ課金されます。"
   },
-  "艦載 AI 正在閱讀第 {page} 頁…": {
-    "en": "Cloud AI is reading page {page}…",
-    "ja": "クラウドAIが{page}ページ目を読んでいます…"
+  "正在翻譯第 {page} 頁⋯": {
+    "en": "Translating page {page}…",
+    "ja": "{page} ページを翻訳中…"
   },
   "請先到設定輸入艦載 AI API Key": {
     "en": "Enter the cloud AI API key in Settings first",

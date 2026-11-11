@@ -159,9 +159,10 @@ migrate_staged_apple_project() {
   [[ -f "$project_yml" ]] || return 0
   [[ -f "$cargo_manifest" ]] || fail_stage "staged Cargo.toml is missing"
 
-  package_name="$(cargo_field '[package]' "$cargo_manifest")"
-  lib_name="$(cargo_field '[lib]' "$cargo_manifest")"
-  project_name="$(sed -n 's/^name:[[:space:]]*//p' "$project_yml" | head -n 1 | tr -d '"[:space:]')"
+  package_name="$(cargo_field '[package]' "$cargo_manifest")" || fail_stage "cannot read staged Cargo package name"
+  lib_name="$(cargo_field '[lib]' "$cargo_manifest")" || fail_stage "cannot read staged Cargo library name"
+  project_name="$(sed -n 's/^name:[[:space:]]*//p' "$project_yml" | head -n 1 | tr -d '"[:space:]')" ||
+    fail_stage "cannot read generated Apple project name"
   [[ -n "$package_name" ]] || fail_stage "cannot read [package].name from staged Cargo.toml"
   [[ -n "$lib_name" ]] || fail_stage "cannot read [lib].name from staged Cargo.toml"
   [[ -n "$project_name" ]] || fail_stage "cannot read generated Apple project name"
@@ -184,16 +185,19 @@ migrate_staged_apple_project() {
   command -v xcodegen >/dev/null || fail_stage "xcodegen is required to regenerate the staged Apple project"
 
   backup_root="$stage_root/.gai-stage-backup/gen-apple-before-package-name-migration"
-  mkdir -p "$(dirname "$backup_root")"
-  cp -a "$apple_root" "$backup_root"
+  mkdir -p "$(dirname "$backup_root")" || fail_stage "cannot create the staged Apple backup directory"
+  cp -a "$apple_root" "$backup_root" || fail_stage "cannot back up the staged Apple project"
 
-  mv "$apple_root/app.xcodeproj" "$apple_root/gai.xcodeproj"
-  mv "$apple_root/app_iOS" "$apple_root/gai_iOS"
-  mv "$apple_root/Sources/app" "$apple_root/Sources/gai"
-  mv "$apple_root/gai_iOS/app_iOS.entitlements" "$apple_root/gai_iOS/gai_iOS.entitlements"
+  mv "$apple_root/app.xcodeproj" "$apple_root/gai.xcodeproj" || fail_stage "cannot rename the staged Xcode project"
+  mv "$apple_root/app_iOS" "$apple_root/gai_iOS" || fail_stage "cannot rename the staged iOS target directory"
+  mv "$apple_root/Sources/app" "$apple_root/Sources/gai" || fail_stage "cannot rename the staged Apple sources"
+  mv "$apple_root/gai_iOS/app_iOS.entitlements" "$apple_root/gai_iOS/gai_iOS.entitlements" ||
+    fail_stage "cannot rename the staged iOS entitlements"
 
-  perl -0pi -e 's/^name:[[:space:]]*"?app"?[[:space:]]*$/name: gai/m; s/\bapp_iOS\b/gai_iOS/g' "$project_yml"
-  xcodegen generate --spec "$project_yml" --project "$apple_root" --quiet
+  perl -0pi -e 's/^name:[[:space:]]*"?app"?[[:space:]]*$/name: gai/m; s/\bapp_iOS\b/gai_iOS/g' "$project_yml" ||
+    fail_stage "cannot rewrite the staged Apple project identity"
+  xcodegen generate --spec "$project_yml" --project "$apple_root" --quiet ||
+    fail_stage "xcodegen failed to regenerate the migrated Apple project"
 
   [[ -d "$apple_root/gai.xcodeproj" ]] || fail_stage "xcodegen did not create gai.xcodeproj"
   [[ -f "$project_yml" ]] || fail_stage "migrated project.yml is missing"
@@ -443,6 +447,12 @@ for entry in public src-tauri scripts package.json package-lock.json rust-toolch
     --exclude='gen/apple/Externals/' --exclude='gen/apple/assets/' \
     "$source_root/$entry" "$stage_root/"
 done
+# Tauri's bundle resource mapping resolves this file relative to src-tauri.
+license_resource="docs/release/THIRD_PARTY_LICENSES.txt"
+[[ -s "$source_root/$license_resource" && ! -L "$source_root/$license_resource" ]] ||
+  fail_stage "required third-party license resource is missing or unsafe"
+mkdir -p "$stage_root/docs/release"
+cp "$source_root/$license_resource" "$stage_root/$license_resource"
 # 不複製 SMB 上的 node_modules：其 .bin symlink 可能已變成一般檔案。
 # 呼叫端進入副本後以 npm ci --ignore-scripts 依 lockfile 安裝建置依賴。
 mkdir -p "$stage_root/src-tauri/gen/apple/Externals" "$stage_root/src-tauri/gen/apple/assets"

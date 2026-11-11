@@ -4,6 +4,7 @@ import assert from 'node:assert/strict';
 import os from 'node:os';
 import path from 'node:path';
 import { spawnSync } from 'node:child_process';
+import { createHash } from 'node:crypto';
 
 const read = (path) => fs.readFileSync(path, 'utf8');
 const state = read('src-tauri/src/state.rs');
@@ -16,9 +17,46 @@ const protocol = read('src-tauri/src/protocol.rs');
 const utils = read('src-tauri/src/utils.rs');
 const swift = read('src-tauri/tauri-plugin-ios-folder/ios/Sources/ExamplePlugin.swift');
 const tauriApi = read('public/tauri-api.js');
+const libRs = read('src-tauri/src/lib.rs');
 const pkg = JSON.parse(read('package.json'));
+const tauriConfig = JSON.parse(read('src-tauri/tauri.conf.json'));
+const macAppStoreConfig = JSON.parse(read('src-tauri/tauri.appstore.macos.conf.json'));
 const macHelperEntitlements = read('src-tauri/Entitlements-macOS-helper.plist');
 const macStoreSigner = read('scripts/release/sign-macos-app-store.sh');
+
+assert.equal(tauriConfig.version, pkg.version, 'native and package versions must agree');
+assert.equal(Object.hasOwn(macAppStoreConfig, 'version'), false,
+  'App Store macOS config must inherit the main app version');
+assert.equal(Object.hasOwn(macAppStoreConfig.bundle.macOS, 'bundleVersion'), false,
+  'App Store macOS config must inherit the main build number');
+assert.equal(tauriConfig.bundle.resources['../docs/release/THIRD_PARTY_LICENSES.txt'],
+  'THIRD_PARTY_LICENSES.txt', 'native bundles must ship the third-party license notices');
+assert.ok(read('docs/release/THIRD_PARTY_LICENSES.txt').includes('Mozilla Public License'),
+  'bundled notices must contain the full MPL terms for the selected runtime dependencies');
+const noticeManifest = JSON.parse(read('docs/release/third-party-licenses-manifest.json'));
+const fileSha256 = file => createHash('sha256').update(fs.readFileSync(file)).digest('hex');
+assert.equal(noticeManifest.input.sha256, fileSha256('src-tauri/Cargo.lock'),
+  'license inventory must be regenerated after changing the native dependency lock');
+assert.equal(noticeManifest.input.license_source_supplements_sha256,
+  fileSha256('docs/release/license-source-supplements.json'),
+  'license inventory must use the exact checked-in upstream source supplements');
+assert.equal(noticeManifest.gap_count, 0, 'release notices must have no missing source-text coverage');
+assert.match(libRs, /spawn_blocking\(move \|\| \{\s*ensure_handle[\s\S]{0,180}\.ensure_available\(request\)/,
+  'iOS external-file availability checks must not block an async runtime worker');
+assert.match(libRs,
+  /let retired_temp_dir = \{[\s\S]{0,180}let _lifecycle = state\.comic_lifecycle\.lock\(\)\.unwrap\(\);[\s\S]{0,1100}and_then\(retire_smb_temp_namespace\)/,
+  'id-less reader close must retire the SMB temp namespace while holding the lifecycle lock');
+assert.match(libRs,
+  /fn cleanup_retired_smb_temp_namespace\(retired: PathBuf\) \{[\s\S]{0,180}tauri::async_runtime::spawn_blocking/,
+  'retired SMB temp cleanup must run on a blocking worker');
+const smbOpen = libRs.slice(libRs.indexOf('async fn open_comic('), libRs.indexOf('async fn close_comic('));
+const smbClose = libRs.slice(libRs.indexOf('async fn close_comic('), libRs.indexOf('async fn update_reader_cache_window('));
+assert.doesNotMatch(smbOpen, /std::env::temp_dir\(/,
+  'SMB opens must not fall back to a shared global temp namespace');
+assert.doesNotMatch(smbClose, /std::env::temp_dir\(/,
+  'reader close must not clean a shared global temp namespace');
+assert.match(smbOpen, /app_local_data_dir\(\)\s*\.map_err\(\|error\| \{\s*let _ = app_handle\.emit\("smb-download-end"/,
+  'SMB app-data resolution failure must end the download indicator before returning');
 
 assert.match(state, /#\[cfg\(target_os = "ios"\)\][\s\S]{0,500}fn process_available_memory_bytes\(\)[\s\S]{0,500}os_proc_available_memory/);
 assert.match(state, /#\[cfg\(target_os = "macos"\)\][\s\S]{0,260}fn process_available_memory_bytes\(\)[\s\S]{0,260}None/);

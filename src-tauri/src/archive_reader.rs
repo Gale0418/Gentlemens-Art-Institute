@@ -14,12 +14,12 @@ use std::path::{Path, PathBuf};
 
 /// 單一 entry 可被讀取的最大解壓後大小。
 pub const MAX_ENTRY_BYTES: usize = 128 * 1024 * 1024;
-/// 單一封存檔所有 entry 宣告大小的總和上限。
-pub const MAX_TOTAL_UNPACKED_BYTES: u64 = 2 * 1024 * 1024 * 1024;
-/// 封存檔內可接受的 entry 數量上限。
-pub const MAX_ENTRY_COUNT: usize = 100_000;
 /// 讀取封存檔 header 時允許的輸入檔案大小上限。
 pub const MAX_ARCHIVE_BYTES: u64 = 8 * 1024 * 1024 * 1024;
+/// 單一封存檔所有 entry 宣告大小的總和上限。
+pub const MAX_TOTAL_UNPACKED_BYTES: u64 = MAX_ARCHIVE_BYTES;
+/// 封存檔內可接受的 entry 數量上限。
+pub const MAX_ENTRY_COUNT: usize = 100_000;
 const MAX_ENTRY_NAME_BYTES: usize = 4096;
 /// Aggregate UTF-8 bytes retained for all entry names in one archive.
 pub const MAX_TOTAL_ENTRY_NAME_BYTES: usize = 16 * 1024 * 1024;
@@ -210,6 +210,14 @@ pub fn read_entry_from_file(
 }
 
 fn identify_kind_from_file(file: &mut File, path: &Path) -> Result<ArchiveKind, ArchiveError> {
+    let bytes = file.metadata()?.len();
+    if bytes > MAX_ARCHIVE_BYTES {
+        return Err(ArchiveError::ArchiveTooLarge {
+            bytes,
+            limit: MAX_ARCHIVE_BYTES,
+        });
+    }
+
     let mut signature = [0_u8; 8];
     let read = file.read(&mut signature)?;
     file.seek(SeekFrom::Start(0))?;
@@ -539,6 +547,16 @@ fn checked_name_bytes(total: usize, additional: usize) -> Result<usize, ArchiveE
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[cfg(unix)]
+    use std::io::Write;
+
+    fn declared_sevenz_entry(name: String, size: u64) -> sevenz_rust2::ArchiveEntry {
+        let mut entry = sevenz_rust2::ArchiveEntry::new();
+        entry.name = name;
+        entry.size = size;
+        entry.compressed_size = size;
+        entry
+    }
 
     #[test]
     fn rejects_traversal_and_platform_absolute_names() {
@@ -565,7 +583,73 @@ mod tests {
         std::fs::write(&path, RAR5_SIGNATURE).unwrap();
         let reader = ArchiveReader::open(&path).unwrap();
         assert_eq!(reader.kind(), ArchiveKind::Rar);
+        assert_eq!(
+            identify_kind_from_file(&mut File::open(&path).unwrap(), &path).unwrap(),
+            ArchiveKind::Rar
+        );
         let _ = std::fs::remove_file(path);
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn descriptor_paths_reject_oversized_archives_before_parsing() {
+        let path = std::env::temp_dir().join(format!(
+            "gai-archive-reader-oversized-test-{}-{}.cbr",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap_or_default()
+                .as_nanos()
+        ));
+        let result = (|| {
+            let file = File::create(&path)?;
+            file.set_len(MAX_ARCHIVE_BYTES + 1)?;
+
+            let list_error = list_entries_from_file(File::open(&path)?, &path).unwrap_err();
+            assert!(matches!(
+                list_error,
+                ArchiveError::ArchiveTooLarge { bytes, limit }
+                    if bytes == MAX_ARCHIVE_BYTES + 1 && limit == MAX_ARCHIVE_BYTES
+            ));
+
+            let read_error =
+                read_entry_from_file(File::open(&path)?, &path, "page.jpg", 1).unwrap_err();
+            assert!(matches!(
+                read_error,
+                ArchiveError::ArchiveTooLarge { bytes, limit }
+                    if bytes == MAX_ARCHIVE_BYTES + 1 && limit == MAX_ARCHIVE_BYTES
+            ));
+            Ok::<_, io::Error>(())
+        })();
+        let _ = std::fs::remove_file(&path);
+        result.unwrap();
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn descriptor_kind_check_accepts_a_valid_archive_at_the_size_limit() {
+        let path = std::env::temp_dir().join(format!(
+            "gai-archive-reader-boundary-test-{}-{}.cbr",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap_or_default()
+                .as_nanos()
+        ));
+        let result = (|| {
+            let mut file = File::create(&path)?;
+            file.write_all(RAR5_SIGNATURE)?;
+            file.set_len(MAX_ARCHIVE_BYTES)?;
+            let mut reader = File::open(&path)?;
+
+            assert_eq!(
+                identify_kind_from_file(&mut reader, &path).unwrap(),
+                ArchiveKind::Rar
+            );
+            Ok::<_, io::Error>(())
+        })();
+        let _ = std::fs::remove_file(&path);
+        result.unwrap();
     }
 
     #[test]
@@ -573,6 +657,60 @@ mod tests {
         let error = read_entry_for_kind(Path::new("ignored"), ArchiveKind::SevenZip, "page.jpg", 0)
             .unwrap_err();
         assert!(matches!(error, ArchiveError::ReadLimitExceeded { .. }));
+
+        let error = read_entry_for_kind(
+            Path::new("ignored"),
+            ArchiveKind::SevenZip,
+            "page.jpg",
+            MAX_ENTRY_BYTES + 1,
+        )
+        .unwrap_err();
+        assert!(matches!(error, ArchiveError::ReadLimitExceeded { .. }));
+    }
+
+    #[test]
+    fn accepts_three_gibibytes_of_declared_sevenz_entries() {
+        let entry_size = MAX_ENTRY_BYTES as u64;
+        let entries = (0..24)
+            .map(|index| declared_sevenz_entry(format!("page-{index}.jpg"), entry_size))
+            .collect::<Vec<_>>();
+
+        let validated = validate_sevenz_entries(&entries).unwrap();
+
+        assert_eq!(validated.len(), 24);
+        assert_eq!(
+            validated.iter().map(|entry| entry.size).sum::<u64>(),
+            3 * 1024 * 1024 * 1024
+        );
+    }
+
+    #[test]
+    fn rejects_sevenz_total_at_hard_cap_plus_one() {
+        let entry_size = MAX_ENTRY_BYTES as u64;
+        let mut entries = (0..(MAX_TOTAL_UNPACKED_BYTES / entry_size))
+            .map(|index| declared_sevenz_entry(format!("page-{index}.jpg"), entry_size))
+            .collect::<Vec<_>>();
+        entries.push(declared_sevenz_entry("overflow.jpg".into(), 1));
+
+        assert!(matches!(
+            validate_sevenz_entries(&entries),
+            Err(ArchiveError::ArchiveBomb { total, limit })
+                if total == MAX_TOTAL_UNPACKED_BYTES + 1 && limit == MAX_TOTAL_UNPACKED_BYTES
+        ));
+    }
+
+    #[test]
+    fn rejects_sevenz_declared_size_overflow_with_checked_add() {
+        let entries = [
+            declared_sevenz_entry("first.jpg".into(), 1),
+            declared_sevenz_entry("overflow.jpg".into(), u64::MAX),
+        ];
+
+        assert!(matches!(
+            validate_sevenz_entries(&entries),
+            Err(ArchiveError::ArchiveBomb { total, limit })
+                if total == u64::MAX && limit == MAX_TOTAL_UNPACKED_BYTES
+        ));
     }
 
     #[test]

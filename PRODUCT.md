@@ -30,16 +30,16 @@ Tauri 2 native app：macOS + iPhone/iPadOS。
 ## Capabilities and Constraints
 
 - **唯一 runtime 是 Tauri 2 + Rust + vanilla HTML/CSS/JavaScript**；Electron、Express 與 browser HTTP fallback 不屬於產品架構，也不應重新加入。
-- 既有閱讀進度、收藏、單頁／雙頁／RTL／Webtoon／目錄模式、ZIP/CBZ、圖片資料夾與 SMB 行為不可退化。
+- 既有閱讀進度、收藏、單頁／雙頁／RTL／Webtoon 閱讀模式、獨立頁面總覽、圖片資料夾、ZIP/CBZ、RAR/CBR、7z/CB7 與 SMB 行為不可退化；壓縮檔頁面按需以有界 entry 讀取，不先解壓到檔案系統。
 - 首批 metadata 匯入涵蓋 ComicInfo.xml、gallery-dl JSON、HDoujin JSON/TXT、galleryinfo.txt、EHDL info.txt 與低信心檔名推測。
 - 使用者覆寫永遠高於外部匯入；來源失聯不得刪除資料。
-- 網路比對、AI 自動寫入、跨裝置同步、RAR/CBR 內嵌解析與多 NAS namespace 不屬於目前里程碑。
+- 網路比對、AI 自動寫入、跨裝置同步與多 NAS namespace 不屬於目前里程碑。
 - 圖片讀取維持既有 byte-size 安全上限；目前不額外引入 decode 前的像素總量限制。
 
 ## Brand Commitments
 
 - 產品名稱為「紳士藝術研究所 Gentlemen's Art Institute」。
-- 保留深色主題系統（預設 Midnight，另有 Sakura／Ink／Aurora）、Archive Red（#ff3d54）主操作色、精緻但熟悉的工作型介面與繁體中文語氣。
+- 保留深色主題系統（預設 `midnight`，另有 `sakura`／`ink`／`aurora`／`alexandria`）、Archive Red（#ff3d54）主操作色、精緻但熟悉的工作型介面與繁體中文語氣。主題識別碼為既有持久化值，新增主題不得改動其相容性。
 
 ## Evidence on Hand
 

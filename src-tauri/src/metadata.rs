@@ -793,14 +793,23 @@ pub(crate) fn filename_metadata_for_discovered_path(
 }
 
 fn read_bounded(path: &Path) -> Result<Vec<u8>, String> {
-    let metadata = std::fs::metadata(path).map_err(|error| error.to_string())?;
-    if metadata.len() as usize > MAX_METADATA_BYTES {
+    let file = std::fs::File::open(path).map_err(|error| error.to_string())?;
+    read_bounded_reader(file)
+}
+
+fn read_bounded_reader(reader: impl Read) -> Result<Vec<u8>, String> {
+    let mut bytes = Vec::new();
+    reader
+        .take(MAX_METADATA_BYTES as u64 + 1)
+        .read_to_end(&mut bytes)
+        .map_err(|error| error.to_string())?;
+    if bytes.len() > MAX_METADATA_BYTES {
         return Err(format!(
             "metadata 超過 {} MiB 安全上限",
             MAX_METADATA_BYTES / 1024 / 1024
         ));
     }
-    std::fs::read(path).map_err(|error| error.to_string())
+    Ok(bytes)
 }
 
 fn decode_text(bytes: &[u8]) -> (Option<String>, Option<String>, bool) {
@@ -997,6 +1006,50 @@ mod tests {
             writer.write_all(payload).unwrap();
         }
         writer.finish().unwrap();
+    }
+
+    #[test]
+    fn read_bounded_accepts_exact_limit_and_rejects_one_more_byte() {
+        let path = temp_zip_path("bounded-read").with_extension("json");
+        let exact_limit = vec![b'x'; MAX_METADATA_BYTES];
+        std::fs::write(&path, &exact_limit).unwrap();
+        assert_eq!(read_bounded(&path).unwrap(), exact_limit);
+
+        let over_limit = vec![b'x'; MAX_METADATA_BYTES + 1];
+        std::fs::write(&path, &over_limit).unwrap();
+        assert_eq!(
+            read_bounded(&path).unwrap_err(),
+            format!(
+                "metadata 超過 {} MiB 安全上限",
+                MAX_METADATA_BYTES / 1024 / 1024
+            )
+        );
+        std::fs::remove_file(path).unwrap();
+    }
+
+    #[test]
+    fn read_bounded_stops_after_the_first_byte_over_the_limit() {
+        struct CountingReader(usize);
+
+        impl Read for CountingReader {
+            fn read(&mut self, buffer: &mut [u8]) -> std::io::Result<usize> {
+                self.0 += buffer.len();
+                buffer.fill(b'x');
+                Ok(buffer.len())
+            }
+        }
+
+        let mut reader = CountingReader(0);
+        let error = read_bounded_reader(&mut reader).unwrap_err();
+
+        assert_eq!(reader.0, MAX_METADATA_BYTES + 1);
+        assert_eq!(
+            error,
+            format!(
+                "metadata 超過 {} MiB 安全上限",
+                MAX_METADATA_BYTES / 1024 / 1024
+            )
+        );
     }
 
     #[test]

@@ -9,11 +9,13 @@
 已完成程式整合，全部 24 項已確認缺陷關閉（P1=7、P2=17），最終無未解 P0/P1/P2/P3。三個獨立領域席位及另一位證據仲裁者，均綁定相同最終快照。結論限定於程式、單元、合成回歸與明列的桌面瀏覽器操作證據；未宣稱 iPad 實機或原生 GUI 全流程驗收。
 
 - 最終 snapshot SHA256：`e9926a0465f0cd3b3a86481a47d41213f63118feddacee0f16473074d3015271`
-- 完整封存：[快照 archive](/Volumes/MyGame/G.A.I/output/audits/COMIC-A45-20261002/final-reviewed-snapshot.tar.gz)
-- [逐檔 manifest](/Volumes/MyGame/G.A.I/output/audits/COMIC-A45-20261002/manifest.json)、[artifact checksums](/Volumes/MyGame/G.A.I/output/audits/COMIC-A45-20261002/artifact-checksums.json)
-- [專家提詞](/Volumes/MyGame/G.A.I/output/audits/COMIC-A45-20261002/council/prompts.md)、[全部缺陷 ledger](/Volumes/MyGame/G.A.I/output/audits/COMIC-A45-20261002/council/finding-ledger.json)
-- 最終獨立報告：[玩家／閱讀](/Volumes/MyGame/G.A.I/output/audits/COMIC-A45-20261002/council/wave5/reader.md)、[原生安全](/Volumes/MyGame/G.A.I/output/audits/COMIC-A45-20261002/council/wave5/native.md)、[資料／效能](/Volumes/MyGame/G.A.I/output/audits/COMIC-A45-20261002/council/wave5/data.md)、[仲裁](/Volumes/MyGame/G.A.I/output/audits/COMIC-A45-20261002/council/wave5/arbiter.md)
-- [整合與原始來源驗證](/Volumes/MyGame/G.A.I/output/audits/COMIC-A45-20261002/integration-verification.json)
+- 完整封存：`final-reviewed-snapshot.tar.gz`（COMIC-A45-20261002）。
+- `manifest.json`、`artifact-checksums.json`：逐檔來源與 artifact checksums。
+- `council/prompts.md`、`council/finding-ledger.json`：專家提詞與缺陷 ledger。
+- `council/wave5/reader.md`、`native.md`、`data.md`、`arbiter.md`：最終獨立報告與仲裁。
+- `integration-verification.json`：整合與原始來源驗證。
+
+上述檔案屬私有驗證證據，本機留存未公開；artifact 名稱與 SHA256 保留供內部追溯，本文不提供作者電腦的絕對路徑，也不暗示可由 repo 連結取得。
 
 ## 待完成的實機驗收
 

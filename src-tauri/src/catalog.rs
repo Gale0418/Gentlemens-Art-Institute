@@ -6864,6 +6864,17 @@ mod tests {
     };
     use std::time::Instant;
 
+    #[test]
+    fn sqlite_engine_includes_the_wal_page_size_security_fix() {
+        // RUSTSEC-2026-0459 is fixed in SQLite 3.54.0. Check the linked
+        // engine too, so an accidental system-library override cannot pass.
+        assert!(
+            rusqlite::version_number() >= 3_054_000,
+            "RUSTSEC-2026-0459 requires SQLite >=3.54.0; linked {}",
+            rusqlite::version()
+        );
+    }
+
     thread_local! {
         static OPENED_LOCATION_READ_HOOK: std::cell::RefCell<Option<Box<dyn FnOnce()>>> =
             std::cell::RefCell::new(None);

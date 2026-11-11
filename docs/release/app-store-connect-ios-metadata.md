@@ -1,6 +1,6 @@
 # G.A.I App Store Connect／TestFlight 發行資料與審查包
 
-狀態：`BLOCKED（local evidence）`。ASC 遠端回讀顯示 iOS 1.0.2（build 63）與 macOS 1.0.2（build 59）均為 `READY_FOR_DISTRIBUTION`，但本機實機、隱私、加密、交易與 release-build 證據尚未完成。本文件的人讀版本對應 canonical JSON：`docs/release/gai-app-store-connect-metadata.json`。修改欄位時先更新 JSON，再同步本文件；不要把 App Store Connect 私密資料、API key、SMB 密碼或真實裝置識別碼提交到 repo。
+狀態：`BLOCKED（local evidence）`。本文與 [`gai-app-store-connect-metadata.json`](gai-app-store-connect-metadata.json) 對應的是該檔記錄的歷史 1.0.2 發行／審查套件（最後回讀 2026-11-02），不是 1.0.5（build 80）的實際 ASC metadata，也不代表該版本已送審或上架。歷史套件內的公開 `storeListing` 與 `reviewInformation.appReviewNotesEnglish` 欄位由該 JSON 為準；1.0.5 的 What's New 與上傳狀態另依其發行準備證據判讀。修改歷史套件欄位時先更新 JSON，再同步本文件；不要把 App Store Connect 私密資料、API key、SMB 密碼或真實裝置識別碼提交到 repo。
 
 本文件保留發行資料與證據清單；2026-11-02 的遠端狀態回讀已寫入 canonical JSON，未在本次修補中執行 ASC 寫入或提交。`scripts/release/asc-dry-run.sh` 只做本地 JSON／欄位／秘密掃描與命令模板輸出，僅以 `activeEvidence` 阻擋，不會把歷史文字或命令佔位文字當成目前待辦。
 
@@ -46,13 +46,13 @@ App Name（zh-Hant-TW）：`紳士藝術研究所`
 
 首發規劃包含繁體中文、英文（en-US）與日文（ja）；英文名稱為 `Gentlemen's Art Institute`。既有三語文案同步是歷史回讀紀錄，不能視為本輪 source changes 已上傳；隱私／支援 URL 與審查素材仍待補齊。
 
-Subtitle：`圖片轉條漫，往下滑就能看`
+Subtitle：`專門整理本機漫畫的好用閱讀器`
 
-Promotional Text：`圖片資料夾、ZIP／CBZ，依閱讀順序直接連續閱讀。原圖不需合併，免費使用條漫、單頁與雙頁模式，並保存進度、搜尋作品與整理收藏。`
+Promotional Text：`漫畫散落在資料夾和壓縮檔，找書找得像在考古？G.A.I 幫你整理自有收藏，條漫、單頁、雙頁都能看。v1 Pro 一次買斷 NT$150，沒有訂閱。App 不附漫畫、不提供下載。`
 
-Keywords：`漫畫,閱讀器,條漫,書架,本機,NAS,SMB,收藏`
+Keywords：`CBZ,CBR,ZIP,RAR,7z,CB7,條漫,雙頁,相簿,圖集,看圖,NAS,SMB,自炊,離線,書庫,匯入,標籤`
 
-Description 草案以 canonical JSON 為準，定位是圖片資料夾／ZIP／CBZ 的連續條漫與本機／NAS 漫畫書架閱讀器。必須如實保留以下邊界：App 不內建漫畫、不提供來源爬取或下載站；可讀取使用者選擇的本機／掛載資料夾與 ZIP／CBZ；SMB 是使用者明確設定的進階路徑；AI 是選用功能，不得描述成核心必需或完全本機。使用者對匯入內容的權利與合法使用負責。
+Description 草案以 canonical JSON 為準，定位是圖片資料夾與 ZIP／CBZ、RAR／CBR、7z／CB7 的本機／NAS 漫畫書架與閱讀器。必須如實保留以下邊界：App 不內建漫畫、不提供來源爬取或下載站；SMB 是使用者明確設定的進階路徑；AI 是選用功能，不得描述成核心必需或完全本機。使用者對匯入內容的權利與合法使用負責。
 
 ## Guideline 2.1 App Review Notes 草案
 
@@ -60,7 +60,7 @@ Description 草案以 canonical JSON 為準，定位是圖片資料夾／ZIP／C
 
 ```text
 REVIEW VIDEO
-A screen recording from a physical [TODO: device model] running iOS [TODO: OS version] is attached as [TODO: exact filename]. It starts from TestFlight build [TODO: version (build)], opens the built-in all-ages demo on a clean install, demonstrates the library and image reader, and returns to Settings. The recording contains no real personal data, passwords, private NAS paths, or unlicensed review material.
+A screen recording from a physical [TODO: device model] running iOS [TODO: OS version] is attached as [TODO: exact filename]. It starts from TestFlight build [TODO: version (build)], opens the built-in all-ages landscape demo on a clean install, demonstrates the library and image reader, and returns to Settings. The exact eight-group, 13-image demo contents must be verified against the final submitted package. The recording contains no real personal data, passwords, private NAS paths, or unlicensed review material.
 
 TEST DEVICES AND OPERATING SYSTEMS
 - Physical device: [TODO: iPhone/iPad model], iOS [TODO: version], app [TODO: version (build)].
@@ -68,19 +68,19 @@ TEST DEVICES AND OPERATING SYSTEMS
 - Additional simulator or desktop checks, if mentioned, are supplementary and do not replace the physical-device recording.
 
 APP PURPOSE AND TARGET AUDIENCE
-Gentlemen's Art Institute (紳士藝術研究所) is a general-purpose local-first comic library and reader for people managing their own files on iPhone or iPad. It indexes and reads user-selected image folders and ZIP/CBZ archives, keeps reading progress and catalog data locally, and can read from a user-selected mounted folder or optional SMB/NAS connection. It is not a medical, diagnostic, emergency, professional-advice, social, or content-hosting service.
+Gentlemen's Art Institute (紳士藝術研究所) is a general-purpose local-first comic library and reader for people managing their own files on iPhone or iPad. It indexes and reads user-selected image folders and ZIP/CBZ, RAR/CBR, and 7z/CB7 archives, keeps reading progress and catalog data locally, and can read from a user-selected mounted folder or optional SMB/NAS connection. It is not a medical, diagnostic, emergency, professional-advice, social, or content-hosting service.
 
 ACCESS AND SETUP
 The core reader is available for free without a purchase. The intended launch also includes a one-time v1 Pro purchase (no subscription and no bundled API quota) for direct SMB/NAS connections, batch tagging and advanced organization, duplicate candidates, and AI explanation/organization tools. On a clean install, open the clearly labeled built-in all-ages landscape demo with eight groups and 13 images; use the final submitted package to verify the exact demo contents. No purchase, subscription, demo credential, NAS, or external sample download is required to review the free core reader. Accessing a NAS folder that the user has already mounted through the system file picker remains part of the free core path and is not blocked by the Pro entitlement. The final package must provide reviewable StoreKit purchase, restore, offline-entitlement, and revocation behavior before submission. Direct SMB and optional AI are disclosed rather than hidden, but are not required for the free core review path.
 
 EXTERNAL SERVICES AND TOOLS
-Core indexing, reading, catalog data, and progress run locally. A user-selected SMB/NAS server is contacted only when the user configures it and requests a scan or read. Optional AI is disabled by default, cloud-only, and requires a user-supplied API key; the launch specification includes no on-device model and no bundled API quota. OpenAI requests use https://api.openai.com/v1/responses; Google requests use https://generativelanguage.googleapis.com/v1beta/models/{model}:generateContent. Before either provider can be enabled, the app identifies the selected provider, states that the current page image and prompt may be sent to that provider, and requires explicit in-app consent for that session. Changing the provider revokes the previous consent and requires a new confirmation. API keys are held for the app session by default; iOS/iPadOS users may explicitly save a key in the device Keychain. A saved key does not restore consent and keys are not included in review material; AI responses/candidates may remain in local App Data. The core reader does not require AI, analytics, advertising, third-party login, or an app-owned content server.
+Core indexing, reading, catalog data, and progress run locally. A user-selected SMB/NAS server is contacted only when the user configures it and requests a scan or read. Optional AI is disabled by default, cloud-only, and requires a user-supplied API key. The launch specification includes no on-device model and no bundled API quota. OpenAI requests use https://api.openai.com/v1/responses; Google requests use https://generativelanguage.googleapis.com/v1beta/models/{model}:generateContent. Before either provider can be enabled, the app identifies the selected provider, states that selected page images (up to six for AI Scan) and the prompt may be sent to that provider, and requires explicit in-app consent for that session. Changing the provider revokes the previous consent and requires a new confirmation. API keys are held for the app session by default; iOS/iPadOS users may explicitly save a key in the device Keychain. A saved key does not restore consent and keys are not included in review material; AI responses/candidates may remain in local App Data. The core reader does not require AI, analytics, advertising, third-party login, or an app-owned content server.
 
 REGIONAL AVAILABILITY
 There is no planned region-specific catalogue or core feature difference. The primary interface is Traditional Chinese (Taiwan). SMB and optional AI availability can depend on the user's network, region, account, and provider terms; neither is required for the core reader.
 
 REGULATED INDUSTRY / PROTECTED CONTENT
-Not applicable as a regulated service: the app provides no medical, diagnostic, emergency, financial, or other professional advice. The app does not bundle third-party comics or provide a source crawler/downloader, but it can display files selected by the user, including material for which the user must have appropriate rights. The attached recording uses only the bundled original all-ages demo. Age rating, rights declarations, and App Privacy answers are based on the actual release build and distribution library and are [TODO: complete before submission].
+Not applicable as a regulated service: the app provides no medical, diagnostic, emergency, financial, or other professional advice. The app does not bundle third-party comics or provide a source crawler/downloader, but it can display files selected by the user, including material for which the user must have appropriate rights. The attached recording uses only the bundled original all-ages landscape demo. Age rating, rights declarations, and App Privacy answers are based on the actual release build and distribution library and are [TODO: complete before submission].
 ```
 
 ## 實機錄影腳本

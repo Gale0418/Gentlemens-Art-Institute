@@ -160,7 +160,7 @@ validate_build_paths
 
 ### 4.3 建立乾淨本機工作副本
 
-也可從 repo 根目錄執行 `bash scripts/release/stage-ios-build.sh`：它會檢查本機暫存空間至少 6 GiB，再建立唯一的新副本並輸出路徑；只複製建置必要的原始碼與 lockfile，不帶正式設定、進度、漫畫快取、`.cargo` 或舊 Xcode 產物。6 GiB 是最低門檻，完整 archive 可能需要更多。空間不足以 exit 3 結束，不會刪除其他檔案。進入輸出的目錄後先執行 `npm ci --ignore-scripts`，再執行 4.4 的建構步驟；不要從 SMB 複製可能失去 symlink 的 node_modules。
+也可從 repo 根目錄執行 `bash scripts/release/stage-ios-build.sh`：它會檢查本機暫存空間至少 6 GiB，再建立唯一的新副本並輸出路徑；只複製建置必要的原始碼、lockfile 與 `docs/release/THIRD_PARTY_LICENSES.txt`，不帶正式設定、進度、漫畫快取、`.cargo` 或舊 Xcode 產物。6 GiB 是最低門檻，完整 archive 可能需要更多。空間不足以 exit 3 結束，不會刪除其他檔案。進入輸出的目錄後先執行 `npm ci --ignore-scripts`，再執行 4.4 的建構步驟；不要從 SMB 複製可能失去 symlink 的 node_modules。
 
 若 staging 複本的 Cargo identity 是 `package = "gai"` / `[lib] name = "gai_lib"`，但複製進來的 Tauri Apple project 仍是舊的 `app` identity，script 只在 staging 目錄執行一次可逆的遷移：先備份整份 `src-tauri/gen/apple` 到 `.gai-stage-backup/gen-apple-before-package-name-migration`，再將 `app.xcodeproj`、`app_iOS`、`Sources/app` 與 entitlements 改成 `gai` 對應名稱，最後以現有 `project.yml` 重新執行 `xcodegen`。這會保留既有 PrivacyInfo、權限、orientations、native plugin dependency 與 Rust build script；canonical checkout 的 `src-tauri/gen/apple` 不會被改寫。遷移需要本機 `xcodegen`，失敗會以 exit 4 停止。
 
@@ -168,11 +168,13 @@ validate_build_paths
 
 `node tests/ios-privacy-sync.mjs` 的一般 PrivacyInfo／PBX fixture 不依賴 `xcodegen`；macOS 上額外的 iOS metadata、交易回滾、signal 與 staging lifecycle fixture 需要本機可執行的 `xcodegen`。若測試環境沒有 `xcodegen`，測試會明確輸出 `SKIP: stage metadata and lifecycle fixtures require xcodegen`，只跳過這組新增 fixture，其餘 privacy 測試仍照常執行。這個 skip 不放寬正式 staging：`stage-ios-build.sh` 在需要解析或重生 `project.yml` 時仍會以 exit 4 明確失敗，不會把缺少 `xcodegen` 視為通過。
 
-完成 staging 後，可先確認生成的 Apple project 與 scheme：
+在原始碼根目錄建立 staging，先確認生成的 Apple project 與 scheme：
 
 ```bash
-cd "${GAI_IOS_STAGE_DIR}"
-npm ci --ignore-scripts
+GAI_IOS_STAGE_DIR="$(bash scripts/release/stage-ios-build.sh)" || exit $?
+cd "${GAI_IOS_STAGE_DIR}" || exit $?
+unset CARGO_TARGET_DIR
+npm ci --ignore-scripts || exit $?
 xcodebuild -list -json -project src-tauri/gen/apple/gai.xcodeproj
 ```
 
@@ -180,30 +182,13 @@ xcodebuild -list -json -project src-tauri/gen/apple/gai.xcodeproj
 
 一般 macOS 建置與 Rust 品質指令透過 `scripts/with-private-cargo-cache.mjs` 使用目前使用者的私人本機 cache；預設為 `~/Library/Caches/com.windsheep.gai/cargo`，並驗證擁有者、拒絕符號連結且設為 700 權限。直接執行 Cargo／Tauri 時，可用 `node scripts/with-private-cargo-cache.mjs cargo <參數>` 或 `node scripts/with-private-cargo-cache.mjs npm run tauri -- build`。`.cargo/config.toml` 不包含共享 target-dir。
 
-iOS/Xcode 產物必須符合 generated Apple project 的預期位置，因此 iOS staging 維持私有本機工作副本的預設 target；不要套用上述 macOS cache wrapper。進入 iOS 副本後先 `unset CARGO_TARGET_DIR`，同步仍**排除 `.cargo`**。
-
-```bash
-validate_build_paths
-rm -rf "${GAI_IOS_WORK_DIR}"
-rsync -av \
-  --exclude 'node_modules' \
-  --exclude 'dist' \
-  --exclude 'src-tauri/target' \
-  --exclude 'src-tauri/gen/apple/build' \
-  --exclude '.cargo' \
-  --exclude '.git' \
-  "${GAI_PROJECT_DIR}/" "${GAI_IOS_WORK_DIR}/"
-
-cd "${GAI_IOS_WORK_DIR}"
-unset CARGO_TARGET_DIR
-npm ci
-```
+iOS/Xcode 產物必須符合 generated Apple project 的預期位置，因此使用上面 `GAI_IOS_STAGE_DIR` 內的預設 target。這份 staging 已排除 `.cargo` 和舊產物。`GAI_IOS_WORK_DIR` 保留給下方歷史版號重包裝工具的暫存工作目錄。
 
 ### 4.4 建構 iOS
 
 ```bash
-cd "${GAI_IOS_WORK_DIR}"
-npm run tauri -- ios build --ci --target aarch64 --export-method debugging
+cd "${GAI_IOS_STAGE_DIR:?請先完成 4.3 的 staging}" &&
+  npm run tauri -- ios build --ci --target aarch64 --export-method debugging
 ```
 
 Tauri 會編譯 Rust static library、呼叫 Xcode project，再產生 signed app / IPA。實際輸出位置以當次 Tauri CLI 輸出為準，不要依賴歷史 blocker 文件記錄的舊絕對路徑。

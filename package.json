@@ -1,6 +1,6 @@
 {
   "name": "gai",
-  "version": "1.0.4",
+  "version": "1.0.5",
   "description": "A beautiful local-first comic reader — 紳士藝術研究所 Gentlemen's Art Institute",
   "type": "module",
   "scripts": {

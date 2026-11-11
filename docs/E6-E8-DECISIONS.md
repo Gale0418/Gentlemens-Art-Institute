@@ -1,16 +1,18 @@
 # E6–E8 架構與發行決策
 
-更新日期：2026-09-04
+原始決策日期：2026-09-04
+
+本文件保留當時的決策脈絡；後續產品現況另以日期補充，不回溯改寫舊版測試或驗收結果。
 
 本文件只保留仍適用的 durable architecture / release decisions。特定日期的匯入數字、裝置狀態、磁碟空間與一次性 blocker 僅保留於本機私人紀錄，不應在這裡形成第二套現況來源。
 
-## RAR／CBR 解碼邊界（COMIC-F6）
+## RAR／CBR 解碼邊界（COMIC-F6；原始決策：2026-09-04）
 
-目前版本只把 `.rar`／`.cbr` 視為可索引、可讀相鄰 sidecar 的收藏項目，不宣稱能開啟內頁。ZIP／CBZ 的既有路徑保持不變。
+當時的邊界是只把 `.rar`／`.cbr` 視為可索引、可讀相鄰 sidecar 的收藏項目，不宣稱能開啟內頁；後續解碼候選採 `libarchive`，不直接綁 RARLAB UnRAR。這段記錄的是當時的選型理由與待辦，不代表目前能力。
 
-後續解碼候選採 `libarchive`，不直接綁 RARLAB UnRAR：libarchive 公開列出 RAR 讀取、串流架構與 New BSD License，較容易同時覆蓋 macOS 與 iOS；RARLAB 的官方授權則包含不得用 UnRAR 重建 RAR 壓縮演算法的限制，需要額外法務與 App Store 分發確認。
+**現況補充（2026-11-11）：** RAR／CBR 頁面讀取已透過 vendored libarchive 隨產品提供，原先「只索引、不開頁」的邊界已解除。RAR／CBR 與 ZIP／CBZ、7z／CB7 均走有界 entry 讀取；逐項安全限制與發行驗收仍以現行 reader 實作及對應版本紀錄為準。
 
-正式啟用前必須另外通過：RAR4／RAR5、密碼檔、分卷、損壞檔、超大 entry、路徑穿越、解壓炸彈、iOS arm64 靜態連結、App Store 簽章與授權 notice。所有頁面必須按需串流並受單頁與單本位元組上限保護，不允許先把整本解壓到 RAM。
+當時列出的正式啟用條件（RAR4／RAR5、密碼檔、分卷、損壞檔、超大 entry、路徑穿越、解壓炸彈、iOS arm64 靜態連結、App Store 簽章與授權 notice）不應解讀為已在 2026-09-04 全數通過；各項結果只依其後實際版本的測試與發行紀錄判讀。頁面仍須按需讀取並受 entry／archive byte limit 保護，不把整本先解壓至檔案系統。
 
 來源：[libarchive 功能與授權](https://www.libarchive.org/)、[libarchive COPYING](https://github.com/libarchive/libarchive/blob/master/COPYING)、[RARLAB 官方授權](https://www.rarlab.com/license.htm)。
 
@@ -58,4 +60,4 @@ OPDS 2.0 只作唯讀目錄交換：標題、作者、語言、修改時間、�
 
 線上來源比對、翻譯、同步與 OPDS server 各自預設關閉。啟用前要顯示實際 endpoint、將傳送的 metadata 欄位與撤銷方式，並記錄明確同意；停用後立即停止送出新請求。服務回傳只進 `metadata_candidates`／建議 Inbox，絕不直接寫 `user_field_overrides` 或 tag override。
 
-艦載 AI 也是選用功能：API key 只保留本次 App session；正式 UI 在啟用 OpenAI 或 Google 前必須明確指出所選 provider，說明選定頁面影像（AI 掃描最多六頁）與 prompt 可能離開裝置，取得 explicit consent 後才建立 AI session。切換 provider 會撤銷先前同意並要求重新確認。AI 只能提案或說明，不能直接覆寫人工 metadata。
+艦載 AI 也是選用功能：API key 預設只保留本次 App session；macOS／iOS／iPadOS 使用者可明確選擇將 key 記入本機 Keychain，清除設定時刪除。Keychain 中的 key 不會恢復資料傳送同意。正式 UI 在啟用 OpenAI 或 Google 前必須明確指出所選 provider，說明選定頁面影像（AI 掃描最多六頁）與 prompt 可能離開裝置，取得 explicit consent 後才建立 AI session。切換 provider 會撤銷先前同意並要求重新確認。AI 只能提案或說明，不能直接覆寫人工 metadata。

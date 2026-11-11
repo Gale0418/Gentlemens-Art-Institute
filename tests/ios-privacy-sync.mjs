@@ -605,8 +605,35 @@ if (process.platform === 'darwin') {
   assert.match(preservedStage, new RegExp(`^${realLifecycleRoot.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}/gai-ios-stage\\.`));
   assert.equal(fs.existsSync(preservedStage), true, 'successful staging must leave the printed stage directory available');
   assert.equal(fs.existsSync(path.join(preservedStage, 'src-tauri/gen/apple/gai_iOS/Info.plist')), true);
+  const licenseResource = 'docs/release/THIRD_PARTY_LICENSES.txt';
+  assert.deepEqual(fs.readFileSync(path.join(preservedStage, licenseResource)),
+    fs.readFileSync(path.join(root, licenseResource)), 'iOS staging must preserve the exact license resource');
   assert.equal(fs.existsSync(sentinel), true, 'successful staging must not affect unrelated directory entries');
   fs.rmSync(preservedStage, { recursive: true, force: true });
+
+  const staleFixture = path.join(lifecycleRoot, 'stale-fixture');
+  fs.cpSync(fixtureRoot, staleFixture, { recursive: true });
+  const staleApple = path.join(staleFixture, 'src-tauri/gen/apple');
+  const staleProject = path.join(staleApple, 'project.yml');
+  fs.writeFileSync(staleProject, fs.readFileSync(staleProject, 'utf8')
+    .replace('name: gai', 'name: app').replaceAll('gai_iOS', 'app_iOS'));
+  fs.renameSync(path.join(staleApple, 'gai_iOS'), path.join(staleApple, 'app_iOS'));
+  fs.writeFileSync(path.join(staleApple, 'app_iOS/app_iOS.entitlements'), 'fixture\n');
+  fs.mkdirSync(path.join(staleApple, 'app.xcodeproj'));
+  fs.mkdirSync(path.join(staleApple, 'Sources/app'), { recursive: true });
+  const failingXcodegenBin = path.join(lifecycleRoot, 'failing-xcodegen-bin');
+  fs.mkdirSync(failingXcodegenBin);
+  fs.writeFileSync(path.join(failingXcodegenBin, 'xcodegen'), '#!/bin/sh\nexit 71\n', { mode: 0o755 });
+  const failedMigration = childProcess.spawnSync('bash', [path.join(root, 'scripts/release/stage-ios-build.sh')], {
+    cwd: root,
+    encoding: 'utf8',
+    env: { ...lifecycleEnv, PATH: `${failingXcodegenBin}${path.delimiter}${lifecycleEnv.PATH}`, IOS_STAGE_TEST_FIXTURE: staleFixture },
+  });
+  assert.equal(failedMigration.status, 4, 'XcodeGen migration failure must use the documented staging error code');
+  assert.match(failedMigration.stderr, /xcodegen failed to regenerate the migrated Apple project/);
+  assert.deepEqual(fs.readdirSync(lifecycleRoot).filter(name => name.startsWith('gai-ios-stage.')), [], 'migration failure must remove only its owned stage');
+  assert.equal(fs.existsSync(sentinel), true, 'migration cleanup must preserve unrelated directory entries');
+
   childProcess.execFileSync('/usr/bin/plutil', ['-replace', 'NSCameraUsageDescription', '-bool', 'true', '--', path.join(fixtureRoot, 'src-tauri/gen/apple/gai_iOS/Info.plist')]);
   const failedAfterCopy = childProcess.spawnSync('bash', [path.join(root, 'scripts/release/stage-ios-build.sh')], {
     cwd: root,

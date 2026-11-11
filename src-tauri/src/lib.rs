@@ -728,6 +728,26 @@ fn open_smb_temp_root(temp_base: &Path, source_id: &str) -> Result<cap_std::fs::
         .map_err(|error| format!("無法開啟 SMB 暫存目錄: {error}"))
 }
 
+/// Atomically detach the fixed SMB temp child so a newer open can create its
+/// own `ComicTemp` after the lifecycle lock is released.
+fn retire_smb_temp_namespace(temp_base: &Path) -> Option<PathBuf> {
+    let current = temp_base.join("ComicTemp");
+    let retired = temp_base.join(format!(".ComicTemp-retired-{}", uuid::Uuid::new_v4()));
+    std::fs::rename(current, &retired).ok()?;
+    Some(retired)
+}
+
+fn remove_retired_smb_temp_namespace(retired: &Path) {
+    let _ = std::fs::remove_dir_all(retired);
+}
+
+fn cleanup_retired_smb_temp_namespace(retired: PathBuf) {
+    // Dropping the handle detaches the already-spawned blocking cleanup.
+    drop(tauri::async_runtime::spawn_blocking(move || {
+        remove_retired_smb_temp_namespace(&retired);
+    }));
+}
+
 fn remove_smb_temp_entry(temp_base: &Path, source_id: &str, relative: &Path) -> Result<(), String> {
     let base = match cap_std::fs::Dir::open_ambient_dir(temp_base, cap_std::ambient_authority()) {
         Ok(base) => base,
@@ -1666,10 +1686,10 @@ async fn open_comic(
             let _ = app_handle.emit("smb-download-start", serde_json::json!({"id": id}));
 
             println!("🌐 準備下載 SMB 漫畫: {relative_path_str}");
-            let temp_base = app_handle
-                .path()
-                .app_local_data_dir()
-                .unwrap_or_else(|_| std::env::temp_dir());
+            let temp_base = app_handle.path().app_local_data_dir().map_err(|error| {
+                let _ = app_handle.emit("smb-download-end", serde_json::json!({"id": id}));
+                format!("無法建立 SMB 暫存目錄: {error}")
+            })?;
             let temp_root = match open_smb_temp_root(&temp_base, &comic_info.source_id) {
                 Ok(root) => root,
                 Err(error) => {
@@ -1855,13 +1875,19 @@ async fn open_comic(
                 if !full_path.starts_with(root_path) {
                     return Err("外部漫畫不屬於原先授權的資料夾".into());
                 }
-                app_handle
-                    .tauri_plugin_ios_folder()
-                    .ensure_available(EnsureAvailableRequest {
-                        bookmark: bookmark.clone(),
-                        path: full_path.to_string_lossy().into_owned(),
-                    })
-                    .map_err(|error| format!("外部漫畫尚未下載完成或無法讀取：{error}"))?;
+                let ensure_handle = app_handle.clone();
+                let request = EnsureAvailableRequest {
+                    bookmark: bookmark.clone(),
+                    path: full_path.to_string_lossy().into_owned(),
+                };
+                tauri::async_runtime::spawn_blocking(move || {
+                    ensure_handle
+                        .tauri_plugin_ios_folder()
+                        .ensure_available(request)
+                })
+                .await
+                .map_err(|error| format!("檢查漫畫檔案時發生錯誤：{error}"))?
+                .map_err(|error| format!("外部漫畫尚未下載完成或無法讀取：{error}"))?;
             }
             let (root, relative) =
                 protocol::external_bookmark_capability(&comic_info, &full_path, state.inner())
@@ -2642,10 +2668,6 @@ async fn close_comic(
         state.opened_comic_revisions.write().unwrap().remove(id);
         if state::is_smb_source_id(&cleanup_source_id) {
             if let Ok(relative_text) = protocol::decode_capability_path(id) {
-                let temp_base = app_handle
-                    .path()
-                    .app_local_data_dir()
-                    .unwrap_or_else(|_| std::env::temp_dir());
                 let relative = Path::new(&relative_text);
                 if relative.is_absolute()
                     || relative.components().any(|part| {
@@ -2659,11 +2681,23 @@ async fn close_comic(
                 {
                     return Err("拒絕清除不安全的 SMB 暫存路徑".into());
                 }
-                let _ = remove_smb_temp_entry(&temp_base, &cleanup_source_id, relative);
+                let cleanup = app_handle
+                    .path()
+                    .app_local_data_dir()
+                    .map_err(|error| error.to_string())
+                    .and_then(|temp_base| {
+                        remove_smb_temp_entry(&temp_base, &cleanup_source_id, relative)
+                    });
+                if let Err(error) = cleanup {
+                    // Closing the reader remains successful when best-effort
+                    // cache cleanup fails, but leave a diagnostic for recovery.
+                    eprintln!("SMB cache cleanup failed: {error}");
+                }
             }
         }
     } else {
-        {
+        let temp_base = app_handle.path().app_local_data_dir().ok();
+        let retired_temp_dir = {
             let _lifecycle = state.comic_lifecycle.lock().unwrap();
             state
                 .reader_generation
@@ -2681,14 +2715,10 @@ async fn close_comic(
             state.ram_cache_revisions.lock().unwrap().clear();
             state.opened_comic_files.write().unwrap().clear();
             state.opened_comic_revisions.write().unwrap().clear();
-        }
-        let temp_dir = app_handle
-            .path()
-            .app_local_data_dir()
-            .unwrap_or_else(|_| std::env::temp_dir())
-            .join("ComicTemp");
-        if temp_dir.exists() {
-            let _ = std::fs::remove_dir_all(&temp_dir);
+            temp_base.as_deref().and_then(retire_smb_temp_namespace)
+        };
+        if let Some(retired_temp_dir) = retired_temp_dir {
+            cleanup_retired_smb_temp_namespace(retired_temp_dir);
         }
     }
 
@@ -3755,9 +3785,11 @@ async fn limited_ai_json_response(
         }
         body.extend_from_slice(&chunk);
     }
-    serde_json::from_slice(&body)
-        .map(|value| (status, value))
-        .map_err(|error| format!("艦載 AI 回應格式不正確：{error}"))
+    match serde_json::from_slice(&body) {
+        Ok(value) => Ok((status, value)),
+        Err(_) if !status.is_success() => Ok((status, serde_json::Value::Null)),
+        Err(error) => Err(format!("艦載 AI 回應格式不正確：{error}")),
+    }
 }
 
 #[tauri::command]
@@ -5986,6 +6018,48 @@ pub fn run() {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    async fn mock_limited_ai_json_response(
+        status: u16,
+        content_type: &str,
+        body: Vec<u8>,
+    ) -> Result<(reqwest::StatusCode, serde_json::Value), String> {
+        use std::io::Read;
+
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let address = listener.local_addr().unwrap();
+        let content_type = content_type.to_owned();
+        let server = std::thread::spawn(move || {
+            let (mut stream, _) = listener.accept().unwrap();
+            stream
+                .set_read_timeout(Some(std::time::Duration::from_secs(10)))
+                .unwrap();
+            let mut request = Vec::new();
+            let mut buffer = [0_u8; 1024];
+            while !request.ends_with(b"\r\n\r\n") {
+                let bytes = stream.read(&mut buffer).unwrap();
+                assert!(bytes > 0, "mock HTTP request ended before its headers");
+                request.extend_from_slice(&buffer[..bytes]);
+                assert!(request.len() <= 8192, "mock HTTP request headers too large");
+            }
+            let headers = format!(
+                "HTTP/1.1 {status} Mock Response\r\nContent-Length: {}\r\nContent-Type: {content_type}\r\nConnection: close\r\n\r\n",
+                body.len()
+            );
+            stream.write_all(headers.as_bytes()).unwrap();
+            let _ = stream.write_all(&body);
+        });
+
+        let client = reqwest::Client::builder().no_proxy().build().unwrap();
+        let response = client
+            .get(format!("http://{address}/mock-ai-response"))
+            .send()
+            .await
+            .unwrap();
+        let result = limited_ai_json_response(response).await;
+        server.join().unwrap();
+        result
+    }
 
     #[test]
     fn ios_history_uses_native_documents_for_custom_scan_roots() {
@@ -8938,6 +9012,68 @@ mod tests {
         fs::remove_dir_all(root).unwrap();
     }
 
+    #[test]
+    fn idless_close_retires_temp_root_before_a_new_smb_partial_is_created() {
+        let root = std::env::temp_dir().join(format!("gai-smb-retire-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&root).unwrap();
+        let source_id = "smb:v1:test";
+        let old_temp_root = open_smb_temp_root(&root, source_id).unwrap();
+        let stale_partial = Path::new("book.part");
+        let mut stale_file = old_temp_root
+            .open_with(
+                stale_partial,
+                cap_std::fs::OpenOptions::new().write(true).create_new(true),
+            )
+            .unwrap()
+            .into_std();
+        stale_file.write_all(b"stale").unwrap();
+        drop(stale_file);
+
+        let state = AppState::new();
+        state
+            .reader_generation
+            .store(7, std::sync::atomic::Ordering::Release);
+        let retired = {
+            let _lifecycle = state.comic_lifecycle.lock().unwrap();
+            state
+                .reader_generation
+                .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            retire_smb_temp_namespace(&root).unwrap()
+        };
+        assert!(retired.join("smb_v1_test/book.part").exists());
+        assert!(!reader_generation_is_current(&state, 7));
+
+        let new_temp_root = open_smb_temp_root(&root, source_id).unwrap();
+        let new_partial = Path::new("book.part");
+        let mut new_file = new_temp_root
+            .open_with(
+                new_partial,
+                cap_std::fs::OpenOptions::new().write(true).create_new(true),
+            )
+            .unwrap()
+            .into_std();
+        new_file.write_all(b"new").unwrap();
+        drop(new_file);
+
+        remove_retired_smb_temp_namespace(&retired);
+
+        assert!(!retired.exists());
+        assert!(new_temp_root.try_exists(new_partial).unwrap());
+        assert_eq!(
+            std::fs::read(root.join("ComicTemp").join("smb_v1_test").join("book.part")).unwrap(),
+            b"new"
+        );
+        assert!(commit_smb_download_if_current(
+            &state,
+            7,
+            &old_temp_root,
+            stale_partial,
+            Path::new("book.cbz")
+        )
+        .is_err());
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
     #[cfg(unix)]
     #[test]
     fn smb_temp_root_rejects_symlink_escape() {
@@ -9396,6 +9532,70 @@ mod tests {
         assert!(!update.is_finished());
         drop(first_guard);
         update.await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn non_json_ai_error_responses_preserve_status_for_http_errors_and_gemma_fallback() {
+        for (status, content_type, body) in [
+            (502, "text/html", b"<html>Bad Gateway</html>".to_vec()),
+            (503, "application/json", Vec::new()),
+        ] {
+            let (observed_status, value) =
+                mock_limited_ai_json_response(status, content_type, body)
+                    .await
+                    .unwrap();
+
+            assert_eq!(observed_status.as_u16(), status);
+            assert_eq!(value, serde_json::Value::Null);
+            assert!(should_try_gemma_fallback(observed_status));
+        }
+    }
+
+    #[tokio::test]
+    async fn malformed_successful_ai_response_keeps_the_existing_parse_error() {
+        let error = mock_limited_ai_json_response(200, "application/json", b"{malformed".to_vec())
+            .await
+            .unwrap_err();
+
+        assert!(error.starts_with("艦載 AI 回應格式不正確："));
+    }
+
+    #[tokio::test]
+    async fn valid_ai_json_response_keeps_its_status_and_value() {
+        let (status, value) = mock_limited_ai_json_response(
+            200,
+            "application/json",
+            br#"{"ok":true,"value":3}"#.to_vec(),
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(status, reqwest::StatusCode::OK);
+        assert_eq!(value, serde_json::json!({ "ok": true, "value": 3 }));
+
+        let (status, value) = mock_limited_ai_json_response(
+            503,
+            "application/json",
+            br#"{"error":{"message":"temporarily unavailable"}}"#.to_vec(),
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(status, reqwest::StatusCode::SERVICE_UNAVAILABLE);
+        assert_eq!(
+            value,
+            serde_json::json!({ "error": { "message": "temporarily unavailable" } })
+        );
+    }
+
+    #[tokio::test]
+    async fn non_json_ai_error_body_still_obeys_the_response_size_cap() {
+        let body = vec![b'x'; MAX_AI_RESPONSE_BYTES + 1];
+        let error = mock_limited_ai_json_response(502, "text/html", body)
+            .await
+            .unwrap_err();
+
+        assert_eq!(error, "艦載 AI 回應超過 1 MiB 安全上限");
     }
 
     #[test]

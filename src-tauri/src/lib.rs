@@ -1631,9 +1631,7 @@ async fn open_comic(
         state::is_smb_source_id(&comic_info.source_id) || comic_info.r#type == "smb-archive";
     let is_external =
         comic_info.source_id.starts_with("external:") || comic_info.r#type.starts_with("external-");
-    if commerce::is_direct_smb(&comic_info.source_id, &comic_info.r#type) {
-        commerce::require_pro(&app_handle).await?;
-    }
+    // App-managed SMB reading is a free core feature; source checks below still apply.
     if !is_smb && !is_external && comic_info.r#type != "offline" {
         let scan_dir = state.scan_dir.read().unwrap().clone();
         if scan_dir.is_empty() || !protocol::local_source_matches_scan_dir(&comic_info, &scan_dir) {
@@ -2893,9 +2891,7 @@ async fn set_smb_config(
     state: State<'_, Arc<AppState>>,
     data: Option<crate::state::SmbConfig>,
 ) -> Result<serde_json::Value, String> {
-    if data.is_some() {
-        commerce::require_pro(&app_handle).await?;
-    }
+    // SMB configuration is available to everyone; validate before storing it.
     let data = validate_smb_config(data)?;
     let _source_authorization = state.source_authorization_lifecycle.write().await;
     let _scan_lifecycle = state.scan_lifecycle.lock().await;
@@ -4323,7 +4319,6 @@ async fn show_item_in_folder(
 
 #[tauri::command]
 async fn get_file_capability(
-    app_handle: AppHandle,
     comic_id: String,
     source_id: Option<String>,
     relative_path: Option<String>,
@@ -4342,22 +4337,6 @@ async fn get_file_capability(
         .read()
         .map_err(|_| "NAS 設定鎖定失敗")?
         .clone();
-    if state::is_smb_source_id(&location.source_id) {
-        if let Err(reason) = commerce::require_pro(&app_handle).await {
-            // Inspecting the library must not trigger a purchase sheet or a NAS probe.
-            // Recovery remains available through its separate, ungated command.
-            return Ok(file_ops::FileCapability {
-                source_kind: location.source_id.clone(),
-                online: location.online,
-                expected_fingerprint: None,
-                can_reveal: false,
-                can_rename: false,
-                can_move: false,
-                can_trash: false,
-                reason: Some(reason),
-            });
-        }
-    }
     Ok(file_ops::capability_with_smb_config(&location, smb_config).await)
 }
 
@@ -4391,9 +4370,6 @@ async fn mutate_comic_file(
     })
     .await
     .map_err(|error| error.to_string())??;
-    if state::is_smb_source_id(&location.source_id) {
-        commerce::require_pro(&app_handle).await?;
-    }
     let target_source_id = location.source_id.clone();
     let target_before_relative_path = location.relative_path.clone();
     let result = file_ops::mutate(&store, smb, request).await?;
@@ -5590,17 +5566,9 @@ where
 
 #[tauri::command]
 async fn recover_reading_progress(
-    app_handle: AppHandle,
     data: SaveProgressRequest,
     state: State<'_, Arc<AppState>>,
 ) -> Result<(), String> {
-    if data
-        .source_id
-        .as_deref()
-        .is_some_and(state::is_smb_source_id)
-    {
-        commerce::require_pro(&app_handle).await?;
-    }
     recover_reading_progress_inner(state.inner(), data).await
 }
 

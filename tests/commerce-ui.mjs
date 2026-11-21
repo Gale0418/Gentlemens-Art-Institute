@@ -9,7 +9,15 @@ const commerceSource = fs.readFileSync('public/commerce.js', 'utf8');
 assert.match(html, /id="commerce-settings"/, 'settings should expose the G.A.I Pro section');
 assert.match(html, /id="commerce-purchase-btn"[^>]*disabled/, 'purchase must start disabled');
 assert.match(html, /免費基本版/, 'free range must be visible');
-assert.match(html, /直接 SMB／NAS 連線/, 'Pro NAS scope must be visible');
+assert.match(html, /NAS／SMB 直接連線/, 'free scope must include direct NAS/SMB');
+assert.doesNotMatch(commerceSource, /target\.closest\('#smb-setup-btn'\)/, 'direct SMB entry must not show a paywall');
+const nativeSource = fs.readFileSync('src-tauri/src/lib.rs', 'utf8');
+for (const command of ['open_comic', 'set_smb_config', 'get_file_capability', 'mutate_comic_file', 'recover_reading_progress']) {
+  const match = nativeSource.match(new RegExp(`async fn ${command}\\([\\s\\S]*?(?=\\n#\\[tauri::command\\]|$)`));
+  assert.ok(match, `native command ${command} must exist`);
+  assert.doesNotMatch(match[0], /commerce::require_pro/, `${command} must not paywall SMB access`);
+}
+assert.match(nativeSource, /commerce::require_pro/, 'AI and batch organization still enforce Pro');
 assert.match(html, /API 費用依供應商方案為準/, 'AI provider billing must be disclosed');
 assert.match(html, /tauri-api\.js"><\/script>\s*<script src="commerce\.js"><\/script>\s*<script src="app\.js">/, 'commerce must load between the bridge and app');
 assert.match(css, /\.commerce-modal-overlay\[hidden\]/, 'commerce modal needs a hidden state');

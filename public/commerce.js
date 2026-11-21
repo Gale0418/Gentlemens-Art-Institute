@@ -13,7 +13,6 @@
     : source.replace(/\{(\w+)\}/g, (token, key) => Object.prototype.hasOwnProperty.call(vars, key) ? String(vars[key]) : token);
 
   const FEATURE_LABELS = {
-    'direct-nas': featureText("直接 SMB／NAS 連線"),
     batch: featureText("批次標籤與進階整理"),
     duplicates: featureText("重複候選"),
     ai: featureText("AI 解說與整理工具"),
@@ -312,7 +311,6 @@
 
   function paidFeatureForTarget(target) {
     if (!target || typeof target.closest !== 'function') return '';
-    if (target.closest('#smb-setup-btn')) return 'direct-nas';
     if (target.closest('#organize-duplicates')) return 'duplicates';
     if (target.closest('#organize-inbox, #organize-apply, #organize-exclude-tag, #organize-folder-rule, #organize-reimport, #organize-tag, #organize-author, #organize-series, #organize-language, #organize-direction')) return 'batch';
     if (target.closest('#btn-ai-explain, #btn-ai-auto-explain, #ai-save-btn, #ai-test-btn, .inspector-ai-action, .ai-page-btn')) return 'ai';

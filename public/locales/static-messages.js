@@ -671,9 +671,9 @@ window.GAIL10n.register({
     "en": "G.A.I Pro",
     "ja": "G.A.I Pro"
   },
-  "基本閱讀免費；Pro 以一次買斷解鎖進階整理、直接 NAS 與 AI 工具。": {
-    "en": "Basic reading is free; a one-time Pro purchase unlocks advanced organization, direct NAS access, and AI tools.",
-    "ja": "基本読書は無料です。Proを一度購入すると、高度な整理、NASへの直接接続、AIツールが利用できます。"
+  "基本閱讀與 NAS／SMB 直連免費；Pro 一次買斷解鎖進階整理與 AI 工具。": {
+    "en": "Reading and direct NAS/SMB connections are free; a one-time Pro purchase unlocks advanced organization and AI tools.",
+    "ja": "読書機能とNAS／SMBへの直接接続は無料です。Proを一度購入すると高度な整理やAIツールを利用できます。"
   },
   "檢查中…": {
     "en": "Checking…",
@@ -683,17 +683,17 @@ window.GAIL10n.register({
     "en": "Free basic edition",
     "ja": "無料ベーシック版"
   },
-  "本機圖片、ZIP／CBZ、正常閱讀、進度、收藏、搜尋、基本標籤、匯出與復原，以及透過系統檔案選擇器使用已掛載 NAS。": {
-    "en": "Local images, ZIP/CBZ, standard reading, progress, favorites, search, basic tags, export and restore, plus mounted NAS folders through the system file picker.",
-    "ja": "ローカル画像、ZIP/CBZ、通常読書、進捗、お気に入り、検索、基本タグ、エクスポートと復元、システムのファイル選択からマウント済みNASを利用できます。"
+  "本機圖片、ZIP／CBZ、正常閱讀、進度、收藏、搜尋、基本標籤、匯出與復原，以及 SMB／NAS 直接連線或透過系統檔案選擇器使用已掛載 NAS。": {
+    "en": "Local images, ZIP/CBZ, standard reading, progress, favorites, search, basic tags, export and restore, plus direct SMB/NAS or system-mounted NAS access.",
+    "ja": "ローカル画像、ZIP/CBZ、通常の読書、進捗、お気に入り、検索、基本タグ、書き出しと復元に加え、SMB／NASへの直接接続とシステムでマウントしたNASを利用できます。"
   },
   "v1 Pro · 一次買斷": {
     "en": "v1 Pro · One-time purchase",
     "ja": "v1 Pro · 買い切り"
   },
-  "直接 SMB／NAS 連線、批次標籤與進階整理、重複候選、AI 解說與整理工具。": {
-    "en": "Direct SMB/NAS connections, batch tags and advanced organization, duplicate candidates, and AI explanation and organization tools.",
-    "ja": "SMB/NASへの直接接続、一括タグと高度な整理、重複候補、AIによる説明・整理ツール。"
+  "批次標籤與進階整理、重複候選、AI 解說與整理工具。": {
+    "en": "Batch tags and advanced organization, duplicate candidates, and AI explanation and organization tools.",
+    "ja": "タグの一括編集と高度な整理、重複候補、AIによる説明・整理ツール。"
   },
   "正在向 App 查詢權益狀態…": {
     "en": "Checking entitlements with the app…",
@@ -735,13 +735,13 @@ window.GAIL10n.register({
     "en": "Add a local, external, or connected NAS folder through the system file picker.",
     "ja": "システムのファイル選択からローカル、外付けディスク、接続済みNASのフォルダーを追加します。"
   },
-  "進階 NAS 連線": {
-    "en": "Advanced NAS connection",
-    "ja": "NAS詳細接続"
+  "NAS／SMB 直連（免費）": {
+    "en": "Direct NAS / SMB connection (free)",
+    "ja": "NAS／SMBに直接接続（無料）"
   },
-  "只有無法先在系統掛載 NAS 時，才需要直接輸入 SMB 連線資料。": {
-    "en": "Enter SMB connection details directly only when the NAS cannot be mounted by the system first.",
-    "ja": "システムでNASを先にマウントできない場合のみ、SMB接続情報を直接入力してください。"
+  "除了透過系統「檔案」App 掛載 NAS，也可以免費在這裡直接設定 SMB 連線。": {
+    "en": "You can mount NAS shares through the system Files app or configure a direct SMB connection here for free.",
+    "ja": "システムの「ファイル」アプリでNASをマウントするか、ここからSMB接続を無料で直接設定できます。"
   },
   "設定 SMB 連線": {
     "en": "Set up SMB connection",
@@ -811,13 +811,13 @@ window.GAIL10n.register({
     "en": "Basic reading is free. A one-time Pro purchase unlocks advanced tools.",
     "ja": "基本の読書機能は無料です。Proを買い切りで購入すると、高度なツールを利用できます。"
   },
-  "閱讀、進度、收藏、搜尋、基本標籤、匯出／復原與已掛載 NAS。": {
-    "en": "Reading, progress, favorites, search, basic tags, export/restore, and mounted NAS.",
-    "ja": "読書、進捗、お気に入り、検索、基本タグ、エクスポート／復元、マウント済みNAS。"
+  "閱讀、進度、收藏、搜尋、基本標籤、匯出／復原與 NAS／SMB 直接連線。": {
+    "en": "Reading, progress, favorites, search, basic tags, export/restore, and direct NAS/SMB connections.",
+    "ja": "読書、進捗、お気に入り、検索、基本タグ、書き出し／復元、NAS／SMBへの直接接続。"
   },
-  "直接 SMB／NAS、批次整理、重複候選與 AI 解說／整理。": {
-    "en": "Direct SMB/NAS, batch organization, duplicate candidates, and AI explanation/organization.",
-    "ja": "SMB/NASへの直接接続、一括整理、重複候補、AIによる説明・整理。"
+  "批次整理、重複候選與 AI 解說／整理。": {
+    "en": "Batch organization, duplicate candidates, and AI explanation/organization.",
+    "ja": "一括整理、重複候補、AIによる説明・整理。"
   },
   "AI 費用另計": {
     "en": "AI billed separately",

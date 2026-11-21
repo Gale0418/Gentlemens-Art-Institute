@@ -1,63 +1,88 @@
-# 紳士藝術研究所 · GAI
+# 紳士藝術研究所 · G.A.I.
 
-**選漫畫資料夾，直接建立書架。**
+> **把漫畫留在電腦或 NAS，躺在床上用 iPad 慢慢看。** ฅ(•ω•)ฅ
 
-選擇本機、外接硬碟或系統已掛載的 NAS 漫畫資料夾即可建立書架，原始檔留在原處。書架可搜尋、收藏漫畫，並在當前裝置保存閱讀進度與閱讀紀錄。圖片資料夾、ZIP／CBZ、RAR／CBR、7z／CB7 可直接閱讀，不必先手動解壓；單頁、雙頁、右至左與條漫可依作品切換。
+G.A.I（Gentlemen's Art Institute）是一款給 **iPhone、iPad、Mac** 使用的私人漫畫書架與閱讀器。它可以閱讀圖片資料夾及常見漫畫壓縮檔、記住閱讀進度，並用搜尋、收藏和標籤整理自己的收藏。
 
-基本閱讀免費，不要求建立 App 帳號。可從本機、外接硬碟或已透過系統掛載的 NAS 選擇資料夾。首發 v1 Pro 採一次買斷，提供直接 SMB／NAS、批次整理、重複候選與選用 AI 工具；AI 需自備金鑰，API 費用另計。
+**[🍎 App Store 免費下載](https://apps.apple.com/tw/app/id6809937717)** · [使用問題與回報](SUPPORT.md) · [隱私政策](#隱私政策) · [原始碼授權](LICENSE)
 
-已取得測試版時，先試讀內建原創風景，再加入自己的收藏。內建圖集供操作體驗；App 不提供漫畫下載或內容庫。NAS 離線時會保留已整理紀錄，原始頁面仍需來源可讀；進度保存在當前裝置，未提供跨裝置自動同步。
+- **原檔留在原處**：可選取本機、外接儲存裝置或透過系統掛載的 NAS 資料夾，不必先手動把整套書庫複製進 App。
+- **壓縮檔直接閱讀**：支援 ZIP／CBZ、RAR／CBR、7z／CB7，不需要事先手動解壓。
+- **隨喜好閱讀**：單頁、雙頁、右至左翻頁與上下連續捲動（條漫）。
+- **找書不再考古**：基本標籤、搜尋、收藏、閱讀紀錄與續讀功能。
+- **基本閱讀免費**：不要求建立 G.A.I 帳號，也沒有廣告；另有一次買斷的 Pro 進階工具。
 
-介面採用五種深色主題，書架、資料夾、搜尋篩選與閱讀控制沿用一致的色彩和操作回饋；可在設定中切換主題。沒有封面的資料夾與漫畫會以向量圖示表示，資料夾卡片會標出目錄，並在有漫畫時顯示數量。介面支援觸控操作，鍵盤移動焦點時也會顯示清楚的提示。
+## 🚀 第一次使用
 
-**第 82 版本機測試版：** 書架往下捲時，標題、回上層、篩選和目前路徑會留在書架頂端。從已捲動的書架開啟「依標籤探索」，介面會把面板帶到可查看的位置。
+1. 透過上方 App Store 連結安裝並開啟 G.A.I。
+2. 第一次開啟時，可先點 **「先試讀原創風景」** 熟悉翻頁操作；這是內建的全年齡示範圖集。
+3. 準備好自己的漫畫後，點 **「加入漫畫資料夾」**；也可以從 **「設定」→「加入漫畫來源…」** 開啟系統檔案選擇器。
+4. 選取存放漫畫的資料夾，讓 G.A.I 建立書架；點一下作品查看詳情，再點同一本或選 **「開始閱讀」**。
+5. 閱讀時點一下畫面可顯示控制列，切換單頁／雙頁／條漫及翻頁方向。下次可從 **「繼續閱讀」** 接續上次位置。
 
-**第 81 版本機測試版：** Mac 與 iPad 使用 `1.0.5 (81)`。書籤修復會先同步備份所在目錄，再替換損壞清單。檔案整理若偵測到檔案身分異動，會保留現況以供核對。Windows 檔案識別改用穩定 API，支援完整的 128 位元 ID。
+支援圖片資料夾或封存檔。G.A.I 不內附第三方漫畫，也不提供漫畫下載服務；請使用自己擁有或有權閱讀的內容。
 
-**第 80 版 Mac／iPad（2026-11-11）：** `1.0.5 (80)` 已在兩台裝置原地安裝。修正快速換書時 SMB 暫存清理可能干擾新下載的情況，iPad 的 iCloud 檔案可用性檢查移至背景，符合安全上限的大型 7z 可正常開啟。此版也更新 SQLite 安全修補，保留 AI 服務的 HTTP 錯誤狀態，並在兩個商店包附上第三方授權清單。詳見[第 80 版驗證紀錄](docs/release/build80-validation.md)。
+## 📡 iPad 如何讀取電腦或 NAS 裡的漫畫？（免費）
 
-**第79版 Mac／iPad（2026-11-11）：** 書架原有四種主題新增亞歷山大，五種主題各有 Mac、iPad 橫向與直向背景；主題名稱支援繁中、英文、日文。修正相片預覽網格位置及 Ink 深色主題標籤對比。Mac 與 iPad 的 `1.0.4 (79)` 均已安裝並完成 12 項原生檢查及資料保留比對。詳見[第79版驗證紀錄](docs/release/build79-validation.md)。
+**這條路徑使用 Apple「檔案」App 先掛載共享資料夾，不需要購買 Pro。**
 
-**第78版 Mac（2026-11-10）：** AI 頁面說明以自然段落精簡意譯，閱讀翻頁時同步改善舊譯文隱藏、新頁載入與快取呈現；翻譯結果直接呈現內容，AI 按鈕同寬對齊。介面標籤經 Gemini 三語校閱，品牌標題依介面語言單獨顯示並接上 GAI。Mac 已安裝 `1.0.4 (78)`，並完成金鑰圈授權後使用已儲存金鑰、翻譯完整呈現及重啟續讀的原生驗收；iPad 本輪未安裝或驗收第78版。驗收範圍與未實測項目見[第78版紀錄](docs/release/build78-validation.md)。
+1. 先在電腦或 NAS 上啟用 **SMB 檔案共享**，確認 iPad 可以透過區域網路存取，並準備有權讀取漫畫資料夾的帳號。
+2. 在 iPad 開啟 **「檔案」App →「瀏覽」→「更多」（⋯）→「連接伺服器」**。
+3. 輸入伺服器位址，例如 **smb://192.168.1.100**，再依伺服器設定使用訪客或註冊使用者身分連線。
+4. 確定能在「檔案」App 看見共享資料夾後，回到 **G.A.I →「加入漫畫資料夾」**，從系統檔案選擇器選取該共享資料夾。
+5. 選取成功後，即可在書架中瀏覽與閱讀漫畫；無須為每本書事先手動解壓。
 
-**第77版歷史紀錄：** 書架換上更寬敞的寫實藏書庫，木書架與暖燈延伸到頂欄及兩側；四種主題共用淡暗色襯底，漫畫封面保持醒目。直立取景保留書架與長廊，閱讀器維持黑底。第77版各平台候選當時的實機驗證範圍見[第77版紀錄](docs/release/build77-validation.md)。
+> **免費掛載 vs. Pro 直接連線：** 上面是先由 iPad 系統連線，再讓 G.A.I 讀取資料夾。若你不想先經過系統掛載，Pro 才有 App 內的 **「設定」→「進階 NAS 連線」→「設定 SMB 連線」**，可直接輸入主機、共享資料夾及登入資料。
 
-**第76版 Mac／iPad（2026-11-10）：** 閱讀器新增獨立「頁面」總覽，選頁後保留原閱讀模式與雙頁配對；進度條延伸至頁碼旁，按鈕、焦點與調校面板的回饋更清楚。書架加入隨四種主題配色的淡淡圖書館紋理。兩平台已在本機安裝 `1.0.4 (76)`，完整 JavaScript 測試通過，CodeRabbit 最終複審 14 個檔案、0 issues。原生測試、資料保存及未驗項目見[第76版驗證紀錄](docs/release/build76-validation.md)。
+提醒：NAS 必須保持連線，才能讀取尚未快取的原始頁面。閱讀時可能使用裝置空間存放縮圖與暫存頁面；**不是零容量占用，也不代表整套漫畫已離線下載**。
 
-**第75版 Mac／iPad（2026-11-09）：** 書庫 Inspector 管理抽屜整合 metadata 與詳情；閱讀器提供互斥控制面板、亮度與銳利化調整，以及版面適配控制。Mac 與 iPad 均已安裝第75版並完成本機原生操作及閱讀資料保留驗證。Mac CBZ 換書、保存與冷啟動續讀通過；iPad 換書、閱讀調校、閱讀紀錄範圍、冷啟動續讀均通過，兩平台安裝前既有閱讀位置與原始歷史逐筆保留。NAS H 掛載及抽樣 metadata 已確認；NAS 畫面內容解碼與效能未驗證。完整獨立複審及發布 exact SHA 收據另存 Mission Center。詳見[第75版驗證紀錄](docs/release/build75-validation.md)。
+## 📚 閱讀與整理小技巧
 
-**第74版 Mac（2026-11-09）：** Mac 已在本機更新至 `1.0.4 (74)`。從「隨手翻一本」或標籤探索進入後，可在閱讀器直接「再翻一本」；同一範圍會先翻過所有候選，再開始下一輪。換書沿用保存與續讀流程，繁中、英文、日文介面文字由 Gemini 校訂。iPad 維持第73版，本輪依使用者安排延後 iPad 74 實機驗證。詳見[第74版驗證紀錄](docs/release/build74-validation.md)；本輪未上傳 App Store Connect。
+- **快速續讀**：首頁的「繼續閱讀」會記住目前裝置上的進度；「閱讀紀錄」可查看最近讀過的作品。
+- **依標籤找書**：利用搜尋欄搜尋漫畫、作者與標籤，或點「依標籤探索」從目前書架範圍找作品。
+- **收藏喜歡的作品**：使用收藏與「已收藏」篩選，縮短尋找時間。
+- **更換來源**：到「設定」管理漫畫來源。來源暫時離線時，已整理的書目紀錄仍可保留，但原始漫畫仍須重新連線才能閱讀。
+- **照片與相簿**：「匯入圖片」會建立書庫副本；連結相簿或外部資料夾則使用原來源，兩者對儲存空間的影響不同。
 
-**第73版（2026-11-09）：** Mac與iPad已在本機更新至 `1.0.4 (73)`。首頁可直接試讀原創風景，或加入自己的漫畫資料夾；閱讀紀錄預設30天，可切一年或全部。iPad已完成兩次安裝後的換書、存檔與冷啟動續讀，並修復更新後紀錄誤判離線的問題。範圍、來源指紋與未測項目見[第73版驗證紀錄](docs/release/build73-validation.md)；本輪未上傳App Store Connect。
+## 💰 免費版與 Pro 差在哪裡？
 
-**歷史商店狀態（2026-11-03）：** 當日 iOS 1.0.4 (68) 與 Mac 1.0.4 (65) 曾處於 `WAITING_FOR_REVIEW`；這是歷史紀錄，不代表目前 App Store Connect 狀態。第59版商店圖組與三語介紹的變更紀錄見 [第59版發行紀錄](docs/release/build59-store-refresh-2026-10-17.md)。
+| 功能 | 免費基本版 | v1 Pro |
+| --- | :---: | :---: |
+| 圖片資料夾及 ZIP／CBZ、RAR／CBR、7z／CB7 閱讀 | ✅ | ✅ |
+| 單頁、雙頁、右翻、條漫、進度與閱讀紀錄 | ✅ | ✅ |
+| 搜尋、收藏、基本 TAG 標籤 | ✅ | ✅ |
+| 透過系統「檔案」App 使用已掛載的 NAS | ✅ | ✅ |
+| 基本資料匯出與復原 | ✅ | ✅ |
+| App 內直接設定 SMB／NAS 連線 | — | ✅ |
+| 批次標籤、進階整理及重複候選 | — | ✅ |
+| AI 解說與整理工具 | — | ✅ |
 
-[隱私政策](#隱私政策) · [支援與使用說明](SUPPORT.md)
+**v1 Pro 為一次買斷，沒有訂閱**；實際售價與購買可用性請以 App Store 和 App 內顯示為準。AI 是選用功能，需自備 OpenAI 或 Google API Key，**不包含 API 額度**，使用費由供應商另計。AI 只會在你選擇供應商、內容並同意後傳送所選頁面與提示文字。
 
-[看看七張宣傳圖](docs/release/PROMO_ART.md)：沿用 App 畫面構圖、替換示範內容；圖中的漫畫不隨 App 提供。
+## ❓ 常見問題
 
-專案現在是 **Tauri 2 + Rust + SQLite + Vanilla HTML/CSS/JavaScript** 的單一路線產品。2026-09-04 起，舊 Electron / Express / browser fallback runtime、對應套件、scripts、測試與包裝資產已正式移除；不再維護第二套後端。
+**Q：無法連上 NAS？**  
+先確認 iPad 與電腦／NAS 的網路連通、SMB 分享權限，以及「檔案」App 本身是否能打開該資料夾。若來源曾離線，可重新連線後回到 G.A.I 檢查來源。詳細排查請看 [支援說明](SUPPORT.md)。
 
-> `public/app.js` 仍透過 `window.electronAPI` 這個歷史名稱呼叫 native facade，實際物件由 `public/tauri-api.js` 在 Tauri WebView 內建立。這只是為了避免大規模重寫共享前端 API 名稱，**不是 Electron runtime 或相依套件**。
+**Q：加進書庫會刪掉或搬走原始檔嗎？**  
+透過資料夾或 NAS 連結的內容，預設保留在原位置。使用「匯入圖片」則不同，會建立副本。手動執行進階整理操作前，請先確認變更。
 
-## 閱讀紀錄
+**Q：iPad 和 Mac 的閱讀進度會自動同步嗎？**  
+**目前不會。** 進度、標籤與閱讀紀錄以各裝置的本機資料為主，沒有跨裝置自動同步。
 
-從「繼續閱讀」旁的「閱讀紀錄」開啟日期清單，預設最近 30 天，也能切換一年或全部。同一本當天合併顯示，點選後從目前保存的進度繼續；來源離線時仍保留紀錄。
+**Q：我可以直接下載漫畫嗎？**  
+G.A.I 是閱讀與整理工具，不提供漫畫下載來源或第三方作品內容。
 
-只有漫畫頁面成功顯示才記錄，查看詳情與背景掃描不會新增。完整歷史從此功能啟用後開始累積，較早紀錄會保留；每次分批載入 40 筆。紀錄與進度儲存在各裝置本機，這版沒有加入跨裝置同步。
+**Q：有問題或想許願新功能？**  
+歡迎使用 GitHub Issues 或查看 [SUPPORT.md](SUPPORT.md)。回報時請附上裝置、系統與 App 版本、重現步驟；記得遮住私人漫畫、NAS 帳密及 API Key。
 
-## Current status
+## 🛠️ 關於本專案
 
-- **唯一正式分支：`main`**；repository 採 trunk-only。
-- **唯一 runtime：Tauri 2**；Electron、Express、`main.js`、`preload.js`、`server.js`、`scan-depth.js` 都已移除。
-- **Rust release toolchain：1.98.1**，由 `rust-toolchain.toml` 與 `src-tauri/Cargo.toml` 同步鎖定。
-- **目前不使用 GitHub Actions**；Actions 額度不可用期間，品質閘門全部改成 repository 內可重跑的 `npm run quality`。
-- SQLite catalog 是 metadata / location / progress 的主要本機 authority；來源離線不等於資料刪除。
-- 本機、iOS security-scoped folder 與單一 SMB/NAS 是獨立來源；其中一個來源離線不應清除其他來源或 catalog 紀錄。
-- 內建全年齡原創 demo 可在乾淨安裝、沒有 NAS／帳號／第三方下載的情況下直接驗證核心 reader。
-- 歷史紀錄（2026-11-02）：當時 iOS 1.0.2 (63) 與 Mac 1.0.2 (59) 為 `READY_FOR_DISTRIBUTION`，iOS 1.0.3 (66) 等待審查；TAG、VoiceOver 與 StoreKit 完整交易矩陣仍待驗收。
-- 歷史紀錄（2026-10-03）：Mac `1.0` 已 `READY_FOR_DISTRIBUTION`；iOS `1.0` 與 Mac `1.0.1` 的第57版已撤回，第58版兩平台已正式送審。本機 Mac／iPad 當時為第56版；TAG 探索的 Mac 證據見 [探索體驗報告](docs/audits/2026-10-03-discovery-experience.md)。
-- `src-tauri/vendor/wry/` 是**刻意保留的 iOS WebKit startup patch**，目前仍由 Cargo `[patch.crates-io]` 使用；不要因為它看起來像 vendor 目錄就清掉。
+G.A.I 使用 **Tauri 2、Rust、SQLite 與 HTML／CSS／JavaScript** 開發。這個倉庫公開供閱讀原始碼；想自行建置，可參考 [BUILD_GUIDE.md](BUILD_GUIDE.md)。
+
+**目前的原創程式碼採保留所有權利方式公開供檢視，並非開源授權。** 使用、修改、重製及重新散布的授權範圍，請以 [LICENSE](LICENSE) 為準；第三方元件另依其個別授權，詳見 [第三方授權清單](docs/release/THIRD_PARTY_NOTICES.md)。
+
+---
 
 ## 隱私政策
 
@@ -81,184 +106,3 @@ G.A.I 不要求建立自有帳號，也未整合廣告或第三方行為分析�
 本機資料保留至你刪除相關內容、清除 App 資料或解除安裝；系統備份與自行匯出的副本須依各自儲存位置另行管理。移除書庫來源或相簿連結不等於刪除原始檔案。你可在系統設定撤回照片及檔案存取權限，停止 AI 使用並清除工作階段金鑰與已記住的本機 Keychain 金鑰；已送到供應商的資料須依其資料控制方式處理。
 
 開發者無法代你讀取或刪除裝置上的私人書庫。若要處理曾寄給支援的資料，請來信說明；涉及必要的問題處理紀錄或依法須保留的資料，會於回覆中說明。政策變更會更新本段日期；新增資料用途仍須依實際功能提供相應告知與選擇。
-
-## 原始碼授權與內容聲明
-
-本 repository 已公開供檢視，**不採開源授權**。G.A.I 原創程式碼、文件與專案資產保留所有權利；除適用法律或託管平台條款允許的範圍外，未經書面許可，不授權使用、修改、再散布或販售。完整條款見 [LICENSE](LICENSE)。第三方元件仍依各自授權提供，包含 `src-tauri/vendor/wry/` 中保留的授權文件。
-
-G.A.I 是讀取使用者自行提供內容的漫畫閱讀工具，不提供漫畫下載、來源站或任何第三方漫畫的使用權。請僅匯入你有權使用的內容。公開原始碼不代表 App 已上架；目前版本與商店驗收狀態請見上方 Current status。第三方元件的授權與 notices 見 [`docs/release/THIRD_PARTY_NOTICES.md`](docs/release/THIRD_PARTY_NOTICES.md)。
-
-請勿將 API Key、NAS 密碼、Apple 簽章私鑰或私人書庫提交至 repository。開發時使用自己的帳號與簽章設定；安全問題請以電子郵件聯絡，勿在公開 issue 貼出憑證。
-
-## Architecture
-
-| Layer | Authority / role |
-| --- | --- |
-| `public/` | Tauri WebView UI、reader、catalog organizer、native bridge |
-| `src-tauri/src/` | native backend：scanner、protocol、cache、catalog、file ops、AI session |
-| SQLite (`catalog.sqlite3`) | catalog / metadata / location / progress 的本機權威資料 |
-| Original comic files / sidecars | 預設只讀；不因整理或來源離線被自動改寫／刪除 |
-| `src-tauri/tauri-plugin-ios-folder/` | iOS security-scoped folder / iCloud materialization bridge |
-| `src-tauri/vendor/wry/` | iOS WebKit startup patch，受 Cargo patch 明確引用 |
-
-### Reader cache
-
-前端只保留有界的鄰近頁工作集；Rust 壓縮頁快取依裝置記憶體、process 可用記憶體與 OS memory pressure 動態調整，並以實際封存檔 entry bytes 決定 nearest-first page window。背景 preload 單頁最多 64 MiB，與正式 protocol 的單頁 serving safety limit 一致。完整契約見 [`docs/E6-E8-DECISIONS.md`](docs/E6-E8-DECISIONS.md)。
-
-RAR5 若帶有完整且可驗證的 QuickOpen 索引，會核對索引與原始標頭後加速建立頁面清單；索引不完整、格式不支援或檢查未通過時，回退既有讀取器。實際開頁時間仍受儲存裝置、檔案提供者與壓縮方式影響。內建 libarchive 的 RAR5 結尾處理帶有上游修補及截斷資料保護；選用回歸測試的外部合成測試檔來源記錄於測試程式。
-
-### Source lifecycle
-
-- 進入目錄時只即時掃描該層的漫畫檔與子資料夾；全域掃描、收藏與最近閱讀各自維持背景優先通道。子資料夾可先導航，點入後再掃下一層。
-- 資料夾書庫優先顯示目前可見的封面；閱讀器可手動放棄尚未保存的閱讀進度，不會把暫時位置誤當成已保存狀態。
-- 未保存進度提示會列出可辨識的作品與頁碼；舊紀錄若缺少來源，只顯示可能的候選並標明尚未確認，不會自動套用到其他書庫。
-- App 啟動並完成書庫 snapshot 後，可自動序列重試具 durable native proof 的未保存紀錄；全庫掃描成功後再排一次重試。重試核對根目錄、bookmark 或 SMB 授權，沿用原始 intent fence，不覆寫較新的閱讀進度；只有成功回寫才清除紀錄，不因路徑存在就刪除。
-- 舊紀錄沒有 token／來源，或資料夾來源缺少可持久驗證的證明時，保留給使用者手動確認。SMB 背景復原與前景存檔分開排隊；閱讀期間的掃描以低負載方式持續。
-- 書架依可用寬度重新排列操作與篩選項；左右側欄同時展開時，按鈕文字不再因空間不足而逐字換行。
-- Local source ID 使用**使用者已配置的 root 字串**衍生，刻意保持來源拔除後仍可重現；不要在每次掃描時動態 canonicalize，否則同一 removable/NAS-backed source 可能在 online/offline 狀態得到不同 ID。若未來要改成 canonical identity，必須先把 resolved identity 持久化再做 migration。
-- 檔案修訂檢查使用大小、時間戳與可取得的檔案身分，不會為每次翻頁完整讀取大檔。若檔案系統只提供秒級時間戳，同一秒內對相同大小的檔案原位改寫，可能暫時無法辨識變更。
-- iOS external folder 使用 security-scoped bookmark；symlink 不可逃出使用者選擇的 root。
-- 專案一次只連線一組 SMB/NAS；不同主機、分享目錄與帳號使用各自的來源識別。舊版未記錄端點的 SMB 資料會保留，無法確認歸屬時不自動套用至新連線。
-- 外部來源授權清單損壞時先保留原有目錄資料；使用者重新選取資料夾並確認後才備份損壞清單、重建授權。其他來源需重新加入。
-- 同時連線的來源若出現相同漫畫識別碼，閱讀器會拒絕開啟，避免顯示或保存到錯誤作品。
-- 改名、移動與整本隔離必須核對選定的來源和相對路徑；來源已移除或身分不明時不會改動其他副本。尚未整合至介面的單頁刪除指令暫停，待安全頁面日誌完成後才重新啟用。
-- SMB 掃描與檔案操作均有 timeout；成功掃描才把 current NAS state 標 online，失敗則保留 SQLite location 並回填 offline shelf。
-- offline 是 location 狀態，不代表 comic metadata 被刪除。
-
-## 2026-09-04 hardening highlights
-
-近期完整 audit 已修正：
-
-- macOS 不再連結 Apple 標示 unavailable 的 `os_proc_available_memory()`；只有 iOS 使用該 advisory API。
-- SMB connect/share/read/stat/rename/create-directory 都有 deadline，避免 NAS 異常時無限等待。
-- SMB mutation 使用 typed `NotFound`、journal、版本前置條件與誠實 rollback 狀態。
-- SMB-only library 與 cold-start offline shelf 由 SQLite 正確恢復。
-- ZIP／CBZ、RAR／CBR、7z／CB7、folder scanner、protocol 同步拒絕 traversal、symlink、hidden/unsafe entry 與超大 page preload。
-- iOS security-scoped bookmark 會正確釋放並先 resolve symlink 再驗授權 root。
-- reader progress 由 SQLite 權威資料與 Tauri bridge 正規化，不讓 stale background refresh 倒退閱讀位置。
-- mutable folder page URL 使用 `no-store`，刪頁後不會被 WebView 舊快取污染。
-- catalog migration / backfill 不再混入每次 connection 的熱路徑。
-- 舊 Electron / Express runtime 已在功能與 hardening 全部移到 Tauri 後正式退役。
-
-## Quick start
-
-```sh
-npm ci
-rustc --version
-npm run quality
-```
-
-`npm run quality` 會執行：
-
-1. Tauri-only Node regressions：UI/native packaging smoke、AI consent、release hardening。
-2. `cargo fmt --check`。
-3. `cargo test --locked --lib`。
-4. `cargo clippy --locked --lib --bins --no-deps -- -D warnings`。
-
-較快的日常功能驗證：
-
-```sh
-npm run verify
-```
-
-`package-lock.json` 現在只鎖 `@tauri-apps/cli` 與其平台 binary；沒有 Electron、Express 或舊 browser-server runtime dependencies。
-
-`npm run build`、`test:rust` 與 `check:clippy` 會使用目前使用者的私人 Cargo cache（macOS：`~/Library/Caches/com.windsheep.gai/cargo`），確認目錄擁有者並限制權限為 700。保留明確的 `CARGO_TARGET_DIR` 覆寫，但同樣檢查擁有者與權限；不再使用固定共享 `/tmp` 路徑。直接執行 Cargo 時可用 `node scripts/with-private-cargo-cache.mjs cargo <參數>`。incremental compilation 仍關閉，避免外接磁碟／NAS 的 lock 問題。
-
-## Development & builds
-
-```sh
-# Tauri 開發版
-npm run tauri dev
-
-# 正式 macOS app / DMG
-npm run build
-
-# iOS/iPadOS：先建立本機副本，再依 BUILD_GUIDE.md 建置及簽署
-bash scripts/release/stage-ios-build.sh
-```
-
-iOS/iPadOS 有額外的本機檔案系統、Xcode、簽名與實機驗證要求，請依 [`BUILD_GUIDE.md`](BUILD_GUIDE.md) 使用 staging 副本遷移並重建 Apple 專案後再建置；不要直接使用舊的 `app` Xcode 專案，也不要從歷史 blocker 文件複製舊路徑。App 發行版號以 Tauri 設定為準，`package.json` 與 Cargo package 版號是內部套件版本。
-
-## Data & privacy boundaries
-
-- 原始漫畫、sidecar 與 NAS 內容預設不由 catalog organizer 自動覆寫。
-- 使用者人工 metadata 永遠高於 importer / AI candidate。
-- API key 預設只保留目前 App session；macOS／iOS／iPadOS 可經使用者明確選擇存入本機 Keychain。不寫入 SQLite、localStorage、log 或 metadata export。
-- OpenAI 與 Google AI 都是選用功能；正式 Tauri UI 在建立 session 前會指出選定頁面影像與 prompt 可能送往所選第三方 provider，並要求 explicit consent。
-- 切換 AI provider 會撤銷前一次同意並要求重新確認。
-- 書本外的「AI 掃描」最多取樣開頭三頁與全書 40%、50%、60% 位置，合併成一次請求；短篇會去除重複頁。摘要跟隨介面語言，AI 回傳只做頁面說明或可人工審核的 metadata candidate，不直接覆寫人工資料。
-
-## Impeccable design state
-
-Impeccable 的共享專案檔案可以進 Git：
-
-- `.impeccable/config.json` — workflow default；目前 `buildPath` 為 `code`。
-- `.impeccable/design.json` — shared design-system artifact。
-
-`.impeccable/config.local.json`、hook cache、live session、preview、annotation、screenshot 等 runtime / per-machine state 已由 `.gitignore` 排除。
-
-`DESIGN.md` 是人類可讀的設計規範；`.impeccable/design.json` 保存較結構化的 tokens、components 與設計 metadata。兩者用途不同，不要把 `design.json` 當暫存垃圾刪除。
-
-## Repository map
-
-```text
-.
-├── .cargo/                  # shared Cargo build policy
-├── .impeccable/             # shared Impeccable config + design artifact
-├── docs/
-│   ├── release/             # canonical App Store / TestFlight preparation and notices
-│   ├── E6-E8-DECISIONS.md   # durable architecture / release decisions
-│   └── RUST-QUALITY.md      # local Rust / release quality contract
-├── public/                  # Tauri WebView frontend
-├── scripts/release/         # local-only release metadata guard
-├── src-tauri/               # Tauri / Rust application
-├── tests/                   # Tauri-only Node regression suite
-├── BUILD_GUIDE.md
-├── DESIGN.md
-├── PRODUCT.md
-├── README.md
-├── package.json
-└── package-lock.json
-```
-
-## Documentation authority
-
-### Current source of truth
-
-- [`PRODUCT.md`](PRODUCT.md) — durable product scope and exclusions。
-- [`DESIGN.md`](DESIGN.md) — current design / UX contract。
-- [`docs/E6-E8-DECISIONS.md`](docs/E6-E8-DECISIONS.md) — durable technical and release decisions。
-- [`docs/RUST-QUALITY.md`](docs/RUST-QUALITY.md) — Rust 1.98.1 local quality gate and native trust boundaries。
-- [`BUILD_GUIDE.md`](BUILD_GUIDE.md) — current Tauri macOS / iOS build workflow。
-- [`docs/release/`](docs/release/) — current TestFlight / App Store metadata and outstanding evidence。
-
-### Historical evidence
-
-私人書庫與裝置的歷史驗收紀錄僅留在本機，不隨公開 repository 提供。公開文件以目前程式碼與可重複的驗證方式為準。
-
-## Tauri-only policy
-
-- 不重新加入 Electron、Express、browser HTTP fallback 或第二套 native backend。
-- 不新增 `main.js`、`preload.js`、`server.js`、Electron Builder packaging config 或對應 runtime dependencies。
-- 新能力直接落在 `src-tauri/` 與 `public/`。
-- 如果某個功能在 Tauri 上缺能力，應修 Tauri bridge / Rust command，而不是復活舊 runtime。
-
-## Release gate
-
-發行資料來源：
-
-- [`docs/release/gai-app-store-connect-metadata.json`](docs/release/gai-app-store-connect-metadata.json) — canonical release metadata。
-- [`docs/release/app-store-connect-ios-metadata.md`](docs/release/app-store-connect-ios-metadata.md) — 人讀版審查包。
-- [`scripts/release/asc-dry-run.sh`](scripts/release/asc-dry-run.sh) — **local-only** metadata / secret / TODO gate；本身不提交版本。
-
-任何 signed artifact、實機資訊、API key、NAS 密碼或真實裝置 identifier 都不應提交進 repository。
-
-## Repository policy
-
-- `main` 是唯一正式 branch。
-- 不建立 feature / release branch 作為長期狀態。
-- 直接進 `main` 的變更必須保持 `npm run quality` 可重跑。
-- GitHub Actions 在額度不可用期間不作為 release gate；恢復 CI 前先確認額度與 runner 可實際執行，再重新建立 workflow。
-- 私人驗收紀錄留在 Git 忽略的本機目錄，不提交到公開 repository。
-- 不提交 build artifacts、runtime cache、Impeccable local/session state 或 secrets。

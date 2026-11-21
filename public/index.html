@@ -594,18 +594,18 @@
           <div class="commerce-settings-heading">
             <div>
               <h3 id="commerce-settings-title"><i class="fa-solid fa-star" aria-hidden="true"></i><span data-i18n="G.A.I Pro">G.A.I Pro</span></h3>
-              <p data-i18n="基本閱讀與 NAS／SMB 直連免費；Pro 一次買斷解鎖進階整理與 AI 工具。">基本閱讀與 NAS／SMB 直連免費；Pro 一次買斷解鎖進階整理與 AI 工具。</p>
+              <p data-i18n="閱讀、手動整理與直接 SMB／NAS 免費；一次買斷 Pro 解鎖 AI 工具，供應商用量費用另計。">閱讀、手動整理與直接 SMB／NAS 免費；一次買斷 Pro 解鎖 AI 工具，供應商用量費用另計。</p>
             </div>
             <span class="commerce-status-badge" id="commerce-status-badge" role="status" aria-live="polite" data-i18n="檢查中…">檢查中…</span>
           </div>
           <div class="commerce-settings-grid">
             <div class="commerce-plan commerce-plan-free">
               <strong data-i18n="免費基本版">免費基本版</strong>
-              <p data-i18n="本機圖片、ZIP／CBZ、正常閱讀、進度、收藏、搜尋、基本標籤、匯出與復原，以及 SMB／NAS 直接連線或透過系統檔案選擇器使用已掛載 NAS。">本機圖片、ZIP／CBZ、正常閱讀、進度、收藏、搜尋、基本標籤、匯出與復原，以及 SMB／NAS 直接連線或透過系統檔案選擇器使用已掛載 NAS。</p>
+              <p data-i18n="閱讀與手動整理全免費：本機及已掛載 NAS、直接 SMB／NAS、批次標籤、重複候選、進階整理、匯出與復原。">閱讀與手動整理全免費：本機及已掛載 NAS、直接 SMB／NAS、批次標籤、重複候選、進階整理、匯出與復原。</p>
             </div>
             <div class="commerce-plan commerce-plan-pro">
-              <strong data-i18n="v1 Pro · 一次買斷">v1 Pro · 一次買斷</strong>
-              <p data-i18n="批次標籤與進階整理、重複候選、AI 解說與整理工具。">批次標籤與進階整理、重複候選、AI 解說與整理工具。</p>
+              <strong data-i18n="v1 Pro · AI 工具一次買斷">v1 Pro · AI 工具一次買斷</strong>
+              <p data-i18n="AI 解說、隨讀、整本翻譯與 AI metadata 整理；不含供應商用量額度。">AI 解說、隨讀、整本翻譯與 AI metadata 整理；不含供應商用量額度。</p>
             </div>
           </div>
           <p class="commerce-settings-note" id="commerce-status-message" aria-live="polite" data-i18n="正在向 App 查詢權益狀態…">正在向 App 查詢權益狀態…</p>
@@ -683,11 +683,15 @@
         <button class="close-modal-btn" id="commerce-pro-close" type="button" aria-label="關閉 G.A.I Pro 說明" data-i18n-aria-label="關閉 G.A.I Pro 說明"><i class="fa-solid fa-xmark" aria-hidden="true"></i></button>
       </div>
       <div class="commerce-modal-body">
-        <p id="commerce-pro-description" data-i18n="基本閱讀免費；Pro 以一次買斷解鎖需要付費的進階工具。">基本閱讀免費；Pro 以一次買斷解鎖需要付費的進階工具。</p>
-        <div class="commerce-modal-list">
-          <div><strong data-i18n="免費基本版">免費基本版</strong><span data-i18n="閱讀、進度、收藏、搜尋、基本標籤、匯出／復原與 NAS／SMB 直接連線。">閱讀、進度、收藏、搜尋、基本標籤、匯出／復原與 NAS／SMB 直接連線。</span></div>
-          <div><strong data-i18n="一次買斷 Pro">一次買斷 Pro</strong><span data-i18n="批次整理、重複候選與 AI 解說／整理。">批次整理、重複候選與 AI 解說／整理。</span></div>
-          <div><strong data-i18n="AI 費用另計">AI 費用另計</strong><span data-i18n="AI 需要自備供應商 API Key；API 費用依供應商方案為準，Pro 不包含額度。">AI 需要自備供應商 API Key；API 費用依供應商方案為準，Pro 不包含額度。</span></div>
+        <div id="commerce-pro-description" class="commerce-offer-copy">
+          <p id="commerce-offer-intro" data-i18n="🥤 請研究員喝杯快樂水！">🥤 請研究員喝杯快樂水！</p>
+          <p data-i18n="G.A.I 的漫畫閱讀、NAS 連線、TAG 管理及各種整理工具都免費開放！">G.A.I 的漫畫閱讀、NAS 連線、TAG 管理及各種整理工具都免費開放！</p>
+          <p data-i18n="不過，研究所裡還住著一位需要餵 API 的 AI 研究員……">不過，研究所裡還住著一位需要餵 API 的 AI 研究員……</p>
+          <p data-i18n="如果你想使用 AI 輔助功能，可以透過一次買斷解鎖，順便請辛苦的開發者喝杯快樂水！ฅ(≧ω≦)ฅ">如果你想使用 AI 輔助功能，可以透過一次買斷解鎖，順便請辛苦的開發者喝杯快樂水！ฅ(≧ω≦)ฅ</p>
+          <p class="commerce-offer-price"><span data-i18n="AI Pro｜">AI Pro｜</span><span id="commerce-offer-price">價格載入中…</span><span id="commerce-offer-purchase-suffix" data-i18n="，一次買斷">，一次買斷</span></p>
+          <p data-i18n="需要自備 OpenAI 或 Google API Key，API 使用費另計。">需要自備 OpenAI 或 Google API Key，API 使用費另計。</p>
+          <p data-i18n="不需要 AI？那就直接關掉這個頁面，繼續免費看漫畫吧！">不需要 AI？那就直接關掉這個頁面，繼續免費看漫畫吧！</p>
+          <p data-i18n="祝各位研究員都有愉快的閱讀時光～ ヾ(X3ﾉｼヾ)ﾉｼ">祝各位研究員都有愉快的閱讀時光～ ヾ(X3ﾉｼヾ)ﾉｼ</p>
         </div>
         <p class="commerce-modal-status" id="commerce-modal-status" aria-live="polite"></p>
         <div class="commerce-modal-actions">

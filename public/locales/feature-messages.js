@@ -171,6 +171,10 @@ window.GAIL10n.register({
     "en": "The operation failed. Try again later.",
     "ja": "操作に失敗しました。後でもう一度お試しください。"
   },
+  "直接 SMB／NAS 連線": {
+    "en": "Direct SMB/NAS connections",
+    "ja": "SMB／NASへの直接接続"
+  },
   "批次標籤與進階整理": {
     "en": "Batch tagging and advanced organization",
     "ja": "タグの一括編集と高度な整理"
@@ -219,9 +223,9 @@ window.GAIL10n.register({
     "en": "Loading price",
     "ja": "価格を読み込み中"
   },
-  "G.A.I Pro 權益已由 App 確認，進階功能現在可以使用。": {
-    "en": "G.A.I Pro has been verified. Advanced features are now available.",
-    "ja": "G.A.I Proの購入を確認しました。高度な機能を利用できます。"
+  "G.A.I Pro 權益已由 App 確認，AI 工具現在可以使用。": {
+    "en": "G.A.I Pro has been verified. AI tools are now available.",
+    "ja": "G.A.I Proを確認しました。AIツールを利用できます。"
   },
   "正在向 App 確認交易，請稍候…": {
     "en": "Verifying the transaction. Please wait…",
@@ -242,6 +246,22 @@ window.GAIL10n.register({
   "一次買斷 v1 Pro 後即可使用進階功能。": {
     "en": "Unlock advanced features with a one-time v1 Pro purchase.",
     "ja": "v1 Proを買い切りで購入すると、高度な機能を利用できます。"
+  },
+  "一次買斷 v1 Pro 後即可使用 AI 工具；供應商用量費用另計。": {
+    "en": "Unlock AI tools with a one-time v1 Pro purchase; provider usage charges are separate.",
+    "ja": "v1 Proを買い切りで購入するとAIツールを利用できます。プロバイダーの利用料金は別途かかります。"
+  },
+  "AI 工具": {
+    "en": "AI tools",
+    "ja": "AIツール"
+  },
+  "這項 AI 功能需要 G.A.I Pro。": {
+    "en": "This AI feature requires G.A.I Pro.",
+    "ja": "このAI機能にはG.A.I Proが必要です。"
+  },
+  "閱讀、手動整理與直接 SMB／NAS 免費；一次買斷 Pro 解鎖 AI 工具，供應商用量費用另計。": {
+    "en": "Reading, manual organization, and direct SMB/NAS access are free. A one-time Pro purchase unlocks AI tools; provider usage charges are separate.",
+    "ja": "読書、手動整理、SMB／NASへの直接接続は無料です。Proを買い切りで購入するとAIツールが利用できます。プロバイダーの利用料金は別途かかります。"
   },
   "已包含 v1 Pro 權益": {
     "en": "v1 Pro included",
@@ -294,6 +314,10 @@ window.GAIL10n.register({
   "這項功能需要 G.A.I Pro；現有資料與設定都保留。": {
     "en": "This feature requires G.A.I Pro. Your data and settings are unchanged.",
     "ja": "この機能にはG.A.I Proが必要です。データと設定は保持されます。"
+  },
+  "這項 AI 功能需要 G.A.I Pro；現有資料與設定都保留。": {
+    "en": "This AI feature requires G.A.I Pro. Your data and settings are unchanged.",
+    "ja": "このAI機能にはG.A.I Proが必要です。データと設定は保持されます。"
   },
   "購買": {
     "en": "Purchase",
@@ -396,8 +420,8 @@ window.GAIL10n.register({
     "ja": "Proの状態を取得できません：{error}"
   },
   "{feature}屬於 G.A.I Pro；基本閱讀與資料安全功能仍可繼續使用。": {
-    "en": "{feature} requires G.A.I Pro. Basic reading and data safety features remain available.",
-    "ja": "{feature}にはG.A.I Proが必要です。基本の読書機能とデータ保護機能は引き続き利用できます。"
+    "en": "{feature} requires G.A.I Pro. Reading, manual organization, and direct SMB/NAS access remain free.",
+    "ja": "{feature}にはG.A.I Proが必要です。読書、手動整理、SMB／NASへの直接接続は引き続き無料です。"
   },
   "{label}正在處理，請稍候…": {
     "en": "{label} in progress. Please wait…",

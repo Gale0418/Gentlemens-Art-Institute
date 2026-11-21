@@ -120,7 +120,6 @@ pub async fn scan_smb(
     if !wait_for_reader_priority(&state, scan_generation, None).await {
         return Ok(());
     }
-    crate::commerce::require_pro(&app_handle).await?;
     let source_id = state::smb_source_id(&config);
     let addr = format!("{}:445", config.host);
     let username = config.username.unwrap_or_else(|| "guest".to_string());
@@ -242,8 +241,6 @@ pub(crate) async fn scan_visible_smb(
     if !wait_for_reader_priority(&state, generation, Some(visible_generation)).await {
         return Ok(());
     }
-
-    crate::commerce::require_pro(&app_handle).await?;
 
     let source_id = state::smb_source_id(&config);
     let addr = format!("{}:445", config.host);

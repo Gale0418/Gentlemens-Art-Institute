@@ -5,24 +5,36 @@ import vm from 'node:vm';
 const html = fs.readFileSync('public/index.html', 'utf8');
 const css = fs.readFileSync('public/style.css', 'utf8');
 const commerceSource = fs.readFileSync('public/commerce.js', 'utf8');
+const nativeSource = fs.readFileSync('src-tauri/src/lib.rs', 'utf8');
+const smbScannerSource = fs.readFileSync('src-tauri/src/smb_scanner.rs', 'utf8');
 
 assert.match(html, /id="commerce-settings"/, 'settings should expose the G.A.I Pro section');
 assert.match(html, /id="commerce-purchase-btn"[^>]*disabled/, 'purchase must start disabled');
 assert.match(html, /免費基本版/, 'free range must be visible');
-assert.match(html, /NAS／SMB 直接連線/, 'free scope must include direct NAS/SMB');
-assert.doesNotMatch(commerceSource, /target\.closest\('#smb-setup-btn'\)/, 'direct SMB entry must not show a paywall');
-const nativeSource = fs.readFileSync('src-tauri/src/lib.rs', 'utf8');
-for (const command of ['open_comic', 'set_smb_config', 'get_file_capability', 'mutate_comic_file', 'recover_reading_progress']) {
-  const match = nativeSource.match(new RegExp(`async fn ${command}\\([\\s\\S]*?(?=\\n#\\[tauri::command\\]|$)`));
-  assert.ok(match, `native command ${command} must exist`);
-  assert.doesNotMatch(match[0], /commerce::require_pro/, `${command} must not paywall SMB access`);
-}
-assert.match(nativeSource, /commerce::require_pro/, 'AI and batch organization still enforce Pro');
-assert.match(html, /API 費用依供應商方案為準/, 'AI provider billing must be disclosed');
+assert.match(html, /閱讀與手動整理全免費/, 'manual organization must be clearly free');
+assert.match(html, /v1 Pro · AI 工具一次買斷/, 'Pro purchase must be scoped to AI tools');
+assert.match(html, /供應商用量額度/, 'provider usage charges and credits must be separated from Pro');
+assert.match(html, /需要自備 OpenAI 或 Google API Key，API 使用費另計。/, 'AI provider billing must be disclosed');
+assert.match(html, /🥤 請研究員喝杯快樂水！[\s\S]*不需要 AI？那就直接關掉這個頁面，繼續免費看漫畫吧！[\s\S]*ヾ\(X3ﾉｼヾ\)ﾉｼ/,
+  'the purchase dialog should carry the requested full copy');
+assert.match(html, /id="commerce-offer-price"/, 'the offer line must use the StoreKit display price');
 assert.match(html, /tauri-api\.js"><\/script>\s*<script src="commerce\.js"><\/script>\s*<script src="app\.js">/, 'commerce must load between the bridge and app');
 assert.match(css, /\.commerce-modal-overlay\[hidden\]/, 'commerce modal needs a hidden state');
 assert.match(css, /min-height:\s*44px/, 'commerce controls need touch-safe sizing');
 assert.doesNotMatch(commerceSource, /localStorage\.(getItem|setItem|removeItem)\([^)]*pro/i, 'frontend must not persist a Pro flag');
+
+const protectedHandlers = [];
+let enclosingHandler = '';
+for (const line of nativeSource.split(/\r?\n/)) {
+  const declaration = line.match(/\basync\s+fn\s+(\w+)\s*\(/);
+  if (declaration) enclosingHandler = declaration[1];
+  if (/commerce::require_pro\s*\(/.test(line)) protectedHandlers.push(enclosingHandler);
+}
+assert.deepEqual(protectedHandlers.sort(), [
+  'explain_page', 'restore_ai_session_config', 'set_ai_session_config', 'suggest_comic_metadata', 'test_ai_session',
+].sort(), 'native Pro enforcement is limited to AI setup and generation handlers');
+assert.doesNotMatch(smbScannerSource, /commerce::require_pro\s*\(|\brequire_pro\s*\(/,
+  'direct SMB/NAS access must not have a Pro guard');
 
 class FakeClassList {
   constructor() { this.values = new Set(); }
@@ -76,6 +88,7 @@ class FakeDocument {
     this.readyState = 'complete';
     this.visibilityState = 'visible';
     this.listeners = new Map();
+    this.captureListeners = new Map();
     this.activeElement = null;
     this.body = new FakeElement('body');
     this.body.classList = new FakeClassList();
@@ -84,6 +97,8 @@ class FakeDocument {
     this.add('commerce-status-badge');
     this.add('commerce-status-message');
     this.add('commerce-price');
+    this.add('commerce-offer-price');
+    this.add('commerce-offer-purchase-suffix');
     this.add('commerce-modal-status');
     this.add('ai-session-status');
     this.add('commerce-pro-description');
@@ -107,10 +122,22 @@ class FakeDocument {
     if (selector === '.commerce-restore-btn') return [this.getElementById('commerce-restore-btn'), this.getElementById('commerce-modal-restore-btn')];
     return [];
   }
-  addEventListener(type, handler) {
+  addEventListener(type, handler, options = false) {
     const handlers = this.listeners.get(type) || [];
     handlers.push(handler);
     this.listeners.set(type, handlers);
+    if (type === 'click' && (options === true || options?.capture === true)) {
+      const captures = this.captureListeners.get(type) || [];
+      captures.push(handler);
+      this.captureListeners.set(type, captures);
+    }
+  }
+  dispatchCaptureClick(target) {
+    const event = { target, defaultPrevented: false, stopped: false,
+      preventDefault() { this.defaultPrevented = true; },
+      stopImmediatePropagation() { this.stopped = true; } };
+    for (const handler of this.captureListeners.get('click') || []) handler(event);
+    return event;
   }
 }
 
@@ -167,6 +194,7 @@ const settle = () => new Promise(resolve => setImmediate(resolve));
   assert.equal(state.status, 'preview', 'missing bridge should remain browser preview');
   assert.equal(state.pro, false, 'browser preview must not unlock Pro');
   assert.equal(document.getElementById('commerce-purchase-btn').disabled, true, 'preview purchase stays disabled');
+  assert.equal(document.getElementById('commerce-offer-price').textContent, '價格載入中…', 'unknown pricing remains loading and is never fabricated');
 }
 
 {
@@ -183,6 +211,7 @@ const settle = () => new Promise(resolve => setImmediate(resolve));
   const { document, window } = harness(api);
   await settle();
   assert.equal(document.getElementById('commerce-purchase-btn').disabled, false, 'supported priced product can be purchased');
+  assert.equal(document.getElementById('commerce-offer-price').textContent, 'NT$490', 'offer copy uses the native display price');
 
   document.getElementById('commerce-purchase-btn').click();
   document.getElementById('commerce-modal-purchase-btn').click();
@@ -274,3 +303,25 @@ console.log('PASS: unavailable restore, preview restore, and revoked UI ownershi
   }
 }
 console.log('PASS: Pro dialog focus trap skips disabled controls and negative tabindex');
+
+{
+  const { document } = harness({});
+  await settle();
+  for (const id of ['smb-setup-btn', 'organize-tag', 'organize-duplicates', 'organize-apply']) {
+    const event = document.dispatchCaptureClick(document.add(id));
+    assert.equal(event.defaultPrevented, false, `${id} remains usable without Pro`);
+    assert.equal(event.stopped, false, `${id} continues to its free manual handler`);
+  }
+  for (const id of ['ai-save-btn', 'ai-restore-btn', 'ai-test-btn', 'btn-ai-explain', 'btn-ai-auto-explain', 'btn-ai-book-explain', 'ai-provider', 'ai-api-key']) {
+    const event = document.dispatchCaptureClick(document.add(id));
+    assert.equal(event.defaultPrevented, true, `${id} is gated as an AI feature`);
+    assert.equal(event.stopped, true, `${id} cannot reach an AI handler before Pro`);
+  }
+  const metadataAction = document.add('ai-metadata-action', ['inspector-ai-action']);
+  assert.equal(document.dispatchCaptureClick(metadataAction).defaultPrevented, true,
+    'AI metadata suggestions remain gated');
+  const stopAction = document.add('btn-ai-book-stop', ['ai-page-btn']);
+  assert.equal(document.dispatchCaptureClick(stopAction).defaultPrevented, false,
+    'an in-progress whole-book AI run can still be stopped');
+}
+console.log('PASS: free manual actions bypass UI gating; AI settings, reading, metadata and native entitlement scope are covered');

@@ -500,7 +500,7 @@ select:focus-visible,
    3. Left Sidebar, Folder Tree & Reading Stats
    -------------------------------------------------------------------------- */
 
-.main-layout:not(.library-panels-narrow) .sidebar {
+.main-layout:not(.library-panels-narrow):not(.sidebar-collapsed) .sidebar {
   width: 256px;
   flex: 0 0 256px;
   padding: 20px 16px 18px;
@@ -719,17 +719,17 @@ select:focus-visible,
 .sidebar-collapse-btn,
 .inspector-collapse-btn {
   width: 30px;
-  height: 46px;
-  border-radius: 999px;
+  height: 56px;
+  border-radius: 8px;
   border: 1px solid var(--at-border-strong);
   background: var(--at-surface-elevated);
   color: var(--at-text-2);
-  box-shadow: var(--at-shadow-card);
+  box-shadow: var(--at-shadow-card), inset 0 0 0 1px color-mix(in srgb, var(--at-border) 48%, transparent);
   font-size: 12px;
 }
 
 .sidebar-collapse-btn {
-  left: calc(256px - 15px);
+  left: calc(256px - 16px);
 }
 
 .inspector-collapse-btn {
@@ -749,7 +749,7 @@ select:focus-visible,
   .sidebar-collapse-btn,
   .inspector-collapse-btn {
     width: 44px;
-    height: 44px;
+    height: 56px;
   }
 
   .sidebar-collapse-btn {
@@ -2426,4 +2426,76 @@ select:focus-visible,
   border: 1px solid rgba(255, 255, 255, 0.12);
   background: rgba(12, 12, 16, 0.88);
   box-shadow: 0 18px 42px rgba(0, 0, 0, 0.55);
+}
+
+/* 窄版書架沿左側起排，寬度不足時讓標題列與控制項自然換列。 */
+@media (max-width: 820px) {
+  .continue-panel .section-title-row {
+    flex-direction: row;
+    flex-wrap: wrap;
+    justify-content: flex-start;
+    align-items: flex-start;
+    text-align: start;
+  }
+
+  .continue-panel .section-title-row > div {
+    min-width: 0;
+    text-align: start;
+  }
+
+  .continue-panel .section-title-row h2 {
+    margin: 0;
+    text-align: start;
+  }
+
+  .continue-panel .reading-history-entry {
+    flex: 0 0 auto;
+    margin-inline-start: 0;
+  }
+
+  .library-header {
+    flex-direction: row;
+    flex-wrap: wrap;
+    justify-content: flex-start;
+    align-items: flex-start;
+  }
+
+  .library-header > div:first-child {
+    justify-content: flex-start;
+    align-items: flex-start;
+  }
+
+  .library-header h2 {
+    text-align: start;
+  }
+
+  .filter-options {
+    justify-content: flex-start;
+  }
+}
+
+@media (max-width: 620px) {
+  .filter-options {
+    flex-wrap: wrap;
+    overflow-x: visible;
+    scrollbar-width: auto;
+  }
+}
+
+/* 收合桌面側欄時，解除內容工作區的版心上限。 */
+@media (min-width: 1101px) {
+  .main-layout.sidebar-collapsed .library-workspace {
+    max-width: none;
+    margin-inline: 0;
+  }
+}
+
+/* 手機兩側欄把手沿用同一條垂直中線。 */
+@media (max-width: 620px) {
+  .sidebar-collapse-btn,
+  .inspector-collapse-btn {
+    top: 50%;
+    bottom: auto;
+    transform: translateY(-50%);
+  }
 }

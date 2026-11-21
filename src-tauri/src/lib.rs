@@ -1016,27 +1016,9 @@ async fn get_comic_metadata(
 
 #[tauri::command]
 async fn apply_batch_metadata(
-    app_handle: AppHandle,
     request: catalog::BatchEditRequest,
     state: State<'_, Arc<AppState>>,
 ) -> Result<catalog::BatchEditResult, String> {
-    let commerce_batch_ids = if request.targets.is_empty() {
-        request.comic_ids.clone()
-    } else {
-        request
-            .targets
-            .iter()
-            .map(|target| {
-                format!(
-                    "{}\0{}\0{}",
-                    target.runtime_id, target.source_id, target.relative_path
-                )
-            })
-            .collect()
-    };
-    if commerce::is_batch(&commerce_batch_ids) {
-        commerce::require_pro(&app_handle).await?;
-    }
     let store = catalog_store(&state)?;
     tokio::task::spawn_blocking(move || store.apply_batch(request))
         .await
@@ -1056,11 +1038,9 @@ async fn undo_batch_metadata(
 
 #[tauri::command]
 async fn upsert_folder_tag_rule(
-    app_handle: AppHandle,
     rule: catalog::FolderTagRule,
     state: State<'_, Arc<AppState>>,
 ) -> Result<catalog::FolderTagRule, String> {
-    commerce::require_pro(&app_handle).await?;
     let store = catalog_store(&state)?;
     tokio::task::spawn_blocking(move || store.upsert_folder_rule(rule))
         .await
@@ -1069,27 +1049,9 @@ async fn upsert_folder_tag_rule(
 
 #[tauri::command]
 async fn reimport_metadata(
-    app_handle: AppHandle,
     request: catalog::ReimportRequest,
     state: State<'_, Arc<AppState>>,
 ) -> Result<catalog::ReimportResult, String> {
-    let commerce_batch_ids = if request.targets.is_empty() {
-        request.comic_ids.clone()
-    } else {
-        request
-            .targets
-            .iter()
-            .map(|target| {
-                format!(
-                    "{}\0{}\0{}",
-                    target.runtime_id, target.source_id, target.relative_path
-                )
-            })
-            .collect()
-    };
-    if commerce_batch_ids.is_empty() || commerce::is_batch(&commerce_batch_ids) {
-        commerce::require_pro(&app_handle).await?;
-    }
     let _catalog_sync = state.catalog_sync.lock().await;
     let store = catalog_store(&state)?;
     tokio::task::spawn_blocking(move || store.reimport(request))
@@ -1110,11 +1072,9 @@ async fn list_import_diagnostics(
 
 #[tauri::command]
 async fn upsert_tag_alias(
-    app_handle: AppHandle,
     alias: catalog::TagAlias,
     state: State<'_, Arc<AppState>>,
 ) -> Result<catalog::TagAlias, String> {
-    commerce::require_pro(&app_handle).await?;
     let store = catalog_store(&state)?;
     tokio::task::spawn_blocking(move || store.upsert_tag_alias(alias))
         .await
@@ -1155,12 +1115,10 @@ async fn update_tag_state(
 
 #[tauri::command]
 async fn rename_tag(
-    app_handle: AppHandle,
     tag_id: i64,
     display_value: String,
     state: State<'_, Arc<AppState>>,
 ) -> Result<catalog::TagMutationResult, String> {
-    commerce::require_pro(&app_handle).await?;
     let store = catalog_store(&state)?;
     tokio::task::spawn_blocking(move || store.rename_tag(tag_id, &display_value))
         .await
@@ -1169,12 +1127,10 @@ async fn rename_tag(
 
 #[tauri::command]
 async fn merge_tags(
-    app_handle: AppHandle,
     source_tag_id: i64,
     target_tag_id: i64,
     state: State<'_, Arc<AppState>>,
 ) -> Result<catalog::TagMutationResult, String> {
-    commerce::require_pro(&app_handle).await?;
     let store = catalog_store(&state)?;
     tokio::task::spawn_blocking(move || store.merge_tags(source_tag_id, target_tag_id))
         .await
@@ -1183,15 +1139,11 @@ async fn merge_tags(
 
 #[tauri::command]
 async fn set_tag_disabled(
-    app_handle: AppHandle,
     tag_id: i64,
     disabled: bool,
     state: State<'_, Arc<AppState>>,
 ) -> Result<catalog::TagMutationResult, String> {
     let store = catalog_store(&state)?;
-    if disabled {
-        commerce::require_pro(&app_handle).await?;
-    }
     tokio::task::spawn_blocking(move || store.set_tag_disabled(tag_id, disabled))
         .await
         .map_err(|error| error.to_string())?
@@ -1210,11 +1162,9 @@ async fn undo_tag_operation(
 
 #[tauri::command]
 async fn list_organizer_inbox(
-    app_handle: AppHandle,
     limit: Option<usize>,
     state: State<'_, Arc<AppState>>,
 ) -> Result<Vec<catalog::OrganizerInboxItem>, String> {
-    commerce::require_pro(&app_handle).await?;
     let store = catalog_store(&state)?;
     tokio::task::spawn_blocking(move || store.organizer_inbox(limit.unwrap_or(200)))
         .await
@@ -1223,11 +1173,9 @@ async fn list_organizer_inbox(
 
 #[tauri::command]
 async fn list_duplicate_candidates(
-    app_handle: AppHandle,
     limit: Option<usize>,
     state: State<'_, Arc<AppState>>,
 ) -> Result<Vec<catalog::DuplicateCandidate>, String> {
-    commerce::require_pro(&app_handle).await?;
     let store = catalog_store(&state)?;
     tokio::task::spawn_blocking(move || store.duplicate_candidates(limit.unwrap_or(200)))
         .await
@@ -1631,7 +1579,6 @@ async fn open_comic(
         state::is_smb_source_id(&comic_info.source_id) || comic_info.r#type == "smb-archive";
     let is_external =
         comic_info.source_id.starts_with("external:") || comic_info.r#type.starts_with("external-");
-    // App-managed SMB reading is a free core feature; source checks below still apply.
     if !is_smb && !is_external && comic_info.r#type != "offline" {
         let scan_dir = state.scan_dir.read().unwrap().clone();
         if scan_dir.is_empty() || !protocol::local_source_matches_scan_dir(&comic_info, &scan_dir) {
@@ -2891,7 +2838,6 @@ async fn set_smb_config(
     state: State<'_, Arc<AppState>>,
     data: Option<crate::state::SmbConfig>,
 ) -> Result<serde_json::Value, String> {
-    // SMB configuration is available to everyone; validate before storing it.
     let data = validate_smb_config(data)?;
     let _source_authorization = state.source_authorization_lifecycle.write().await;
     let _scan_lifecycle = state.scan_lifecycle.lock().await;

@@ -2,8 +2,8 @@
  * G.A.I Pro UI
  *
  * The native bridge is the authority for entitlement and transactions. This
- * file only presents that state and stops paid entry points while free
- * reading and data safety paths remain available.
+ * file only presents that state and stops AI entry points while reading,
+ * manual organization, and data safety paths remain available.
  */
 (() => {
   'use strict';
@@ -11,12 +11,6 @@
   const featureText = (source, vars = {}) => window.GAIL10n
     ? window.GAIL10n.t(source, vars)
     : source.replace(/\{(\w+)\}/g, (token, key) => Object.prototype.hasOwnProperty.call(vars, key) ? String(vars[key]) : token);
-
-  const FEATURE_LABELS = {
-    batch: featureText("批次標籤與進階整理"),
-    duplicates: featureText("重複候選"),
-    ai: featureText("AI 解說與整理工具"),
-  };
 
   const PREVIEW_STATE = {
     supported: false,
@@ -75,13 +69,13 @@
   }
 
   function transactionMessage(snapshot) {
-    if (snapshot.pro) return featureText("G.A.I Pro 權益已由 App 確認，進階功能現在可以使用。");
+    if (snapshot.pro) return featureText("G.A.I Pro 權益已由 App 確認，AI 工具現在可以使用。");
     if (snapshot.status === 'pending') return snapshot.message || featureText("正在向 App 確認交易，請稍候…");
     if (snapshot.status === 'cancelled') return snapshot.message || featureText("你已取消這次操作，現有資料與設定都保留。");
     if (snapshot.status === 'failed' || snapshot.status === 'unavailable') return snapshot.message || featureText("交易未完成；現有資料與設定都保留，請稍後再試。");
     if (snapshot.status === 'preview') return snapshot.message || PREVIEW_STATE.message;
     if (!snapshot.supported) return snapshot.message || featureText("目前環境不能進行 App 內購買；瀏覽器預覽不會解鎖 Pro。");
-    return snapshot.message || featureText("一次買斷 v1 Pro 後即可使用進階功能。");
+    return snapshot.message || featureText("一次買斷 v1 Pro 後即可使用 AI 工具；供應商用量費用另計。");
   }
 
   function canPurchase() {
@@ -96,6 +90,8 @@
     const message = byId('commerce-status-message');
     const price = byId('commerce-price');
     const modalStatus = byId('commerce-modal-status');
+    const offerPrice = byId('commerce-offer-price');
+    const offerPurchaseSuffix = byId('commerce-offer-purchase-suffix');
     const purchaseButtons = document.querySelectorAll('.commerce-purchase-btn');
     const restoreButtons = document.querySelectorAll('.commerce-restore-btn');
 
@@ -105,6 +101,12 @@
       badge.classList.toggle('is-error', snapshot.status === 'failed' || snapshot.status === 'unavailable');
     }
     if (message) message.textContent = transactionMessage(snapshot);
+    if (offerPrice) {
+      offerPrice.textContent = snapshot.pro
+        ? featureText("已解鎖")
+        : snapshot.displayPrice || featureText("價格載入中…");
+    }
+    if (offerPurchaseSuffix) offerPurchaseSuffix.hidden = snapshot.pro;
     if (price) {
       price.textContent = snapshot.pro
         ? featureText("已包含 v1 Pro 權益")
@@ -171,21 +173,11 @@
     return state.refreshPromise;
   }
 
-  function featureLabel(feature) {
-    return FEATURE_LABELS[feature] || featureText("這項進階功能");
-  }
-
   function openProDialog(feature = '') {
     const modal = byId('commerce-pro-modal');
     if (!modal || state.snapshot.pro) return;
     state.pendingFeature = feature;
     state.returnFocus = document.activeElement;
-    const description = byId('commerce-pro-description');
-    if (description) {
-      description.textContent = feature
-        ? featureText("{feature}屬於 G.A.I Pro；基本閱讀與資料安全功能仍可繼續使用。", { feature: featureLabel(feature) })
-        : featureText("基本閱讀免費；Pro 以一次買斷解鎖需要付費的進階工具。");
-    }
     modal.hidden = false;
     document.body.classList.add('commerce-modal-open');
     renderCommerce();
@@ -213,7 +205,7 @@
     openProDialog();
     const modalStatus = byId('commerce-modal-status');
     if (modalStatus) {
-      modalStatus.textContent = featureText("這項功能需要 G.A.I Pro。");
+      modalStatus.textContent = featureText("這項 AI 功能需要 G.A.I Pro。");
       modalStatus.classList.add('is-error');
     }
     return true;
@@ -281,7 +273,7 @@
             : featureText("操作失敗，請稍後再試。"),
         };
       } else {
-        state.snapshot = { ...state.snapshot, status: 'failed', message: featureText("這項功能需要 G.A.I Pro；現有資料與設定都保留。") };
+        state.snapshot = { ...state.snapshot, status: 'failed', message: featureText("這項 AI 功能需要 G.A.I Pro；現有資料與設定都保留。") };
       }
       renderCommerce();
       return false;
@@ -311,9 +303,8 @@
 
   function paidFeatureForTarget(target) {
     if (!target || typeof target.closest !== 'function') return '';
-    if (target.closest('#organize-duplicates')) return 'duplicates';
-    if (target.closest('#organize-inbox, #organize-apply, #organize-exclude-tag, #organize-folder-rule, #organize-reimport, #organize-tag, #organize-author, #organize-series, #organize-language, #organize-direction')) return 'batch';
-    if (target.closest('#btn-ai-explain, #btn-ai-auto-explain, #ai-save-btn, #ai-test-btn, .inspector-ai-action, .ai-page-btn')) return 'ai';
+    if (target.closest('#btn-ai-book-stop')) return '';
+    if (target.closest('#btn-ai-explain, #btn-ai-auto-explain, #btn-ai-book-explain, #ai-provider, #ai-api-key, #ai-remember-key, #ai-google-disclosure, #ai-save-btn, #ai-restore-btn, #ai-test-btn, .inspector-ai-action, .ai-page-btn')) return 'ai';
     return '';
   }
 

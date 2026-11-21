@@ -671,9 +671,73 @@ window.GAIL10n.register({
     "en": "G.A.I Pro",
     "ja": "G.A.I Pro"
   },
-  "基本閱讀與 NAS／SMB 直連免費；Pro 一次買斷解鎖進階整理與 AI 工具。": {
-    "en": "Reading and direct NAS/SMB connections are free; a one-time Pro purchase unlocks advanced organization and AI tools.",
-    "ja": "読書機能とNAS／SMBへの直接接続は無料です。Proを一度購入すると高度な整理やAIツールを利用できます。"
+  "🥤 請研究員喝杯快樂水！": {
+    "en": "🥤 Buy the researcher a happy drink!",
+    "ja": "🥤 研究員にハッピードリンクを！"
+  },
+  "G.A.I 的漫畫閱讀、NAS 連線、TAG 管理及各種整理工具都免費開放！": {
+    "en": "G.A.I's manga reading, NAS connections, TAG management, and all organization tools are free!",
+    "ja": "G.A.Iの漫画読書、NAS接続、TAG管理、各種整理ツールはすべて無料です！"
+  },
+  "不過，研究所裡還住著一位需要餵 API 的 AI 研究員……": {
+    "en": "But there is also an AI researcher at the institute who needs API fuel…",
+    "ja": "ただし研究所には、APIが必要なAI研究員もいます……"
+  },
+  "如果你想使用 AI 輔助功能，可以透過一次買斷解鎖，順便請辛苦的開發者喝杯快樂水！ฅ(≧ω≦)ฅ": {
+    "en": "If you'd like AI assistance, unlock it with a one-time purchase—and buy the hard-working developer a happy drink too! ฅ(≧ω≦)ฅ",
+    "ja": "AI機能を使いたい場合は、買い切り購入で解放できます。開発者にもハッピードリンクをどうぞ！ ฅ(≧ω≦)ฅ"
+  },
+  "AI Pro｜": {
+    "en": "AI Pro | ",
+    "ja": "AI Pro｜"
+  },
+  "，一次買斷": {
+    "en": ", one-time purchase",
+    "ja": "、買い切り"
+  },
+  "需要自備 OpenAI 或 Google API Key，API 使用費另計。": {
+    "en": "Bring your own OpenAI or Google API key. API usage is billed separately.",
+    "ja": "OpenAIまたはGoogleのAPI Keyをご用意ください。API利用料は別途かかります。"
+  },
+  "不需要 AI？那就直接關掉這個頁面，繼續免費看漫畫吧！": {
+    "en": "Don't need AI? Close this window and keep reading comics for free!",
+    "ja": "AIが不要なら、この画面を閉じて無料で漫画を読み続けてください！"
+  },
+  "祝各位研究員都有愉快的閱讀時光～ ヾ(X3ﾉｼヾ)ﾉｼ": {
+    "en": "Wishing all researchers happy reading~ ヾ(X3ﾉｼヾ)ﾉｼ",
+    "ja": "研究員の皆さんが楽しい読書時間を過ごせますように～ ヾ(X3ﾉｼヾ)ﾉｼ"
+  },
+  "已解鎖": {
+    "en": "Unlocked",
+    "ja": "解放済み"
+  },
+  "閱讀、手動整理與直接 SMB／NAS 免費；一次買斷 Pro 解鎖 AI 工具，供應商用量費用另計。": {
+    "en": "Reading, manual organization, and direct SMB/NAS access are free. A one-time Pro purchase unlocks AI tools; provider usage charges are separate.",
+    "ja": "読書、手動整理、SMB／NASへの直接接続は無料です。Proを買い切りで購入するとAIツールが利用できます。プロバイダーの利用料金は別途かかります。"
+  },
+  "閱讀與手動整理全免費：本機及已掛載 NAS、直接 SMB／NAS、批次標籤、重複候選、進階整理、匯出與復原。": {
+    "en": "Reading and manual organization are free: local and mounted NAS libraries, direct SMB/NAS, batch tags, duplicate candidates, advanced organization, export, and restore.",
+    "ja": "読書と手動整理はすべて無料です。ローカル／マウント済みNAS、SMB／NASへの直接接続、一括タグ、重複候補、高度な整理、エクスポート、復元を利用できます。"
+  },
+  "v1 Pro · AI 工具一次買斷": {
+    "en": "v1 Pro · One-time AI tools purchase",
+    "ja": "v1 Pro · AIツール買い切り"
+  },
+  "AI 解說、隨讀、整本翻譯與 AI metadata 整理；不含供應商用量額度。": {
+    "en": "AI explanations, translate-as-you-read, whole-book translation, and AI metadata organization; provider usage credits are not included.",
+    "ja": "AI解説、読書中の翻訳、全巻翻訳、AIメタデータ整理が利用できます。プロバイダーの利用枠は含まれません。"
+  },
+  "閱讀、手動批次標籤與整理、重複候選、直接 SMB／NAS、匯出／復原與已掛載 NAS。": {
+    "en": "Reading, manual batch tags and organization, duplicate candidates, direct SMB/NAS, export/restore, and mounted NAS.",
+    "ja": "読書、手動の一括タグと整理、重複候補、SMB／NASへの直接接続、エクスポート／復元、マウント済みNAS。"
+  },
+  "AI 解說、隨讀、整本翻譯與 AI metadata 整理。": {
+    "en": "AI explanations, translate-as-you-read, whole-book translation, and AI metadata organization.",
+    "ja": "AI解説、読書中の翻訳、全巻翻訳、AIメタデータ整理。"
+  },
+  "基本閱讀免費；Pro 以一次買斷解鎖進階整理、直接 NAS 與 AI 工具。": {
+    "en": "Basic reading is free; a one-time Pro purchase unlocks advanced organization, direct NAS access, and AI tools.",
+    "ja": "基本読書は無料です。Proを一度購入すると、高度な整理、NASへの直接接続、AIツールが利用できます。"
   },
   "檢查中…": {
     "en": "Checking…",
@@ -683,17 +747,17 @@ window.GAIL10n.register({
     "en": "Free basic edition",
     "ja": "無料ベーシック版"
   },
-  "本機圖片、ZIP／CBZ、正常閱讀、進度、收藏、搜尋、基本標籤、匯出與復原，以及 SMB／NAS 直接連線或透過系統檔案選擇器使用已掛載 NAS。": {
-    "en": "Local images, ZIP/CBZ, standard reading, progress, favorites, search, basic tags, export and restore, plus direct SMB/NAS or system-mounted NAS access.",
-    "ja": "ローカル画像、ZIP/CBZ、通常の読書、進捗、お気に入り、検索、基本タグ、書き出しと復元に加え、SMB／NASへの直接接続とシステムでマウントしたNASを利用できます。"
+  "本機圖片、ZIP／CBZ、正常閱讀、進度、收藏、搜尋、基本標籤、匯出與復原，以及透過系統檔案選擇器使用已掛載 NAS。": {
+    "en": "Local images, ZIP/CBZ, standard reading, progress, favorites, search, basic tags, export and restore, plus mounted NAS folders through the system file picker.",
+    "ja": "ローカル画像、ZIP/CBZ、通常読書、進捗、お気に入り、検索、基本タグ、エクスポートと復元、システムのファイル選択からマウント済みNASを利用できます。"
   },
   "v1 Pro · 一次買斷": {
     "en": "v1 Pro · One-time purchase",
     "ja": "v1 Pro · 買い切り"
   },
-  "批次標籤與進階整理、重複候選、AI 解說與整理工具。": {
-    "en": "Batch tags and advanced organization, duplicate candidates, and AI explanation and organization tools.",
-    "ja": "タグの一括編集と高度な整理、重複候補、AIによる説明・整理ツール。"
+  "直接 SMB／NAS 連線、批次標籤與進階整理、重複候選、AI 解說與整理工具。": {
+    "en": "Direct SMB/NAS connections, batch tags and advanced organization, duplicate candidates, and AI explanation and organization tools.",
+    "ja": "SMB/NASへの直接接続、一括タグと高度な整理、重複候補、AIによる説明・整理ツール。"
   },
   "正在向 App 查詢權益狀態…": {
     "en": "Checking entitlements with the app…",
@@ -811,13 +875,13 @@ window.GAIL10n.register({
     "en": "Basic reading is free. A one-time Pro purchase unlocks advanced tools.",
     "ja": "基本の読書機能は無料です。Proを買い切りで購入すると、高度なツールを利用できます。"
   },
-  "閱讀、進度、收藏、搜尋、基本標籤、匯出／復原與 NAS／SMB 直接連線。": {
-    "en": "Reading, progress, favorites, search, basic tags, export/restore, and direct NAS/SMB connections.",
-    "ja": "読書、進捗、お気に入り、検索、基本タグ、書き出し／復元、NAS／SMBへの直接接続。"
+  "閱讀、進度、收藏、搜尋、基本標籤、匯出／復原與已掛載 NAS。": {
+    "en": "Reading, progress, favorites, search, basic tags, export/restore, and mounted NAS.",
+    "ja": "読書、進捗、お気に入り、検索、基本タグ、エクスポート／復元、マウント済みNAS。"
   },
-  "批次整理、重複候選與 AI 解說／整理。": {
-    "en": "Batch organization, duplicate candidates, and AI explanation/organization.",
-    "ja": "一括整理、重複候補、AIによる説明・整理。"
+  "直接 SMB／NAS、批次整理、重複候選與 AI 解說／整理。": {
+    "en": "Direct SMB/NAS, batch organization, duplicate candidates, and AI explanation/organization.",
+    "ja": "SMB/NASへの直接接続、一括整理、重複候補、AIによる説明・整理。"
   },
   "AI 費用另計": {
     "en": "AI billed separately",

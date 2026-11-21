@@ -90,10 +90,6 @@ fn authorize(pro: bool) -> Result<(), String> {
     }
 }
 
-pub fn is_batch(ids: &[String]) -> bool {
-    ids.iter().collect::<std::collections::BTreeSet<_>>().len() > 1
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -103,12 +99,4 @@ mod tests {
         assert!(authorize(false).unwrap_err().starts_with("PRO_REQUIRED:"));
         assert!(authorize(true).is_ok());
     }
-
-    #[test]
-    fn single_comic_edits_remain_free_even_with_duplicate_ids() {
-        assert!(!is_batch(&[]));
-        assert!(!is_batch(&["one".into(), "one".into()]));
-        assert!(is_batch(&["one".into(), "two".into()]));
-    }
-
 }

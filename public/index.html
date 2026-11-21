@@ -204,32 +204,36 @@
             </div>
           </section>
 
-          <div class="library-header">
-            <div>
-              <h2 id="library-title" aria-live="polite" data-i18n="全部漫畫">全部漫畫</h2>
-              <button type="button" class="library-up-btn" id="library-up-btn" aria-label="回到上一層資料夾" data-i18n-aria-label="回到上一層資料夾" title="回到上一層資料夾" data-i18n-title="回到上一層資料夾" disabled>
-                <i class="fa-solid fa-chevron-left" aria-hidden="true"></i>
-                <span data-i18n="回上層">回上層</span>
-              </button>
-              <button id="library-discovery-btn" class="library-discovery-btn" type="button" disabled title="從目前資料夾與篩選結果挑一本，再點會盡量換一本。" data-i18n-title="從目前資料夾與篩選結果挑一本，再點會盡量換一本。">
-                <i class="fa-solid fa-shuffle" aria-hidden="true"></i><span data-i18n="隨手翻一本">隨手翻一本</span>
-              </button>
-              <button id="library-tag-discovery-btn" class="library-discovery-btn" type="button" aria-expanded="false" aria-controls="library-tag-discovery-panel" data-i18n="依標籤探索">依標籤探索</button>
+          <div class="library-toolbar" id="library-toolbar">
+            <div class="library-header">
+              <div>
+                <h2 id="library-title" aria-live="polite" data-i18n="全部漫畫">全部漫畫</h2>
+                <button type="button" class="library-up-btn" id="library-up-btn" aria-label="回到上一層資料夾" data-i18n-aria-label="回到上一層資料夾" title="回到上一層資料夾" data-i18n-title="回到上一層資料夾" disabled>
+                  <i class="fa-solid fa-chevron-left" aria-hidden="true"></i>
+                  <span data-i18n="回上層">回上層</span>
+                </button>
+                <button id="library-discovery-btn" class="library-discovery-btn" type="button" disabled title="從目前資料夾與篩選結果挑一本，再點會盡量換一本。" data-i18n-title="從目前資料夾與篩選結果挑一本，再點會盡量換一本。">
+                  <i class="fa-solid fa-shuffle" aria-hidden="true"></i><span data-i18n="隨手翻一本">隨手翻一本</span>
+                </button>
+                <button id="library-tag-discovery-btn" class="library-discovery-btn" type="button" aria-expanded="false" aria-controls="library-tag-discovery-panel" data-i18n="依標籤探索">依標籤探索</button>
+              </div>
+              <div class="filter-options">
+                <label class="series-filter-field" for="series-filter-select">
+                  <i class="fa-solid fa-folder-tree" aria-hidden="true"></i>
+                  <span class="visually-hidden" data-i18n="篩選漫畫系列">篩選漫畫系列</span>
+                  <select id="series-filter-select" aria-label="篩選漫畫系列" data-i18n-aria-label="篩選漫畫系列">
+                    <option value="all" data-i18n="全部系列">全部系列</option>
+                  </select>
+                </label>
+                <button class="filter-btn active" data-filter="all" aria-pressed="true" data-i18n="全部">全部</button>
+                <button class="filter-btn" data-filter="reading" aria-pressed="false" data-i18n="閱讀中">閱讀中</button>
+                <button class="filter-btn" data-filter="unread" aria-pressed="false" data-i18n="未讀取">未讀取</button>
+                <button class="filter-btn" data-filter="finished" aria-pressed="false" data-i18n="已看完">已看完</button>
+                <button class="filter-btn" data-filter="favorite" aria-pressed="false"><i class="fa-solid fa-heart filter-heart-icon" aria-hidden="true"></i><span data-i18n="已收藏">已收藏</span></button>
+              </div>
             </div>
-            <div class="filter-options">
-              <label class="series-filter-field" for="series-filter-select">
-                <i class="fa-solid fa-folder-tree" aria-hidden="true"></i>
-                <span class="visually-hidden" data-i18n="篩選漫畫系列">篩選漫畫系列</span>
-                <select id="series-filter-select" aria-label="篩選漫畫系列" data-i18n-aria-label="篩選漫畫系列">
-                  <option value="all" data-i18n="全部系列">全部系列</option>
-                </select>
-              </label>
-              <button class="filter-btn active" data-filter="all" aria-pressed="true" data-i18n="全部">全部</button>
-              <button class="filter-btn" data-filter="reading" aria-pressed="false" data-i18n="閱讀中">閱讀中</button>
-              <button class="filter-btn" data-filter="unread" aria-pressed="false" data-i18n="未讀取">未讀取</button>
-              <button class="filter-btn" data-filter="finished" aria-pressed="false" data-i18n="已看完">已看完</button>
-              <button class="filter-btn" data-filter="favorite" aria-pressed="false"><i class="fa-solid fa-heart filter-heart-icon" aria-hidden="true"></i><span data-i18n="已收藏">已收藏</span></button>
-            </div>
+            <div class="folder-breadcrumbs" id="folder-breadcrumbs" style="display: none;"></div>
+            <p class="library-discovery-status" id="library-discovery-status" role="status" aria-live="polite" hidden></p>
           </div>
 
           <section id="library-tag-discovery-panel" class="library-tag-discovery-panel" aria-label="依標籤探索" data-i18n-aria-label="依標籤探索" hidden>
@@ -243,13 +247,8 @@
             </div>
             <p id="library-discovery-tag-status" role="status" aria-live="polite"></p>
           </section>
-          <p class="library-discovery-status" id="library-discovery-status" role="status" aria-live="polite" hidden></p>
           <div class="catalog-facets" id="catalog-facets" aria-live="polite" hidden></div>
 
-          <!-- 資料夾層級導航列 (姬米妮貼心打造 ✨) -->
-          <div class="folder-breadcrumbs" id="folder-breadcrumbs" style="display: none;">
-            <!-- 動態麵包屑 -->
-          </div>
           <p class="visible-scan-status" id="visible-scan-status" role="status" aria-live="polite" hidden></p>
 
           <!-- 空狀態緊接篩選列；搜尋無結果時不必捲過整個書架區。 -->

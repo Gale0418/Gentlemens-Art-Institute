@@ -1512,6 +1512,7 @@ const elements = {
   sidebarCollapseBtn: document.getElementById('sidebar-collapse-btn'),
   inspectorCollapseBtn: document.getElementById('inspector-collapse-btn'),
   libraryPanelScrim: document.getElementById('library-panel-scrim'),
+  libraryToolbar: document.getElementById('library-toolbar'),
   libraryUpBtn: document.getElementById('library-up-btn'),
   visibleScanStatus: document.getElementById('visible-scan-status'),
   libraryWorkspace: document.querySelector('.library-workspace'),
@@ -2319,6 +2320,12 @@ function bindEvents() {
       requestDeferredLibraryRefresh();
     }
   });
+  if (elements.contentArea && elements.libraryToolbar && typeof window.ResizeObserver === 'function') {
+    // Keep focused cards and scroll targets below the sticky controls after wrapping.
+    new window.ResizeObserver(() => {
+      elements.contentArea.style.setProperty('--library-toolbar-height', `${elements.libraryToolbar.offsetHeight}px`);
+    }).observe(elements.libraryToolbar);
+  }
   elements.contentArea?.addEventListener('scroll', () => {
     if (state.readingHistoryVisible) state.readingHistoryScrollTop = Number(elements.contentArea.scrollTop) || 0;
     noteCatalogScroll();
@@ -6414,10 +6421,19 @@ function normalizeDiscoveryTagGroups(groups, candidates) {
 }
 
 async function toggleDiscoveryTags() {
-  if (!elements.libraryTagDiscoveryPanel || discoveryOpening) return;
-  if (!elements.libraryTagDiscoveryPanel.hidden) { closeDiscoveryTags(); return; }
-  elements.libraryTagDiscoveryPanel.hidden = false;
+  const { contentArea, libraryToolbar, libraryTagDiscoveryPanel } = elements;
+  if (!libraryTagDiscoveryPanel || discoveryOpening) return;
+  if (!libraryTagDiscoveryPanel.hidden) { closeDiscoveryTags(); return; }
+  libraryTagDiscoveryPanel.hidden = false;
   elements.libraryTagDiscoveryBtn?.setAttribute('aria-expanded', 'true');
+  if (contentArea && libraryToolbar) {
+    const panelRect = libraryTagDiscoveryPanel.getBoundingClientRect();
+    const toolbarRect = libraryToolbar.getBoundingClientRect();
+    const viewportRect = contentArea.getBoundingClientRect();
+    if (panelRect.top < toolbarRect.bottom || panelRect.bottom > viewportRect.bottom) {
+      contentArea.scrollTop += panelRect.top - viewportRect.top - toolbarRect.height;
+    }
+  }
   const request = ++discoveryTagRequest;
   const candidates = getDiscoveryCandidates().filter(comic => !isBuiltInDemoComic(comic));
   discoveryTagScope = discoveryBaseScopeKey();

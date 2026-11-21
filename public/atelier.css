@@ -966,6 +966,29 @@ select:focus-visible,
 }
 
 /* Library Header & Segmented Filters */
+.content-area:not(.history-visible) {
+  scroll-padding-block-start: var(--library-toolbar-height, 0px);
+}
+
+.library-toolbar {
+  position: sticky;
+  inset-block-start: 0;
+  z-index: 12;
+  flex-shrink: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  min-width: 0;
+  padding: 8px;
+  border-block-end: 1px solid var(--at-border);
+  border-radius: 0 0 12px 12px;
+  background: var(--at-surface);
+}
+
+.library-toolbar .folder-breadcrumbs {
+  margin: 0;
+}
+
 .library-header {
   display: flex;
   flex-wrap: wrap;

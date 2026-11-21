@@ -94,10 +94,6 @@ pub fn is_batch(ids: &[String]) -> bool {
     ids.iter().collect::<std::collections::BTreeSet<_>>().len() > 1
 }
 
-pub fn is_direct_smb(source_id: &str, item_type: &str) -> bool {
-    crate::state::is_smb_source_id(source_id) || item_type == "smb-archive"
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -115,11 +111,4 @@ mod tests {
         assert!(is_batch(&["one".into(), "two".into()]));
     }
 
-    #[test]
-    fn mounted_nas_is_not_mistaken_for_direct_smb() {
-        assert!(!is_direct_smb("local:/Volumes/NAS", "archive"));
-        assert!(!is_direct_smb("external:nas-bookmark", "external-archive"));
-        assert!(is_direct_smb("smb", "archive"));
-        assert!(is_direct_smb("legacy", "smb-archive"));
-    }
 }

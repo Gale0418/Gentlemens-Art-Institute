@@ -171,10 +171,6 @@ window.GAIL10n.register({
     "en": "The operation failed. Try again later.",
     "ja": "操作に失敗しました。後でもう一度お試しください。"
   },
-  "直接 SMB／NAS 連線": {
-    "en": "Direct SMB/NAS connections",
-    "ja": "SMB／NASへの直接接続"
-  },
   "批次標籤與進階整理": {
     "en": "Batch tagging and advanced organization",
     "ja": "タグの一括編集と高度な整理"

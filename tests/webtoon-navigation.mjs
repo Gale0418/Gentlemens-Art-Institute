@@ -133,6 +133,50 @@ assert.match(pageNoticeRule, /pointer-events:\s*none/, 'the transient page count
   assert.equal(elements.readerOverlay.classList.contains('reader-idle'), true, 'reader returns to idle after the timer');
   assert.equal(elements.readerBottomBar.classList.contains('active'), false, 'idle removes the active bottom bar');
 }
+// When the translation panel reserves one side of the reader, page-turn zones
+// follow the remaining viewport content box instead of the full window.
+{
+  const tap = ({ windowWidth, x, paddingLeft = 0, paddingRight = 0, mode = 'single', panelTarget = false }) => {
+    const calls = [];
+    const overlayClasses = new Set(['ai-panel-open']);
+    const viewport = {
+      clientWidth: windowWidth,
+      clientLeft: 0,
+      getBoundingClientRect: () => ({ left: 0 }),
+    };
+    const context = {
+      window: { innerWidth: windowWidth },
+      getComputedStyle: () => ({ paddingLeft: `${paddingLeft}px`, paddingRight: `${paddingRight}px` }),
+      elements: {
+        readerOverlay: {
+          style: { display: 'flex' },
+          classList: { contains: name => overlayClasses.has(name), add: name => overlayClasses.add(name) },
+        },
+        readerViewport: viewport,
+      },
+      state: { readingMode: mode, readerContextMenuOpen: false, catalogOpen: false },
+      isCatalogThumbnailInteraction: () => false,
+      prevPage: () => calls.push('previous'),
+      nextPage: () => calls.push('next'),
+    };
+    vm.runInNewContext(`${extractFunction('goPreviousByReadingDirection')}\n${extractFunction('goNextByReadingDirection')}\n${pointer}\nglobalThis.tap = handleReaderPointerClick;`, context);
+    context.tap({
+      button: 0,
+      clientX: x,
+      target: { closest: selector => panelTarget && selector.includes('#ai-page-panel') ? {} : null },
+    });
+    return calls;
+  };
+
+  assert.deepEqual(tap({ windowWidth: 1200, x: 600, paddingRight: 384 }), ['next'], 'right-reserved desktop content turns forward from its right zone');
+  assert.deepEqual(tap({ windowWidth: 1200, x: 600, paddingLeft: 384 }), ['previous'], 'left-reserved desktop content turns backward from its left zone');
+  assert.deepEqual(tap({ windowWidth: 390, x: 310 }), ['next'], 'narrow viewport without a side reserve keeps its right turn zone');
+  assert.deepEqual(tap({ windowWidth: 1200, x: 600, paddingRight: 384, mode: 'double-rtl' }), ['previous'], 'right-reserved RTL content keeps its reading direction');
+  assert.deepEqual(tap({ windowWidth: 1200, x: 600, paddingLeft: 384, mode: 'double-rtl' }), ['next'], 'left-reserved RTL content keeps its reading direction');
+  assert.deepEqual(tap({ windowWidth: 390, x: 310, mode: 'double-rtl' }), ['previous'], 'narrow RTL right zone keeps its reading direction');
+  assert.deepEqual(tap({ windowWidth: 1200, x: 1100, paddingRight: 384, panelTarget: true }), [], 'translation text target remains interactive without turning the page');
+}
+console.log('PASS: AI-panel viewport tap zones preserve direction, narrow layout, and translation targets');
 {
   const classes = new Set(['reader-idle']);
   const state = { readingMode: 'single', currentPageIndex: 0, currentComicPages: ['one', 'two', 'three'], readerPageNoticeTimer: null };

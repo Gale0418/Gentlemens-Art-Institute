@@ -1778,6 +1778,40 @@ function handleLibraryPanelKeyDown(event) {
   closeLibraryPanelScrim();
 }
 
+function syncInspectorHandlePosition() {
+  const layout = elements.mainLayout;
+  const panel = elements.comicInspector;
+  const handle = elements.inspectorCollapseBtn;
+  if (!layout || !panel || !handle || state.inspectorCollapsed) return;
+
+  const layoutRect = layout.getBoundingClientRect();
+  const panelRect = panel.getBoundingClientRect();
+  const handleRect = handle.getBoundingClientRect();
+  if (!panelRect.width || !handleRect.width) return;
+
+  // The narrow drawer slides with transform; remove that temporary offset so
+  // the handle can follow its final inner edge during the same transition.
+  const transform = window.getComputedStyle(panel).transform;
+  let transformX = 0;
+  if (transform && transform !== 'none') {
+    try {
+      const Matrix = window.DOMMatrixReadOnly || window.DOMMatrix;
+      if (Matrix) transformX = new Matrix(transform).m41;
+      else {
+        const values = transform.match(/^matrix(?:3d)?\((.+)\)$/)?.[1].split(',').map(Number);
+        if (values) transformX = values.length === 16 ? values[12] : values[4];
+      }
+    } catch {
+      // The panel only uses translateX; leave it at its measured position if
+      // the host WebView cannot parse its computed matrix.
+    }
+  }
+
+  const panelInnerEdge = panelRect.left - transformX;
+  const right = layoutRect.right - panelInnerEdge - handleRect.width / 2;
+  layout.style.setProperty('--inspector-handle-open-right', `${Math.max(0, right)}px`);
+}
+
 function applySidebarCollapsed(collapsed, { persist = true, exclusive = true } = {}) {
   const isCollapsed = Boolean(collapsed);
   const isNarrow = state.libraryPanelsNarrow || isNarrowLibraryViewport();
@@ -1798,6 +1832,7 @@ function applySidebarCollapsed(collapsed, { persist = true, exclusive = true } =
   }
   if (persist && !isNarrow) localStorage.setItem(SIDEBAR_COLLAPSED_STORAGE_KEY, String(isCollapsed));
   syncLibraryPanelScrim();
+  syncInspectorHandlePosition();
 }
 
 function applyInspectorCollapsed(collapsed, { persist = true, exclusive = true } = {}) {
@@ -1821,6 +1856,7 @@ function applyInspectorCollapsed(collapsed, { persist = true, exclusive = true }
   }
   if (persist && !isNarrow) localStorage.setItem(INSPECTOR_COLLAPSED_STORAGE_KEY, String(isCollapsed));
   syncLibraryPanelScrim();
+  syncInspectorHandlePosition();
 }
 
 function syncLibraryPanelsForViewport({ initial = false } = {}) {
@@ -1831,6 +1867,7 @@ function syncLibraryPanelsForViewport({ initial = false } = {}) {
 
   if (!initial && previousIsNarrow === nextIsNarrow) {
     syncLibraryPanelScrim();
+    syncInspectorHandlePosition();
     return;
   }
 
@@ -1839,6 +1876,7 @@ function syncLibraryPanelsForViewport({ initial = false } = {}) {
     applySidebarCollapsed(true, { persist: false, exclusive: false });
     applyInspectorCollapsed(true, { persist: false, exclusive: false });
     syncLibraryPanelScrim();
+    syncInspectorHandlePosition();
     return;
   }
 
@@ -1846,6 +1884,7 @@ function syncLibraryPanelsForViewport({ initial = false } = {}) {
   applySidebarCollapsed(readStoredSetting(SIDEBAR_COLLAPSED_STORAGE_KEY) === 'true', { persist: false, exclusive: false });
   applyInspectorCollapsed(readStoredSetting(INSPECTOR_COLLAPSED_STORAGE_KEY) === 'true', { persist: false, exclusive: false });
   syncLibraryPanelScrim();
+  syncInspectorHandlePosition();
 }
 
 function scheduleLibraryPanelSync() {
@@ -2333,6 +2372,17 @@ function bindEvents() {
       elements.contentArea.style.setProperty('--library-toolbar-height', `${elements.libraryToolbar.offsetHeight}px`);
     }).observe(elements.libraryToolbar);
   }
+  if (typeof window.ResizeObserver === 'function') {
+    const inspectorHandleObserver = new window.ResizeObserver(syncInspectorHandlePosition);
+    [elements.mainLayout, elements.libraryWorkspace, elements.comicInspector, elements.librarySidebar]
+      .filter(Boolean)
+      .forEach(element => inspectorHandleObserver.observe(element));
+  }
+  elements.comicInspector?.addEventListener('transitionend', event => {
+    if (event.target === elements.comicInspector && (event.propertyName === 'transform' || event.propertyName === 'width')) {
+      syncInspectorHandlePosition();
+    }
+  });
   elements.contentArea?.addEventListener('scroll', () => {
     if (state.readingHistoryVisible) state.readingHistoryScrollTop = Number(elements.contentArea.scrollTop) || 0;
     noteCatalogScroll();
@@ -2854,8 +2904,14 @@ function bindEvents() {
   elements.aiRestoreBtn?.addEventListener('click', restoreAiSession);
   elements.aiTestBtn?.addEventListener('click', testAiSession);
   elements.aiClearBtn?.addEventListener('click', clearAiSession);
-  elements.btnAiExplain?.addEventListener('click', explainCurrentPage);
-  elements.btnAiAutoExplain?.addEventListener('click', toggleAutoPageExplanation);
+  elements.btnAiExplain?.addEventListener('click', () => {
+    readerPanels?.close();
+    void explainCurrentPage();
+  });
+  elements.btnAiAutoExplain?.addEventListener('click', () => {
+    readerPanels?.close();
+    toggleAutoPageExplanation();
+  });
   elements.btnAiBookExplain?.addEventListener('click', requestBookTranslation);
   elements.btnAiBookStop?.addEventListener('click', stopBookTranslation);
   ['pointerdown', 'pointerup', 'click'].forEach(eventName => {
@@ -9754,26 +9810,36 @@ function handleReaderPointerClick(e) {
   // 不能被閱讀器的中間 tap 或左右翻頁 chrome 先吃掉。
   if (e.target.closest?.('button, input, select, textarea, a, #ai-page-panel, .catalog-thumb')) return;
 
-  // 如果是觸控裝置且是滑動(Swipe)，已經由 touchend 處理，pointerup 可以避免重複觸發
-  // pointerup 也會被觸發，所以我們根據滑動距離來排除
-  // 但我們簡化處理：將螢幕分為左 30%、中 40%、右 30%
   if (state.readerContextMenuOpen) {
     hideReaderContextMenu();
     return;
   }
   if (state.catalogOpen) return;
 
-  const w = window.innerWidth;
-  const x = e.clientX;
+  let width = window.innerWidth;
+  let left = 0;
+  const viewport = elements.readerViewport;
+  if (viewport && state.readingMode !== 'webtoon' && elements.readerOverlay.classList.contains('ai-panel-open')) {
+    // 譯文側欄會改變漫畫可用的寬度，翻頁區要以這個範圍計算。
+    const { paddingLeft, paddingRight } = getComputedStyle(viewport);
+    const leftInset = parseFloat(paddingLeft) || 0;
+    const rightInset = parseFloat(paddingRight) || 0;
+    const contentWidth = viewport.clientWidth - leftInset - rightInset;
+    if (contentWidth > 0) {
+      left = viewport.getBoundingClientRect().left + viewport.clientLeft + leftInset;
+      width = contentWidth;
+    }
+  }
+  const x = e.clientX - left;
 
   // 漫條輕點任何閱讀區域都能切換工具列；滑動已由上游手勢守衛排除。
-  if (state.readingMode === 'webtoon' || (x >= w * 0.3 && x <= w * 0.7)) {
+  if (state.readingMode === 'webtoon' || (x >= width * 0.3 && x <= width * 0.7)) {
     if (elements.readerOverlay.classList.contains('reader-idle')) {
       triggerControlsActive();
     } else {
       elements.readerOverlay.classList.add('reader-idle');
     }
-  } else if (x < w * 0.3) {
+  } else if (x < width * 0.3) {
     goPreviousByReadingDirection();
   } else {
     goNextByReadingDirection();

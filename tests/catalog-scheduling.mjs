@@ -2744,6 +2744,14 @@ for (let columns = 1; columns <= 12; columns += 1) {
 {
   const panel = createHarness({ width: 820 });
   panel.hooks.elements.mainLayout = new FakeElement();
+  const { mainLayout, comicInspector, inspectorCollapseBtn } = panel.hooks.elements;
+  const handleStyle = new Map();
+  let drawerOffset = 180;
+  mainLayout.getBoundingClientRect = () => ({ right: panel.context.window.innerWidth });
+  mainLayout.style.setProperty = (name, value) => handleStyle.set(name, value);
+  comicInspector.getBoundingClientRect = () => ({ left: panel.context.window.innerWidth - 360 + drawerOffset, width: 360 });
+  inspectorCollapseBtn.getBoundingClientRect = () => ({ width: 44 });
+  panel.context.window.getComputedStyle = () => ({ transform: `matrix(1, 0, 0, 1, ${drawerOffset}, 0)` });
   vm.runInContext(`
     filterAndRenderGrid = () => { throw new Error('viewport change rebuilt grid'); };
     fetchLibrary = () => { throw new Error('viewport change fetched library'); };
@@ -2757,11 +2765,13 @@ for (let columns = 1; columns <= 12; columns += 1) {
   vm.runInContext('applyInspectorCollapsed(false)', panel.context);
   assert.equal(panel.hooks.elements.librarySidebar.getAttribute('aria-hidden'), 'true');
   assert.equal(panel.hooks.elements.comicInspector.getAttribute('aria-hidden'), 'false');
+  assert.equal(handleStyle.get('--inspector-handle-open-right'), '338px', 'the handle aims at the drawer edge after its slide finishes');
   vm.runInContext('applyInspectorCollapsed(true)', panel.context);
   assert.equal(panel.hooks.elements.comicInspector.getAttribute('aria-hidden'), 'true');
   assert.equal(panel.hooks.elements.comicInspector.hidden, true, 'old WebView hidden fallback');
 
   panel.context.window.innerWidth = 1200;
+  drawerOffset = 0;
   vm.runInContext('syncLibraryPanelsForViewport(); applySidebarCollapsed(false); applyInspectorCollapsed(false)', panel.context);
   assert.equal(panel.hooks.elements.librarySidebar.getAttribute('aria-hidden'), 'false');
   assert.equal(panel.hooks.elements.comicInspector.getAttribute('aria-hidden'), 'false');

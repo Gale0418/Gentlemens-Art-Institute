@@ -6550,6 +6550,10 @@ select:focus-visible,
   right: max(8px, env(safe-area-inset-right));
 }
 
+.main-layout:not(.inspector-collapsed) .inspector-collapse-btn {
+  right: var(--inspector-handle-open-right, max(8px, env(safe-area-inset-right)));
+}
+
 .sidebar-collapse-btn:hover,
 .sidebar-collapse-btn:focus-visible,
 .inspector-collapse-btn:hover,

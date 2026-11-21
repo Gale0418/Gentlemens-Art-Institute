@@ -20,8 +20,8 @@ use std::{
 use windows_sys::Win32::Foundation::{GetLastError, HANDLE};
 #[cfg(windows)]
 use windows_sys::Win32::Storage::FileSystem::{
-    FileRenameInfo, SetFileInformationByHandle, DELETE, FILE_RENAME_INFO, FILE_SHARE_DELETE,
-    FILE_SHARE_READ, FILE_SHARE_WRITE,
+    FileIdInfo, FileRenameInfo, GetFileInformationByHandleEx, SetFileInformationByHandle, DELETE,
+    FILE_ID_INFO, FILE_RENAME_INFO, FILE_SHARE_DELETE, FILE_SHARE_READ, FILE_SHARE_WRITE,
 };
 
 const SMB_CONNECT_TIMEOUT: Duration = Duration::from_secs(10);
@@ -37,7 +37,7 @@ std::thread_local! {
 #[derive(Debug)]
 struct LocalFileIdentity {
     volume: u64,
-    file: u64,
+    file: u128,
     // Keep the inode/file ID allocated through fingerprinting and rename.
     _handle: std::fs::File,
 }
@@ -64,44 +64,53 @@ fn local_file_identity(dir: &cap_std::fs::Dir, name: &Path) -> Result<LocalFileI
         .open_with(name, &options)
         .map_err(|error| format!("無法以 nofollow handle 開啟檔案：{error}"))?
         .into_std();
-    let metadata = file
-        .metadata()
-        .map_err(|error| format!("無法讀取檔案 handle 身分：{error}"))?;
     #[cfg(unix)]
     {
+        let metadata = file
+            .metadata()
+            .map_err(|error| format!("無法讀取檔案 handle 身分：{error}"))?;
         use std::os::unix::fs::MetadataExt;
         Ok(LocalFileIdentity {
             volume: metadata.dev(),
-            file: metadata.ino(),
+            file: u128::from(metadata.ino()),
             _handle: file,
         })
     }
     #[cfg(windows)]
     {
-        use std::os::windows::fs::MetadataExt;
-        let volume = metadata
-            .volume_serial_number()
-            .ok_or("Windows 無法取得檔案 volume serial number".to_string())?;
-        let file_index = metadata
-            .file_index()
-            .ok_or("Windows 無法取得檔案 file index".to_string())?;
+        // FileIdInfo supplies the full 128-bit ID (including on ReFS); do not
+        // fall back to the older 64-bit index when a filesystem rejects it.
+        let mut information: FILE_ID_INFO = unsafe { std::mem::zeroed() };
+        if unsafe {
+            GetFileInformationByHandleEx(
+                file.as_raw_handle() as HANDLE,
+                FileIdInfo,
+                (&mut information as *mut FILE_ID_INFO).cast(),
+                size_of::<FILE_ID_INFO>() as u32,
+            )
+        } == 0
+        {
+            return Err(format!(
+                "Windows 無法取得檔案 handle 身分：{}",
+                std::io::Error::last_os_error()
+            ));
+        }
         Ok(LocalFileIdentity {
-            volume: u64::from(volume),
-            file: file_index,
+            volume: information.VolumeSerialNumber,
+            file: u128::from_le_bytes(information.FileId.Identifier),
             _handle: file,
         })
     }
     #[cfg(not(any(unix, windows)))]
     {
-        let _ = metadata;
         Err("此平台無法安全取得本機檔案身分".into())
     }
 }
 
 // rename_noreplace is intentionally not described as compare-and-rename: no
 // supported platform here can atomically bind a path rename to this identity.
-// The post-rename check detects a leaf swap in the gap and tries a no-clobber
-// rollback. A rollback collision is surfaced for the caller to reconcile.
+// The post-rename check detects a leaf swap in the gap. If the destination no
+// longer has the pinned identity, leave it untouched for caller reconciliation.
 fn rename_local_verified(
     from_dir: &cap_std::fs::Dir,
     from: &Path,
@@ -155,16 +164,34 @@ fn rename_local_verified(
     let detail = actual
         .err()
         .unwrap_or_else(|| "目的地檔案身分與操作前不符".into());
-    match rename_noreplace(to_dir, to, from_dir, from) {
-        Ok(()) => Err(VerifiedRenameError {
-            message: format!("檔案位置在操作期間被替換，已 no-clobber 回復來源：{detail}"),
-            rollback_failed: false,
-        }),
-        Err(error) => Err(VerifiedRenameError {
-            message: format!("檔案位置在操作期間被替換，且 no-clobber 回滾失敗，需要人工檢查：{detail}; rollback: {error}"),
-            rollback_failed: true,
-        }),
+    Err(VerifiedRenameError {
+        message: format!(
+            "檔案位置在操作期間被替換，目的地身分無法確認；為避免移動第三方項目，未自動回滾，需要人工檢查：{detail}"
+        ),
+        rollback_failed: true,
+    })
+}
+
+fn rollback_local_verified(
+    from_dir: &cap_std::fs::Dir,
+    from: &Path,
+    to_dir: &cap_std::fs::Dir,
+    to: &Path,
+    expected: &LocalFileIdentity,
+) -> Result<(), String> {
+    let actual = local_file_identity(from_dir, from)
+        .map_err(|error| format!("無法確認回滾來源身分，未執行回滾：{error}"))?;
+    if &actual != expected {
+        return Err("回滾來源身分已改變，為避免移動第三方項目，未執行回滾".into());
     }
+    rename_noreplace(from_dir, from, to_dir, to)
+        .map_err(|error| format!("no-clobber 回滾失敗：{error}"))?;
+    let restored = local_file_identity(to_dir, to)
+        .map_err(|error| format!("回滾後無法確認檔案身分：{error}"))?;
+    if &restored != expected {
+        return Err("回滾後檔案身分與原操作不符，需要人工檢查".into());
+    }
+    Ok(())
 }
 
 #[cfg(any(target_os = "macos", target_os = "ios", target_os = "linux"))]
@@ -950,11 +977,12 @@ fn execute_local_move(
         Some(&runtime_id),
         operation.action != "trash",
     ) {
-        let rollback = rename_noreplace(
+        let rollback = rollback_local_verified(
             &destination_dir,
             &destination_name,
             &source_dir,
             &source_name,
+            &pinned_identity,
         );
         let failure = match rollback {
             Ok(()) => {
@@ -1065,11 +1093,12 @@ fn undo_local(store: &CatalogStore, record: &FileOperationRecord) -> Result<(), 
     let runtime_id =
         general_purpose::URL_SAFE_NO_PAD.encode(record.before_relative_path.as_bytes());
     if let Err(error) = store.complete_file_operation_undo(&record.id, Some(&runtime_id)) {
-        let rollback = rename_noreplace(
+        let rollback = rollback_local_verified(
             &destination_dir,
             &destination_name,
             &source_dir,
             &source_name,
+            &pinned_identity,
         );
         return match rollback {
             Ok(()) => {
@@ -1611,13 +1640,14 @@ mod tests {
             &expected,
         )
         .unwrap_err();
-        assert!(!error.rollback_failed);
-        assert!(error.message.contains("已 no-clobber 回復來源"));
+        assert!(error.rollback_failed);
+        assert!(error.message.contains("未自動回滾"));
+        assert!(!base.join("source").exists());
         assert_eq!(
-            std::fs::read(base.join("source")).unwrap(),
+            std::fs::read(base.join("destination")).unwrap(),
             b"replacement leaf"
         );
-        assert!(!base.join("destination").exists());
+        root.remove_file("destination").unwrap();
 
         root.write("source", b"original leaf").unwrap();
         let expected = local_file_identity(&root, Path::new("source")).unwrap();
@@ -1632,7 +1662,7 @@ mod tests {
         )
         .unwrap_err();
         assert!(error.rollback_failed);
-        assert!(error.message.contains("回滾失敗"));
+        assert!(error.message.contains("未自動回滾"));
         assert_eq!(
             std::fs::read(base.join("source")).unwrap(),
             b"rollback collision"
@@ -1640,6 +1670,24 @@ mod tests {
         assert_eq!(
             std::fs::read(base.join("destination")).unwrap(),
             b"replacement leaf"
+        );
+
+        let rollback_error = rollback_local_verified(
+            &root,
+            Path::new("destination"),
+            &root,
+            Path::new("source"),
+            &expected,
+        )
+        .unwrap_err();
+        assert!(rollback_error.contains("未執行回滾"));
+        assert_eq!(
+            std::fs::read(base.join("destination")).unwrap(),
+            b"replacement leaf"
+        );
+        assert_eq!(
+            std::fs::read(base.join("source")).unwrap(),
+            b"rollback collision"
         );
 
         drop(root);

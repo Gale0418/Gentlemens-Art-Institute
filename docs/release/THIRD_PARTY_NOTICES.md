@@ -12,6 +12,8 @@ The generator uses `cargo metadata --locked --offline`, keeps normal dependency 
 
 ## Directly vendored and notable licenses
 
+The offline SVG masks include adapted artwork from Feather, Lucide, and Material Icons. Their original license texts and source revisions are included with the frontend assets in [`icon-licenses.txt`](../../public/assets/icon-licenses.txt).
+
 - [`zip` 0.6.6 — LICENSE](../../src-tauri/vendor/zip/LICENSE) declares MIT.
 - [`wry` 0.55.1 — LICENSE-MIT](../../src-tauri/vendor/wry/LICENSE-MIT) and [`LICENSE-APACHE`](../../src-tauri/vendor/wry/LICENSE-APACHE) are included with the vendored crate; [`LICENSE.spdx`](../../src-tauri/vendor/wry/LICENSE.spdx) is also retained.
 - [`sevenz-rust2` 0.23.0 — LICENSE](../../src-tauri/vendor/sevenz-rust2/LICENSE) contains the package's Apache-2.0 license text.

@@ -7257,16 +7257,16 @@ function renderGrid({ skipUnchanged = false, background = false, appendOnly = fa
                decoding="async"
                fetchpriority="low"
                alt="${escapeHtml(comic.title)}">` : ''}
-          <div class="comic-cover-placeholder" style="background: var(--bg-hover);">
-            <div class="placeholder-icon" style="font-size: 40px;">📁</div>
-            <div class="placeholder-text" style="margin-top: 10px;">${escapeHtml(comic.title)}</div>
+          <div class="comic-cover-placeholder">
+            <div class="placeholder-icon"><i class="fa-solid fa-folder" aria-hidden="true"></i></div>
+            <div class="placeholder-text">${escapeHtml(comic.title)}</div>
           </div>
-            <span class="comic-format-tag" style="background: var(--accent); color: white;"><i class="fa-solid fa-folder"></i> ${readerText('目錄')}</span>
+            <span class="comic-format-tag tag-directory"><i class="fa-solid fa-folder"></i> ${readerText('目錄')}</span>
         </div>
         <div class="comic-info">
           <div class="comic-title" title="${escapeHtml(comic.title)}">${escapeHtml(comic.title)}</div>
           <div class="comic-meta">
-            ${comic.comicsCount ? `<span style="color: var(--accent); font-weight: 500;"><i class="fa-solid fa-book-open"></i> ${comic.comicsCount} ${readerText('本漫畫')}</span>` : ''}
+            ${comic.comicsCount ? `<span class="folder-count-meta"><i class="fa-solid fa-book-open"></i> ${comic.comicsCount} ${readerText('本漫畫')}</span>` : ''}
             <span>${readerText("點一下進入")}</span>
           </div>
         </div>
@@ -7310,7 +7310,7 @@ function renderGrid({ skipUnchanged = false, background = false, appendOnly = fa
                fetchpriority="low"
                alt="${escapeHtml(comic.title)}">
           <div class="comic-cover-placeholder">
-            <div class="placeholder-icon">📖</div>
+            <div class="placeholder-icon"><i class="fa-solid fa-book-open" aria-hidden="true"></i></div>
             <div class="placeholder-text">${escapeHtml(comic.title)}</div>
           </div>
 

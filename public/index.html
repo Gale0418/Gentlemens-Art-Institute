@@ -17,6 +17,8 @@
   <link rel="stylesheet" href="reader-interface.css">
   <link rel="stylesheet" href="activity-progress.css">
   <link rel="stylesheet" href="library-ambience.css">
+  <link rel="stylesheet" href="icons.css">
+  <link rel="stylesheet" href="atelier.css">
 </head>
 <body>
 
@@ -82,13 +84,13 @@
         <button id="refresh-btn" class="action-btn" title="重新整理書架" data-i18n-title="重新整理書架">
           <i class="fa-solid fa-rotate-right"></i><span data-i18n="重新整理">重新整理</span>
         </button>
-        <button id="import-photo-btn" class="action-btn" title="從相簿匯入圖片" data-i18n-title="從相簿匯入圖片" style="display: none; background: rgba(255, 255, 255, 0.05); border-color: var(--card-border); color: var(--text-muted);">
+        <button id="import-photo-btn" class="action-btn" title="從相簿匯入圖片" data-i18n-title="從相簿匯入圖片" style="display: none;">
           <i class="fa-solid fa-file-import" aria-hidden="true"></i><span data-i18n="匯入圖片">匯入圖片</span>
         </button>
         <button id="photo-library-link-btn" class="action-btn photo-library-link-btn" type="button" title="連結 iOS 相簿" data-i18n-title="連結 iOS 相簿" hidden>
           <i class="fa-regular fa-images" aria-hidden="true"></i><span data-i18n="連結相簿">連結相簿</span>
         </button>
-        <button id="settings-btn" class="action-btn" title="設定" data-i18n-title="設定" style="background: rgba(255, 255, 255, 0.05); border-color: var(--card-border); color: var(--text-muted);">
+        <button id="settings-btn" class="action-btn" title="設定" data-i18n-title="設定">
           <i class="fa-solid fa-gear"></i><span data-i18n="設定">設定</span>
         </button>
       </div>
@@ -226,7 +228,7 @@
               <button class="filter-btn" data-filter="reading" aria-pressed="false" data-i18n="閱讀中">閱讀中</button>
               <button class="filter-btn" data-filter="unread" aria-pressed="false" data-i18n="未讀取">未讀取</button>
               <button class="filter-btn" data-filter="finished" aria-pressed="false" data-i18n="已看完">已看完</button>
-              <button class="filter-btn" data-filter="favorite" aria-pressed="false"><i class="fa-solid fa-heart" style="color: #ff6b8b; margin-right: 4px;"></i><span data-i18n="已收藏">已收藏</span></button>
+              <button class="filter-btn" data-filter="favorite" aria-pressed="false"><i class="fa-solid fa-heart filter-heart-icon" aria-hidden="true"></i><span data-i18n="已收藏">已收藏</span></button>
             </div>
           </div>
 
@@ -245,7 +247,7 @@
           <div class="catalog-facets" id="catalog-facets" aria-live="polite" hidden></div>
 
           <!-- 資料夾層級導航列 (姬米妮貼心打造 ✨) -->
-          <div class="folder-breadcrumbs" id="folder-breadcrumbs" style="display: none; align-items: center; gap: 8px; margin: -10px 0 20px 0; padding: 10px 16px; background: var(--bg-hover); border: 1px solid var(--border); border-radius: 10px; font-size: 13.5px; color: var(--text-light); overflow-x: auto; white-space: nowrap; scrollbar-width: none;">
+          <div class="folder-breadcrumbs" id="folder-breadcrumbs" style="display: none;">
             <!-- 動態麵包屑 -->
           </div>
           <p class="visible-scan-status" id="visible-scan-status" role="status" aria-live="polite" hidden></p>
@@ -726,7 +728,7 @@
 
   <!-- NAS (SMB) 設定彈出視窗 -->
   <div class="modal-overlay" id="smb-modal" role="dialog" aria-modal="true" aria-labelledby="smb-title" style="display: none;">
-    <div class="modal-content" style="max-width: 400px;">
+    <div class="modal-content smb-modal-content">
       <div class="modal-header">
         <h2 id="smb-title"><i class="fa-solid fa-globe"></i><span data-i18n="網路硬碟 (NAS) 設定">網路硬碟 (NAS) 設定</span></h2>
         <button class="close-modal-btn" id="close-smb-btn" aria-label="關閉 NAS 設定" data-i18n-aria-label="關閉 NAS 設定"><i class="fa-solid fa-xmark"></i></button>
@@ -748,8 +750,8 @@
           <label for="smb-pass" data-i18n="密碼：">密碼：</label>
           <input type="password" id="smb-pass" placeholder="留白表示無密碼" data-i18n-placeholder="留白表示無密碼">
         </div>
-        <div class="advanced-settings-group" style="margin-top: 20px; display: flex; justify-content: flex-end; gap: 10px;">
-          <button id="smb-clear-btn" class="modal-action-btn" style="background: rgba(255,107,139,0.1); color: var(--accent);" data-i18n="清除連線">清除連線</button>
+        <div class="advanced-settings-group">
+          <button id="smb-clear-btn" class="modal-action-btn modal-action-danger" data-i18n="清除連線">清除連線</button>
           <button id="smb-connect-btn" class="modal-action-btn primary"><i class="fa-solid fa-plug"></i><span data-i18n="測試並儲存">測試並儲存</span></button>
         </div>
       </div>

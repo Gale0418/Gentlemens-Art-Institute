@@ -267,6 +267,13 @@ pub fn recover_external_bookmarks(
     }
     drop(backup_file);
 
+    // Persist the backup's directory entry before replacing the damaged file.
+    // If this fails, keep the backup and stop before the commit rename.
+    sync_parent(&backup_path).map_err(|source| RecoveryError::Backup {
+        path: backup_path.clone(),
+        source,
+    })?;
+
     // Recheck after creating the backup.  A changed destination is never
     // overwritten, while the unique backup remains useful evidence.
     ensure_unchanged(path, &bytes)?;

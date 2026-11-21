@@ -140,9 +140,10 @@ actor CommerceManager {
         do {
             let products = try await Product.products(for: [CommercePolicy.proProductId])
             guard let foundProduct = products.first(where: { $0.id == CommercePolicy.proProductId }) else {
+                let pro = await checkProEntitlement()
                 return CommercePolicy.buildCommercePayload(
                     supported: true,
-                    pro: false,
+                    pro: pro,
                     productId: CommercePolicy.proProductId,
                     displayPrice: cachedDisplayPrice,
                     status: .unavailable,
@@ -152,9 +153,10 @@ actor CommerceManager {
             product = foundProduct
             cachedDisplayPrice = product.displayPrice
         } catch {
+            let pro = await checkProEntitlement()
             return CommercePolicy.buildCommercePayload(
                 supported: true,
-                pro: false,
+                pro: pro,
                 productId: CommercePolicy.proProductId,
                 displayPrice: cachedDisplayPrice,
                 status: .unavailable,

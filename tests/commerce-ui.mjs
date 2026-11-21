@@ -28,7 +28,9 @@ let enclosingHandler = '';
 for (const line of nativeSource.split(/\r?\n/)) {
   const declaration = line.match(/\basync\s+fn\s+(\w+)\s*\(/);
   if (declaration) enclosingHandler = declaration[1];
-  if (/commerce::require_pro\s*\(/.test(line)) protectedHandlers.push(enclosingHandler);
+  if (/^\s*commerce::require_pro\(&app_handle\)\.await\?;/.test(line)) {
+    protectedHandlers.push(enclosingHandler);
+  }
 }
 assert.deepEqual(protectedHandlers.sort(), [
   'explain_page', 'restore_ai_session_config', 'set_ai_session_config', 'suggest_comic_metadata', 'test_ai_session',
@@ -321,7 +323,8 @@ console.log('PASS: Pro dialog focus trap skips disabled controls and negative ta
   assert.equal(document.dispatchCaptureClick(metadataAction).defaultPrevented, true,
     'AI metadata suggestions remain gated');
   const stopAction = document.add('btn-ai-book-stop', ['ai-page-btn']);
-  assert.equal(document.dispatchCaptureClick(stopAction).defaultPrevented, false,
-    'an in-progress whole-book AI run can still be stopped');
+  const stopEvent = document.dispatchCaptureClick(stopAction);
+  assert.equal(stopEvent.defaultPrevented, false, 'an in-progress whole-book AI run can still be stopped');
+  assert.equal(stopEvent.stopped, false, 'the click reaches the whole-book translation stop handler');
 }
 console.log('PASS: free manual actions bypass UI gating; AI settings, reading, metadata and native entitlement scope are covered');

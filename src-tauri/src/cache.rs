@@ -483,23 +483,6 @@ async fn preload_comic_window_with_item(
                     return true;
                 }
                 // Validate once per small batch, before publishing any page.
-                let live_revision = capability_root
-                    .open(&capability_relative)
-                    .and_then(|file| file.metadata())
-                    .map(|metadata| SourceRevision::from_cap_metadata(&metadata));
-                if live_revision.ok().as_ref() != Some(&source_file_revision) {
-                    let _lifecycle = state.comic_lifecycle.lock().unwrap();
-                    if state
-                        .preload_generation
-                        .load(std::sync::atomic::Ordering::Acquire)
-                        == generation
-                    {
-                        state.ram_cache_pool.lock().unwrap().remove(&id);
-                        state.ram_cache_revisions.lock().unwrap().remove(&id);
-                    }
-                    return false;
-                }
-
                 let id_clone = id.clone();
                 let mut committed_count = 0usize;
                 {
@@ -507,6 +490,24 @@ async fn preload_comic_window_with_item(
                     // lifecycle mutex; no await occurs while lifecycle is held.
                     let comics = lock_comics_for_preload(&state, || {});
                     let _lifecycle = state.comic_lifecycle.lock().unwrap();
+                    // Re-open the authorized source only after the comics wait:
+                    // a replacement during contention must not publish pages
+                    // validated against the earlier file revision.
+                    let live_revision = capability_root
+                        .open(&capability_relative)
+                        .and_then(|file| file.metadata())
+                        .map(|metadata| SourceRevision::from_cap_metadata(&metadata));
+                    if live_revision.ok().as_ref() != Some(&source_file_revision) {
+                        if state
+                            .preload_generation
+                            .load(std::sync::atomic::Ordering::Acquire)
+                            == generation
+                        {
+                            state.ram_cache_pool.lock().unwrap().remove(&id);
+                            state.ram_cache_revisions.lock().unwrap().remove(&id);
+                        }
+                        return false;
+                    }
                     if state
                         .preload_generation
                         .load(std::sync::atomic::Ordering::Acquire)

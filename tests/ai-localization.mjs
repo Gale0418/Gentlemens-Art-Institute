@@ -598,7 +598,7 @@ console.log('PASS: reader-operation queueing discards stale responses and resume
     const firstRun = fixture.context.requestBookTranslation();
     await flush();
     const secondRun = fixture.context.requestBookTranslation();
-    await secondRun;
+    await flush();
     assert.equal(fixture.dialogShowCount, 1);
     assert.equal(fixture.images.length, 0);
     assert.equal(fixture.calls.length, 0);
@@ -609,7 +609,7 @@ console.log('PASS: reader-operation queueing discards stale responses and resume
     fixture.responses[1].resolve('page 2 translation');
     await waitForCall(fixture, 3);
     fixture.responses[2].resolve('page 3 translation');
-    await firstRun;
+    await Promise.all([firstRun, secondRun]);
     assert.equal(fixture.dialogShowCount, 1);
     assert.equal(fixture.calls.length, 3);
   }

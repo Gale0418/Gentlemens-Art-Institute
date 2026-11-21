@@ -26,6 +26,7 @@ pub fn init<R: Runtime, C: DeserializeOwned>(
     Ok(TauriPluginIosFolder {
         app: app.clone(),
         active_accesses: Arc::new(Mutex::new(HashMap::new())),
+        alias_access: Arc::new(Mutex::new(())),
     })
 }
 
@@ -35,6 +36,7 @@ pub struct TauriPluginIosFolder<R: Runtime> {
     // Keep the resolved NSURL until stop_accessing so the same security scope
     // object is used for the balanced start/stop calls.
     active_accesses: Arc<Mutex<HashMap<String, (String, ActiveUrl)>>>,
+    alias_access: Arc<Mutex<()>>,
 }
 
 impl<R: Runtime> TauriPluginIosFolder<R> {
@@ -67,6 +69,7 @@ impl<R: Runtime> TauriPluginIosFolder<R> {
     }
 
     fn load_alias(&self, bookmark: &str) -> Option<String> {
+        let _guard = self.alias_access.lock().ok()?;
         let path = self.aliases_path().ok()?;
         let aliases = std::fs::read_to_string(path).ok()?;
         let aliases = serde_json::from_str::<HashMap<String, String>>(&aliases).ok()?;
@@ -74,6 +77,9 @@ impl<R: Runtime> TauriPluginIosFolder<R> {
     }
 
     fn save_alias(&self, bookmark: &str, alias: &str) {
+        let Ok(_guard) = self.alias_access.lock() else {
+            return;
+        };
         let Ok(path) = self.aliases_path() else {
             return;
         };
@@ -92,6 +98,9 @@ impl<R: Runtime> TauriPluginIosFolder<R> {
     }
 
     fn remove_alias(&self, bookmark: &str) {
+        let Ok(_guard) = self.alias_access.lock() else {
+            return;
+        };
         let Ok(path) = self.aliases_path() else {
             return;
         };
@@ -177,26 +186,15 @@ impl<R: Runtime> TauriPluginIosFolder<R> {
                 NSData, NSURLBookmarkCreationOptions, NSURLBookmarkResolutionOptions,
             };
 
-            {
-                let active = self
-                    .active_accesses
-                    .lock()
-                    .map_err(|_| native_error("FOLDER_ACCESS_START_FAILED"))?;
-                if let Some((path, _)) = active.get(&payload.bookmark) {
-                    return Ok(StartAccessingResponse { path: path.clone() });
-                }
-            }
-
             let original = payload.bookmark.clone();
             let alias = self.load_alias(&original);
-            let result = self.run_on_main_thread(move || {
-                let candidates = [alias, Some(original.clone())]
+            let (path, refreshed, url) = objc2::rc::autoreleasepool(|_| {
+                let mut last_error = "FOLDER_BOOKMARK_ACCESS_FAILED";
+                for candidate in [alias.as_deref(), Some(original.as_str())]
                     .into_iter()
                     .flatten()
-                    .collect::<Vec<_>>();
-                let mut last_error = "FOLDER_BOOKMARK_ACCESS_FAILED";
-                for candidate in candidates {
-                    let Ok(bytes) = general_purpose::STANDARD.decode(&candidate) else {
+                {
+                    let Ok(bytes) = general_purpose::STANDARD.decode(candidate) else {
                         last_error = "FOLDER_BOOKMARK_INVALID_BASE64";
                         continue;
                     };
@@ -241,7 +239,6 @@ impl<R: Runtime> TauriPluginIosFolder<R> {
                 }
                 Err(native_error(last_error))
             })?;
-            let (path, refreshed, url) = result;
             if let Some(refreshed) = refreshed {
                 self.save_alias(&payload.bookmark, &refreshed);
             }
@@ -250,17 +247,20 @@ impl<R: Runtime> TauriPluginIosFolder<R> {
                 .lock()
                 .map_err(|_| native_error("FOLDER_ACCESS_START_FAILED"))?;
             if let Some((existing_path, _)) = active.get(&payload.bookmark) {
-                let existing_path = existing_path.clone();
-                drop(active);
-                self.run_on_main_thread(move || {
+                if existing_path == &path {
+                    let existing_path = existing_path.clone();
+                    drop(active);
                     unsafe { url.stopAccessingSecurityScopedResource() };
-                    Ok(())
-                })?;
-                return Ok(StartAccessingResponse {
-                    path: existing_path,
-                });
+                    return Ok(StartAccessingResponse {
+                        path: existing_path,
+                    });
+                }
             }
-            active.insert(payload.bookmark, (path.clone(), url));
+            let previous = active.insert(payload.bookmark, (path.clone(), url));
+            drop(active);
+            if let Some((_, previous_url)) = previous {
+                unsafe { previous_url.stopAccessingSecurityScopedResource() };
+            }
             Ok(StartAccessingResponse { path })
         }
 

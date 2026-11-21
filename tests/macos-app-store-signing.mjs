@@ -84,6 +84,10 @@ if [[ "$1" == --force ]]; then
   exit 0
 fi
 if [[ "$1" == -d ]]; then
+  if [[ "$2" != --xml || "$3" != --entitlements || "$4" != - ]]; then
+    printf '[Dict]\n'
+    exit 0
+  fi
   if [[ "$target" == *catalog-import ]]; then
     cat "$GAI_MOCK_ROOT/helper-entitlements.plist"
   else

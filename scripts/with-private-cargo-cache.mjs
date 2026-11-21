@@ -10,8 +10,9 @@ if (!command) throw new Error('Usage: node scripts/with-private-cargo-cache.mjs 
 const cacheBase = process.platform === 'darwin'
   ? path.join(os.homedir(), 'Library', 'Caches', 'com.windsheep.gai')
   : path.join(os.homedir(), '.cache', 'gai');
-const target = path.resolve(process.env.CARGO_TARGET_DIR || path.join(cacheBase, 'cargo'));
-fs.mkdirSync(target, { recursive: true, mode: 0o700 });
+const requestedTarget = path.resolve(process.env.CARGO_TARGET_DIR || path.join(cacheBase, 'cargo'));
+fs.mkdirSync(requestedTarget, { recursive: true, mode: 0o700 });
+const target = path.join(fs.realpathSync(path.dirname(requestedTarget)), path.basename(requestedTarget));
 const info = fs.lstatSync(target);
 if (!info.isDirectory() || info.isSymbolicLink()
   || (process.getuid && info.uid !== process.getuid())) {
@@ -21,7 +22,7 @@ if (process.getuid) {
   // A private leaf alone is insufficient if another user can replace it
   // through a writable parent. Sticky shared roots such as /tmp are safe
   // only after the leaf ownership check above.
-  for (let parent = fs.realpathSync(path.dirname(target)); ; parent = path.dirname(parent)) {
+  for (let parent = path.dirname(target); ; parent = path.dirname(parent)) {
     const ancestor = fs.statSync(parent);
     if ((ancestor.uid !== process.getuid() && ancestor.uid !== 0)
       || ((ancestor.mode & 0o022) && !(ancestor.mode & 0o1000))) {

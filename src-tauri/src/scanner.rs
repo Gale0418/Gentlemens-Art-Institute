@@ -196,22 +196,33 @@ fn should_yield_to_reader(priority: ReaderPriority, visible_generation: Option<u
 fn yield_to_reader_if_needed(state: &AppState, my_gen: u64, visible_generation: Option<u64>) {
     // This is cooperative only. A provider call already in progress cannot
     // be preempted by this check or by `try_lock`.
-    while should_yield_to_reader(state.reader_priority(), visible_generation) {
-        // A superseding scan generation cancels the wait; this keeps an old
-        // worker bounded even if a reader remains open for a long time.
-        if state.scan_generation.load(Ordering::Acquire) != my_gen
-            || visible_generation.is_some_and(|visible| {
-                state.visible_scan_generation.load(Ordering::Acquire) != visible
-            })
-        {
-            return;
+    let mut active_delay_used = false;
+    loop {
+        while should_yield_to_reader(state.reader_priority(), visible_generation) {
+            // A superseding scan generation cancels the wait; this keeps an old
+            // worker bounded even if a reader remains open for a long time.
+            if state.scan_generation.load(Ordering::Acquire) != my_gen
+                || visible_generation.is_some_and(|visible| {
+                    state.visible_scan_generation.load(Ordering::Acquire) != visible
+                })
+            {
+                return;
+            }
+            std::thread::sleep(READER_SCAN_WAIT);
         }
-        std::thread::sleep(READER_SCAN_WAIT);
-    }
-    // Keep making bounded progress while reading. Only opening a book pauses
-    // discovery; an active reader reduces the full-library lane's I/O rate.
-    if visible_generation.is_none() && state.reader_priority() == ReaderPriority::Active {
-        std::thread::sleep(READER_SCAN_WAIT);
+
+        // Keep making bounded progress while reading. Only opening a book
+        // pauses discovery; an active reader reduces the full-library lane's
+        // I/O rate. Re-enter the loop afterward to catch a newly pending open.
+        if !active_delay_used
+            && visible_generation.is_none()
+            && state.reader_priority() == ReaderPriority::Active
+        {
+            active_delay_used = true;
+            std::thread::sleep(READER_SCAN_WAIT);
+            continue;
+        }
+        return;
     }
 }
 
@@ -1623,13 +1634,17 @@ pub async fn scan_visible_directory(
             #[cfg(any(target_os = "ios", target_os = "macos"))]
             {
                 use tauri_plugin_ios_folder::{StartAccessingRequest, TauriPluginIosFolderExt};
-                let path = app_handle
-                    .tauri_plugin_ios_folder()
-                    .start_accessing(StartAccessingRequest {
-                        bookmark: entry.bookmark.clone(),
-                    })
-                    .map_err(|error| format!("無法存取外部漫畫來源：{error}"))?
-                    .path;
+                let app_handle = app_handle.clone();
+                let bookmark = entry.bookmark.clone();
+                let path = tokio::task::spawn_blocking(move || {
+                    app_handle
+                        .tauri_plugin_ios_folder()
+                        .start_accessing(StartAccessingRequest { bookmark })
+                })
+                .await
+                .map_err(|error| format!("無法存取外部漫畫來源：{error}"))?
+                .map_err(|error| format!("無法存取外部漫畫來源：{error}"))?
+                .path;
                 state
                     .active_bookmarks
                     .lock()
@@ -2597,6 +2612,8 @@ mod tests {
         waiter.join().unwrap();
 
         *state.active_comic_id.lock().unwrap() = Some("reading".into());
+        *state.pending_open_id.lock().unwrap() = Some("opening".into());
+        assert_eq!(state.reader_priority(), ReaderPriority::Opening);
         let (cancelled_tx, cancelled_rx) = std::sync::mpsc::channel();
         let cancelled_state = state.clone();
         let cancelled = std::thread::spawn(move || {
@@ -2609,6 +2626,7 @@ mod tests {
             .recv_timeout(Duration::from_secs(1))
             .expect("superseding generation did not cancel reader wait");
         cancelled.join().unwrap();
+        *state.pending_open_id.lock().unwrap() = None;
     }
 
     #[tokio::test]

@@ -14,7 +14,11 @@ pub(crate) async fn start_accessing<R: Runtime>(
     app: AppHandle<R>,
     payload: StartAccessingRequest,
 ) -> Result<StartAccessingResponse> {
-    app.tauri_plugin_ios_folder().start_accessing(payload)
+    tauri::async_runtime::spawn_blocking(move || {
+        app.tauri_plugin_ios_folder().start_accessing(payload)
+    })
+    .await
+    .map_err(|_| std::io::Error::other("FOLDER_BOOKMARK_RESOLVE_FAILED"))?
 }
 
 #[command]

@@ -260,7 +260,7 @@ codesign --force --verbose --options runtime \
   --sign "$APPLICATION_IDENTITY" "$staged_app"
 
 entitlements_dump() {
-  codesign -d --entitlements :- "$1" 2>/dev/null | plutil -p -
+  codesign -d --xml --entitlements - "$1" 2>/dev/null | plutil -p -
 }
 
 signature_dump() {

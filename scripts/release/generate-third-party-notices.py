@@ -343,9 +343,9 @@ def safe_legal_files(package: dict) -> list[tuple[str, bytes]]:
     if root.is_symlink() or not root.is_dir():
         return []
     candidates: set[str] = set()
-    explicit = package.get("license_file")
+    explicit = manifest_relative_license_file(package.get("license_file"))
     if explicit:
-        candidates.add(explicit.replace("\\", "/"))
+        candidates.add(explicit)
 
     # Search the package's own legal files only. Search known legal folders and
     # libarchive2-sys's bundled upstream tree; do not absorb nested vendored
@@ -512,7 +512,10 @@ def main() -> int:
             shared_texts[digest][1].append(label)
         key = (package["name"], package["version"])
         package_supplements = supplements_by_package.get(key, [])
-        has_package_license_text = any(is_license_text_source(relative) for relative, _ in files)
+        explicit_license = manifest_relative_license_file(package.get("license_file"))
+        has_package_license_text = any(
+            relative == explicit_license or is_license_text_source(relative) for relative, _ in files
+        )
         has_original_supplement = any(item["role"] == "original-license-text" for item in package_supplements)
         has_reference_text = any(item["role"] == "canonical-license-reference" for item in package_supplements)
         has_template_attribution_note = any(

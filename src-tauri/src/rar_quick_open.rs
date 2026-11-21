@@ -290,25 +290,30 @@ fn parse_main_header(bytes: &[u8], file_len: u64) -> Option<(u64, u64, Option<u6
     if extra_end != bytes.len() || extra_len.0 == 0 {
         return None;
     }
-    let _field_size = read_vint_at(bytes, pos)?;
-    pos = _field_size.1;
-    let field_id = read_vint_at(bytes, pos)?;
+    let field_size = read_vint_at(bytes, pos)?;
+    pos = field_size.1;
+    let field_end = pos.checked_add(usize::try_from(field_size.0).ok()?)?;
+    if field_size.0 == 0 || field_end > extra_end {
+        return None;
+    }
+    let record = &bytes[..field_end];
+    let field_id = read_vint_at(record, pos)?;
     pos = field_id.1;
     if field_id.0 != 1 {
         return None;
     }
-    let locator_flags = read_vint_at(bytes, pos)?;
+    let locator_flags = read_vint_at(record, pos)?;
     pos = locator_flags.1;
     if locator_flags.0 & !0x03 != 0 || locator_flags.0 & 0x01 == 0 {
         return None;
     }
-    let q_offset = read_vint_at(bytes, pos)?;
+    let q_offset = read_vint_at(record, pos)?;
     pos = q_offset.1;
     if q_offset.0 == 0 {
         return None;
     }
     let recovery_offset = if locator_flags.0 & 0x02 != 0 {
-        let value = read_vint_at(bytes, pos)?;
+        let value = read_vint_at(record, pos)?;
         pos = value.1;
         (value.0 != 0).then_some(value.0)
     } else {
@@ -317,7 +322,7 @@ fn parse_main_header(bytes: &[u8], file_len: u64) -> Option<(u64, u64, Option<u6
     if locator_flags.0 & 0x02 != 0 && recovery_offset.is_none() {
         return None;
     }
-    if pos != extra_end || 8_u64.checked_add(q_offset.0)? >= file_len {
+    if pos != field_end || field_end != extra_end || 8_u64.checked_add(q_offset.0)? >= file_len {
         return None;
     }
     Some((
@@ -709,6 +714,9 @@ fn read_vint(bytes: &[u8], mut pos: usize) -> Option<(u64, usize)> {
     while pos < bytes.len() && pos - start < 10 {
         let byte = bytes[pos];
         pos += 1;
+        if shift == 63 && (byte & 0x7f) > 1 {
+            return None;
+        }
         value = value.checked_add((u64::from(byte & 0x7f)).checked_shl(shift)?)?;
         if byte & 0x80 == 0 {
             return Some((value, pos - start));
@@ -924,6 +932,39 @@ mod tests {
     fn varints_are_bounded_and_checked() {
         assert_eq!(read_vint(&[0x80, 0x01], 0), Some((128, 2)));
         assert!(read_vint(&[0x80; 10], 0).is_none());
+
+        let mut max_value = vec![0xff; 9];
+        max_value.push(0x01);
+        assert_eq!(read_vint(&max_value, 0), Some((u64::MAX, 10)));
+
+        let mut overflow = vec![0xff; 9];
+        overflow.push(0x02);
+        assert!(read_vint(&overflow, 0).is_none());
+    }
+
+    #[test]
+    fn locator_fields_must_fit_their_declared_record_size() {
+        let (mut bytes, _) = make_fixture(&[("page.jpg", 2)]);
+        let (main_size, size_len) = read_vint(&bytes, 12).unwrap();
+        let main_end = 8 + 4 + size_len + usize::try_from(main_size).unwrap();
+        let main = &bytes[8..main_end];
+
+        let mut pos = 4 + size_len;
+        pos = read_vint_at(main, pos).unwrap().1; // header type
+        pos = read_vint_at(main, pos).unwrap().1; // header flags
+        pos = read_vint_at(main, pos).unwrap().1; // extra area size
+        pos = read_vint_at(main, pos).unwrap().1; // archive flags
+        let (field_size, field_size_len) = read_vint(main, pos).unwrap();
+        assert!(field_size > 1);
+        assert_eq!(field_size_len, 1);
+
+        // Keep the locator body present and CRC-valid, but claim its record
+        // contains only the field type. The parser must not use extra-area
+        // bytes beyond that declared record boundary.
+        bytes[8 + pos] = 1;
+        let main_crc = rar_crc32(&bytes[12..main_end]);
+        bytes[8..12].copy_from_slice(&main_crc.to_le_bytes());
+        assert!(parse_main_header(&bytes[8..main_end], bytes.len() as u64).is_none());
     }
 
     #[test]
@@ -940,6 +981,7 @@ mod tests {
         assert!(validate_extra_area(&[]));
     }
 
+    #[cfg(unix)]
     #[test]
     fn version_and_redirection_extras_use_authoritative_parser() {
         // EX_VERSION payload: flags=0, version=1. libarchive exposes this as
@@ -1004,6 +1046,7 @@ mod tests {
         );
     }
 
+    #[cfg(unix)]
     #[test]
     fn service_image_and_unsafe_name_fall_back() {
         let (_, service) = run_fixture(&[("fake.jpg", 3)]);
@@ -1034,6 +1077,7 @@ mod tests {
         std::fs::remove_file(path).unwrap();
     }
 
+    #[cfg(unix)]
     #[test]
     fn malformed_qo_crc_and_file_before_endarc_fall_back() {
         let (mut bytes, qdata_start) = make_fixture(&[("page.jpg", 2)]);
@@ -1050,6 +1094,7 @@ mod tests {
         assert!(run_bytes(&bytes).is_none());
     }
 
+    #[cfg(unix)]
     #[test]
     fn unknown_main_flags_fall_back_even_with_valid_crc() {
         let (mut bytes, _) = make_fixture(&[("page.jpg", 2)]);
@@ -1104,6 +1149,7 @@ mod tests {
         std::fs::remove_file(path).unwrap();
     }
 
+    #[cfg(unix)]
     #[test]
     fn copied_header_mismatch_and_partial_qo_fall_back() {
         let (mut bytes, qdata_start) = make_fixture(&[("page.jpg", 2)]);

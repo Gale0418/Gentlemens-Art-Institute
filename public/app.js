@@ -1404,6 +1404,7 @@ let state = {
   brightness: Number(readStoredSetting('readerBrightness')) || 100,
   aiAutoExplain: false,
   aiExplainCache: new Map(),
+  aiBookTranslation: null,
   aiExplainDisplayedKey: '',
   aiExplainInFlight: false,
   aiExplainActiveRequest: null,
@@ -1636,6 +1637,12 @@ const elements = {
   btnBrightness: document.getElementById('btn-brightness'),
   btnAiExplain: document.getElementById('btn-ai-explain'),
   btnAiAutoExplain: document.getElementById('btn-ai-auto-explain'),
+  btnAiBookExplain: document.getElementById('btn-ai-book-explain'),
+  btnAiBookStop: document.getElementById('btn-ai-book-stop'),
+  aiBookConfirmDialog: document.getElementById('ai-book-confirm-dialog'),
+  aiBookConfirmMessage: document.getElementById('ai-book-confirm-message'),
+  aiBookProgress: document.getElementById('ai-book-progress'),
+  aiBookStatus: document.getElementById('ai-book-status'),
   aiPagePanel: document.getElementById('ai-page-panel'),
   aiPageResult: document.getElementById('ai-page-result'),
   aiPageClose: document.getElementById('ai-page-close'),
@@ -2849,6 +2856,8 @@ function bindEvents() {
   elements.aiClearBtn?.addEventListener('click', clearAiSession);
   elements.btnAiExplain?.addEventListener('click', explainCurrentPage);
   elements.btnAiAutoExplain?.addEventListener('click', toggleAutoPageExplanation);
+  elements.btnAiBookExplain?.addEventListener('click', requestBookTranslation);
+  elements.btnAiBookStop?.addEventListener('click', stopBookTranslation);
   ['pointerdown', 'pointerup', 'click'].forEach(eventName => {
     elements.aiPagePanel?.addEventListener(eventName, event => event.stopPropagation());
   });
@@ -7559,6 +7568,8 @@ async function openReader(comicOrId, { returnToComicFolder = false } = {}) {
     state.currentComicIsDir = data.isDir || false;
     state.currentComicFilenames = data.filenames || [];
     state.aiExplainCache.clear();
+    state.aiBookTranslation = null;
+    syncBookTranslationUi();
     state.aiExplainPendingPage = null;
     state.aiExplainPendingRequest = null;
 
@@ -7748,6 +7759,7 @@ async function flushReadingProgressBeforeClose(queue, snapshot) {
 
 // 關閉閱讀器
 async function closeReader({ switchingComic = false } = {}) {
+  if (elements.aiBookConfirmDialog?.open) elements.aiBookConfirmDialog.close('cancel');
   if (typeof readerPanels !== 'undefined') readerPanels?.close({ restoreFocus: false });
   resetReaderControlsPointerActivity();
   discoveryReaderContext = null;
@@ -7804,6 +7816,8 @@ async function closeReader({ switchingComic = false } = {}) {
   state.aiExplainPendingPage = null;
   state.aiExplainPendingRequest = null;
   setAiPagePanelVisible(false);
+  state.aiBookTranslation = null;
+  syncBookTranslationUi();
 
   if (elements.statusLoading) elements.statusLoading.style.display = 'none';
   releasePreloadedImages();
@@ -7967,7 +7981,7 @@ function focusReaderEntry() {
 }
 
 function trapReaderFocus(event) {
-  if (elements.readerOverlay.style.display === 'none' || event.key !== 'Tab') return;
+  if (elements.readerOverlay.style.display === 'none' || elements.aiBookConfirmDialog?.open || event.key !== 'Tab') return;
   elements.readerOverlay.classList.add('reader-keyboard-controls');
   triggerControlsActive();
   const focusables = getReaderFocusableElements();
@@ -10218,7 +10232,7 @@ function toggleFullscreen() {
 // 鍵盤快捷鍵處理
 function handleKeyDown(e) {
   // 只有當閱讀器打開時，才觸發閱讀器快捷鍵
-  if (elements.readerOverlay.style.display === 'none') return;
+  if (elements.readerOverlay.style.display === 'none' || elements.aiBookConfirmDialog?.open) return;
   // 設定視窗與文字輸入擁有鍵盤事件；不能在輸入 Key 時翻頁或旋轉。
   if (typeof getActiveLibraryModal === 'function' && getActiveLibraryModal()) return;
   const target = e.target;
@@ -11502,6 +11516,7 @@ function isCurrentAiSessionMutation(generation) {
 }
 
 function setAiSessionActionAvailability() {
+  syncBookTranslationUi();
   const mutationBlocked = state.aiSessionSwitchPending
     || state.aiSessionMutationPending
     || state.aiSessionRevocationFailed;
@@ -11926,15 +11941,16 @@ function scheduleAutoPageExplanation() {
     return;
   }
   const key = aiExplainCacheKey(state.currentComic.id, state.currentPageIndex, getAiExplainLocale(), getComicSourceId(state.currentComic));
-  if (!state.aiAutoExplain) {
-    // Repainting the same page keeps its manual result; a new page cannot show old text.
-    if (!elements.aiPagePanel.hidden && state.aiExplainDisplayedKey !== key) setAiPagePanelVisible(false);
-    return;
-  }
+  const bookTranslation = currentBookTranslation();
   const cached = state.aiExplainCache.get(key);
-  if (cached) {
+  if ((state.aiAutoExplain || bookTranslation) && cached) {
     setAiPagePanelVisible(true);
     elements.aiPageResult.textContent = cached;
+    return;
+  }
+  if (!state.aiAutoExplain || bookTranslation?.running) {
+    // Repainting the same page keeps its manual result; a new page cannot show old text.
+    if (!elements.aiPagePanel.hidden && state.aiExplainDisplayedKey !== key) setAiPagePanelVisible(false);
     return;
   }
   if (!state.aiSessionStatus?.configured || isBuiltInDemoComic(state.currentComic)
@@ -11975,6 +11991,7 @@ function localizeAiExplainError(error) {
 }
 
 async function requestPageExplanation(pageIndex, automatic = false) {
+  if (elements.aiBookConfirmDialog?.open) return;
   if (state.aiSessionSwitchPending || state.aiSessionMutationPending || state.aiSessionRevocationFailed) {
     if (!automatic) showReaderToast(readerText('艦載 AI 工作階段正在切換，請稍後再試。'));
     return;
@@ -12009,6 +12026,11 @@ async function requestPageExplanation(pageIndex, automatic = false) {
     return;
   }
 
+  if (currentBookTranslation()?.running) {
+    if (!automatic) showReaderToast(readerText('ui.readerAiBookPageQueued'));
+    return;
+  }
+
   if (state.aiExplainInFlight) {
     const active = state.aiExplainActiveRequest;
     if (active?.comicId !== comicId || active.sourceId !== sourceId
@@ -12020,7 +12042,13 @@ async function requestPageExplanation(pageIndex, automatic = false) {
     return;
   }
 
+  const nativeGeneration = state.aiSessionStatus.sessionGeneration;
+  if (typeof nativeGeneration !== 'string') {
+    if (!automatic) showReaderToast(readerText('艦載 AI 工作階段正在切換，請稍後再試。'));
+    return;
+  }
   state.aiExplainInFlight = true;
+  syncBookTranslationUi();
   state.aiExplainActiveRequest = { comicId, sourceId, pageIndex, locale, automatic, readerOperation };
   const sessionGeneration = state.aiSessionSwitchGeneration;
   const mutationGeneration = state.aiSessionMutationGeneration;
@@ -12034,15 +12062,21 @@ async function requestPageExplanation(pageIndex, automatic = false) {
     const dataUrl = await pageDataUrl(state.currentComicPages[pageIndex]);
     if (sessionGeneration !== state.aiSessionSwitchGeneration
       || mutationGeneration !== state.aiSessionMutationGeneration
+      || nativeGeneration !== state.aiSessionStatus?.sessionGeneration
       || readerOperation !== state.readerOperation
       || state.currentComic?.id !== comicId
       || getComicSourceId(state.currentComic) !== sourceId
       || state.currentPageIndex !== pageIndex
       || getAiExplainLocale() !== locale
       || (automatic && !state.aiAutoExplain)) return;
-    const explanation = await eAPI.explainPage({ dataUrl, targetLocale: locale });
+    const explanation = await eAPI.explainPage({
+      dataUrl,
+      targetLocale: locale,
+      expectedSessionGeneration: nativeGeneration,
+    });
     if (sessionGeneration !== state.aiSessionSwitchGeneration
       || mutationGeneration !== state.aiSessionMutationGeneration
+      || nativeGeneration !== state.aiSessionStatus?.sessionGeneration
       || readerOperation !== state.readerOperation) return;
     state.aiExplainCache.set(cacheKey, explanation);
     if (state.currentComic?.id === comicId
@@ -12055,6 +12089,7 @@ async function requestPageExplanation(pageIndex, automatic = false) {
   } catch (error) {
     if (sessionGeneration !== state.aiSessionSwitchGeneration
       || mutationGeneration !== state.aiSessionMutationGeneration
+      || nativeGeneration !== state.aiSessionStatus?.sessionGeneration
       || readerOperation !== state.readerOperation) return;
     if (state.currentComic?.id === comicId
       && getComicSourceId(state.currentComic) === sourceId
@@ -12093,6 +12128,182 @@ async function requestPageExplanation(pageIndex, automatic = false) {
       // Retry a same-page request when its locale changed while the previous
       // request was in flight; this is deliberately explicit for manual mode.
       void requestPageExplanation(pendingRequest.pageIndex, pendingRequest.automatic);
+    }
+  }
+}
+
+function bookTranslationOwnerMatches(job) {
+  return Boolean(job && state.aiSessionStatus?.configured
+    && !state.aiSessionSwitchPending && !state.aiSessionMutationPending && !state.aiSessionRevocationFailed
+    && state.readerOperation === job.readerOperation
+    && state.currentComic?.id === job.comicId
+    && getComicSourceId(state.currentComic) === job.sourceId
+    && getAiExplainLocale() === job.locale
+    && state.aiSessionSwitchGeneration === job.switchGeneration
+    && state.aiSessionMutationGeneration === job.mutationGeneration
+    && state.aiSessionStatus.sessionGeneration === job.sessionGeneration
+    && state.aiSessionStatus.provider === job.provider);
+}
+
+function currentBookTranslation() {
+  const job = state.aiBookTranslation;
+  return bookTranslationOwnerMatches(job) ? job : null;
+}
+
+function syncBookTranslationUi() {
+  const job = currentBookTranslation();
+  const { btnAiBookExplain, btnAiBookStop, aiBookProgress, aiBookStatus } = elements;
+  if (btnAiBookExplain) {
+    btnAiBookExplain.disabled = Boolean(state.aiSessionSwitchPending || state.aiSessionMutationPending
+      || state.aiSessionRevocationFailed || state.aiExplainInFlight || job?.running);
+  }
+  if (btnAiBookStop) {
+    const restoreFocus = job && !job.running && document.activeElement === btnAiBookStop;
+    btnAiBookStop.hidden = !job?.running;
+    btnAiBookStop.disabled = Boolean(job?.stopRequested);
+    if (restoreFocus) btnAiBookExplain?.focus({ preventScroll: true });
+  }
+  if (aiBookProgress) {
+    aiBookProgress.hidden = !job?.count;
+    if (job?.count) {
+      aiBookProgress.max = job.count;
+      aiBookProgress.value = job.done;
+    }
+  }
+  if (aiBookStatus) {
+    aiBookStatus.hidden = !job;
+    aiBookStatus.textContent = job?.message || '';
+  }
+}
+
+function stopBookTranslation() {
+  const job = currentBookTranslation();
+  if (!job?.running || job.stopRequested) return;
+  job.stopRequested = true;
+  job.message = readerText('ui.readerAiBookStopping');
+  syncBookTranslationUi();
+}
+
+async function confirmBookTranslation(message) {
+  const { aiBookConfirmDialog: dialog, aiBookConfirmMessage } = elements;
+  if (!aiBookConfirmMessage || !dialog || dialog.open || dialog.onclose || typeof dialog.showModal !== 'function') return false;
+  aiBookConfirmMessage.textContent = message;
+  dialog.returnValue = '';
+  dialog.showModal();
+  return new Promise(resolve => {
+    dialog.onclose = () => {
+      dialog.onclose = null;
+      resolve(dialog.returnValue === 'translate');
+    };
+  });
+}
+
+async function requestBookTranslation() {
+  if (state.aiSessionSwitchPending || state.aiSessionMutationPending || state.aiSessionRevocationFailed) {
+    showReaderToast(readerText('艦載 AI 工作階段正在切換，請稍後再試。'));
+    return;
+  }
+  if (!state.aiSessionStatus?.configured) {
+    openAiSettings();
+    return;
+  }
+  if (currentBookTranslation()?.running) return;
+  if (state.aiExplainInFlight) {
+    showReaderToast(readerText('ui.readerAiBookBusy'));
+    return;
+  }
+  const comic = state.currentComic;
+  if (isBuiltInDemoComic(comic)) {
+    showReaderToast(readerText('風景選集不會送出頁面內容給 AI。'));
+    return;
+  }
+  const pages = state.currentComicPages;
+  if (!eAPI?.explainPage || !comic?.id || !pages.length) {
+    showReaderToast(readerText('請先開啟一頁漫畫'));
+    return;
+  }
+  const { provider, sessionGeneration } = state.aiSessionStatus;
+  if (typeof sessionGeneration !== 'string') {
+    showReaderToast(readerText('艦載 AI 工作階段正在切換，請稍後再試。'));
+    return;
+  }
+  const job = {
+    comicId: comic.id,
+    sourceId: getComicSourceId(comic),
+    locale: getAiExplainLocale(),
+    readerOperation: state.readerOperation,
+    switchGeneration: state.aiSessionSwitchGeneration,
+    mutationGeneration: state.aiSessionMutationGeneration,
+    provider,
+    sessionGeneration,
+    running: false,
+    stopRequested: false,
+    done: 0,
+    count: 0,
+    message: '',
+  };
+  const pageCacheKey = pageIndex => aiExplainCacheKey(job.comicId, pageIndex, job.locale, job.sourceId);
+  const pending = Array.from(pages.keys()).filter(pageIndex => !state.aiExplainCache.has(pageCacheKey(pageIndex)));
+  job.count = pending.length;
+  if (!job.count) {
+    showReaderToast(readerText('ui.readerAiBookAlreadyComplete'));
+    return;
+  }
+  const label = provider === 'google' ? 'Google · Gemma 4' : 'OpenAI · Luna';
+  if (!await confirmBookTranslation(readerText('ui.readerAiBookConfirm', { count: job.count, provider: label }))) return;
+  if (!bookTranslationOwnerMatches(job) || currentBookTranslation()?.running || state.aiExplainInFlight) return;
+
+  job.running = true;
+  job.message = readerText('ui.readerAiBookWorking', { done: job.done, count: job.count });
+  state.aiBookTranslation = job;
+  clearTimeout(state.aiExplainTimer);
+  state.aiExplainTimer = null;
+  syncBookTranslationUi();
+  elements.btnAiBookStop?.focus({ preventScroll: true });
+
+  let pageIndex;
+  let failed = false;
+  try {
+    for (pageIndex of pending) {
+      if (currentBookTranslation() !== job || job.stopRequested) break;
+      const dataUrl = await pageDataUrl(pages[pageIndex]);
+      if (currentBookTranslation() !== job || job.stopRequested) break;
+      const result = await eAPI.explainPage({
+        dataUrl,
+        targetLocale: job.locale,
+        expectedSessionGeneration: job.sessionGeneration,
+      });
+      if (currentBookTranslation() !== job) break;
+      state.aiExplainCache.set(pageCacheKey(pageIndex), result);
+      job.done++;
+      if (!job.stopRequested) {
+        job.message = readerText('ui.readerAiBookWorking', { done: job.done, count: job.count });
+        syncBookTranslationUi();
+      }
+      if (state.currentPageIndex === pageIndex) {
+        setAiPagePanelVisible(true);
+        elements.aiPageResult.textContent = result;
+        syncReaderRotationUi();
+      }
+    }
+  } catch (error) {
+    if (currentBookTranslation() === job && !job.stopRequested) {
+      failed = true;
+      const rawMessage = error?.nativeMessage || error?.message || String(error);
+      if (/^PRO_REQUIRED:|HTTP 429|RESOURCE_EXHAUSTED|quota|rate limit/i.test(rawMessage)) {
+        setAutoPageExplanation(false);
+      }
+      job.message = readerText('ui.readerAiBookError', {
+        page: pageIndex + 1,
+        error: localizeAiExplainError(error),
+      });
+    }
+  } finally {
+    job.running = false;
+    if (currentBookTranslation() === job) {
+      if (job.stopRequested) job.message = readerText('ui.readerAiBookStopped', { done: job.done, count: job.count });
+      else if (!failed) job.message = readerText('ui.readerAiBookComplete', { count: job.count });
+      syncBookTranslationUi();
     }
   }
 }

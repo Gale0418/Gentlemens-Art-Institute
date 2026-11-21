@@ -2957,6 +2957,7 @@ struct AiSessionRestoreRequest {
 #[serde(rename_all = "camelCase")]
 struct AiSessionStatus {
     configured: bool,
+    session_generation: Option<String>,
     provider: Option<String>,
     model: Option<String>,
     remembered: bool,
@@ -2970,6 +2971,8 @@ struct ExplainPageRequest {
     data_url: String,
     #[serde(default = "default_explain_page_locale")]
     target_locale: String,
+    // Every translation belongs to the native provider/key session that initiated it.
+    expected_session_generation: String,
 }
 
 fn default_explain_page_locale() -> String {
@@ -3055,11 +3058,18 @@ struct SaveProgressRequest {
 }
 
 fn ai_status(
+    state: &AppState,
     config: Option<&crate::state::AiSessionConfig>,
     remembered_provider: Option<String>,
 ) -> AiSessionStatus {
     AiSessionStatus {
         configured: config.is_some(),
+        session_generation: config.map(|_| {
+            state
+                .ai_session_generation
+                .load(std::sync::atomic::Ordering::SeqCst)
+                .to_string()
+        }),
         provider: config.map(|value| value.provider.clone()),
         model: config.map(|value| value.model.clone()),
         remembered: remembered_provider.is_some(),
@@ -3375,7 +3385,7 @@ async fn get_ai_session_status(
         .ai_session
         .read()
         .map_err(|_| "艦載 AI 工作階段鎖定失敗".to_string())?;
-    let mut status = ai_status(config.as_ref(), remembered_provider);
+    let mut status = ai_status(state.inner(), config.as_ref(), remembered_provider);
     status.remembered_lookup_failed = remembered_lookup_failed;
     Ok(status)
 }
@@ -3433,7 +3443,7 @@ async fn set_ai_session_config(
         ai_keychain_delete_all(&app_handle).await?;
     }
     let remembered_provider = ai_keychain_remembered_provider(&app_handle).await?;
-    let status = ai_status(Some(&config), remembered_provider);
+    let status = ai_status(state.inner(), Some(&config), remembered_provider);
     *state
         .ai_session
         .write()
@@ -3458,7 +3468,7 @@ async fn restore_ai_session_config(
     wait_for_ai_sends().await;
     let api_key = ai_keychain_load_for_provider(&app_handle, &data.provider).await?;
     let config = validate_ai_session(&data.provider, &api_key, data.google_content_disclosure)?;
-    let status = ai_status(Some(&config), Some(config.provider.clone()));
+    let status = ai_status(state.inner(), Some(&config), Some(config.provider.clone()));
     *state
         .ai_session
         .write()
@@ -3819,6 +3829,9 @@ async fn explain_page(
 ) -> Result<String, String> {
     commerce::require_pro(&app_handle).await?;
     let (config, generation) = ai_session_snapshot(state.inner()).await?;
+    if data.expected_session_generation.parse::<u64>().ok() != Some(generation) {
+        return Err("艦載 AI 工作階段已撤銷或切換，請重新提交".into());
+    }
     let (mime, encoded) = validate_page_data_url(&data.data_url)?;
     if !config.google_content_disclosure {
         return Err("尚未同意第三方 AI 資料分享".into());
@@ -8900,10 +8913,13 @@ mod tests {
 
     #[test]
     fn explain_page_request_defaults_to_traditional_chinese() {
-        let request: ExplainPageRequest =
-            serde_json::from_value(serde_json::json!({"dataUrl": "data:image/png;base64,AA=="}))
-                .unwrap();
+        let payload = serde_json::json!({
+            "dataUrl": "data:image/png;base64,AA==",
+            "expectedSessionGeneration": "1",
+        });
+        let request: ExplainPageRequest = serde_json::from_value(payload).unwrap();
         assert_eq!(request.target_locale, "zh-Hant");
+        assert_eq!(request.expected_session_generation, "1");
     }
 
     #[test]

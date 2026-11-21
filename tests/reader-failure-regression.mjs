@@ -158,6 +158,7 @@ function extractSection(source, startMarker, endMarker) {
     captureLibraryFocus: () => null,
     setAutoPageExplanation() {},
     setAiPagePanelVisible() {},
+    syncBookTranslationUi() {},
     releasePreloadedImages() {},
     hideReaderContextMenu() {},
     dismissReaderDiscoveryHint() {},

@@ -103,6 +103,7 @@ const context = {
   endReaderHistoryRecordingSession() {},
   releasePreloadedImages() {},
   setAutoPageExplanation() {},
+  syncBookTranslationUi() {},
   updateReaderUiControls() {},
   applyFitMode() {},
   showReaderDiscoveryHint() {},

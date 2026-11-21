@@ -24,6 +24,9 @@ const functions = [
   'getAiExplainLocale',
   'aiExplainCacheKey',
   'localizeAiExplainError',
+  'bookTranslationOwnerMatches',
+  'currentBookTranslation',
+  'syncBookTranslationUi',
   'requestPageExplanation',
 ].map(extractFunction).join('\n');
 
@@ -41,7 +44,7 @@ const context = {
     aiExplainPendingPage: null,
     aiExplainPendingRequest: null,
     aiAutoExplain: false,
-    aiSessionStatus: { configured: true },
+    aiSessionStatus: { configured: true, sessionGeneration: '17' },
     aiSessionSwitchPending: false,
     aiSessionRevocationFailed: false,
     aiSessionSwitchGeneration: 0,
@@ -72,6 +75,7 @@ vm.runInNewContext(functions, context);
 const firstRequest = context.requestPageExplanation(0, false);
 await new Promise(resolve => setImmediate(resolve));
 assert.deepEqual(calls.map(call => call.targetLocale), ['zh-Hant']);
+assert.equal(calls[0].expectedSessionGeneration, '17');
 
 context.window.GAIL10n.locale = 'en';
 context.elements.aiPageResult.textContent = 'existing English result';
@@ -80,6 +84,7 @@ pending.shift()('繁中舊結果');
 await firstRequest;
 await Promise.resolve();
 assert.deepEqual(calls.map(call => call.targetLocale), ['zh-Hant', 'en']);
+assert.equal(calls[1].expectedSessionGeneration, '17');
 assert.equal(context.elements.aiPageResult.textContent, '正在翻譯第 1 頁⋯');
 
 pending.shift()('English result');
@@ -92,6 +97,7 @@ context.window.GAIL10n.locale = 'ja';
 const thirdRequest = context.requestPageExplanation(0, false);
 await new Promise(resolve => setImmediate(resolve));
 assert.deepEqual(calls.map(call => call.targetLocale), ['zh-Hant', 'en', 'ja']);
+assert.equal(calls[2].expectedSessionGeneration, '17');
 pending.shift()('日本語結果');
 await thirdRequest;
 assert.equal(context.state.aiExplainCache.get('comic-1:0:ja'), '日本語結果');
@@ -112,7 +118,7 @@ assert.equal(context.state.aiExplainCache.get('comic-1:0:ja'), '日本語結果'
       aiExplainPendingPage: null,
       aiExplainPendingRequest: null,
       aiAutoExplain: false,
-      aiSessionStatus: { configured: true },
+      aiSessionStatus: { configured: true, sessionGeneration: '17' },
       aiSessionSwitchPending: false,
       aiSessionMutationPending: false,
       aiSessionRevocationFailed: false,
@@ -204,7 +210,7 @@ console.log('PASS: incomplete translations stay retryable and dense completed tr
       currentComic: { id: 'panel-pages', sourceId: 'local:test' },
       currentComicPages: ['page-1', 'page-2'], currentPageIndex: 0,
       aiExplainCache: new Map(), aiExplainDisplayedKey: '',
-      aiAutoExplain: false, aiSessionStatus: { configured: true },
+      aiAutoExplain: false, aiSessionStatus: { configured: true, sessionGeneration: '17' },
     },
     elements: {
       aiPagePanel: { hidden: true }, aiPageResult: { textContent: '' },
@@ -219,6 +225,7 @@ console.log('PASS: incomplete translations stay retryable and dense completed tr
   };
   vm.runInNewContext([
     'getComicSourceId', 'getAiExplainLocale', 'aiExplainCacheKey',
+    'bookTranslationOwnerMatches', 'currentBookTranslation',
     'setAiPagePanelVisible', 'scheduleAutoPageExplanation',
   ].map(extractFunction).join('\n'), pageContext);
   pageContext.setAiPagePanelVisible(true);
@@ -267,7 +274,7 @@ console.log('PASS: translations follow page changes without hiding same-page man
         aiExplainCache: new Map(), aiExplainInFlight: false,
         aiExplainActiveRequest: null, aiExplainPendingPage: null,
         aiExplainPendingRequest: null, aiAutoExplain: true,
-        aiSessionStatus: { configured: true }, aiSessionSwitchPending: false,
+        aiSessionStatus: { configured: true, sessionGeneration: '17' }, aiSessionSwitchPending: false,
         aiSessionMutationPending: false, aiSessionRevocationFailed: false,
         aiSessionSwitchGeneration: 0, aiSessionMutationGeneration: 0,
       },
@@ -339,7 +346,7 @@ console.log('PASS: deferred page fetches are invalidated after view, locale, ses
         aiExplainCache: new Map(), aiExplainInFlight: false,
         aiExplainActiveRequest: null, aiExplainPendingPage: null,
         aiExplainPendingRequest: null, aiAutoExplain: false,
-        aiSessionStatus: { configured: true }, aiSessionSwitchPending: false,
+        aiSessionStatus: { configured: true, sessionGeneration: '17' }, aiSessionSwitchPending: false,
         aiSessionMutationPending: false, aiSessionRevocationFailed: false,
         aiSessionSwitchGeneration: 0, aiSessionMutationGeneration: 0,
       },
@@ -435,3 +442,312 @@ console.log('PASS: deferred page fetches are invalidated after view, locale, ses
   assert.equal(latestView.resultContext.elements.aiPageResult.textContent, 'third view result');
 }
 console.log('PASS: reader-operation queueing discards stale responses and resumes only the latest same-identity view');
+
+// Whole-book translation remains opt-in, serial, cache-aware, and scoped to
+// the reader/session that the user confirmed. These tests use only synthetic
+// image URLs and deferred mock IPC responses.
+{
+  const bookFunctions = [
+    'getComicSourceId', 'getAiExplainLocale', 'aiExplainCacheKey',
+    'localizeAiExplainError', 'bookTranslationOwnerMatches',
+    'currentBookTranslation', 'syncBookTranslationUi', 'requestPageExplanation',
+    'confirmBookTranslation', 'requestBookTranslation', 'stopBookTranslation',
+  ].map(extractFunction).join('\n');
+
+  function deferred() {
+    let resolve;
+    let reject;
+    const promise = new Promise((done, fail) => { resolve = done; reject = fail; });
+    return { promise, resolve, reject };
+  }
+
+  function makeBookFixture({
+    comicId = 'book-A', sourceId = 'local:test', pages = ['synthetic-0', 'synthetic-1', 'synthetic-2'],
+    locale = 'zh-Hant', confirmations = [true],
+  } = {}) {
+    const prompts = [];
+    const images = [];
+    const calls = [];
+    const responses = [];
+    let dialogShowCount = 0;
+    const makeElement = () => ({
+      textContent: '', hidden: false, disabled: false, value: '',
+      setAttribute() {}, removeAttribute() {},
+      classList: { toggle() {}, add() {}, remove() {} },
+      focus() {},
+    });
+    const fixtureContext = {
+      clearTimeout() {}, setTimeout() { return 1; },
+      document: { activeElement: null },
+      window: { GAIL10n: { locale, t: source => source } },
+      state: {
+        currentComic: { id: comicId, sourceId },
+        currentComicPages: [...pages], currentPageIndex: 0,
+        readerOperation: 31,
+        aiExplainCache: new Map(), aiExplainDisplayedKey: '',
+        aiExplainInFlight: false, aiExplainActiveRequest: null,
+        aiExplainPendingPage: null, aiExplainPendingRequest: null,
+        aiAutoExplain: false, aiExplainTimer: null,
+        aiSessionStatus: { configured: true, sessionGeneration: '17' },
+        aiSessionSwitchPending: false, aiSessionMutationPending: false,
+        aiSessionRevocationFailed: false,
+        aiSessionSwitchGeneration: 0, aiSessionMutationGeneration: 0,
+      },
+      elements: {
+        btnAiExplain: makeElement(), aiPagePanel: makeElement(), aiPageResult: makeElement(),
+        readerOverlay: { classList: { toggle() {} }, dataset: {}, style: { setProperty() {} } },
+        btnAiBookExplain: makeElement(), btnAiBookStop: makeElement(),
+        aiBookProgress: makeElement(), aiBookStatus: makeElement(),
+        aiBookConfirmMessage: makeElement(),
+        aiBookConfirmDialog: {
+          open: false, returnValue: '', onclose: null,
+          showModal() {
+            this.open = true;
+            dialogShowCount += 1;
+            prompts.push(fixtureContext.elements.aiBookConfirmMessage.textContent);
+            const choice = confirmations.shift();
+            if (choice !== undefined) queueMicrotask(() => this.close(choice === true || choice === 'translate' ? 'translate' : 'cancel'));
+          },
+          close(value = '') {
+            this.open = false;
+            this.returnValue = value;
+            const handler = this.onclose;
+            if (handler) handler();
+          },
+        },
+      },
+      eAPI: {
+        explainPage: payload => {
+          calls.push(payload);
+          const response = deferred();
+          responses.push(response);
+          return response.promise;
+        },
+      },
+      isBuiltInDemoComic: () => false,
+      pageDataUrl: async source => { images.push(source); return `data:image/mock,${source}`; },
+      setAiPagePanelVisible(visible) {
+        fixtureContext.elements.aiPagePanel.hidden = !visible;
+      },
+      syncReaderRotationUi() {}, setAiSessionActionAvailability() {},
+      setAutoPageExplanation() {}, showReaderToast() {},
+      scheduleReaderImageTransformRefresh() {},
+      readerText: (source, vars = {}) => source.replace(/\{(\w+)\}/g, (_, key) => String(vars[key] ?? `{${key}}`)),
+      localizeAiExplainError: error => error?.message || String(error),
+    };
+    fixtureContext.readerText = (source, vars = {}) => fixtureContext.window.GAIL10n.t(source)
+      .replace(/\{(\w+)\}/g, (_, key) => String(vars[key] ?? `{${key}}`));
+    vm.runInNewContext(bookFunctions, fixtureContext);
+    return { context: fixtureContext, prompts, images, calls, responses, get dialogShowCount() { return dialogShowCount; }, dialog: fixtureContext.elements.aiBookConfirmDialog };
+  }
+
+  async function flush() { await new Promise(resolve => setImmediate(resolve)); }
+  async function waitForCall(fixture, count) {
+    for (let attempt = 0; attempt < 30 && fixture.calls.length < count; attempt += 1) await flush();
+    assert.equal(fixture.calls.length, count, `expected ${count} explainPage call(s)`);
+  }
+
+  // Confirmation is the privacy boundary: declining must not read image bytes
+  // or invoke native explainPage.
+  {
+    const declined = makeBookFixture({ confirmations: [false] });
+    await declined.context.requestBookTranslation();
+    await flush();
+    assert.equal(declined.dialogShowCount, 1);
+    assert.equal(declined.prompts[0], 'ui.readerAiBookConfirm');
+    assert.equal(declined.images.length, 0);
+    assert.equal(declined.calls.length, 0);
+  }
+
+  // A native HTML-dialog confirmation is awaited: while it remains open, neither
+  // image bytes nor native IPC are requested. Cancel is resolved as rejection.
+  {
+    const fixture = makeBookFixture({ confirmations: [] });
+    const run = fixture.context.requestBookTranslation();
+    await flush();
+    assert.equal(fixture.dialog.open, true);
+    assert.equal(fixture.images.length, 0);
+    assert.equal(fixture.calls.length, 0);
+    fixture.dialog.close('cancel');
+    await run;
+    assert.equal(fixture.images.length, 0);
+    assert.equal(fixture.calls.length, 0);
+  }
+
+  // Changes made while the confirmation is open invalidate the captured job;
+  // accepting afterward must not read or send any page.
+  for (const invalidate of [
+    context => { context.state.currentComic = { id: 'book-B', sourceId: 'local:other' }; context.state.currentComicPages = ['other-0']; context.state.readerOperation += 1; },
+    context => { context.state.aiSessionStatus.provider = 'google'; context.state.aiSessionStatus.sessionGeneration = '18'; context.state.aiSessionSwitchGeneration += 1; },
+  ]) {
+    const fixture = makeBookFixture({ confirmations: [] });
+    const run = fixture.context.requestBookTranslation();
+    await flush();
+    assert.equal(fixture.dialog.open, true);
+    invalidate(fixture.context);
+    fixture.dialog.close('translate');
+    await run;
+    assert.equal(fixture.images.length, 0);
+    assert.equal(fixture.calls.length, 0);
+  }
+
+  // A repeated activation while the dialog is open cannot create a second
+  // confirmation or a second book job. The original approval runs once.
+  {
+    const fixture = makeBookFixture({ confirmations: [] });
+    const firstRun = fixture.context.requestBookTranslation();
+    await flush();
+    const secondRun = fixture.context.requestBookTranslation();
+    await secondRun;
+    assert.equal(fixture.dialogShowCount, 1);
+    assert.equal(fixture.images.length, 0);
+    assert.equal(fixture.calls.length, 0);
+    fixture.dialog.close('translate');
+    await waitForCall(fixture, 1);
+    fixture.responses[0].resolve('page 1 translation');
+    await waitForCall(fixture, 2);
+    fixture.responses[1].resolve('page 2 translation');
+    await waitForCall(fixture, 3);
+    fixture.responses[2].resolve('page 3 translation');
+    await firstRun;
+    assert.equal(fixture.dialogShowCount, 1);
+    assert.equal(fixture.calls.length, 3);
+  }
+
+  // A current-page translation and a whole-book run share the existing cache
+  // key. The whole-book pass skips page 1, translates the remaining pages one
+  // at a time, and later single-page requests reuse the book result.
+  {
+    const fixture = makeBookFixture({ confirmations: [true] });
+    const singlePage = fixture.context.requestPageExplanation(0, false);
+    await waitForCall(fixture, 1);
+    assert.equal(fixture.calls[0].dataUrl, 'data:image/mock,synthetic-0');
+    assert.equal(fixture.calls[0].expectedSessionGeneration, '17');
+    fixture.responses[0].resolve('page 1 translation');
+    await singlePage;
+    assert.equal(fixture.context.state.aiExplainCache.get('local:test\u0000book-A:0:zh-Hant'), 'page 1 translation');
+
+    const bookRun = fixture.context.requestBookTranslation();
+    await waitForCall(fixture, 2);
+    assert.deepEqual(fixture.images, ['synthetic-0', 'synthetic-1']);
+    assert.equal(fixture.calls[1].dataUrl, 'data:image/mock,synthetic-1');
+    assert.equal(fixture.calls[1].expectedSessionGeneration, '17', 'bulk IPC is bound to the confirmed native session');
+    await flush();
+    assert.equal(fixture.calls.length, 2, 'the next page waits for the active page response');
+    fixture.responses[1].resolve('page 2 translation');
+    await waitForCall(fixture, 3);
+    assert.equal(fixture.calls[2].dataUrl, 'data:image/mock,synthetic-2');
+    assert.equal(fixture.calls[2].expectedSessionGeneration, '17');
+    fixture.responses[2].resolve('page 3 translation');
+    await bookRun;
+    assert.equal(fixture.context.state.aiExplainCache.get('local:test\u0000book-A:1:zh-Hant'), 'page 2 translation');
+    assert.equal(fixture.context.state.aiExplainCache.get('local:test\u0000book-A:2:zh-Hant'), 'page 3 translation');
+
+    const callsBeforeCachedSingle = fixture.calls.length;
+    await fixture.context.requestPageExplanation(2, false);
+    assert.equal(fixture.calls.length, callsBeforeCachedSingle, 'single-page translation reuses the whole-book cache');
+    assert.equal(fixture.images.length, 3, 'cached pages do not reread image data');
+  }
+
+  // Turning pages within the same comic does not invalidate a confirmed
+  // whole-book run; the run is independent of the visible page index.
+  {
+    const fixture = makeBookFixture({ confirmations: [true] });
+    const run = fixture.context.requestBookTranslation();
+    await waitForCall(fixture, 1);
+    fixture.context.state.currentPageIndex = 2;
+    fixture.responses[0].resolve('first page survives page turn');
+    await waitForCall(fixture, 2);
+    assert.equal(fixture.calls[1].dataUrl, 'data:image/mock,synthetic-1');
+    fixture.responses[1].resolve('second page');
+    await waitForCall(fixture, 3);
+    fixture.responses[2].resolve('third page');
+    await run;
+    assert.equal(fixture.context.state.aiExplainCache.get('local:test\u0000book-A:0:zh-Hant'), 'first page survives page turn');
+  }
+
+  // Stop while a page is in flight: that response may settle, but no later
+  // page may be fetched or sent.
+  {
+    const fixture = makeBookFixture({ confirmations: [true] });
+    const run = fixture.context.requestBookTranslation();
+    await waitForCall(fixture, 1);
+    fixture.context.stopBookTranslation();
+    fixture.responses[0].resolve('in-flight response');
+    await run;
+    assert.equal(fixture.calls.length, 1);
+    assert.equal(fixture.images.length, 1);
+    assert.equal(fixture.context.state.aiExplainCache.get('local:test\u0000book-A:0:zh-Hant'), 'in-flight response',
+      'Stop preserves the already-sent page result when the confirmed book/session still matches');
+  }
+
+  // Replacing the comic while IPC is pending invalidates the whole run and
+  // prevents its late response from populating the old book cache.
+  {
+    const fixture = makeBookFixture({ confirmations: [true] });
+    const run = fixture.context.requestBookTranslation();
+    await waitForCall(fixture, 1);
+    fixture.context.state.currentComic = { id: 'book-B', sourceId: 'local:other' };
+    fixture.context.state.currentComicPages = ['other-0', 'other-1'];
+    fixture.context.state.readerOperation += 1;
+    fixture.responses[0].resolve('late old-book result');
+    await run;
+    assert.equal(fixture.calls.length, 1);
+    assert.equal(fixture.context.state.aiExplainCache.has('local:test\u0000book-A:0:zh-Hant'), false);
+  }
+
+  // Locale and native session-generation changes also invalidate late results.
+  for (const invalidate of [
+    context => { context.window.GAIL10n.locale = 'en'; },
+    context => { context.state.aiSessionStatus.provider = 'different-provider'; },
+    context => { context.state.aiSessionStatus.sessionGeneration = '18'; },
+    context => { context.state.aiSessionSwitchGeneration += 1; },
+    context => { context.state.aiSessionMutationGeneration += 1; },
+  ]) {
+    const fixture = makeBookFixture({ confirmations: [true] });
+    const run = fixture.context.requestBookTranslation();
+    await waitForCall(fixture, 1);
+    invalidate(fixture.context);
+    fixture.responses[0].resolve('late invalidated result');
+    await run;
+    assert.equal(fixture.calls.length, 1, 'a changed locale/session stops before another page');
+    assert.equal(fixture.context.state.aiExplainCache.has('local:test\u0000book-A:0:zh-Hant'), false,
+      'a result from the prior locale/session is not cached');
+  }
+
+  // The first real provider error ends the run while keeping earlier successes.
+  // Retrying skips page 1 and retries the first failed page.
+  {
+    const fixture = makeBookFixture({ confirmations: [true, true] });
+    const firstRun = fixture.context.requestBookTranslation();
+    await waitForCall(fixture, 1);
+    fixture.responses[0].resolve('kept page 1');
+    await waitForCall(fixture, 2);
+    fixture.responses[1].reject(new Error('mock provider failure'));
+    await firstRun;
+    assert.equal(fixture.calls.length, 2, 'first failure stops before page 3');
+    assert.equal(fixture.context.state.aiExplainCache.get('local:test\u0000book-A:0:zh-Hant'), 'kept page 1');
+    assert.equal(fixture.context.state.aiExplainCache.has('local:test\u0000book-A:1:zh-Hant'), false);
+    assert.equal(fixture.context.state.aiExplainCache.has('local:test\u0000book-A:2:zh-Hant'), false);
+
+    const retry = fixture.context.requestBookTranslation();
+    await waitForCall(fixture, 3);
+    assert.equal(fixture.calls[2].dataUrl, 'data:image/mock,synthetic-1', 'retry resumes at the first uncached page');
+    assert.equal(fixture.calls[2].expectedSessionGeneration, '17');
+    fixture.responses[2].resolve('retried page 2');
+    await waitForCall(fixture, 4);
+    assert.equal(fixture.calls[3].dataUrl, 'data:image/mock,synthetic-2');
+    assert.equal(fixture.calls[3].expectedSessionGeneration, '17');
+    fixture.responses[3].resolve('page 3 after retry');
+    await retry;
+    assert.equal(fixture.context.state.aiExplainCache.get('local:test\u0000book-A:0:zh-Hant'), 'kept page 1');
+    assert.equal(fixture.context.state.aiExplainCache.get('local:test\u0000book-A:1:zh-Hant'), 'retried page 2');
+    assert.equal(fixture.context.state.aiExplainCache.get('local:test\u0000book-A:2:zh-Hant'), 'page 3 after retry');
+  }
+
+  const bookHtml = fs.readFileSync(new URL('../public/index.html', import.meta.url), 'utf8');
+  for (const id of ['btn-ai-book-explain', 'btn-ai-book-stop', 'ai-book-progress', 'ai-book-status']) {
+    assert.ok(bookHtml.includes(`id="${id}"`), `reader HTML should include #${id}`);
+  }
+}
+console.log('PASS: whole-book AI translation confirmation, serial IPC, shared cache, stop, stale response, and retry behavior');

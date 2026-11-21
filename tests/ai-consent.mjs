@@ -658,12 +658,13 @@ console.log('PASS: metadata suggestion stays reachable after clear and blocks on
   assert.equal(focused, 1, 'AI setup focuses the key field');
 
   const readerContext = {
+    elements: {},
     state: { aiSessionStatus: { configured: false }, aiSessionSwitchPending: false, aiSessionMutationPending: false, aiSessionRevocationFailed: false },
     openAiSettings: () => { opened += 1; },
     showReaderToast() {},
   };
   vm.runInNewContext(`(${extractFunction(app, 'toggleAutoPageExplanation')})`, readerContext)();
-  vm.runInNewContext(`(${extractFunction(app, 'requestPageExplanation')})`, readerContext)(0, false);
+  await vm.runInNewContext(`(${extractFunction(app, 'requestPageExplanation')})`, readerContext)(0, false);
   assert.equal(opened, 3, 'both reader AI buttons lead to setup while disabled');
 
   const inspectorResults = { hidden: true, textContent: '' };
@@ -723,12 +724,13 @@ console.log('PASS: stale AI status refresh cannot overwrite a newer mutation');
 
 {
   let resolveExplanation;
+  let explanationPayload;
   const explanationContext = {
     state: {
       aiSessionSwitchPending: false,
       aiSessionMutationPending: false,
       aiSessionRevocationFailed: false,
-      aiSessionStatus: { configured: true },
+      aiSessionStatus: { configured: true, sessionGeneration: '17' },
       aiSessionSwitchGeneration: 0,
       aiSessionMutationGeneration: 0,
       currentComic: { id: 'comic-1' },
@@ -745,7 +747,7 @@ console.log('PASS: stale AI status refresh cannot overwrite a newer mutation');
       aiPageResult: { textContent: '' },
       btnAiExplain: { disabled: false },
     },
-    eAPI: { explainPage: () => new Promise(resolve => { resolveExplanation = resolve; }) },
+    eAPI: { explainPage: payload => { explanationPayload = payload; return new Promise(resolve => { resolveExplanation = resolve; }); } },
     isBuiltInDemoComic: () => false,
     getComicSourceId: comicSourceId,
     getAiExplainLocale: () => 'zh-Hant',
@@ -754,6 +756,8 @@ console.log('PASS: stale AI status refresh cannot overwrite a newer mutation');
     setAiPagePanelVisible() {},
     syncReaderRotationUi() {},
     setAiSessionActionAvailability() {},
+    currentBookTranslation: () => null,
+    syncBookTranslationUi() {},
     readerText: message => message,
     showReaderToast() {},
     setAutoPageExplanation() {},
@@ -761,6 +765,7 @@ console.log('PASS: stale AI status refresh cannot overwrite a newer mutation');
   const explain = vm.runInNewContext(`(${extractFunction(app, 'requestPageExplanation')})`, explanationContext);
   const explaining = explain(0, false);
   await new Promise(resolve => setImmediate(resolve));
+  assert.equal(explanationPayload.expectedSessionGeneration, '17', 'single-page IPC is bound to the configured native session');
   explanationContext.state.aiSessionMutationGeneration = 1;
   resolveExplanation('stale explanation');
   await explaining;

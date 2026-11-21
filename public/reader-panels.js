@@ -39,7 +39,7 @@
       if (!element || element.isConnected === false || element.disabled || element.getAttribute('aria-disabled') === 'true') return false;
       if (element.tabIndex < 0) return false;
       for (let node = element; node && node !== root.parentElement; node = node.parentElement) {
-        if (node.hidden || node.getAttribute?.('aria-hidden') === 'true') return false;
+        if (node.hidden || node.getAttribute?.('aria-hidden') === 'true' || (node.localName === 'dialog' && !node.open)) return false;
         if (node === root) break;
       }
       return true;
@@ -109,7 +109,7 @@
     }
 
     listen(doc, 'keydown', event => {
-      if (!current || destroyed) return;
+      if (!current || destroyed || event.target?.closest?.('dialog[open]')) return;
       if (event.key === 'Escape') {
         event.preventDefault();
         event.stopImmediatePropagation();

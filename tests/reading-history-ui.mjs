@@ -121,6 +121,7 @@ function historyHarness(api, { removeReturnGuard = false } = {}) {
     syncDiscoveryReaderButton() {},
     resetReaderControlsPointerActivity() {},
     syncLibraryBackgroundActivity() {},
+    syncBookTranslationUi() {},
     readerText: text => text,
     renderReadingHistory() {},
     getComicSourceId: comic => comic?.sourceId || '',

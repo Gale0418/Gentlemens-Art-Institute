@@ -67,6 +67,15 @@ assert.equal(denied.select.value, 'auto');
 assert.ok(denied.elements.some(element => element.id === 'app-language-status' && element.textContent));
 
 const dictionaries = {};
+// Symbolic UI message keys do not encode their interpolation names; keep
+// those names explicit so every locale still has to match the runtime call.
+const symbolicUiPlaceholders = {
+  'ui.readerAiBookConfirm': ['count', 'provider'],
+  'ui.readerAiBookWorking': ['count', 'done'],
+  'ui.readerAiBookComplete': ['count'],
+  'ui.readerAiBookStopped': ['count', 'done'],
+  'ui.readerAiBookError': ['error', 'page'],
+};
 for (const file of ['static-messages.js', 'reader-messages.js', 'feature-messages.js', 'interface-messages.js']) {
   const source = fs.readFileSync(`public/locales/${file}`, 'utf8');
   vm.runInNewContext(source, { window: { GAIL10n: { register(entries) {
@@ -75,7 +84,8 @@ for (const file of ['static-messages.js', 'reader-messages.js', 'feature-message
         assert.equal(typeof translations[locale], 'string', `${file}: missing ${locale}: ${key}`);
         assert.ok(translations[locale].trim(), `${file}: empty ${locale}: ${key}`);
         const slots = value => [...value.matchAll(/\{(\w+)\}/g)].map(match => match[1]).sort();
-        assert.deepEqual(slots(translations[locale]), slots(key), `${file}: ${locale} placeholders: ${key}`);
+        const expectedSlots = symbolicUiPlaceholders[key] || slots(key);
+        assert.deepEqual(slots(translations[locale]), expectedSlots, `${file}: ${locale} placeholders: ${key}`);
       }
       if (dictionaries[key]) assert.deepEqual(JSON.stringify(translations), JSON.stringify(dictionaries[key]), `Conflicting translations: ${key}`);
       dictionaries[key] = translations;

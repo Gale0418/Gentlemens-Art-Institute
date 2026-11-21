@@ -426,7 +426,23 @@
             <path d="M14 19l3.5-8 3.5 8M15.2 16h4.6"></path>
           </svg>
           <span data-i18n="ui.readerAiAuto">隨讀翻譯</span>
-        </button><p class="reader-panel-note" id="reader-ai-hint" hidden></p>
+        </button><button class="control-action-btn ai-page-btn" id="btn-ai-book-explain" type="button">
+          <i class="fa-solid fa-book-open" aria-hidden="true"></i>
+          <span data-i18n="ui.readerAiBook">翻譯整本</span>
+        </button><button class="control-action-btn ai-page-btn" id="btn-ai-book-stop" type="button" hidden>
+          <i class="fa-solid fa-stop" aria-hidden="true"></i>
+          <span data-i18n="ui.readerAiBookStop">停止整本翻譯</span>
+        </button><progress class="reader-ai-book-progress" id="ai-book-progress" max="1" value="0" aria-label="整本翻譯進度" data-i18n-aria-label="ui.readerAiBookProgress" hidden></progress>
+        <p class="reader-panel-note reader-ai-book-status" id="ai-book-status" role="status" aria-live="polite" hidden></p>
+        <p class="reader-panel-note" id="reader-ai-hint" hidden></p>
+        <dialog class="reader-ai-book-confirm" id="ai-book-confirm-dialog" aria-labelledby="ai-book-confirm-title" aria-describedby="ai-book-confirm-message">
+          <h3 id="ai-book-confirm-title" data-i18n="ui.readerAiBook">翻譯整本</h3>
+          <p id="ai-book-confirm-message"></p>
+          <form method="dialog" class="reader-ai-book-confirm-actions">
+            <button class="control-action-btn" value="cancel" autofocus data-i18n="取消">取消</button>
+            <button class="control-action-btn" value="translate" data-i18n="ui.readerAiBookStart">開始翻譯</button>
+          </form>
+        </dialog>
       </section>
     </div>
 

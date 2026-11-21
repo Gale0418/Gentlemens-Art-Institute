@@ -132,6 +132,22 @@
 .reader-ai-tools-popover > .ai-page-btn > i,
 .reader-ai-tools-popover > .ai-page-btn > svg { flex: 0 0 1.25rem; width: 1.25rem; text-align: center; }
 .reader-ai-tools-popover > .ai-page-btn > span { flex: 1 1 auto; min-width: 0; white-space: normal; overflow-wrap: anywhere; }
+.reader-ai-book-progress:not([hidden]) { display: block; width: 100%; height: 12px; margin: 10px 0 4px; accent-color: var(--reader-accent); }
+.reader-ai-book-status:not([hidden]) { display: block; }
+.reader-ai-book-confirm {
+  width: min(400px, calc(100% - 32px));
+  max-height: calc(100% - 32px);
+  padding: 20px;
+  border: 1px solid var(--line-subtle);
+  border-radius: 12px;
+  background: var(--panel-bg);
+  color: var(--text-main);
+}
+.reader-ai-book-confirm::backdrop { background: rgb(0 0 0 / 65%); }
+.reader-ai-book-confirm h3 { margin: 0 0 10px; font-size: 18px; }
+.reader-ai-book-confirm p { margin: 0; line-height: 1.6; }
+.reader-ai-book-confirm-actions { display: flex; flex-wrap: wrap; justify-content: flex-end; gap: 8px; margin-top: 18px; }
+.reader-ai-book-confirm-actions [value="translate"] { border-color: var(--reader-accent); }
 .reader-setting-check { margin-left: auto; }
 [aria-pressed="false"] .reader-setting-check { visibility: hidden; }
 .reader-popover .control-action-btn[aria-pressed="true"],

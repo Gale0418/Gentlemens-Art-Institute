@@ -113,13 +113,13 @@ window.GAIL10n.register({
   }
 });
 window.GAIL10n.register({
-  "自己的漫畫，打開資料夾就能讀。": {
-    "en": "Your comics. Open a folder and read.",
-    "ja": "自分の漫画を、フォルダーからすぐに。"
+  "(｡•̀ᴗ-)✧ 現在就是享受漫畫的時刻啦！": {
+    "en": "(｡•̀ᴗ-)✧ It’s comic time!",
+    "ja": "(｡•̀ᴗ-)✧ さあ、マンガの時間だよ！"
   },
-  "支援本機、外接硬碟與已掛載的 NAS；原始檔案留在原處。": {
-    "en": "Read from your device, an external drive, or a mounted NAS. Your files stay where they are.",
-    "ja": "本体、外付けドライブ、マウント済み NAS に対応。元のファイルはそのままの場所に。"
+  "選個漫畫資料夾，或先試讀幾頁。": {
+    "en": "Pick a comics folder or try a few sample pages.",
+    "ja": "マンガのフォルダーを選ぶか、まずは数ページ試し読みしてみよう。"
   },
   "先試讀原創風景": {
     "en": "Try original landscapes",

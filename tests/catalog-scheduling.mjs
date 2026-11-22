@@ -4274,15 +4274,17 @@ console.log('Finder platform boundary tests passed');
 {
   const html = fs.readFileSync(new URL('../public/index.html', import.meta.url), 'utf8');
   const startPanel = html.slice(html.indexOf('id="library-start-panel"'), html.indexOf('class="scan-recovery-panel"'));
-  assert.match(startPanel, /自己的漫畫，打開資料夾就能讀。/);
-  assert.match(startPanel, /支援本機、外接硬碟與已掛載的 NAS；原始檔案留在原處。/);
+  const welcomeTitle = '(｡•̀ᴗ-)✧ 現在就是享受漫畫的時刻啦！';
+  const welcomeDescription = '選個漫畫資料夾，或先試讀幾頁。';
+  assert.ok(startPanel.includes(`id="library-start-title" data-i18n="${welcomeTitle}">${welcomeTitle}</h2>`));
+  assert.ok(startPanel.includes(`<p data-i18n="${welcomeDescription}">${welcomeDescription}</p>`));
   assert.ok(startPanel.indexOf('id="library-start-demo"') < startPanel.indexOf('id="library-start-choose"'), '原創風景試讀是首次入口的第一個操作');
   assert.match(startPanel, /id="library-start-demo" class="library-start-primary"/);
   const dictionary = {};
   vm.runInNewContext(fs.readFileSync(new URL('../public/locales/reader-messages.js', import.meta.url), 'utf8'), {
     window: { GAIL10n: { register: entries => Object.assign(dictionary, entries) } },
   });
-  for (const message of ['自己的漫畫，打開資料夾就能讀。', '支援本機、外接硬碟與已掛載的 NAS；原始檔案留在原處。', '先試讀原創風景', '加入漫畫資料夾', '隨手翻一本', '再翻一本', '正在開啟…', '從目前資料夾與篩選結果挑一本，再點會盡量換一本。', '目前範圍沒有可讀漫畫，試著換個資料夾或清除篩選。']) {
+  for (const message of [welcomeTitle, welcomeDescription, '先試讀原創風景', '加入漫畫資料夾', '隨手翻一本', '再翻一本', '正在開啟…', '從目前資料夾與篩選結果挑一本，再點會盡量換一本。', '目前範圍沒有可讀漫畫，試著換個資料夾或清除篩選。']) {
     assert.ok(dictionary[message]?.en && dictionary[message]?.ja, `新增入口缺少翻譯：${message}`);
   }
 }

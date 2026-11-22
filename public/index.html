@@ -144,7 +144,7 @@
         </div>
 
         <div class="sidebar-footer">
-          <p data-i18n="點一下查看詳情；再點同一本或按開始閱讀即可開啟。支援 CBZ 與圖片資料夾。">點一下查看詳情；再點同一本或按開始閱讀即可開啟。支援 CBZ 與圖片資料夾。</p>
+          <p data-i18n="點一下查看詳情，再點同一本或按「開始閱讀」開啟。支援圖片資料夾與 ZIP／CBZ、RAR／CBR、7z／CB7。">點一下查看詳情，再點同一本或按「開始閱讀」開啟。支援圖片資料夾與 ZIP／CBZ、RAR／CBR、7z／CB7。</p>
         </div>
       </aside>
 
@@ -473,7 +473,7 @@
       <div class="ai-page-panel-header">
         <button id="ai-page-close" aria-label="關閉艦載 AI 面板" data-i18n-aria-label="關閉艦載 AI 面板"><i class="fa-solid fa-xmark"></i></button>
       </div>
-      <p id="ai-page-result" data-i18n="按下 AI 按鈕後，只會送出目前這一頁；整理候選必須由你逐筆套用。">按下 AI 按鈕後，只會送出目前這一頁；整理候選必須由你逐筆套用。</p>
+      <p id="ai-page-result" data-i18n="翻譯本頁會送出目前這一頁。隨讀翻譯會處理你翻到的頁面，翻譯整本需要再次確認。">翻譯本頁會送出目前這一頁。隨讀翻譯會處理你翻到的頁面，翻譯整本需要再次確認。</p>
     </aside>
 
     <div class="reader-context-menu" id="reader-context-menu" style="display: none;">
@@ -531,9 +531,9 @@
           <p class="input-tip" id="scan-dir-status" aria-live="polite" data-i18n="從系統檔案選擇器加入本機、外接磁碟或已連線的 NAS 資料夾。">從系統檔案選擇器加入本機、外接磁碟或已連線的 NAS 資料夾。</p>
 
           <details class="library-source-advanced">
-            <summary data-i18n="NAS／SMB 直連（免費）">NAS／SMB 直連（免費）</summary>
+            <summary data-i18n="NAS／SMB 直連">NAS／SMB 直連</summary>
             <div class="library-source-advanced-body">
-              <p data-i18n="除了透過系統「檔案」App 掛載 NAS，也可以免費在這裡直接設定 SMB 連線。">除了透過系統「檔案」App 掛載 NAS，也可以免費在這裡直接設定 SMB 連線。</p>
+              <p data-i18n="除了透過系統「檔案」App 掛載 NAS，也可以在這裡直接設定 SMB 連線。">除了透過系統「檔案」App 掛載 NAS，也可以在這裡直接設定 SMB 連線。</p>
               <button id="smb-setup-btn" class="modal-action-btn" type="button"><i class="fa-solid fa-globe" aria-hidden="true"></i><span data-i18n="設定 SMB 連線">設定 SMB 連線</span></button>
             </div>
           </details>
@@ -590,33 +590,6 @@
           <p id="library-card-size-help" class="input-tip" data-i18n="拖曳時立即預覽，重新開啟 App 後仍會保留。">拖曳時立即預覽，重新開啟 App 後仍會保留。</p>
         </section>
 
-        <section class="commerce-settings" id="commerce-settings" aria-labelledby="commerce-settings-title">
-          <div class="commerce-settings-heading">
-            <div>
-              <h3 id="commerce-settings-title"><i class="fa-solid fa-star" aria-hidden="true"></i><span data-i18n="G.A.I Pro">G.A.I Pro</span></h3>
-              <p data-i18n="閱讀、手動整理與直接 SMB／NAS 免費；一次買斷 Pro 解鎖 AI 工具，供應商用量費用另計。">閱讀、手動整理與直接 SMB／NAS 免費；一次買斷 Pro 解鎖 AI 工具，供應商用量費用另計。</p>
-            </div>
-            <span class="commerce-status-badge" id="commerce-status-badge" role="status" aria-live="polite" data-i18n="檢查中…">檢查中…</span>
-          </div>
-          <div class="commerce-settings-grid">
-            <div class="commerce-plan commerce-plan-free">
-              <strong data-i18n="免費基本版">免費基本版</strong>
-              <p data-i18n="閱讀與手動整理全免費：本機及已掛載 NAS、直接 SMB／NAS、批次標籤、重複候選、進階整理、匯出與復原。">閱讀與手動整理全免費：本機及已掛載 NAS、直接 SMB／NAS、批次標籤、重複候選、進階整理、匯出與復原。</p>
-            </div>
-            <div class="commerce-plan commerce-plan-pro">
-              <strong data-i18n="v1 Pro · AI 工具一次買斷">v1 Pro · AI 工具一次買斷</strong>
-              <p data-i18n="AI 解說、隨讀、整本翻譯與 AI metadata 整理；不含供應商用量額度。">AI 解說、隨讀、整本翻譯與 AI metadata 整理；不含供應商用量額度。</p>
-            </div>
-          </div>
-          <p class="commerce-settings-note" id="commerce-status-message" aria-live="polite" data-i18n="正在向 App 查詢權益狀態…">正在向 App 查詢權益狀態…</p>
-          <div class="commerce-settings-actions">
-            <button class="modal-action-btn primary commerce-purchase-btn" id="commerce-purchase-btn" type="button" disabled data-i18n="一次買斷 Pro">一次買斷 Pro</button>
-            <button class="modal-action-btn commerce-restore-btn" id="commerce-restore-btn" type="button" data-i18n="恢復購買">恢復購買</button>
-            <button class="commerce-more-btn" id="commerce-more-btn" type="button" data-i18n="查看完整範圍">查看完整範圍</button>
-          </div>
-          <p class="commerce-price" id="commerce-price" aria-live="polite" data-i18n="價格載入中…">價格載入中…</p>
-        </section>
-
         <section class="catalog-exchange" aria-labelledby="catalog-exchange-title">
           <div>
             <h3 id="catalog-exchange-title"><i class="fa-solid fa-arrow-right-arrow-left"></i><span data-i18n="整理資料交換">整理資料交換</span></h3>
@@ -630,6 +603,21 @@
           <div id="catalog-import-preview" class="catalog-import-preview" aria-live="polite"></div>
         </section>
 
+        <section class="commerce-settings" id="commerce-settings" aria-labelledby="commerce-settings-title">
+          <div class="commerce-settings-heading">
+            <h3 id="commerce-settings-title"><i class="fa-solid fa-star" aria-hidden="true"></i><span data-i18n="G.A.I Pro">G.A.I Pro</span></h3>
+            <span class="commerce-status-badge" id="commerce-status-badge" role="status" aria-live="polite" data-i18n="檢查中…">檢查中…</span>
+          </div>
+          <div class="commerce-offer-copy" data-commerce-offer></div>
+          <p class="commerce-settings-note" id="commerce-status-message" aria-live="polite" data-i18n="正在向 App 查詢權益狀態…">正在向 App 查詢權益狀態…</p>
+          <div class="commerce-settings-actions">
+            <button class="modal-action-btn primary commerce-purchase-btn" id="commerce-purchase-btn" type="button" disabled data-i18n="一次買斷 Pro">一次買斷 Pro</button>
+            <button class="modal-action-btn commerce-restore-btn" id="commerce-restore-btn" type="button" data-i18n="恢復購買">恢復購買</button>
+            <button class="commerce-more-btn" id="commerce-more-btn" type="button" data-i18n="查看完整範圍">查看完整範圍</button>
+          </div>
+          <p class="commerce-price" id="commerce-price" aria-live="polite" hidden></p>
+        </section>
+
         <section class="ai-settings" aria-labelledby="ai-settings-title">
           <div>
             <h3 id="ai-settings-title"><i class="fa-solid fa-wand-sparkles"></i><span data-i18n="艦載 AI">艦載 AI</span></h3>
@@ -641,7 +629,7 @@
             <option value="google" data-i18n="Google · Gemma 4 26B／31B（雲端 BYOK）">Google · Gemma 4 26B／31B（雲端 BYOK）</option>
           </select>
           <label for="ai-api-key" data-i18n="API Key">API Key</label>
-          <input id="ai-api-key" type="password" autocomplete="off" spellcheck="false" placeholder="手動貼上，只保留本次工作階段" data-i18n-placeholder="手動貼上，只保留本次工作階段">
+          <input id="ai-api-key" type="password" autocomplete="off" spellcheck="false" placeholder="貼上 API Key" data-i18n-placeholder="貼上 API Key">
           <label class="ai-remember-key">
             <input id="ai-remember-key" type="checkbox">
             <span data-i18n="使用本機 Keychain 記住這個 Key（只保存一個供應商；儲存另一家會取代既有 Key）">使用本機 Keychain 記住這個 Key（只保存一個供應商；儲存另一家會取代既有 Key）</span>
@@ -683,15 +671,16 @@
         <button class="close-modal-btn" id="commerce-pro-close" type="button" aria-label="關閉 G.A.I Pro 說明" data-i18n-aria-label="關閉 G.A.I Pro 說明"><i class="fa-solid fa-xmark" aria-hidden="true"></i></button>
       </div>
       <div class="commerce-modal-body">
-        <div id="commerce-pro-description" class="commerce-offer-copy">
-          <p id="commerce-offer-intro" data-i18n="🥤 請研究員喝杯快樂水！">🥤 請研究員喝杯快樂水！</p>
-          <p data-i18n="G.A.I 的漫畫閱讀、NAS 連線、TAG 管理及各種整理工具都免費開放！">G.A.I 的漫畫閱讀、NAS 連線、TAG 管理及各種整理工具都免費開放！</p>
-          <p data-i18n="不過，研究所裡還住著一位需要餵 API 的 AI 研究員……">不過，研究所裡還住著一位需要餵 API 的 AI 研究員……</p>
-          <p data-i18n="如果你想使用 AI 輔助功能，可以透過一次買斷解鎖，順便請辛苦的開發者喝杯快樂水！ฅ(≧ω≦)ฅ">如果你想使用 AI 輔助功能，可以透過一次買斷解鎖，順便請辛苦的開發者喝杯快樂水！ฅ(≧ω≦)ฅ</p>
-          <p class="commerce-offer-price"><span data-i18n="AI Pro｜">AI Pro｜</span><span id="commerce-offer-price">價格載入中…</span><span id="commerce-offer-purchase-suffix" data-i18n="，一次買斷">，一次買斷</span></p>
-          <p data-i18n="需要自備 OpenAI 或 Google API Key，API 使用費另計。">需要自備 OpenAI 或 Google API Key，API 使用費另計。</p>
-          <p data-i18n="不需要 AI？那就直接關掉這個頁面，繼續免費看漫畫吧！">不需要 AI？那就直接關掉這個頁面，繼續免費看漫畫吧！</p>
-          <p data-i18n="祝各位研究員都有愉快的閱讀時光～ ヾ(X3ﾉｼヾ)ﾉｼ">祝各位研究員都有愉快的閱讀時光～ ヾ(X3ﾉｼヾ)ﾉｼ</p>
+        <div id="commerce-pro-description" class="commerce-offer-copy" data-commerce-offer></div>
+        <div class="commerce-plan-grid">
+          <div class="commerce-plan commerce-plan-free">
+            <strong data-i18n="免費基本版">免費基本版</strong>
+            <p data-i18n="閱讀與手動整理全免費：本機及已掛載 NAS、直接 SMB／NAS、批次標籤、重複候選、進階整理、匯出與復原。">閱讀與手動整理全免費：本機及已掛載 NAS、直接 SMB／NAS、批次標籤、重複候選、進階整理、匯出與復原。</p>
+          </div>
+          <div class="commerce-plan commerce-plan-pro">
+            <strong data-i18n="v1 Pro · AI 工具一次買斷">v1 Pro · AI 工具一次買斷</strong>
+            <p data-i18n="AI 解說、隨讀、整本翻譯與 AI metadata 整理；不含供應商用量額度。">AI 解說、隨讀、整本翻譯與 AI metadata 整理；不含供應商用量額度。</p>
+          </div>
         </div>
         <p class="commerce-modal-status" id="commerce-modal-status" aria-live="polite"></p>
         <div class="commerce-modal-actions">
@@ -701,6 +690,20 @@
       </div>
     </div>
   </div>
+
+  <template id="commerce-offer-template">
+    <p><strong data-i18n="🥤 請研究員喝杯快樂水！">🥤 請研究員喝杯快樂水！</strong><br>
+      <span data-i18n="G.A.I 的漫畫閱讀、NAS 連線、TAG 管理及各種整理工具都免費開放！">G.A.I 的漫畫閱讀、NAS 連線、TAG 管理及各種整理工具都免費開放！</span>
+    </p>
+    <p><span data-i18n="不過，研究所裡還住著一位需要餵 API 的 AI 研究員……">不過，研究所裡還住著一位需要餵 API 的 AI 研究員……</span><br>
+      <span data-i18n="如果你想使用 AI 輔助功能，可以透過一次買斷解鎖，順便請辛苦的開發者喝杯快樂水！ฅ(≧ω≦)ฅ">如果你想使用 AI 輔助功能，可以透過一次買斷解鎖，順便請辛苦的開發者喝杯快樂水！ฅ(≧ω≦)ฅ</span>
+    </p>
+    <p class="commerce-offer-price"><span data-i18n="AI Pro｜">AI Pro｜</span><span data-commerce-offer-price data-i18n="價格載入中…">價格載入中…</span><span data-commerce-offer-purchase-suffix data-i18n="，一次買斷" hidden>，一次買斷</span></p>
+    <p><span data-i18n="需要自備 OpenAI 或 Google API Key，API 使用費另計。">需要自備 OpenAI 或 Google API Key，API 使用費另計。</span><br>
+      <span data-i18n="不需要 AI？那就直接關掉這個頁面，繼續免費看漫畫吧！">不需要 AI？那就直接關掉這個頁面，繼續免費看漫畫吧！</span>
+    </p>
+    <p data-i18n="祝各位研究員都有愉快的閱讀時光～ ヾ(X3ﾉｼヾ)ﾉｼ">祝各位研究員都有愉快的閱讀時光～ ヾ(X3ﾉｼヾ)ﾉｼ</p>
+  </template>
 
   <!-- iOS 相簿持續來源設定；只有 native bridge 回報支援時才會顯示入口。 -->
   <div class="photo-library-overlay" id="photo-library-modal" role="dialog" aria-modal="true" aria-labelledby="photo-library-title" aria-describedby="photo-library-description" hidden>

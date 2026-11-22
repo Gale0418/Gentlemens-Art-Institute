@@ -1711,7 +1711,6 @@ body {
   color: var(--accent);
 }
 
-.commerce-settings-heading p,
 .commerce-plan p,
 .commerce-settings-note,
 .commerce-price {
@@ -1748,7 +1747,7 @@ body {
   background: rgba(143, 49, 69, .26);
 }
 
-.commerce-settings-grid {
+.commerce-plan-grid {
   display: grid;
   grid-template-columns: repeat(2, minmax(0, 1fr));
   gap: 10px;
@@ -1769,6 +1768,25 @@ body {
 
 .commerce-plan-pro {
   border-color: color-mix(in srgb, var(--accent-color) 35%, var(--card-border));
+}
+
+.commerce-offer-copy {
+  display: grid;
+  gap: 12px;
+  max-inline-size: 70ch;
+  color: var(--text-muted);
+  line-height: 1.55;
+  overflow-wrap: anywhere;
+}
+
+.commerce-offer-copy p {
+  margin: 0;
+}
+
+.commerce-offer-copy strong,
+.commerce-offer-price {
+  color: var(--text-main);
+  font-weight: 600;
 }
 
 .commerce-settings-actions,
@@ -1910,6 +1928,7 @@ body {
   line-height: 1.55;
 }
 
+.commerce-settings-note:empty,
 .commerce-modal-status:empty {
   display: none;
 }
@@ -1923,7 +1942,7 @@ body {
 }
 
 @media (max-width: 620px) {
-  .commerce-settings-grid {
+  .commerce-plan-grid {
     grid-template-columns: 1fr;
   }
 

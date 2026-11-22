@@ -2560,7 +2560,7 @@ function bindEvents() {
           pending,
         });
         if (failed || scanError || refreshError) {
-          alert(`${summary}\n${readerText('已成功寫入的圖片會保留；請按「重試未匯入的圖片」再次處理失敗項。')}`);
+          alert(`${summary}\n${readerText('已匯入的圖片會保留。請按重試按鈕處理失敗的圖片。')}`);
         } else {
           showReaderToast(summary);
         }
@@ -3357,7 +3357,7 @@ function switchOrganizerPanel(panel) {
 async function refreshTagLibrary() {
   if (!state.organizeMode || !elements.tagLibraryList) return;
   if (!eAPI?.listTagInventory) {
-    elements.tagLibraryList.innerHTML = `<p class="metadata-warning">${readerText('標籤庫需要最新版 Tauri 後端。')}</p>`;
+    elements.tagLibraryList.innerHTML = `<p class="metadata-warning">${readerText('請更新 G.A.I. App 以使用標籤庫。')}</p>`;
     return;
   }
   elements.tagLibraryList.setAttribute('aria-busy', 'true');
@@ -5851,7 +5851,7 @@ function renderComicInspector(comic, options = {}) {
         </button>
         <div class="inspector-ai-results" role="status" aria-live="polite" hidden></div>
       `}
-      ${isDirectory || builtInDemo || photoAlbum ? '' : `<section class="metadata-section" id="inspector-metadata"><p class="metadata-loading">${readerText('正在讀取 SQLite metadata…')}</p></section>
+      ${isDirectory || builtInDemo || photoAlbum ? '' : `<section class="metadata-section" id="inspector-metadata"><p class="metadata-loading">${readerText('正在讀取書目資料…')}</p></section>
           </div>
         </details>`}
     </div>
@@ -5999,7 +5999,7 @@ async function runInspectorFileAction(comic, panel, action) {
     let destinationRelativePath = null;
     if (action === 'rename') {
       const currentName = String(comic.relativePath || comic.title).split('/').pop();
-      destinationRelativePath = window.prompt(readerText('輸入新檔名（保留 .cbz／.zip 副檔名）：'), currentName);
+      destinationRelativePath = window.prompt(readerText('輸入新檔名，請保留原本副檔名。'), currentName);
       if (!destinationRelativePath) return;
     } else if (action === 'move') {
       destinationRelativePath = window.prompt(readerText('輸入漫畫書庫內的目的相對路徑（包含檔名；目的資料夾須已存在）：'), comic.relativePath || '');
@@ -11990,11 +11990,11 @@ function toggleAutoPageExplanation() {
   setAutoPageExplanation(enabled);
   if (!enabled) {
     setAiPagePanelVisible(false);
-    showReaderToast(readerText('已停止全書隨讀'));
+    showReaderToast(readerText('已停止隨讀翻譯'));
     return;
   }
   setAiPagePanelVisible(true);
-  elements.aiPageResult.textContent = readerText('全書隨讀已開啟：只分析實際翻到的頁面，同頁不重複計費。');
+  elements.aiPageResult.textContent = readerText('隨讀翻譯已開啟，只會處理你翻到的頁面。');
   syncReaderRotationUi();
   scheduleAutoPageExplanation();
 }
@@ -12167,11 +12167,11 @@ async function requestPageExplanation(pageIndex, automatic = false) {
         elements.aiPageResult.textContent = message;
       } else if (/^PRO_REQUIRED:/i.test(rawMessage)) {
         setAutoPageExplanation(false);
-        elements.aiPageResult.textContent = readerText('Pro 權益目前不可用，已停止全書隨讀；已完成的解說仍保留。');
+        elements.aiPageResult.textContent = readerText('目前無法使用 Pro 權益，隨讀翻譯已停止。已完成的翻譯仍保留。');
         if (!automatic) window.GaiCommerce?.handleError(error);
       } else if (/HTTP 429|RESOURCE_EXHAUSTED|quota|rate limit/i.test(rawMessage)) {
         setAutoPageExplanation(false);
-        elements.aiPageResult.textContent = readerText('免費額度或請求頻率暫時用完，已停止全書隨讀。稍後再試，或到設定切換 Luna。已完成的頁面仍保留在本次快取。');
+        elements.aiPageResult.textContent = readerText('已達供應商的用量或請求頻率上限，隨讀翻譯已停止。請稍後再試。已完成的翻譯仍保留在本次快取。');
       } else {
         elements.aiPageResult.textContent = readerText('艦載 AI 無法說明：{error}', { error: message });
       }

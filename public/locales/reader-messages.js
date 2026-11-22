@@ -341,9 +341,9 @@ window.GAIL10n.register({
     "en": "Local library",
     "ja": "ローカルライブラリ"
   },
-  "標籤庫需要最新版 Tauri 後端。": {
-    "en": "The tag library requires the latest Tauri backend.",
-    "ja": "タグライブラリには最新のTauriバックエンドが必要です。"
+  "請更新 G.A.I. App 以使用標籤庫。": {
+    "en": "Update G.A.I. to use the tag library.",
+    "ja": "タグライブラリを使うには G.A.I. を更新してください。"
   },
   "正在整理標籤庫…": {
     "en": "Organizing the tag library…",
@@ -549,9 +549,9 @@ window.GAIL10n.register({
     "en": "Reads the cover/first page and creates suggestions for review",
     "ja": "表紙または1ページ目を読み、確認用の提案だけを作成"
   },
-  "正在讀取 SQLite metadata…": {
-    "en": "Reading SQLite metadata…",
-    "ja": "SQLiteメタデータを読み込んでいます…"
+  "正在讀取書目資料…": {
+    "en": "Loading book details…",
+    "ja": "書誌情報を読み込み中…"
   },
   "第 {page} / {total} 頁": {
     "en": "Page {page} / {total}",
@@ -657,9 +657,9 @@ window.GAIL10n.register({
     "en": "This will open the adjacent comic.",
     "ja": "隣のコミックを開きます。"
   },
-  "已停止全書隨讀": {
-    "en": "Continuous AI reading stopped",
-    "ja": "全書AIリーディングを停止しました"
+  "已停止隨讀翻譯": {
+    "en": "Auto-Translate stopped",
+    "ja": "自動翻訳を停止しました"
   },
   "請先開啟一頁漫畫": {
     "en": "Open a comic page first",
@@ -813,9 +813,9 @@ window.GAIL10n.register({
     "en": "The last file operation was undone.",
     "ja": "前回のファイル操作を取り消しました。"
   },
-  "輸入新檔名（保留 .cbz／.zip 副檔名）：": {
-    "en": "Enter a new filename (keep the .cbz/.zip extension):",
-    "ja": "新しいファイル名を入力（.cbz/.zip拡張子を維持）："
+  "輸入新檔名，請保留原本副檔名。": {
+    "en": "Enter a new name and keep the original file extension.",
+    "ja": "元の拡張子を残して、新しいファイル名を入力してください。"
   },
   "輸入漫畫書庫內的目的相對路徑（包含檔名；目的資料夾須已存在）：": {
     "en": "Enter the destination relative path in the comic library, including the filename. The destination folder must already exist:",
@@ -1173,9 +1173,9 @@ window.GAIL10n.register({
     "en": "Landscape collections do not send page content to AI.",
     "ja": "風景コレクションのページ内容はAIに送信されません。"
   },
-  "全書隨讀已開啟：只分析實際翻到的頁面，同頁不重複計費。": {
-    "en": "Continuous reading is on: only viewed pages are analyzed, and each page is billed once.",
-    "ja": "全書リーディングを開始しました。実際に開いたページだけを分析し、同じページは一度だけ課金されます。"
+  "隨讀翻譯已開啟，只會處理你翻到的頁面。": {
+    "en": "Auto-Translate is on and processes only the pages you open.",
+    "ja": "自動翻訳を開始しました。開いたページだけを翻訳します。"
   },
   "正在翻譯第 {page} 頁⋯": {
     "en": "Translating page {page}…",
@@ -1193,13 +1193,13 @@ window.GAIL10n.register({
     "en": "Cloud AI is currently unavailable. Try again later.",
     "ja": "クラウドAIは現在利用できません。後でもう一度お試しください。"
   },
-  "Pro 權益目前不可用，已停止全書隨讀；已完成的解說仍保留。": {
-    "en": "Pro access is unavailable, so continuous reading stopped; completed explanations remain.",
-    "ja": "Pro特典を利用できないため全書リーディングを停止しました。完了済みの解説は保持されます。"
+  "目前無法使用 Pro 權益，隨讀翻譯已停止。已完成的翻譯仍保留。": {
+    "en": "Auto-Translate stopped because Pro access is unavailable. Completed translations are kept.",
+    "ja": "Proを利用できないため自動翻訳を停止しました。翻訳済みの内容は保持されます。"
   },
-  "免費額度或請求頻率暫時用完，已停止全書隨讀。稍後再試，或到設定切換 Luna。已完成的頁面仍保留在本次快取。": {
-    "en": "The free quota or request rate is temporarily exhausted, so continuous reading stopped. Try later or switch to Luna in Settings. Completed pages remain cached for this session.",
-    "ja": "無料枠またはリクエスト頻度の上限に達したため全書リーディングを停止しました。後で再試行するか、設定でLunaに切り替えてください。完了済みページはこのセッションのキャッシュに残ります。"
+  "已達供應商的用量或請求頻率上限，隨讀翻譯已停止。請稍後再試。已完成的翻譯仍保留在本次快取。": {
+    "en": "Auto-Translate stopped after reaching the provider’s usage or rate limit. Try again later. Completed translations remain cached for this session.",
+    "ja": "プロバイダーの利用量またはリクエスト頻度の上限に達したため、自動翻訳を停止しました。時間をおいて再試行してください。翻訳済みの内容はこのセッションのキャッシュに残ります。"
   },
   "艦載 AI 無法說明：{error}": {
     "en": "Cloud AI could not explain this: {error}",

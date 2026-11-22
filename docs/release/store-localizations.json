@@ -4,14 +4,14 @@
     "zh-Hant": {
       "appName": "紳士藝術研究所",
       "subtitle": "專門整理本機漫畫的好用閱讀器",
-      "promotionalText": "漫畫散落在資料夾和壓縮檔，找書找得像在考古？G.A.I 幫你整理自有收藏，條漫、單頁、雙頁都能看。v1 Pro 一次買斷 NT$150，沒有訂閱。App 不附漫畫、不提供下載。",
+      "promotionalText": "漫畫散落在資料夾和壓縮檔，找書找得像在考古？G.A.I. 幫你整理自有收藏，條漫、單頁、雙頁都能看。閱讀與手動整理免費，AI Pro 可一次買斷。請自備漫畫檔案。",
       "description": "G.A.I（紳士藝術研究所）是一款專為個人漫畫與圖集打造的私人閱讀器。App 不內附漫畫，也不提供線上漫畫下載，請匯入並使用您自行準備且有權閱讀的檔案，安心打造專屬的私人書庫。\n\n完整支援圖片資料夾、ZIP/CBZ、RAR/CBR 以及 7z/CB7 等常見格式。無論您習慣單頁瀏覽、雙頁跨頁還是垂直條漫模式，都能自由切換；系統會自動記錄閱讀進度，並提供關鍵字搜尋、收藏與自訂標籤功能，讓大量藏書依然井然有序。\n\n在 iPhone 與 iPad 上，您可以直接透過 SMB 連線 NAS，或讀取已掛載於「檔案」App 的來源。內建的手動整理、批次標籤與檢視疑似重複作品等書庫管理功能皆可免費使用，輕鬆維持收藏整潔。\n\n若需要進階輔助，可透過 AI Pro 一次買斷解鎖選用的雲端 AI 功能，包含單頁翻譯、經確認後逐頁翻譯整本作品、內容解說與書庫整理建議。此功能需自備 OpenAI 或 Google API Key，相關 API 呼叫費用由供應商另計。選定的頁面與提示只會在您明確同意後傳送，整理建議也完全由您決定是否採用。同一個 App Store Apple 帳號可在 Mac、iPhone 與 iPad 共用購買權益。",
       "keywords": "CBZ,CBR,ZIP,RAR,7z,CB7,條漫,雙頁,相簿,圖集,看圖,NAS,SMB,自炊,離線,書庫,匯入,標籤"
     },
     "en-US": {
       "appName": "Gentlemen's Art Institute",
       "subtitle": "Comic piles, meet your shelf",
-      "promotionalText": "Read your own images and ZIP/CBZ, RAR/CBR, or 7z/CB7 comics from your device, external drive, or NAS. Scroll or flip pages. No comics included or downloads.",
+      "promotionalText": "Read your own images and ZIP/CBZ, RAR/CBR, or 7z/CB7 comics from your device, external drive, or NAS. Scroll or flip pages. Bring your own comics.",
       "description": "G.A.I (Gentlemen’s Art Institute) is a private reader built for your personal manga and image collections. The app does not include any bundled content or offer downloadable comics; simply bring the files you have prepared and have the right to read to build your own private library.\n\nIt natively supports image folders, ZIP/CBZ, RAR/CBR, and 7z/CB7 archives. Read comfortably in single-page, double-page spread, or vertical webtoon modes while keeping track of your reading progress. Built-in search, favorites, and custom tags make navigating large collections effortless.\n\nOn iPhone and iPad, you can connect directly to your NAS via SMB or read from sources mounted in the Files app. Manual organization, batch tagging, and duplicate detection review are all free to use, helping you keep your library tidy with ease.\n\nFor users who want optional cloud AI assistance, a one-time AI Pro purchase unlocks single-page translation, page-by-page full-book translation after your confirmation, content commentary, and organization suggestions. You bring your own OpenAI or Google API Key, and any API usage fees are billed separately by the provider. Selected pages and prompts are sent only with your explicit consent, and you always decide whether to apply any organization suggestions. Use the same App Store Apple Account to share your purchase across Mac, iPhone, and iPad.",
       "keywords": "comics,manga,reader,vertical,CBZ,ZIP,RAR,CBR,7z,CB7,NAS,SMB,offline,library"
     },
@@ -20,7 +20,7 @@
       "subtitle": "漫画の山を、読む本棚へ",
       "promotionalText": "本体・外付けドライブ・NASにある自分の画像やZIP／CBZ、RAR／CBR、7z／CB7を読むためのアプリ。漫画は同梱されず、ダウンロード機能もありません。縦スクロール・単ページ・見開きに対応。",
       "description": "G.A.I（紳士芸術研究所）は、個人のマンガや画像コレクションのために設計されたプライベートリーダーです。アプリ内に付属コンテンツやダウンロード可能なマンガは含まれておりません。ご自身で用意し、閲覧する権利をお持ちのファイルを取り込んで、自分だけの書庫を構築できます。\n\n画像フォルダをはじめ、ZIP/CBZ、RAR/CBR、7z/CB7形式に対応しています。単ページ、見開き2ページ、縦スクロール（ウェブトゥーン）表示を自由に切り替えられるほか、読書進捗の記録、検索、お気に入り、タグ付け機能で蔵書を快適に管理できます。\n\niPhoneやiPadでは、SMBによるNASへの直接接続、または「ファイル」アプリにマウントされたソースの読み込みに対応しています。手動での整理、一括タグ付け、重複が疑われる作品の確認といった管理機能は無料でご利用いただけます。\n\nオプションのクラウドAI機能は、AI Proの買い切りでアンロック可能です。単ページ翻訳や確認後の1冊まるごと逐次翻訳、解説、整理の提案を利用でき、ご自身のOpenAIまたはGoogle APIキーを設定して動作します（API利用料は各プロバイダより別途請求されます）。選択したページやプロンプトはユーザーの同意後にのみ送信され、整理の提案を採用するかどうかもご自身で判断できます。同じApp StoreのApple Accountを使えば、Mac、iPhone、iPadで購入内容を共有できます。",
-      "keywords": "漫画,マンガ,リーダー,縦スクロール,見開き,CBZ,ZIP,RAR,CBR,7z,CB7,NAS,SMB,オフライン,本棚"
+      "keywords": "漫画,マンガ,縦スクロール,見開き,CBZ,ZIP,RAR,CBR,7z,CB7,NAS,SMB,本棚"
     }
   },
   "whatsNewByVersion": {
@@ -30,9 +30,9 @@
       "ja": "• NAS接続（SMB／Apple「ファイル」連携）および手動整理、一括タグ付け、重複候補検出などの管理機能を完全無料で開放。\n• AIによる一冊まるごと翻訳は、再確認してからページごとに実行できます。\n• 本棚をスクロールしてもツールバーが上部に表示されます。両側のサイドバーや翻訳表示中のページめくりも改善しました。"
     },
     "1.0.7": {
-      "zh-Hant": "Mac、iPhone 與 iPad 的 AI Pro 權益已統一。同一個 App Store Apple 帳號買斷一次，就能在三端使用 AI 翻譯、解說與整理建議。漫畫閱讀、NAS 連線、標籤及手動整理繼續免費。",
-      "en-US": "AI Pro now works across Mac, iPhone, and iPad with a single purchase on the same App Store Apple Account. Reading, NAS access, tagging, and manual library tools remain free.",
-      "ja": "AI Proを1回購入すると、同じApp StoreのApple AccountでMac、iPhone、iPadすべてのAI機能をご利用いただけます。マンガの閲覧、NAS接続、タグ付け、手動整理は引き続き無料です。"
+      "zh-Hant": "Mac、iPhone 與 iPad 可用同一個 App Store 帳號共用 AI Pro，一次買斷即可。Mac 的 AI Pro 需 macOS 12 或更新版本。AI 設定畫面已更新，使用 AI 需自備 OpenAI 或 Google API Key，供應商用量費另計。閱讀、NAS 連線、標籤與手動整理維持免費。",
+      "en-US": "One AI Pro purchase works across Mac (macOS 12 or later), iPhone, and iPad with the same Apple Account in the App Store. The AI settings have a new layout. Bring your own OpenAI or Google API key. The provider bills for usage separately. Reading, NAS access, tagging, and manual organization remain free.",
+      "ja": "同じApple AccountでApp Storeにサインインすると、AI Proの買い切り購入をMac（macOS 12以降）、iPhone、iPadで共用できます。AI設定画面を更新しました。OpenAIまたはGoogleのAPIキーが必要で、利用料は各プロバイダーから別途請求されます。閲覧、NAS接続、タグ付け、手動整理は引き続き無料です。"
     }
   },
   "macDescriptions": {

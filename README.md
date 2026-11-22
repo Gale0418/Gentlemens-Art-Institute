@@ -9,7 +9,7 @@ G.A.I.（Gentlemen’s Art Institute）是 **iPhone、iPad 與 Mac** 的私人�
 1. 點 **「先試讀原創風景」**，用內建的示範圖集試試翻頁。
 2. 點 **「加入漫畫資料夾」**，選取存放漫畫的本機、外接儲存裝置或 NAS 資料夾。
 
-## 免費功能
+## 核心免費功能（閱讀、NAS／SMB 與手動整理）
 
 - 直接閱讀圖片資料夾、`ZIP/CBZ`、`RAR/CBR`、`7z/CB7`。
 - 單頁、雙頁、右至左翻頁或直向條漫，並記住閱讀進度。
@@ -18,9 +18,9 @@ G.A.I.（Gentlemen’s Art Institute）是 **iPhone、iPad 與 Mac** 的私人�
 
 ## AI 翻譯與整理
 
-Mac、iPhone 和 iPad 的免費功能範圍相同。一次買斷的 AI Pro 只解鎖雲端翻譯、作品解說與整理建議。用同一個 App Store Apple 帳號，可在 iPhone／iPad 和支援 AI Pro 的 Mac App Store 版本共用購買權益。Mac 的 AI Pro 需要 macOS 12 或更新版本。翻譯可選單頁，或再次確認後逐頁翻譯整本。
+Mac、iPhone 和 iPad 的核心免費功能範圍相同。一次買斷的 AI Pro 解鎖雲端翻譯、作品解說與整理建議；同一個 App Store Apple 帳號可在 iPhone、iPad 與 Mac 共用購買權益。Mac 的 AI Pro 需要 macOS 12 或更新版本。
 
-請自備 OpenAI 或 Google API Key，API 費用由服務商另計。
+AI 需自備 OpenAI 或 Google API Key，API 費用由服務商另計；整本翻譯會在再次確認後逐頁進行。
 
 請使用自己有權閱讀的檔案。G.A.I. 不提供第三方漫畫下載，閱讀進度保存在各裝置。
 

@@ -8,16 +8,23 @@ const commerceSource = fs.readFileSync('public/commerce.js', 'utf8');
 const nativeSource = fs.readFileSync('src-tauri/src/lib.rs', 'utf8');
 const smbScannerSource = fs.readFileSync('src-tauri/src/smb_scanner.rs', 'utf8');
 
-assert.match(html, /id="commerce-settings"/, 'settings should expose the G.A.I Pro section');
-assert.match(html, /id="commerce-purchase-btn"[^>]*disabled/, 'purchase must start disabled');
+const exchangeStart = html.indexOf('id="catalog-exchange-title"');
+const proStart = html.indexOf('id="commerce-settings"');
+const aiStart = html.indexOf('id="ai-settings-title"');
+assert.ok(exchangeStart >= 0 && exchangeStart < proStart && proStart < aiStart,
+  'free data exchange comes before the purchase section immediately above AI settings');
+const purchaseSection = html.slice(proStart, aiStart);
+assert.match(purchaseSection, /data-commerce-offer[\s\S]*id="commerce-purchase-btn"[^>]*disabled/,
+  'settings shows the full offer beside the initially disabled purchase control');
 assert.match(html, /免費基本版/, 'free range must be visible');
 assert.match(html, /閱讀與手動整理全免費/, 'manual organization must be clearly free');
 assert.match(html, /v1 Pro · AI 工具一次買斷/, 'Pro purchase must be scoped to AI tools');
 assert.match(html, /供應商用量額度/, 'provider usage charges and credits must be separated from Pro');
 assert.match(html, /需要自備 OpenAI 或 Google API Key，API 使用費另計。/, 'AI provider billing must be disclosed');
 assert.match(html, /🥤 請研究員喝杯快樂水！[\s\S]*不需要 AI？那就直接關掉這個頁面，繼續免費看漫畫吧！[\s\S]*ヾ\(X3ﾉｼヾ\)ﾉｼ/,
-  'the purchase dialog should carry the requested full copy');
-assert.match(html, /id="commerce-offer-price"/, 'the offer line must use the StoreKit display price');
+  'the shared purchase offer should carry the requested full copy');
+assert.match(html, /id="commerce-pro-description"[^>]*data-commerce-offer/, 'the purchase dialog also uses the shared copy');
+assert.match(html, /data-commerce-offer-price/, 'the shared offer line must use the StoreKit display price');
 assert.match(html, /tauri-api\.js"><\/script>\s*<script src="commerce\.js"><\/script>\s*<script src="app\.js">/, 'commerce must load between the bridge and app');
 assert.match(css, /\.commerce-modal-overlay\[hidden\]/, 'commerce modal needs a hidden state');
 assert.match(css, /min-height:\s*44px/, 'commerce controls need touch-safe sizing');
@@ -99,6 +106,8 @@ class FakeDocument {
     this.add('commerce-status-badge');
     this.add('commerce-status-message');
     this.add('commerce-price');
+    this.add('settings-offer-price');
+    this.add('settings-purchase-suffix');
     this.add('commerce-offer-price');
     this.add('commerce-offer-purchase-suffix');
     this.add('commerce-modal-status');
@@ -122,6 +131,8 @@ class FakeDocument {
   querySelectorAll(selector) {
     if (selector === '.commerce-purchase-btn') return [this.getElementById('commerce-purchase-btn'), this.getElementById('commerce-modal-purchase-btn')];
     if (selector === '.commerce-restore-btn') return [this.getElementById('commerce-restore-btn'), this.getElementById('commerce-modal-restore-btn')];
+    if (selector === '[data-commerce-offer-price]') return [this.getElementById('settings-offer-price'), this.getElementById('commerce-offer-price')];
+    if (selector === '[data-commerce-offer-purchase-suffix]') return [this.getElementById('settings-purchase-suffix'), this.getElementById('commerce-offer-purchase-suffix')];
     return [];
   }
   addEventListener(type, handler, options = false) {
@@ -214,6 +225,7 @@ const settle = () => new Promise(resolve => setImmediate(resolve));
   await settle();
   assert.equal(document.getElementById('commerce-purchase-btn').disabled, false, 'supported priced product can be purchased');
   assert.equal(document.getElementById('commerce-offer-price').textContent, 'NT$490', 'offer copy uses the native display price');
+  assert.equal(document.getElementById('settings-offer-price').textContent, 'NT$490', 'settings also uses the native display price');
 
   document.getElementById('commerce-purchase-btn').click();
   document.getElementById('commerce-modal-purchase-btn').click();
@@ -226,6 +238,19 @@ const settle = () => new Promise(resolve => setImmediate(resolve));
   await settle();
   assert.equal(window.GaiCommerce.getState().pro, true, 'only native response can unlock Pro');
   assert.equal(document.getElementById('commerce-purchase-btn').disabled, true, 'already purchased Pro cannot be bought again');
+  assert.equal(document.getElementById('settings-offer-price').textContent, 'NT$490', 'owners can still read the offer price');
+  document.getElementById('commerce-more-btn').click();
+  assert.equal(document.getElementById('commerce-pro-modal').hidden, false, 'owners can still view the full feature breakdown');
+  assert.equal(document.getElementById('commerce-modal-purchase-btn').disabled, true);
+}
+
+{
+  const { document } = harness({
+    getCommerce: async () => ({ supported: true, pro: true, displayPrice: null }),
+  });
+  await settle();
+  assert.equal(document.getElementById('settings-offer-price').textContent, '已解鎖');
+  assert.equal(document.getElementById('settings-purchase-suffix').hidden, true);
 }
 
 {

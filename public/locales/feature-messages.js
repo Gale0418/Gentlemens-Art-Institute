@@ -135,7 +135,7 @@ window.GAIL10n.register({
     "en": "Retry pending photos ({count})",
     "ja": "未処理の写真 {count} 枚を再試行"
   },
-  "已成功寫入的圖片會保留；請按「重試未匯入的圖片」再次處理失敗項。": {
+  "已匯入的圖片會保留。請按重試按鈕處理失敗的圖片。": {
     "en": "Successfully imported photos are kept. Use the retry button to process the failed items.",
     "ja": "正常に読み込めた写真は保持されます。再試行ボタンで失敗した項目を処理してください。"
   },

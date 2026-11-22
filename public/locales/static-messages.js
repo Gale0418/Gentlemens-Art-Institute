@@ -91,9 +91,9 @@ window.GAIL10n.register({
     "en": "Completed",
     "ja": "読了"
   },
-  "點一下查看詳情；再點同一本或按開始閱讀即可開啟。支援 CBZ 與圖片資料夾。": {
-    "en": "Tap once for details, then tap the same book again or choose Start Reading. CBZ files and image folders are supported.",
-    "ja": "1回タップすると詳細を表示します。同じ作品をもう一度タップするか「読み始める」で開けます。CBZ と画像フォルダーに対応しています。"
+  "點一下查看詳情，再點同一本或按「開始閱讀」開啟。支援圖片資料夾與 ZIP／CBZ、RAR／CBR、7z／CB7。": {
+    "en": "Select a book for details, then select it again or choose Start Reading. Supports image folders and ZIP/CBZ, RAR/CBR, and 7z/CB7 archives.",
+    "ja": "作品を選ぶと詳細が表示されます。もう一度選ぶか「読み始める」で開けます。画像フォルダーと ZIP／CBZ、RAR／CBR、7z／CB7 に対応しています。"
   },
   "收合漫畫資料夾側欄": {
     "en": "Collapse comic folders sidebar",
@@ -551,9 +551,9 @@ window.GAIL10n.register({
     "en": "Close cloud AI panel",
     "ja": "クラウドAIパネルを閉じる"
   },
-  "按下 AI 按鈕後，只會送出目前這一頁；整理候選必須由你逐筆套用。": {
-    "en": "Only the current page is sent after you press the AI button; apply organization candidates one by one.",
-    "ja": "AIボタンを押すと現在のページだけが送信されます。整理候補は1件ずつ適用してください。"
+  "翻譯本頁會送出目前這一頁。隨讀翻譯會處理你翻到的頁面，翻譯整本需要再次確認。": {
+    "en": "Translate Page sends the current page. Auto-Translate processes pages as you read. Translating the whole book requires a separate confirmation.",
+    "ja": "「このページを翻訳」では現在のページを送信します。自動翻訳は開いたページを処理します。本全体を翻訳するには確認が必要です。"
   },
   "日式雙頁": {
     "en": "Japanese two-page",
@@ -672,8 +672,8 @@ window.GAIL10n.register({
     "ja": "G.A.I Pro"
   },
   "🥤 請研究員喝杯快樂水！": {
-    "en": "🥤 Buy the researcher a happy drink!",
-    "ja": "🥤 研究員にハッピードリンクを！"
+    "en": "🥤 Treat the researcher to a soda!",
+    "ja": "🥤 研究員にコーラを1杯おごろう！"
   },
   "G.A.I 的漫畫閱讀、NAS 連線、TAG 管理及各種整理工具都免費開放！": {
     "en": "G.A.I's manga reading, NAS connections, TAG management, and all organization tools are free!",
@@ -684,8 +684,8 @@ window.GAIL10n.register({
     "ja": "ただし研究所には、APIが必要なAI研究員もいます……"
   },
   "如果你想使用 AI 輔助功能，可以透過一次買斷解鎖，順便請辛苦的開發者喝杯快樂水！ฅ(≧ω≦)ฅ": {
-    "en": "If you'd like AI assistance, unlock it with a one-time purchase—and buy the hard-working developer a happy drink too! ฅ(≧ω≦)ฅ",
-    "ja": "AI機能を使いたい場合は、買い切り購入で解放できます。開発者にもハッピードリンクをどうぞ！ ฅ(≧ω≦)ฅ"
+    "en": "Want AI assistance? Unlock it with a one-time purchase and treat the hard-working developer to a soda! ฅ(≧ω≦)ฅ",
+    "ja": "AI機能は買い切りで利用できます。がんばる開発者にもコーラを1杯どうぞ！ ฅ(≧ω≦)ฅ"
   },
   "AI Pro｜": {
     "en": "AI Pro | ",
@@ -799,13 +799,13 @@ window.GAIL10n.register({
     "en": "Add a local, external, or connected NAS folder through the system file picker.",
     "ja": "システムのファイル選択からローカル、外付けディスク、接続済みNASのフォルダーを追加します。"
   },
-  "NAS／SMB 直連（免費）": {
-    "en": "Direct NAS / SMB connection (free)",
-    "ja": "NAS／SMBに直接接続（無料）"
+  "NAS／SMB 直連": {
+    "en": "Direct NAS / SMB connection",
+    "ja": "NAS／SMBに直接接続"
   },
-  "除了透過系統「檔案」App 掛載 NAS，也可以免費在這裡直接設定 SMB 連線。": {
-    "en": "You can mount NAS shares through the system Files app or configure a direct SMB connection here for free.",
-    "ja": "システムの「ファイル」アプリでNASをマウントするか、ここからSMB接続を無料で直接設定できます。"
+  "除了透過系統「檔案」App 掛載 NAS，也可以在這裡直接設定 SMB 連線。": {
+    "en": "Mount NAS shares through the system Files app or set up a direct SMB connection here.",
+    "ja": "システムの「ファイル」アプリでNASをマウントするか、ここからSMB接続を直接設定できます。"
   },
   "設定 SMB 連線": {
     "en": "Set up SMB connection",
@@ -839,9 +839,9 @@ window.GAIL10n.register({
     "en": "API key",
     "ja": "API Key"
   },
-  "手動貼上，只保留本次工作階段": {
-    "en": "Paste manually; kept only for this session",
-    "ja": "手動で貼り付け（このセッション中のみ保持）"
+  "貼上 API Key": {
+    "en": "Paste your API key",
+    "ja": "APIキーを貼り付け"
   },
   "我了解雲端 BYOK 會將我選擇的頁面與提示傳送至供應商；啟用前請確認上方所選供應商與資料使用說明。": {
     "en": "I understand that cloud BYOK sends the pages I select and my prompts to the provider; before enabling it, I will confirm the provider and its data-use policy above.",
@@ -1005,7 +1005,7 @@ window.GAIL10n.register({
   },
   "漫畫庫暫時無法載入，請按「重試掃描」。": {
     "en": "The library could not load. Select Retry scan.",
-    "ja": "ライブラリを読み込めませんでした。「再スキャン」を選んでください。"
+    "ja": "ライブラリを読み込めませんでした。「スキャンを再試行」を選んでください。"
   },
   "無法讀取資料夾，請返回上一層或稍後重試。": {
     "en": "Could not open this folder. Go back or try again later.",

@@ -75,7 +75,7 @@
     if (snapshot.status === 'failed' || snapshot.status === 'unavailable') return snapshot.message || featureText("交易未完成；現有資料與設定都保留，請稍後再試。");
     if (snapshot.status === 'preview') return snapshot.message || PREVIEW_STATE.message;
     if (!snapshot.supported) return snapshot.message || featureText("目前環境不能進行 App 內購買；瀏覽器預覽不會解鎖 Pro。");
-    return snapshot.message || featureText("一次買斷 v1 Pro 後即可使用 AI 工具；供應商用量費用另計。");
+    return snapshot.message;
   }
 
   function canPurchase() {
@@ -90,8 +90,6 @@
     const message = byId('commerce-status-message');
     const price = byId('commerce-price');
     const modalStatus = byId('commerce-modal-status');
-    const offerPrice = byId('commerce-offer-price');
-    const offerPurchaseSuffix = byId('commerce-offer-purchase-suffix');
     const purchaseButtons = document.querySelectorAll('.commerce-purchase-btn');
     const restoreButtons = document.querySelectorAll('.commerce-restore-btn');
 
@@ -101,20 +99,18 @@
       badge.classList.toggle('is-error', snapshot.status === 'failed' || snapshot.status === 'unavailable');
     }
     if (message) message.textContent = transactionMessage(snapshot);
-    if (offerPrice) {
-      offerPrice.textContent = snapshot.pro
-        ? featureText("已解鎖")
-        : snapshot.displayPrice || featureText("價格載入中…");
+    for (const offerPrice of document.querySelectorAll('[data-commerce-offer-price]')) {
+      offerPrice.textContent = snapshot.displayPrice
+        || (snapshot.pro ? featureText("已解鎖") : featureText("價格載入中…"));
     }
-    if (offerPurchaseSuffix) offerPurchaseSuffix.hidden = snapshot.pro;
+    for (const suffix of document.querySelectorAll('[data-commerce-offer-purchase-suffix]')) {
+      suffix.hidden = !snapshot.displayPrice;
+    }
     if (price) {
-      price.textContent = snapshot.pro
-        ? featureText("已包含 v1 Pro 權益")
-        : snapshot.displayPrice
-          ? featureText("目前價格：{price}", { price: snapshot.displayPrice })
-          : snapshot.supported
-            ? featureText("價格尚未提供，暫時不能購買。")
-            : featureText("價格只會在支援 App 內購買的環境顯示。");
+      price.hidden = snapshot.pro || Boolean(snapshot.displayPrice);
+      price.textContent = snapshot.supported
+        ? featureText("價格尚未提供，暫時不能購買。")
+        : featureText("價格只會在支援 App 內購買的環境顯示。");
     }
 
     purchaseButtons.forEach((button) => {
@@ -176,9 +172,9 @@
     return request;
   }
 
-  function openProDialog(feature = '') {
+  function openProDialog(feature = '', showDetails = false) {
     const modal = byId('commerce-pro-modal');
-    if (!modal || state.snapshot.pro) return;
+    if (!modal || (state.snapshot.pro && !showDetails)) return;
     state.pendingFeature = feature;
     state.returnFocus = document.activeElement;
     modal.hidden = false;
@@ -340,8 +336,15 @@
   }
 
   function bindCommerceUi() {
+    const offerTemplate = byId('commerce-offer-template');
+    if (offerTemplate) {
+      for (const offer of document.querySelectorAll('[data-commerce-offer]')) {
+        offer.append(offerTemplate.content.cloneNode(true));
+        window.GAIL10n?.apply(offer);
+      }
+    }
     byId('commerce-pro-close')?.addEventListener('click', closeProDialog);
-    byId('commerce-more-btn')?.addEventListener('click', () => openProDialog());
+    byId('commerce-more-btn')?.addEventListener('click', () => openProDialog('', true));
     document.querySelectorAll('.commerce-purchase-btn').forEach((button) => {
       button.addEventListener('click', () => { void transact('purchasePro', featureText("購買")); });
     });

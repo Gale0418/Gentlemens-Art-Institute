@@ -78,6 +78,12 @@ if [[ "$1" == --force ]]; then
   for ((i=1; i<=$#; i++)); do
     if [[ "\${!i}" == --entitlements ]]; then
       j=$((i+1)); ent=$(basename "\${!j}")
+      if [[ "$ent" == Entitlements-macOS.plist ]]; then
+        cp "\${!j}" "$GAI_MOCK_ROOT/app-entitlements.plist"
+        if [[ "$GAI_MOCK_OMIT_APP_ID" == 1 ]]; then
+          /usr/libexec/PlistBuddy -c 'Delete :com.apple.application-identifier' "$GAI_MOCK_ROOT/app-entitlements.plist"
+        fi
+      fi
     fi
   done
   echo "SIGN|$(basename "$target")|$ent" >> "$GAI_MOCK_LOG"
@@ -126,13 +132,6 @@ exec /bin/mv "$@"`);
 <key>com.apple.security.app-sandbox</key><true/>
 <key>com.apple.security.inherit</key><true/>
 </dict></plist>`);
-  writePlist(path.join(root, 'app-entitlements.plist'), `
-<?xml version="1.0" encoding="UTF-8"?>
-<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
-<plist version="1.0"><dict>
-<key>com.apple.security.app-sandbox</key><true/>
-</dict></plist>`);
-
   const sourceBefore = fs.readFileSync(path.join(macos, 'catalog-import'));
   const outputApp = path.join(root, 'out', 'signed.app');
   const outputPkg = path.join(root, 'out', 'signed.pkg');
@@ -258,6 +257,14 @@ exec /bin/mv "$@"`);
   ], 'helpers must be signed before the main executable and outer app');
   assert.deepEqual(fs.readFileSync(path.join(macos, 'catalog-import')), sourceBefore,
     'successful signing must still leave the source App unchanged');
+
+  const missingIdApp = path.join(root, 'out', 'missing-app-id.app');
+  const missingIdPkg = path.join(root, 'out', 'missing-app-id.pkg');
+  const missingId = runWithPaths(profile, missingIdApp, missingIdPkg, app,
+    { GAI_MOCK_OMIT_APP_ID: '1' });
+  assert.notEqual(missingId.status, 0, 'a signature without the App ID is not TestFlight eligible');
+  assert.match(missingId.stderr, /signed application identifier does not match the profile/);
+  assert.equal(fs.existsSync(missingIdPkg), false, 'invalid entitlements must not produce a package');
 
   const extraArchApp = path.join(root, 'out', 'extra-arch.app');
   const extraArchPkg = path.join(root, 'out', 'extra-arch.pkg');

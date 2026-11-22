@@ -38,7 +38,7 @@
       "debugApplicationIdSuffix": ".debug"
     },
     "macOS": {
-      "bundleVersion": "87",
+      "bundleVersion": "88",
       "signingIdentity": "-"
     },
     "iOS": {

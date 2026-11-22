@@ -229,6 +229,11 @@ security find-identity -v | grep -F "\"$INSTALLER_IDENTITY\"" >/dev/null || \
   fail "installer signing identity is not available: $INSTALLER_IDENTITY"
 
 cp "$PROFILE_PATH" "$staged_app/Contents/embedded.provisionprofile"
+# TestFlight needs the signed App ID to agree with the embedded Mac profile.
+staged_entitlements="$stage_root/Entitlements-macOS.plist"
+cp "$APP_ENTITLEMENTS" "$staged_entitlements"
+/usr/libexec/PlistBuddy -c "Add :com.apple.application-identifier string $profile_app_id" "$staged_entitlements"
+/usr/libexec/PlistBuddy -c "Add :com.apple.developer.team-identifier string $profile_team" "$staged_entitlements"
 find "$staged_app" -type d -exec chmod 755 {} +
 find "$staged_app" -type f -exec chmod u+rwX,go+rX {} +
 chmod 644 "$staged_app/Contents/embedded.provisionprofile" "$staged_app/Contents/Resources/icon.icns"
@@ -251,12 +256,12 @@ done
 
 printf 'Signing sandboxed main app executable: %s\n' "$main_path"
 codesign --force --verbose --options runtime \
-  --entitlements "$APP_ENTITLEMENTS" \
+  --entitlements "$staged_entitlements" \
   --sign "$APPLICATION_IDENTITY" "$main_path"
 
 printf 'Signing outer app after helpers: %s\n' "$staged_app"
 codesign --force --verbose --options runtime \
-  --entitlements "$APP_ENTITLEMENTS" \
+  --entitlements "$staged_entitlements" \
   --sign "$APPLICATION_IDENTITY" "$staged_app"
 
 entitlements_dump() {
@@ -341,6 +346,11 @@ codesign --verify --deep --strict --verbose=2 "$staged_app"
 require_signature_identity "$staged_app"
 signature_dump "$staged_app" | grep -F "Identifier=$bundle_identifier" >/dev/null || \
   fail "signed bundle identifier mismatch: $staged_app"
+signed_entitlements=$(entitlements_dump "$staged_app") || fail 'cannot read signed App entitlements'
+printf '%s\n' "$signed_entitlements" | grep -F "\"com.apple.application-identifier\" => \"$profile_app_id\"" >/dev/null || \
+  fail 'signed application identifier does not match the profile'
+printf '%s\n' "$signed_entitlements" | grep -F "\"com.apple.developer.team-identifier\" => \"$profile_team\"" >/dev/null || \
+  fail 'signed team identifier does not match the profile'
 productbuild --component "$staged_app" /Applications \
   --sign "$INSTALLER_IDENTITY" "$staged_pkg"
 pkgutil --check-signature "$staged_pkg"

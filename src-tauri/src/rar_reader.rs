@@ -358,8 +358,24 @@ fn open_rar_file(file: File, _path: &Path) -> Result<OpenedRar, ArchiveError> {
     #[cfg(windows)]
     let (archive, file) = {
         let marker_file = file.try_clone()?;
-        let archive = ReadArchive::open_callback(CallbackReader::new(file))
-            .map_err(|error| ArchiveError::Corrupt(error.to_string()))?;
+        let archive = ReadArchive::open_callback_with_skip(CallbackReader::with_skip(
+            file,
+            move |file: &mut File, request| {
+                let Ok(position) = file.stream_position() else {
+                    return -1;
+                };
+                let amount = (request as u64).min(bytes.saturating_sub(position));
+                let Ok(amount) = i64::try_from(amount) else {
+                    return -1;
+                };
+                if file.seek(SeekFrom::Current(amount)).is_ok() {
+                    amount
+                } else {
+                    -1
+                }
+            },
+        ))
+        .map_err(|error| ArchiveError::Corrupt(error.to_string()))?;
         (archive, marker_file)
     };
     #[cfg(not(any(unix, windows)))]

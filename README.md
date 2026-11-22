@@ -18,7 +18,7 @@ G.A.I.（Gentlemen’s Art Institute）是 **iPhone、iPad 與 Mac** 的私人�
 
 ## AI 翻譯與整理
 
-iPhone／iPad 可以透過一次買斷的 AI Pro 解鎖雲端翻譯、作品解說與整理建議，Mac 可以直接使用這些功能。翻譯可選單頁，或再次確認後逐頁翻譯整本。
+Mac、iPhone 和 iPad 的免費功能範圍相同。一次買斷的 AI Pro 只解鎖雲端翻譯、作品解說與整理建議。用同一個 App Store Apple 帳號，可在 iPhone／iPad 和支援 AI Pro 的 Mac App Store 版本共用購買權益。Mac 的 AI Pro 需要 macOS 12 或更新版本。翻譯可選單頁，或再次確認後逐頁翻譯整本。
 
 請自備 OpenAI 或 Google API Key，API 費用由服務商另計。
 

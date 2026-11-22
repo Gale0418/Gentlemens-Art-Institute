@@ -7,9 +7,11 @@
 
 import Foundation
 import StoreKit
+#if os(iOS)
 import Tauri
+#endif
 
-@available(iOS 15.0, *)
+@available(iOS 15.0, macOS 12.0, *)
 actor CommerceManager {
     static let shared = CommerceManager()
 
@@ -166,7 +168,11 @@ actor CommerceManager {
 
         // 呼叫系統原生付款 Sheet
         do {
+            #if os(macOS)
+            let result = try await purchaseOnMac(product)
+            #else
             let result = try await product.purchase()
+            #endif
             switch result {
             case .success(let verification):
                 switch verification {
@@ -315,6 +321,7 @@ actor CommerceManager {
 }
 
 // MARK: - ExamplePlugin Commerce Extension
+#if os(iOS)
 extension ExamplePlugin {
     @objc public func getCommerce(_ invoke: Invoke) {
         guard #available(iOS 15.0, *) else {
@@ -360,3 +367,4 @@ extension ExamplePlugin {
         }
     }
 }
+#endif

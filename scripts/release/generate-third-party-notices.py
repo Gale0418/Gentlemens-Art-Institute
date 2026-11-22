@@ -10,7 +10,7 @@ import re
 import subprocess
 import sys
 from pathlib import Path
-from urllib.parse import urlsplit, urlunsplit
+from urllib.parse import unquote, urlsplit, urlunsplit
 
 
 ROOT = Path(__file__).resolve().parents[2]
@@ -53,13 +53,23 @@ def parse_sqlite_version(header: bytes | None) -> str:
 def immutable_source_url_is_safe(source_url: str, commit: str) -> bool:
     try:
         parsed = urlsplit(source_url)
+        path_segments = parsed.path.split("/")[1:]
+        decoded_segments = [unquote(segment) for segment in path_segments]
         return bool(
-            parsed.hostname
+            parsed.scheme == "https"
+            and parsed.hostname == "github.com"
             and not parsed.username
             and not parsed.password
             and not parsed.query
             and not parsed.fragment
-            and commit in source_url
+            and re.fullmatch(r"(?:[0-9a-f]{40}|[0-9a-f]{64})", commit)
+            and len(path_segments) >= 5
+            and path_segments[2] == "blob"
+            and path_segments[3] == commit
+            and all(
+                segment and segment not in {".", ".."} and "/" not in segment and "\\" not in segment
+                for segment in decoded_segments
+            )
         )
     except ValueError:
         return False
@@ -199,9 +209,19 @@ def load_source_supplements(selected: dict[str, dict], data: dict) -> tuple[list
 
 
 def load_native_components(data: dict, selected: dict[str, dict]) -> tuple[list[dict], dict[str, bytes]]:
+    components = data.get("native_components")
+    if not isinstance(components, list):
+        raise GenerationError("native component supplement is missing or invalid")
+    if not any(isinstance(component, dict) and component.get("name") == "SwiftRs" for component in components):
+        raise GenerationError("required SwiftRs native component is missing")
     normalized = []
     texts = {}
-    for component in data.get("native_components", []):
+    for component in components:
+        if not isinstance(component, dict):
+            raise GenerationError("native component record is invalid")
+        materials = component.get("materials", [])
+        if not isinstance(materials, list):
+            raise GenerationError("native component materials are invalid")
         record = {
             "name": component.get("name"),
             "version": component.get("version"),
@@ -212,8 +232,10 @@ def load_native_components(data: dict, selected: dict[str, dict]) -> tuple[list[
             "evidence": component.get("evidence", ""),
             "materials": [],
         }
-        if component.get("materials"):
-            for material in component["materials"]:
+        if materials:
+            for material in materials:
+                if not isinstance(material, dict):
+                    raise GenerationError("native component material is invalid")
                 raw = material.get("text", "").encode("utf-8")
                 digest = sha256(raw)
                 commit = material.get("commit")
@@ -244,6 +266,10 @@ def load_native_components(data: dict, selected: dict[str, dict]) -> tuple[list[
             if not any(package.get("name") == key[0] and package.get("version") == key[1] for package in selected.values()):
                 raise GenerationError("native component coverage refers to a package outside the selected target graph")
             record["covered_by_cargo_package"] = {"name": key[0], "version": key[1]}
+        if record["name"] == "SwiftRs" and not record["materials"]:
+            raise GenerationError("required SwiftRs license materials are missing")
+        if not record["materials"] and not record.get("covered_by_cargo_package"):
+            raise GenerationError("native component has no license source coverage")
         normalized.append(record)
     return normalized, texts
 
@@ -391,6 +417,13 @@ def is_license_text_source(relative: str) -> bool:
     return is_full_license_filename(Path(relative).name)
 
 
+def contains_nonempty_license_text(files: list[tuple[str, bytes]], explicit_license: str | None) -> bool:
+    return any(
+        (relative == explicit_license or is_license_text_source(relative)) and bool(data.strip())
+        for relative, data in files
+    )
+
+
 def safe_package_file(package: dict, relative: str) -> bytes | None:
     root = package_root(package)
     path = root / relative
@@ -513,9 +546,7 @@ def main() -> int:
         key = (package["name"], package["version"])
         package_supplements = supplements_by_package.get(key, [])
         explicit_license = manifest_relative_license_file(package.get("license_file"))
-        has_package_license_text = any(
-            relative == explicit_license or is_license_text_source(relative) for relative, _ in files
-        )
+        has_package_license_text = contains_nonempty_license_text(files, explicit_license)
         has_original_supplement = any(item["role"] == "original-license-text" for item in package_supplements)
         has_reference_text = any(item["role"] == "canonical-license-reference" for item in package_supplements)
         has_template_attribution_note = any(

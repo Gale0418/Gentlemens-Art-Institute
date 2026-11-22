@@ -206,9 +206,10 @@ console.log('PASS: built-in reader titles localize only at display time; canonic
 for (const file of [
   'src-tauri/tauri-plugin-ios-folder/ios/Sources/CommercePlugin.swift',
   'src-tauri/tauri-plugin-ios-folder/ios/Sources/CommercePolicy.swift',
+  'src-tauri/src/commerce/macos.rs',
 ]) {
   const source = fs.readFileSync(file, 'utf8');
-  for (const [, message] of source.matchAll(/message\s*(?:=|:)\s*"([^"\n]+)"/g)) {
+  for (const [, message] of source.matchAll(/(?:"message"|\bmessage)\s*(?:=|:)\s*"([^"\n]+)"/g)) {
     assert.ok(dictionaries[message], `${file}: untranslated StoreKit message: ${message}`);
   }
 }

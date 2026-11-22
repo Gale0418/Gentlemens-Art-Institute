@@ -17,7 +17,7 @@ public enum CommerceStatus: String {
 }
 
 public struct CommercePolicy {
-    /// 固定一次買斷產品 ID（本地擬定待 ASC 建立）
+    /// iOS、iPadOS 與 macOS 共用的 App Store 一次買斷商品 ID。
     public static let proProductId = "com.windsheep.gai.pro.v1"
 
     /// 純決策判定：是否給予 Pro 授權

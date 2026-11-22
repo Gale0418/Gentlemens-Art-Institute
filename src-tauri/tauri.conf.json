@@ -1,7 +1,7 @@
 {
   "$schema": "../node_modules/@tauri-apps/cli/config.schema.json",
   "productName": "紳士藝術研究所 Gentlemen's Art Institute",
-  "version": "1.0.6",
+  "version": "1.0.7",
   "identifier": "com.windsheep.gai",
   "build": {
     "frontendDist": "../public"
@@ -38,12 +38,12 @@
       "debugApplicationIdSuffix": ".debug"
     },
     "macOS": {
-      "bundleVersion": "86",
+      "bundleVersion": "87",
       "signingIdentity": "-"
     },
     "iOS": {
       "minimumSystemVersion": "15.0",
-      "bundleVersion": "86"
+      "bundleVersion": "87"
     }
   }
 }

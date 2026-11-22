@@ -371,11 +371,36 @@ impl<'a> ReadArchive<'a> {
     pub fn open_callback<R: std::io::Read + 'static>(
         callback: crate::callbacks::CallbackReader<R>,
     ) -> Result<Self> {
+        Self::open_callback_inner(callback, false)
+    }
+
+    /// Open an archive using callbacks that include a custom skip handler.
+    ///
+    /// This uses libarchive's `archive_read_open2`; ordinary `open_callback`
+    /// remains a streaming reader with no skip support.
+    pub fn open_callback_with_skip<R: std::io::Read + 'static>(
+        callback: crate::callbacks::CallbackReader<R>,
+    ) -> Result<Self> {
+        Self::open_callback_inner(callback, true)
+    }
+
+    fn open_callback_inner<R: std::io::Read + 'static>(
+        callback: crate::callbacks::CallbackReader<R>,
+        require_skip: bool,
+    ) -> Result<Self> {
         let mut reader = Self::new()?;
         reader.support_filter_all()?;
         reader.support_format_all()?;
 
-        let (client_data, read_cb, close_cb, drop_fn) = callback.into_raw_parts();
+        let (client_data, read_cb, skip_cb, close_cb, drop_fn) = callback.into_raw_parts();
+        // Ensure callback state is released after the archive closes, including
+        // validation and C open failures on the paths below.
+        reader._callback_data = Some((client_data, drop_fn));
+        if require_skip && skip_cb.is_none() {
+            return Err(Error::InvalidArgument(
+                "CallbackReader has no skip handler".to_string(),
+            ));
+        }
 
         unsafe {
             // SAFETY: The function pointers returned from into_raw_parts are guaranteed
@@ -390,6 +415,11 @@ impl<'a> ReadArchive<'a> {
                 *mut libarchive2_sys::archive,
                 *mut std::ffi::c_void,
             ) -> std::os::raw::c_int;
+            type SkipFn = unsafe extern "C" fn(
+                *mut libarchive2_sys::archive,
+                *mut std::ffi::c_void,
+                i64,
+            ) -> i64;
 
             // Cast from void pointer to function pointer
             let read_fn = Some(std::mem::transmute::<*const std::ffi::c_void, ReadFn>(
@@ -398,20 +428,22 @@ impl<'a> ReadArchive<'a> {
             let close_fn = Some(std::mem::transmute::<*const std::ffi::c_void, CloseFn>(
                 close_cb,
             ));
+            let skip_fn = skip_cb
+                .map(|callback| std::mem::transmute::<*const std::ffi::c_void, SkipFn>(callback));
 
             Error::from_return_code(
-                libarchive2_sys::archive_read_open(
+                libarchive2_sys::archive_read_open2(
                     reader.archive,
                     client_data,
                     None,
                     read_fn,
+                    skip_fn,
                     close_fn,
                 ),
                 reader.archive,
             )?;
         }
 
-        reader._callback_data = Some((client_data, drop_fn));
         Ok(reader)
     }
 

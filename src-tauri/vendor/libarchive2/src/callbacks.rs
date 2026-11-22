@@ -15,6 +15,7 @@ pub(crate) type DropFn = unsafe fn(*mut c_void);
 struct ReadCallbackState<R: Read> {
     reader: R,
     buffer: Vec<u8>,
+    skip: Option<Box<dyn FnMut(&mut R, i64) -> i64 + Send>>,
 }
 
 /// Internal state for write callbacks
@@ -63,6 +64,7 @@ unsafe extern "C" fn read_callback_impl<R: Read>(
         let ReadCallbackState {
             reader,
             buffer: buf,
+            ..
         } = &mut *guard;
 
         // Read into buffer
@@ -74,6 +76,29 @@ unsafe extern "C" fn read_callback_impl<R: Read>(
                 n as isize
             }
             Err(_) => -1,
+        }
+    }
+}
+
+/// C callback for skipping bytes in a seekable source.
+unsafe extern "C" fn skip_callback_impl<R: Read>(
+    _archive: *mut libarchive2_sys::archive,
+    client_data: *mut c_void,
+    request: i64,
+) -> i64 {
+    if client_data.is_null() || request < 0 {
+        return -1;
+    }
+    unsafe {
+        let state = &*(client_data as *mut Mutex<ReadCallbackState<R>>);
+        let mut guard = match state.lock() {
+            Ok(guard) => guard,
+            Err(_) => return -1,
+        };
+        let ReadCallbackState { reader, skip, .. } = &mut *guard;
+        match skip {
+            Some(skip) => skip(reader, request),
+            None => -1,
         }
     }
 }
@@ -135,11 +160,42 @@ impl<R: Read> CallbackReader<R> {
             state: Box::new(Mutex::new(ReadCallbackState {
                 reader,
                 buffer: vec![0u8; BUFFER_SIZE],
+                skip: None,
             })),
         }
     }
 
-    pub(crate) fn into_raw_parts(self) -> (*mut c_void, *const c_void, *const c_void, DropFn) {
+    /// Create a callback reader with a custom skip handler.
+    ///
+    /// The handler decides how many of `request` bytes can be skipped and
+    /// should return `-1` on failure. This is intended for seekable sources
+    /// that need to cap skips (for example, at a verified file length).
+    pub fn with_skip(reader: R, skip: impl FnMut(&mut R, i64) -> i64 + Send + 'static) -> Self {
+        const BUFFER_SIZE: usize = 65536;
+        CallbackReader {
+            state: Box::new(Mutex::new(ReadCallbackState {
+                reader,
+                buffer: vec![0u8; BUFFER_SIZE],
+                skip: Some(Box::new(skip)),
+            })),
+        }
+    }
+
+    pub(crate) fn into_raw_parts(
+        self,
+    ) -> (
+        *mut c_void,
+        *const c_void,
+        Option<*const c_void>,
+        *const c_void,
+        DropFn,
+    ) {
+        let skip_callback = self.state.lock().ok().and_then(|state| {
+            state
+                .skip
+                .as_ref()
+                .map(|_| skip_callback_impl::<R> as *const c_void)
+        });
         let ptr = Box::into_raw(self.state) as *mut c_void;
 
         // Create a properly typed drop function for this specific type
@@ -154,6 +210,7 @@ impl<R: Read> CallbackReader<R> {
         (
             ptr,
             read_callback_impl::<R> as *const c_void,
+            skip_callback,
             close_callback_impl as *const c_void,
             drop_fn::<R>,
         )
@@ -229,5 +286,36 @@ impl ProgressTracker {
     /// Reset progress
     pub fn reset(&mut self) {
         self.bytes_processed = 0;
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::io::{Cursor, Seek, SeekFrom};
+
+    #[test]
+    fn skip_callback_uses_handler_and_returns_bounded_distance() {
+        let mut source = Cursor::new(vec![0; 10]);
+        source.set_position(4);
+        let callback = CallbackReader::with_skip(source, |source, request| {
+            let Ok(position) = source.stream_position() else {
+                return -1;
+            };
+            let amount = (request as u64).min(10_u64.saturating_sub(position));
+            if source.seek(SeekFrom::Current(amount as i64)).is_ok() {
+                amount as i64
+            } else {
+                -1
+            }
+        });
+        let (client_data, _, skip_callback, _, drop_fn) = callback.into_raw_parts();
+        let skip_callback = skip_callback.expect("custom skip callback");
+        let skip: unsafe extern "C" fn(*mut libarchive2_sys::archive, *mut c_void, i64) -> i64 =
+            unsafe { std::mem::transmute(skip_callback) };
+
+        assert_eq!(unsafe { skip(std::ptr::null_mut(), client_data, 20) }, 6);
+
+        unsafe { drop_fn(client_data) };
     }
 }

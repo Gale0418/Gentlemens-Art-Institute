@@ -328,3 +328,30 @@ console.log('PASS: Pro dialog focus trap skips disabled controls and negative ta
   assert.equal(stopEvent.stopped, false, 'the click reaches the whole-book translation stop handler');
 }
 console.log('PASS: free manual actions bypass UI gating; AI settings, reading, metadata and native entitlement scope are covered');
+
+{
+  const available = { supported: true, pro: false, status: 'ready', displayPrice: 'NT$150' };
+  let resolveOlderRefresh;
+  let resolvePurchase;
+  let reads = 0;
+  const { window, document } = harness({
+    getCommerce: () => ++reads === 2
+      ? new Promise(resolve => { resolveOlderRefresh = resolve; })
+      : Promise.resolve(available),
+    purchasePro: () => new Promise(resolve => { resolvePurchase = resolve; }),
+  });
+  await settle();
+  document.getElementById('commerce-purchase-btn').click();
+  const olderRefresh = window.GaiCommerce.refresh();
+  resolvePurchase({ ...available, pro: true, status: 'purchased' });
+  await settle();
+  assert.equal(window.GaiCommerce.getState().pro, true);
+  resolveOlderRefresh(available);
+  await olderRefresh;
+  assert.equal(window.GaiCommerce.getState().pro, true,
+    'a status read started during checkout cannot undo a verified purchase');
+  await window.GaiCommerce.refresh();
+  assert.equal(window.GaiCommerce.getState().pro, false,
+    'a new status read after checkout can still detect a revoked entitlement');
+}
+console.log('PASS: a checkout result supersedes older reads while later reads still update entitlements');

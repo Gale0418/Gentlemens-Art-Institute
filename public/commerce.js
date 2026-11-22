@@ -147,14 +147,16 @@
 
   async function refreshCommerce() {
     if (state.refreshPromise) return state.refreshPromise;
-    state.refreshPromise = readCommerceState()
+    const request = readCommerceState()
       .then((snapshot) => {
+        if (state.refreshPromise !== request) return state.snapshot;
         state.snapshot = snapshot;
         state.ready = true;
         renderCommerce();
         return snapshot;
       })
-      .catch((error) => {
+      .catch(() => {
+        if (state.refreshPromise !== request) return state.snapshot;
         state.snapshot = {
           supported: false,
           pro: false,
@@ -168,9 +170,10 @@
         return state.snapshot;
       })
       .finally(() => {
-        state.refreshPromise = null;
+        if (state.refreshPromise === request) state.refreshPromise = null;
       });
-    return state.refreshPromise;
+    state.refreshPromise = request;
+    return request;
   }
 
   function openProDialog(feature = '') {
@@ -234,6 +237,8 @@
     renderCommerce();
     try {
       const result = normalizeCommerce(await api[method]());
+      // A foreground refresh may have read entitlements before checkout finished.
+      state.refreshPromise = null;
       const transactionStatus = normalizeTransactionStatus(result.status);
       const verified = result.pro === true;
       state.snapshot = verified
@@ -264,6 +269,7 @@
       }
       return verified;
     } catch (error) {
+      state.refreshPromise = null;
       if (!handleError(error)) {
         state.snapshot = {
           ...state.snapshot,

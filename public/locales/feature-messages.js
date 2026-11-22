@@ -147,6 +147,10 @@ window.GAIL10n.register({
     "en": "Purchases require iOS 15 or later.",
     "ja": "購入には iOS 15 以降が必要です。"
   },
+  "購買功能需要 macOS 12 或更新版本": {
+    "en": "Purchases require macOS 12 or later.",
+    "ja": "購入には macOS 12 以降が必要です。"
+  },
   "桌面版功能可用；此版本不提供 App Store 購買": {
     "en": "Desktop features are available; this version does not offer App Store purchases.",
     "ja": "デスクトップ版の機能は利用できます。このバージョンでは App Store での購入に対応していません。"

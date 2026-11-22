@@ -22,7 +22,7 @@
     "cargo_lock": "src-tauri/Cargo.lock",
     "license_source_supplements": "docs/release/license-source-supplements.json",
     "license_source_supplements_sha256": "f23dcbc8ac66ab768523cb19dbd9e61a72090966cd2ea499c893e0a00ca99569",
-    "sha256": "70af57d5eb9058deeb417ab80bef6132c056a047c270df8fd17e13e45179a590"
+    "sha256": "dd2bf580954d5d636d39d27b6a1a819242ad9e4645d83e43b9d847e75c62eb31"
   },
   "native_components": [
     {

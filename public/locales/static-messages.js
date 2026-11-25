@@ -735,10 +735,6 @@ window.GAIL10n.register({
     "en": "AI explanations, translate-as-you-read, whole-book translation, and AI metadata organization.",
     "ja": "AI解説、読書中の翻訳、全巻翻訳、AIメタデータ整理。"
   },
-  "基本閱讀免費；Pro 以一次買斷解鎖進階整理、直接 NAS 與 AI 工具。": {
-    "en": "Basic reading is free; a one-time Pro purchase unlocks advanced organization, direct NAS access, and AI tools.",
-    "ja": "基本読書は無料です。Proを一度購入すると、高度な整理、NASへの直接接続、AIツールが利用できます。"
-  },
   "檢查中…": {
     "en": "Checking…",
     "ja": "確認中…"
@@ -747,17 +743,9 @@ window.GAIL10n.register({
     "en": "Free basic edition",
     "ja": "無料ベーシック版"
   },
-  "本機圖片、ZIP／CBZ、正常閱讀、進度、收藏、搜尋、基本標籤、匯出與復原，以及透過系統檔案選擇器使用已掛載 NAS。": {
-    "en": "Local images, ZIP/CBZ, standard reading, progress, favorites, search, basic tags, export and restore, plus mounted NAS folders through the system file picker.",
-    "ja": "ローカル画像、ZIP/CBZ、通常読書、進捗、お気に入り、検索、基本タグ、エクスポートと復元、システムのファイル選択からマウント済みNASを利用できます。"
-  },
   "v1 Pro · 一次買斷": {
     "en": "v1 Pro · One-time purchase",
     "ja": "v1 Pro · 買い切り"
-  },
-  "直接 SMB／NAS 連線、批次標籤與進階整理、重複候選、AI 解說與整理工具。": {
-    "en": "Direct SMB/NAS connections, batch tags and advanced organization, duplicate candidates, and AI explanation and organization tools.",
-    "ja": "SMB/NASへの直接接続、一括タグと高度な整理、重複候補、AIによる説明・整理ツール。"
   },
   "正在向 App 查詢權益狀態…": {
     "en": "Checking entitlements with the app…",
@@ -870,18 +858,6 @@ window.GAIL10n.register({
   "關閉 G.A.I Pro 說明": {
     "en": "Close G.A.I Pro information",
     "ja": "G.A.I Proの説明を閉じる"
-  },
-  "基本閱讀免費；Pro 以一次買斷解鎖需要付費的進階工具。": {
-    "en": "Basic reading is free. A one-time Pro purchase unlocks advanced tools.",
-    "ja": "基本の読書機能は無料です。Proを買い切りで購入すると、高度なツールを利用できます。"
-  },
-  "閱讀、進度、收藏、搜尋、基本標籤、匯出／復原與已掛載 NAS。": {
-    "en": "Reading, progress, favorites, search, basic tags, export/restore, and mounted NAS.",
-    "ja": "読書、進捗、お気に入り、検索、基本タグ、エクスポート／復元、マウント済みNAS。"
-  },
-  "直接 SMB／NAS、批次整理、重複候選與 AI 解說／整理。": {
-    "en": "Direct SMB/NAS, batch organization, duplicate candidates, and AI explanation/organization.",
-    "ja": "SMB/NASへの直接接続、一括整理、重複候補、AIによる説明・整理。"
   },
   "AI 費用另計": {
     "en": "AI billed separately",

@@ -1,4 +1,8 @@
 {
+  "historicalNotice": {
+    "status": "superseded",
+    "message": "歷史商店文案快照；status 與 observedReleaseState 僅記錄當時狀態，不代表現況。此稿把 App 內直連 SMB、批次標籤、進階整理與重複候選檢查列為 Pro，相關說法已過時，這些功能現均免費。現行政策唯一依據為 ../release/monetization.md；目前產品資訊見 ../../README.md，現行商店欄位見 ../release/store-localizations.json。此註記位於根物件，不修改 locales 或原有欄位。"
+  },
   "status": "applied-to-submitted-versions",
   "observedReleaseState": {
     "date": "2026-10-03",

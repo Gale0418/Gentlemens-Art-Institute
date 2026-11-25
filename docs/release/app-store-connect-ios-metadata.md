@@ -1,12 +1,12 @@
 # G.A.I App Store Connect／TestFlight 發行資料與審查包
 
-狀態：`BLOCKED（local evidence）`。本文與 [`gai-app-store-connect-metadata.json`](gai-app-store-connect-metadata.json) 對應的是該檔記錄的歷史 1.0.2 發行／審查套件（最後回讀 2026-11-02），不是 1.0.5（build 80）的實際 ASC metadata，也不代表該版本已送審或上架。歷史套件內的公開 `storeListing` 與 `reviewInformation.appReviewNotesEnglish` 欄位由該 JSON 為準；1.0.5 的 What's New 與上傳狀態另依其發行準備證據判讀。修改歷史套件欄位時先更新 JSON，再同步本文件；不要把 App Store Connect 私密資料、API key、SMB 密碼或真實裝置識別碼提交到 repo。
+2026-11-25 已回讀 iPhone／iPad 與 Mac 的 1.0.7 (90) 均為 `READY_FOR_DISTRIBUTION`。現行上架版本與內購文案狀態見 [App Store Connect 回讀紀錄](gai-app-store-connect-metadata.json) 的 `currentDistributionReadback`，正式商店文案見 [商店在地化資料](store-localizations.json)。
 
-本文件保留發行資料與證據清單；2026-11-02 的遠端狀態回讀已寫入 canonical JSON，未在本次修補中執行 ASC 寫入或提交。`scripts/release/asc-dry-run.sh` 只做本地 JSON／欄位／秘密掃描與命令模板輸出，僅以 `activeEvidence` 阻擋，不會把歷史文字或命令佔位文字當成目前待辦。
+本文件保留 1.0.2／1.0.3 時期的發行資料、草稿和證據清單。歷史套件的本機檢查仍為 `BLOCKED（local evidence）`，僅適用當時的準備紀錄。`scripts/release/asc-dry-run.sh` 做本機 JSON、欄位和秘密掃描，並依該套件的 `activeEvidence` 判定。提交到 repo 的紀錄應排除 App Store Connect 私密資料、API Key、SMB 密碼及實機識別碼。
 
 只有八項 active evidence 全部具備 `VERIFIED`、`verifiedAt`、`evidenceRef`，八個固定 TestFlight gate 項目完整且唯一、七類 review category 完成，且 App Privacy questionnaire 沒有佔位文字時，才可進入 READY；parser 只驗證紀錄形狀，不能自動證明外部事實，仍需人工核對。
 
-## 目前遠端狀態（唯讀回讀）
+## 2026-11-02 歷史遠端回讀
 
 - iOS 1.0.2（build 63）：processing `VALID`、`READY_FOR_DISTRIBUTION`，review `COMPLETE`，無遠端 blocking issue。
 - macOS 1.0.2（build 59）：processing `VALID`、`READY_FOR_DISTRIBUTION`，review `COMPLETE`，無遠端 blocking issue。
@@ -16,15 +16,15 @@
 
 1.0.0／build 42 與早期 macOS 1.0 首發失敗資料已移至 canonical JSON 的 `historical` 區段，僅供追溯，不代表目前版本狀態。
 
-1.0.3 目前僅是準備中的下一版本，canonical JSON 明確標為 `BLOCKED`；本輪沒有 1.0.3 的 ASC version/build 回讀，不能把它當成已上傳、已審查或已上架。
+1.0.3 在當時的紀錄中仍屬本機準備，JSON 標為 `BLOCKED`，未取得該版本的 ASC version/build 回讀。
 
-## 首發商業模型（已整合，待完整交易驗收）
+## 現行商業政策
 
-首發規格為免費基本閱讀＋v1 Pro 單次買斷，不做訂閱，也不含 API 額度。免費範圍包括本機圖片／ZIP／CBZ、正常閱讀模式、閱讀進度、收藏、搜尋、基本標籤、資料匯出與基本復原；透過系統檔案選擇器存取已掛載 NAS 也屬免費，不能因為路徑位於 NAS 而鎖定。v1 Pro 預定解鎖直接 SMB／NAS 連線、批次標籤與進階整理、重複候選，以及 AI 解說／整理工具。
+現行收費政策見[monetization.md](monetization.md)：閱讀、本機與已掛載／直接 SMB NAS、標籤（含批次）、手動整理、重複候選檢查、資料匯出，以及產品實際提供的撤銷與復原功能免費；只有選用的雲端 AI 翻譯、解說與整理建議需要一次買斷 AI Pro。AI Pro 可由同一個 App Store Apple 帳號在 Mac、iPhone 與 iPad 共用；Mac AI Pro 需要 macOS 12 或更新版本。使用者自備 API Key，供應商費用另計。
 
-undo／復原、資料安全保護、已產生的 AI 結果與匯出不以付費封鎖。AI 僅走使用者自備金鑰（BYOK）的雲端路徑，不提供裝置端模型或內含 API 額度。v1 Pro 是首發版本的買斷範圍，不承諾所有未來新增功能永久免費；已購得的 v1 Pro 權益必須在後續支援版本中保留，不因 v2 發布或日後新增訂閱方案而收回。
+產品實際提供的撤銷／復原、資料匯出與權益變更前仍可用的 AI 結果不以付費封鎖；不得暗示所有手動操作都能撤銷，也不保證所有 AI 結果均持久保存或可匯出。AI 僅走使用者自備金鑰（BYOK）的雲端路徑，不提供內含 API 額度。AI Pro 是首發版本的買斷範圍，不承諾所有未來新增功能永久免費；已購得的 AI Pro 權益必須在後續支援版本中保留。正式支援資訊見[根目錄 SUPPORT.md](../../SUPPORT.md)。
 
-StoreKit 2 原生程式、後端權益檢查與 Pro 介面已整合；本機／沙盒交易與實機證據尚未完成，不代表已具備送審資格。依 2026-11-02 遠端回讀，Product ID 為 `com.windsheep.gai.pro.v1`，台灣基準價格為 TWD 150，商品狀態為 `APPROVED`；實際 StoreKit 交易與裝置商店地區／幣別驗證仍為 `TODO`。正式包送審前，必須能驗證購買、恢復、離線權益判定與 revocation／退款後收回；TestFlight 應驗證完整功能與沙盒購買流程，且沙盒權益不得流入正式環境。
+現行商品 ID 為 `com.windsheep.gai.pro.v1`。售價由當地 App Store 顯示。購買、恢復、離線權益和退款／撤銷證據依各次實測紀錄確認，TestFlight 沙盒權益只用於測試。
 
 ## 已知發行身分
 
@@ -71,7 +71,7 @@ APP PURPOSE AND TARGET AUDIENCE
 Gentlemen's Art Institute (紳士藝術研究所) is a general-purpose local-first comic library and reader for people managing their own files on iPhone or iPad. It indexes and reads user-selected image folders and ZIP/CBZ, RAR/CBR, and 7z/CB7 archives, keeps reading progress and catalog data locally, and can read from a user-selected mounted folder or optional SMB/NAS connection. It is not a medical, diagnostic, emergency, professional-advice, social, or content-hosting service.
 
 ACCESS AND SETUP
-The core reader is available for free without a purchase. The intended launch also includes a one-time v1 Pro purchase (no subscription and no bundled API quota) for direct SMB/NAS connections, batch tagging and advanced organization, duplicate candidates, and AI explanation/organization tools. On a clean install, open the clearly labeled built-in all-ages landscape demo with eight groups and 13 images; use the final submitted package to verify the exact demo contents. No purchase, subscription, demo credential, NAS, or external sample download is required to review the free core reader. Accessing a NAS folder that the user has already mounted through the system file picker remains part of the free core path and is not blocked by the Pro entitlement. The final package must provide reviewable StoreKit purchase, restore, offline-entitlement, and revocation behavior before submission. Direct SMB and optional AI are disclosed rather than hidden, but are not required for the free core review path.
+The one-time AI Pro purchase unlocks only optional cloud AI translation, commentary, and organization suggestions. Reading, local and system-mounted sources (including mounted NAS folders), direct SMB/NAS connections, tagging including batch tagging, manual organization, duplicate-candidate review, data export, and the undo or recovery actions explicitly supported by the app are free. Do not imply that every manual action can be undone. No subscription or API quota is included. AI requires a user-supplied API key, and the provider bills API usage separately. The same App Store Apple Account can share AI Pro across Mac, iPhone, and iPad; AI Pro on Mac requires macOS 12 or later. On a clean install, open the clearly labeled built-in all-ages landscape demo with eight groups and 13 images; use the build under review to verify the exact demo contents. No purchase, demo credential, NAS, or external sample download is required to review the free reader. Direct SMB and optional AI are disclosed rather than hidden, but are not required for the free core review path.
 
 EXTERNAL SERVICES AND TOOLS
 Core indexing, reading, catalog data, and progress run locally. A user-selected SMB/NAS server is contacted only when the user configures it and requests a scan or read. Optional AI is disabled by default, cloud-only, and requires a user-supplied API key. The launch specification includes no on-device model and no bundled API quota. OpenAI requests use https://api.openai.com/v1/responses; Google requests use https://generativelanguage.googleapis.com/v1beta/models/{model}:generateContent. Before either provider can be enabled, the app identifies the selected provider, states that selected page images (up to six for AI Scan) and the prompt may be sent to that provider, and requires explicit in-app consent for that session. Changing the provider revokes the previous consent and requires a new confirmation. API keys are held for the app session by default; iOS/iPadOS users may explicitly save a key in the device Keychain. A saved key does not restore consent and keys are not included in review material; AI responses/candidates may remain in local App Data. The core reader does not require AI, analytics, advertising, third-party login, or an app-owned content server.

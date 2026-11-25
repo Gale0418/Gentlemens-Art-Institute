@@ -1,6 +1,6 @@
 # 紳士藝術研究所 · G.A.I.
 
-G.A.I.（Gentlemen’s Art Institute）是 **iPhone、iPad 與 Mac** 的私人漫畫閱讀器，用來閱讀與整理自己的漫畫檔案。
+G.A.I.（Gentlemen’s Art Institute）是 **iPhone、iPad 與 Mac** 的私人漫畫閱讀器。免費下載，沒有廣告、訂閱，也不用註冊 G.A.I. 帳號。
 
 [App Store 下載](https://apps.apple.com/tw/app/id6809937717) ｜ [支援與常見問題](SUPPORT.md) ｜ [隱私政策](#隱私政策) ｜ [編譯指南](BUILD_GUIDE.md) ｜ [授權條款](LICENSE)
 
@@ -9,20 +9,19 @@ G.A.I.（Gentlemen’s Art Institute）是 **iPhone、iPad 與 Mac** 的私人�
 1. 點 **「先試讀原創風景」**，用內建的示範圖集試試翻頁。
 2. 點 **「加入漫畫資料夾」**，選取存放漫畫的本機、外接儲存裝置或 NAS 資料夾。
 
-## 核心免費功能（閱讀、NAS／SMB 與手動整理）
+## 免費功能與 AI Pro
 
-- 直接閱讀圖片資料夾、`ZIP/CBZ`、`RAR/CBR`、`7z/CB7`。
-- 單頁、雙頁、右至左翻頁或直向條漫，並記住閱讀進度。
-- 搜尋、收藏、標籤與批次標記、手動整理，以及查看疑似重複的作品。
-- 可在 App 內使用 SMB 直連 NAS，也能選取透過系統掛載的共享資料夾（iPhone／iPad 可使用「檔案」App）。
+| 免費功能 | 可做的事 |
+| --- | --- |
+| 閱讀 | 直讀圖片資料夾、`ZIP/CBZ`、`RAR/CBR`、`7z/CB7`，支援單頁、雙頁、右至左翻頁及直向條漫。 |
+| NAS／SMB | 在 App 內直連 SMB 共享資料夾，或讀取系統已掛載的來源。 |
+| 書庫整理 | 搜尋、收藏、批次標籤、手動整理、檢查疑似重複作品，以及書目資料匯出、復原與支援的操作撤銷。 |
 
-## AI 翻譯與整理
+**AI Pro（一次買斷）**解鎖選用的雲端 AI 翻譯、作品解說與整理建議。同一個 App Store Apple 帳號可在三端共用權益，Mac 的 AI Pro 需 macOS 12 或更新版本。
 
-Mac、iPhone 和 iPad 的核心免費功能範圍相同。一次買斷的 AI Pro 解鎖雲端翻譯、作品解說與整理建議；同一個 App Store Apple 帳號可在 iPhone、iPad 與 Mac 共用購買權益。Mac 的 AI Pro 需要 macOS 12 或更新版本。
+請自備 OpenAI 或 Google API Key，供應商費用另計。整本翻譯需再次確認，並逐頁進行。詳見 [AI Pro 權益說明](docs/release/monetization.md)。
 
-AI 需自備 OpenAI 或 Google API Key，API 費用由服務商另計；整本翻譯會在再次確認後逐頁進行。
-
-請使用自己有權閱讀的檔案。G.A.I. 不提供第三方漫畫下載，閱讀進度保存在各裝置。
+閱讀進度保存在各裝置，沒有跨裝置自動同步。請使用自己有權閱讀的檔案，App 不附第三方漫畫，也不提供下載。
 
 ## 技術與授權
 

@@ -3,6 +3,42 @@
   "status": "blocked-local-evidence",
   "lastReviewed": "2026-11-02",
   "sourceOfTruth": "docs/release/gai-app-store-connect-metadata.json",
+  "recordScope": "The blocked local gate, command templates, and older release records are historical 1.0.2/1.0.3 material. For the released build use currentDistributionReadback. For current AI Pro policy see docs/release/monetization.md.",
+  "currentDistributionReadback": {
+    "checkedAt": "2026-11-25",
+    "version": "1.0.7",
+    "buildNumber": "90",
+    "releaseType": "AFTER_APPROVAL",
+    "platforms": {
+      "IOS": {
+        "versionId": "3fa301b6-b420-4697-9e30-820ebf537230",
+        "buildId": "a8192366-c3ab-4d48-95dc-af6f82122581",
+        "distributionState": "READY_FOR_DISTRIBUTION"
+      },
+      "MAC_OS": {
+        "versionId": "84dc4eda-a2e8-4934-a108-84d97096937a",
+        "buildId": "1763fad0-a552-485b-8938-a53e8d194512",
+        "distributionState": "READY_FOR_DISTRIBUTION"
+      }
+    },
+    "listingReadback": "App Store Connect description, promotional text, keywords and What's New matched store-localizations.json for zh-Hant, en-US and ja on both platforms. Taiwan's public Apple lookup returned iOS 1.0.7 with the matching zh-Hant description and What's New.",
+    "iap": {
+      "productId": "com.windsheep.gai.pro.v1",
+      "type": "NON_CONSUMABLE",
+      "state": "APPROVED",
+      "approvedLocalizationVersion": 1,
+      "localizationReadback": "Version 1 still describes SMB and manual organization as paid tools. Version 2 corrects the three descriptions to cover cloud AI only. Apple displays the existing descriptions until it approves the update.",
+      "localizationReview": {
+        "version": 2,
+        "versionId": "b3316b0b-6fca-4ed8-b690-02438ce99ef6",
+        "submissionId": "3217336a-3980-4ab8-bd40-276d0bdfe46a",
+        "submittedAt": "2026-11-25T07:49:33.617Z",
+        "submissionState": "WAITING_FOR_REVIEW",
+        "locales": ["zh-Hant", "en-US", "ja"],
+        "descriptionSource": "docs/release/store-localizations.json#iapDescriptions"
+      }
+    }
+  },
   "remoteReleaseState": {
     "checkedAt": "2026-11-02",
     "appStoreConnectAppId": "6809937717",
@@ -143,7 +179,7 @@
         "ja"
       ]
     },
-    "metadataSyncStatus": "Historical listing localization readback recorded 2026-09-28. The AI-only v1 Pro copy is a local draft for a later release."
+    "metadataSyncStatus": "The AI-only Pro description matched the published iOS 1.0.7 listing on 2026-11-25. See currentDistributionReadback for both platforms and all three locales."
   },
   "reviewInformation": {
     "sevenRequiredCategories": {

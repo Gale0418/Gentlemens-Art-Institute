@@ -291,10 +291,6 @@ window.GAIL10n.register({
     "en": "This advanced feature",
     "ja": "この高度な機能"
   },
-  "基本閱讀免費；Pro 以一次買斷解鎖需要付費的進階工具。": {
-    "en": "Basic reading is free. A one-time Pro purchase unlocks advanced tools.",
-    "ja": "基本の読書機能は無料です。Proを買い切りで購入すると、高度なツールを利用できます。"
-  },
   "這項功能需要 G.A.I Pro。": {
     "en": "This feature requires G.A.I Pro.",
     "ja": "この機能にはG.A.I Proが必要です。"

@@ -1,5 +1,10 @@
 {
-  "status": "draft-next-release",
+  "status": "published-1.0.7",
+  "iapDescriptions": {
+    "zh-Hant": "一次買斷雲端 AI 翻譯、解說與整理建議。自備 API Key，費用另計。",
+    "en-US": "Buy cloud AI once. API key and fees separate.",
+    "ja": "クラウドAI翻訳・解説・整理提案の買い切り。APIキーが必要で、料金は別途。"
+  },
   "locales": {
     "zh-Hant": {
       "appName": "紳士藝術研究所",
